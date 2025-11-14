@@ -309,13 +309,18 @@ app.get('/auth/google',
 );
 
 // 2. Callback-маршрут (сюда Google вернет пользователя)
+
+// Читаем "адрес зала" из "сейфа" (Render), 
+// или используем localhost, если "сейф" пуст.
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
 app.get('/auth/google/callback', 
   passport.authenticate('google', { 
-      failureRedirect: 'http://localhost:5173/login-failed' // (Адрес фронтенда + /login-failed)
+      failureRedirect: `${FRONTEND_URL}/login-failed` // <-- (ИСПРАВЛЕНО)
   }),
   (req, res) => {
     // Успешная аутентификация, редирект на главную страницу фронтенда
-    res.redirect('http://localhost:5173'); // <-- Адрес вашего Vue-приложения
+    res.redirect(FRONTEND_URL); // <-- (ИСПРАВЛЕНО)
   }
 );
 
@@ -738,5 +743,4 @@ mongoose.connect(DB_URL)
     })
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
-
     });
