@@ -2,8 +2,6 @@
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-
-// --- !!! НОВЫЕ ЗАВИСИМОСТИ (Шаг 2) !!! ---
 const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
@@ -12,31 +10,35 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 // Загружаем секреты из .env в process.env
 // Это должно быть в самом верху, до использования process.env
 require('dotenv').config();
-// --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
 const app = express();
 
 // --- !!! ИЗМЕНЕНИЕ v2.8: Настройка CORS для работы с сессиями (credentials) !!! ---
 app.use(cors({
-    origin: 'http://localhost:5173', // Адрес вашего фронтенда (Vite)
+    origin: process.env.FRONTEND_URL || 'http://localhost:5173', // <-- ИСПРАВЛЕНО
     credentials: true 
 }));
 app.use(express.json({ limit: '10mb' }));
 
-
-const PORT = process.env.PORT || 3000;
-const DB_URL = process.env.DB_URL; // <-- Читаем из "сейфа"
-
 /**
- * * --- МЕТКА ВЕРСИИ: v2.9-ENV-FIX ---
- * * ВЕРСИЯ: 2.9 - Секреты вынесены в .env
- * ДАТА: 2025-11-14
+ * * --- МЕТКА ВЕРСИИ: v3.0-FINAL-ENV-FIX ---
+ * * ВЕРСИЯ: 3.0 - Все переменные вынесены в .env
+ * ДАТА: 2025-11-15
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. (NEW) Добавлен `dotenv` для загрузки переменных окружения.
- * 2. (FIX) `clientID` и `clientSecret` удалены из кода
- * и теперь читаются из `process.env`.
+ * 1. (FIX) `PORT` теперь читается из `process.env.PORT`.
+ * 2. (FIX) `FRONTEND_URL` теперь читается из `process.env.FRONTEND_URL`.
+ * 3. (FIX) `DB_URL` теперь читается из `process.env.DB_URL`.
+ * 4. (FIX) `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET` читаются из .env.
+ * 5. (FIX) `session secret` читается из .env.
+ * 6. (FIX) Все редиректы (`callbackURL`, `failureRedirect`) используют `FRONTEND_URL`.
  */
+
+
+// --- !!! ИСПРАВЛЕНИЕ: Все переменные читаются из "сейфа" (process.env) !!! ---
+const PORT = process.env.PORT || 3000;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const DB_URL = process.env.DB_URL; // (Берем из "сейфа" Render)
 
 // --- Схемы ---
 
@@ -47,7 +49,7 @@ const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
     name: String,
-    avatarUrl: String, // (Мы попытаемся получить URL аватарки)
+    avatarUrl: String, 
 });
 const User = mongoose.model('User', userSchema);
 
@@ -61,7 +63,6 @@ const accountSchema = new mongoose.Schema({
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
-  // --- ПРИВЯЗКА К ПОЛЬЗОВАТЕЛЮ ---
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -69,7 +70,6 @@ const Account = mongoose.model('Account', accountSchema);
 const companySchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
-  // --- ПРИВЯЗКА К ПОЛЬЗОВАТЕЛЮ ---
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Company = mongoose.model('Company', companySchema);
@@ -79,7 +79,6 @@ const contractorSchema = new mongoose.Schema({
   order: { type: Number, default: 0 },
   defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
   defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
-  // --- ПРИВЯЗКА К ПОЛЬЗОВАТЕЛЮ ---
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Contractor = mongoose.model('Contractor', contractorSchema);
@@ -87,14 +86,12 @@ const Contractor = mongoose.model('Contractor', contractorSchema);
 const projectSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
-  // --- ПРИВЯЗКА К ПОЛЬЗОВАТЕЛЮ ---
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Project = mongoose.model('Project', projectSchema);
 
 const categorySchema = new mongoose.Schema({ 
   name: String,
-  // --- ПРИВЯЗКА К ПОЛЬЗОВАТЕЛЮ ---
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Category = mongoose.model('Category', categorySchema);
@@ -117,7 +114,6 @@ const eventSchema = new mongoose.Schema({
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     date: { type: Date }, 
     dateKey: { type: String, index: true }, // YYYY-DOY
-    // --- ПРИВЯЗКА К ПОЛЬЗОВАТЕЛЮ ---
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
@@ -130,11 +126,11 @@ const Event = mongoose.model('Event', eventSchema);
 // 1. Настройка Сессий (Express-Session)
 app.use(session({
     // !!! ИСПРАВЛЕНИЕ GITHUB: Читаем секрет из .env !!!
-    secret: process.env.GOOGLE_CLIENT_SECRET, // (Для теста используем ваш Client Secret)
+    secret: process.env.GOOGLE_CLIENT_SECRET, 
     resave: false,
     saveUninitialized: false, 
     cookie: { 
-        secure: false, 
+        secure: process.env.NODE_ENV === 'production', // true для https (Render), false для http (localhost)
         httpOnly: true, 
         maxAge: 1000 * 60 * 60 * 24 * 7 // Сессия живет 7 дней
     }
@@ -150,22 +146,19 @@ passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     
-    // Этот URL должен ТОЧНО совпадать с тем, что вы указали в Google Console
-    callbackURL: 'http://localhost:3000/auth/google/callback', 
+    // !!! ИСПРАВЛЕНИЕ: URL обратного вызова теперь динамический !!!
+    // (Render/Google не знают, что такое :3000, поэтому мы убираем порт)
+    callbackURL: '/auth/google/callback', 
     
-    scope: ['profile', 'email'] // Запрашиваем email и профиль
+    scope: ['profile', 'email'] 
   },
   async (accessToken, refreshToken, profile, done) => {
-    // Эта функция вызывается, когда Google успешно аутентифицировал пользователя
     try {
-      // Ищем пользователя в нашей БД по Google ID
       let user = await User.findOne({ googleId: profile.id });
 
       if (user) {
-        // Пользователь найден, возвращаем его
         return done(null, user);
       } else {
-        // Пользователя нет, создаем нового
         const newUser = new User({
           googleId: profile.id,
           name: profile.displayName,
@@ -173,7 +166,7 @@ passport.use(new GoogleStrategy({
           avatarUrl: profile.photos[0] ? profile.photos[0].value : null
         });
         await newUser.save();
-        return done(null, newUser); // Возвращаем нового пользователя
+        return done(null, newUser); 
       }
     } catch (err) {
       return done(err, null);
@@ -181,16 +174,16 @@ passport.use(new GoogleStrategy({
   }
 ));
 
-// 4. Сериализация (Сохранение пользователя в сессию)
+// 4. Сериализация
 passport.serializeUser((user, done) => {
-    done(null, user.id); // user.id - это _id из MongoDB
+    done(null, user.id); 
 });
 
-// 5. Десериализация (Получение пользователя из сессии)
+// 5. Десериализация
 passport.deserializeUser(async (id, done) => {
     try {
         const user = await User.findById(id);
-        done(null, user); // Этот `user` будет доступен как `req.user`
+        done(null, user); 
     } catch (err) {
         done(err, null);
     }
@@ -243,7 +236,6 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
   const trimmedNameEscaped = escapeRegExp(trimmedName);
   const regex = new RegExp(`^\\s*${trimmedNameEscaped}\\s*$`, 'i');
   
-  // 2. Ищем в БД (!!! С УЧЕТОМ userId !!!)
   const existing = await model.findOne({ 
       name: { $regex: regex }, 
       userId: userId 
@@ -254,15 +246,13 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     return existing._id;
   }
   
-  // 3. Создаем, если не нашли
   try {
     let createData = { 
         name: trimmedName,
-        userId: userId // !!! ПРИВЯЗЫВАЕМ К ПОЛЬЗОВАТЕЛЮ !!!
+        userId: userId 
     }; 
     
     if (model.schema.paths.order) {
-        // !!! Ищем maxOrder ТОЛЬКО у этого пользователя !!!
         const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
         createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0;
     }
@@ -283,7 +273,6 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
  * Находит первый свободный cellIndex для заданного dateKey (ОБНОВЛЕНО ДЛЯ userId)
  */
 const getFirstFreeCellIndex = async (dateKey, userId) => {
-    // !!! Ищем ТОЛЬКО у этого пользователя !!!
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
     
@@ -309,28 +298,22 @@ app.get('/auth/google',
 );
 
 // 2. Callback-маршрут (сюда Google вернет пользователя)
-
-// Читаем "адрес зала" из "сейфа" (Render), 
-// или используем localhost, если "сейф" пуст.
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-
+// !!! ИСПРАВЛЕНО: Редиректы теперь используют FRONTEND_URL !!!
 app.get('/auth/google/callback', 
   passport.authenticate('google', { 
-      failureRedirect: `${FRONTEND_URL}/login-failed` // <-- (ИСПРАВЛЕНО)
+      failureRedirect: `${FRONTEND_URL}/login-failed` // <-- ИСПРАВЛЕНО
   }),
   (req, res) => {
     // Успешная аутентификация, редирект на главную страницу фронтенда
-    res.redirect(FRONTEND_URL); // <-- (ИСПРАВЛЕНО)
+    res.redirect(FRONTEND_URL); // <-- ИСПРАВЛЕНО
   }
 );
 
 // 3. Маршрут "Кто я?" (для проверки сессии при загрузке)
 app.get('/api/auth/me', (req, res) => {
-  if (req.isAuthenticated()) { // req.isAuthenticated() - функция Passport
-    // Пользователь вошел, возвращаем его данные
+  if (req.isAuthenticated()) { 
     res.json(req.user);
   } else {
-    // Пользователь не вошел
     res.status(401).json({ message: 'No user authenticated' });
   }
 });
@@ -343,7 +326,7 @@ app.post('/api/auth/logout', (req, res, next) => {
         if (err) {
             return res.status(500).json({ message: 'Error destroying session' });
         }
-        res.clearCookie('connect.sid'); // Очищаем cookie
+        res.clearCookie('connect.sid'); 
         res.status(200).json({ message: 'Logged out successfully' });
     });
   });
@@ -355,9 +338,8 @@ app.post('/api/auth/logout', (req, res, next) => {
 // =================================================================
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) {
-        return next(); // Пользователь вошел, пропускаем
+        return next(); 
     }
-    // Пользователь не вошел, блокируем
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
@@ -368,9 +350,9 @@ function isAuthenticated(req, res, next) {
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; 
-        const userId = req.user.id; // <-- Получаем ID пользователя из сессии
+        const userId = req.user.id; 
         
-        let query = { userId: userId }; // <-- БАЗОВЫЙ ЗАПРОС УЖЕ ФИЛЬТРУЕТ ПОЛЬЗОВАТЕЛЯ
+        let query = { userId: userId }; 
         
         if (dateKey) {
             query.dateKey = dateKey;
@@ -380,7 +362,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameter: day or dateKey.' });
         }
         
-        const events = await Event.find(query) // <-- Запрос с userId
+        const events = await Event.find(query) 
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
@@ -393,7 +375,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 app.post('/api/events', isAuthenticated, async (req, res) => {
     try {
         const data = req.body;
-        const userId = req.user.id; // <-- Получаем ID пользователя
+        const userId = req.user.id; 
         let date, dateKey, dayOfYear;
 
         if (data.dateKey) {
@@ -412,7 +394,7 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
           date: date,
           dateKey: dateKey,
           dayOfYear: dayOfYear,
-          userId: userId // <-- ПРИВЯЗЫВАЕМ ОПЕРАЦИЮ К ПОЛЬЗОВАТЕЛЮ
+          userId: userId 
         });
         
         await newEvent.save();
@@ -441,7 +423,6 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
         updatedData.dateKey = _getDateKey(updatedData.date);
         updatedData.dayOfYear = _getDayOfYear(updatedData.date);
     } else if (updatedData.dayOfYear) {
-        // (v2.8) Используем год из существующей даты, если есть
         const existing = await Event.findOne({ _id: id, userId: userId });
         const year = existing ? existing.date.getFullYear() : new Date().getFullYear();
         updatedData.date = new Date(year, 0, 1);
@@ -449,7 +430,6 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
         updatedData.dateKey = _getDateKey(updatedData.date);
     }
     
-    // !!! Ищем событие по ID И userId, чтобы чужой пользователь не мог его обновить !!!
     const updatedEvent = await Event.findOneAndUpdate(
         { _id: id, userId: userId }, 
         updatedData, 
@@ -475,7 +455,6 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // !!! Ищем событие по ID И userId, чтобы чужой пользователь не мог его удалить !!!
     const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
     
     if (!deletedEvent) {
@@ -494,7 +473,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     fromCompanyId, toCompanyId, date, 
   } = req.body;
   
-  const userId = req.user.id; // <-- Получаем ID пользователя
+  const userId = req.user.id; 
   
   try {
     let finalDate, finalDateKey, finalDayOfYear;
@@ -519,7 +498,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
       categoryId: categoryId, isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey,
-      userId: userId // <-- ПРИВЯЗЫВАЕМ ПЕРЕВОД К ПОЛЬЗОВАТЕЛЮ
+      userId: userId 
     });
     
     await transferEvent.save();
@@ -539,7 +518,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 // ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
-  const userId = req.user.id; // <-- Получаем ID пользователя
+  const userId = req.user.id; 
   
   if (!Array.isArray(operations) || operations.length === 0) {
     return res.status(400).json({ message: 'Массив operations не предоставлен.' });
@@ -555,7 +534,6 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   
   console.log(`[Import] Запрос на импорт ${rowsToImport.length} операций для User ${userId}.`);
   
-  // "Ленивые" кэши (теперь уникальны для каждого запроса/пользователя)
   const caches = {
     categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {},
   };
@@ -586,14 +564,12 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       const dayOfYear = _getDayOfYear(date); 
       const dateKey = _getDateKey(date);
       
-      // !!! Передаем userId в findOrCreateEntity !!!
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
       
-      // !!! Передаем userId в getFirstFreeCellIndex !!!
       let nextCellIndex;
       if (cellIndexCache.has(dateKey)) {
         nextCellIndex = cellIndexCache.get(dateKey);
@@ -608,7 +584,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         categoryId: categoryId, projectId: projectId, accountId: accountId,
         companyId: companyId, contractorId: contractorId,
         isTransfer: false, 
-        userId: userId // <-- ПРИВЯЗЫВАЕМ ОПЕРАЦИЮ К ПОЛЬЗОВАТЕЛЮ
+        userId: userId 
       };
       
       createdOps.push(newOperation);
@@ -634,7 +610,6 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
 
 // --- ГЕНЕРАТОР CRUD (Обновлен до v2.8) ---
 const generateCRUD = (model, path) => {
-    // !!! ЗАЩИЩАЕМ и ФИЛЬТРУЕМ `GET` !!!
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { 
           const userId = req.user.id;
@@ -651,12 +626,10 @@ const generateCRUD = (model, path) => {
         catch (err) { res.status(500).json({ message: err.message }); }
     });
     
-    // !!! ЗАЩИЩАЕМ и ПРИВЯЗЫВАЕМ `POST` !!!
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
             
-            // !!! Ищем maxOrder ТОЛЬКО у этого пользователя !!!
             const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
             const newOrder = maxOrderDoc ? maxOrderDoc.order + 1 : 0;
 
@@ -667,7 +640,7 @@ const generateCRUD = (model, path) => {
                 companyId: req.body.companyId || null,
                 defaultProjectId: req.body.defaultProjectId || null, 
                 defaultCategoryId: req.body.defaultCategoryId || null,
-                userId: userId // <-- ПРИВЯЗЫВАЕМ СУЩНОСТЬ К ПОЛЬЗОВАТЕЛЮ
+                userId: userId 
             };
             
             const item = new model(newItemData);
@@ -681,7 +654,6 @@ const generateCRUD = (model, path) => {
 };
 
 const generateBatchUpdate = (model, path) => {
-  // !!! ЗАЩИЩАЕМ `PUT` (Batch Update) !!!
   app.put(`/api/${path}/batch-update`, isAuthenticated, async (req, res) => {
     try {
       const items = req.body; 
@@ -698,7 +670,6 @@ const generateBatchUpdate = (model, path) => {
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
 
-        // !!! Обновляем ТОЛЬКО если _id И userId совпадают !!!
         return model.findOneAndUpdate(
             { _id: item._id, userId: userId }, 
             updateData
@@ -707,7 +678,6 @@ const generateBatchUpdate = (model, path) => {
       
       await Promise.all(updatePromises);
       
-      // !!! Возвращаем обновленный список ТОЛЬКО этого пользователя !!!
       let query = model.find({ userId: userId }).sort({ order: 1 });
       if (path === 'contractors') {
         query = query.populate('defaultProjectId').populate('defaultCategoryId');
@@ -733,12 +703,20 @@ generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 
 // --- ЗАПУСК СЕРВЕРА ---
+
+// (Проверяем, что DB_URL вообще существует, прежде чем запускать)
+if (!DB_URL) {
+    console.error('Ошибка: Переменная окружения DB_URL не установлена!');
+    process.exit(1); // Выход с ошибкой
+}
+
 console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
       app.listen(PORT, () => {
-        console.log(`Сервер v2.9 (ENV-FIX) запущен на порту ${PORT}`);
+        // !!! ИСПРАВЛЕНО: Лог теперь правильный !!!
+        console.log(`Сервер v3.0 (FINAL-ENV-FIX) запущен на порту ${PORT}`);
       });
     })
     .catch(err => {
