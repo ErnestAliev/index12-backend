@@ -17,6 +17,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 // !!! ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ !!!
 const FRONTEND_URL = process.env.APP_HOST_URL || 'http://localhost:5173';
+const FRONTEND_URL_WWW = FRONTEND_URL.replace('https://', 'https://www.');
 const DB_URL = process.env.DB_URL; 
 // --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
 
@@ -718,4 +719,5 @@ mongoose.connect(DB_URL)
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
+
 
