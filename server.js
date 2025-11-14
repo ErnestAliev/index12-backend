@@ -6,71 +6,52 @@ const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
-// --- !!! ИСПРАВЛЕНИЕ GITHUB (Шаг 6) !!! ---
-// Загружаем секреты из .env в process.env
+// Загружаем секреты из .env
 require('dotenv').config();
 
 const app = express();
 
-
-// --- !!! ИСПРАВЛЕНИЕ v3.1: Все переменные читаются из "сейфа" (process.env) !!! ---
+// Конфигурация
 const PORT = process.env.PORT || 3000;
-// !!! ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ !!!
-const FRONTEND_URL = process.env.APP_HOST_URL || 'http://localhost:5173';
-const FRONTEND_URL_WWW = FRONTEND_URL.replace('https://', 'https://www.');
-const DB_URL = process.env.DB_URL; 
-// --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
+const FRONTEND_URL = 'https://www.index12.com'; // Жестко задаем правильный URL
+const DB_URL = process.env.DB_URL;
 
-// НОВЫЙ КОД (Принимает оба домена: с www и без www)
+console.log('=== SERVER CONFIGURATION ===');
+console.log('FRONTEND_URL:', FRONTEND_URL);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('============================');
+
+// CORS настройки
 const ALLOWED_ORIGINS = [
-   FRONTEND_URL, // https://www.index12.com
-   FRONTEND_URL.replace('https://', 'https://www.'), // https://www.index12.com
-   'http://localhost:5173', // Для локального тестирования
-   'https://index12-frontend-git-main-ernests-projects-a0f1e55e.vercel.app',
-   'https://index12-frontend-qd71uaai4-ernests-projects-a0f1e55e.vercel.app'
+    'https://www.index12.com',
+    'https://index12.com',
+    'http://localhost:5173'
 ];
 
 app.use(cors({
     origin: (origin, callback) => {
-        // Проверяем, есть ли текущий запрос в списке разрешенных
-        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        if (!origin) return callback(null, true);
+        
+        if (ALLOWED_ORIGINS.includes(origin)) {
             callback(null, true);
         } else {
-            callback(new Error(`Not allowed by CORS: Origin ${origin} is not in [${ALLOWED_ORIGINS.join(', ')}]`));
+            console.warn('CORS blocked for origin:', origin);
+            callback(new Error('Not allowed by CORS'));
         }
     },
-    credentials: true 
+    credentials: true
 }));
 
-/**
- * * --- МЕТКА ВЕРСИИ: v3.1-FINAL-REDIRECT-FIX ---
- * * ВЕРСИЯ: 3.1 - Устранены конфликты PORT и FRONTEND_URL
- * ДАТА: 2025-11-15
- *
- * ЧТО ИСПРАВЛЕНО:
- * 1. (FIX) `PORT` и `FRONTEND_URL` объявлены до `app.use(cors)`
- * 2. (FIX) `cors origin` теперь использует динамическую переменную `FRONTEND_URL`.
- * 3. (FIX) `DB_URL` читается из `process.env`.
- */
+app.use(express.json());
 
-
-// --- Схемы ---
-
-// =================================================================
-// --- !!! НОВАЯ СХЕМА: User (Шаг 2) !!! ---
-// =================================================================
+// Схемы Mongoose
 const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
     name: String,
-    avatarUrl: String, 
+    avatarUrl: String,
 });
 const User = mongoose.model('User', userSchema);
-
-
-// =================================================================
-// --- !!! ОБНОВЛЕННЫЕ СХЕМЫ (с userId) (Шаг 2) !!! ---
-// =================================================================
 
 const accountSchema = new mongoose.Schema({ 
   name: String, 
@@ -127,43 +108,33 @@ const eventSchema = new mongoose.Schema({
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     date: { type: Date }, 
-    dateKey: { type: String, index: true }, // YYYY-DOY
+    dateKey: { type: String, index: true },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
 
-
-// =================================================================
-// --- !!! НАСТРОЙКА СЕССИЙ И PASSPORT.JS (Шаг 2) !!! ---
-// =================================================================
-
-// 1. Настройка Сессий (Express-Session)
+// Настройка сессий и Passport
 app.use(session({
-    // Читаем секрет из .env
-    secret: process.env.GOOGLE_CLIENT_SECRET, 
+    secret: process.env.GOOGLE_CLIENT_SECRET,
     resave: false,
-    saveUninitialized: false, 
+    saveUninitialized: false,
     cookie: { 
-        secure: process.env.NODE_ENV === 'production', // true для https (Render), false для http (localhost)
-        httpOnly: true, 
-        maxAge: 1000 * 60 * 60 * 24 * 7 // Сессия живет 7 дней
+        secure: true, // true для HTTPS
+        httpOnly: true,
+        maxAge: 1000 * 60 * 60 * 24 * 7,
+        domain: '.index12.com' // Работает для всех поддоменов index12.com
     }
 }));
 
-// 2. Инициализация Passport
 app.use(passport.initialize());
-app.use(passport.session()); 
+app.use(passport.session());
 
-// 3. Настройка Google Strategy
+// Настройка Google Strategy
 passport.use(new GoogleStrategy({
-    // Читаем ключи из .env (process.env)
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    
-    // URL обратного вызова теперь относительный
-    callbackURL: '/auth/google/callback', 
-    
-    scope: ['profile', 'email'] 
+    callbackURL: '/auth/google/callback',
+    scope: ['profile', 'email']
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
@@ -179,7 +150,7 @@ passport.use(new GoogleStrategy({
           avatarUrl: profile.photos[0] ? profile.photos[0].value : null
         });
         await newUser.save();
-        return done(null, newUser); 
+        return done(null, newUser);
       }
     } catch (err) {
       return done(err, null);
@@ -187,44 +158,42 @@ passport.use(new GoogleStrategy({
   }
 ));
 
-// 4. Сериализация
 passport.serializeUser((user, done) => {
-    done(null, user.id); 
+    done(null, user.id);
 });
 
-// 5. Десериализация
 passport.deserializeUser(async (id, done) => {
     try {
         const user = await User.findById(id);
-        done(null, user); 
+        done(null, user);
     } catch (err) {
         done(err, null);
     }
 });
 
-
-// ---
-// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-// ---
-
+// Вспомогательные функции
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
-  return Math.floor(diff / 86400000); 
+  return Math.floor(diff / 86400000);
 };
+
 const _getDateKey = (date) => {
   const year = date.getFullYear();
   const doy = _getDayOfYear(date);
   return `${year}-${doy}`;
 };
+
 const _parseDateKey = (dateKey) => {
     if (typeof dateKey !== 'string' || !dateKey.includes('-')) {
-        console.error(`!!! server._parseDateKey ОШИБКА:`, dateKey); return new Date(); 
+        console.error('!!! _parseDateKey ОШИБКА:', dateKey);
+        return new Date();
     }
     const [year, doy] = dateKey.split('-').map(Number);
-    const date = new Date(year, 0, 1); date.setDate(doy); return date;
+    const date = new Date(year, 0, 1);
+    date.setDate(doy);
+    return date;
 };
-
 
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) {
@@ -251,7 +220,7 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
   });
   
   if (existing) {
-    cache[lowerName] = existing._id; 
+    cache[lowerName] = existing._id;
     return existing._id;
   }
   
@@ -259,7 +228,7 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     let createData = { 
         name: trimmedName,
         userId: userId 
-    }; 
+    };
     
     if (model.schema.paths.order) {
         const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
@@ -289,38 +258,29 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
-
-// ---
-// --- МАРШРУТЫ АУТЕНТИФИКАЦИИ ---
-// ---
-
-// 1. Маршрут "Логин"
+// Маршруты аутентификации
 app.get('/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
-// 2. Callback-маршрут
 app.get('/auth/google/callback', 
   passport.authenticate('google', { 
-      // !!! ИСПРАВЛЕНО: Редиректы теперь используют FRONTEND_URL !!!
-      failureRedirect: `${FRONTEND_URL}/login-failed` 
+      failureRedirect: `${FRONTEND_URL}/login-failed`
   }),
   (req, res) => {
-    // Успешная аутентификация, редирект на главную страницу фронтенда
-    res.redirect(FRONTEND_URL); 
+    console.log('Успешная аутентификация, редирект на:', FRONTEND_URL);
+    res.redirect(FRONTEND_URL);
   }
 );
 
-// 3. Маршрут "Кто я?"
 app.get('/api/auth/me', (req, res) => {
-  if (req.isAuthenticated()) { 
+  if (req.isAuthenticated()) {
     res.json(req.user);
   } else {
     res.status(401).json({ message: 'No user authenticated' });
   }
 });
 
-// 4. Маршрут "Выход"
 app.post('/api/auth/logout', (req, res, next) => {
   req.logout((err) => {
     if (err) { return next(err); }
@@ -328,32 +288,27 @@ app.post('/api/auth/logout', (req, res, next) => {
         if (err) {
             return res.status(500).json({ message: 'Error destroying session' });
         }
-        res.clearCookie('connect.sid'); 
+        res.clearCookie('connect.sid');
         res.status(200).json({ message: 'Logged out successfully' });
     });
   });
 });
 
-
-// ---
-// --- Middleware "КПП" ---
-// ---
+// Middleware аутентификации
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) {
-        return next(); 
+        return next();
     }
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
-
-// --- API ДЛЯ ОПЕРАЦИЙ (Events) ---
-
+// API для операций
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
-        const { dateKey, day } = req.query; 
-        const userId = req.user.id; 
+        const { dateKey, day } = req.query;
+        const userId = req.user.id;
         
-        let query = { userId: userId }; 
+        let query = { userId: userId };
         
         if (dateKey) {
             query.dateKey = dateKey;
@@ -363,7 +318,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameter: day or dateKey.' });
         }
         
-        const events = await Event.find(query) 
+        const events = await Event.find(query)
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
@@ -376,16 +331,23 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 app.post('/api/events', isAuthenticated, async (req, res) => {
     try {
         const data = req.body;
-        const userId = req.user.id; 
+        const userId = req.user.id;
         let date, dateKey, dayOfYear;
 
         if (data.dateKey) {
-            dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date);
+            dateKey = data.dateKey;
+            date = _parseDateKey(dateKey);
+            dayOfYear = _getDayOfYear(date);
         } else if (data.date) {
-            date = new Date(data.date); dateKey = _getDateKey(date); dayOfYear = _getDayOfYear(date);
+            date = new Date(data.date);
+            dateKey = _getDateKey(date);
+            dayOfYear = _getDayOfYear(date);
         } else if (data.dayOfYear) {
-            dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); 
-            date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date);
+            dayOfYear = data.dayOfYear;
+            const year = new Date().getFullYear();
+            date = new Date(year, 0, 1);
+            date.setDate(dayOfYear);
+            dateKey = _getDateKey(date);
         } else {
             return res.status(400).json({ message: 'Operation data must include date, dateKey, or dayOfYear.' });
         }
@@ -395,7 +357,7 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
           date: date,
           dateKey: dateKey,
           dayOfYear: dayOfYear,
-          userId: userId 
+          userId: userId
         });
         
         await newEvent.save();
@@ -404,9 +366,9 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
             'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId'
         ]);
         res.status(201).json(newEvent);
-    } catch (err) { 
+    } catch (err) {
         console.error('Ошибка POST /api/events:', err.message);
-        res.status(400).json({ message: err.message }); 
+        res.status(400).json({ message: err.message });
     }
 });
 
@@ -414,7 +376,7 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const updatedData = { ...req.body }; 
+    const updatedData = { ...req.body };
     
     if (updatedData.dateKey) {
         updatedData.date = _parseDateKey(updatedData.dateKey);
@@ -432,8 +394,8 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     }
     
     const updatedEvent = await Event.findOneAndUpdate(
-        { _id: id, userId: userId }, 
-        updatedData, 
+        { _id: id, userId: userId },
+        updatedData,
         { new: true }
     );
     
@@ -461,20 +423,20 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     if (!deletedEvent) {
       return res.status(404).json({ message: 'Операция не найдена или принадлежит другому пользователю' });
     }
-    res.status(200).json(deletedEvent); 
+    res.status(200).json(deletedEvent);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// --- API ДЛЯ ПЕРЕВОДОВ (Обновлен до v2.8) ---
+// API для переводов
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
-  const { 
+  const {
     amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex,
-    fromCompanyId, toCompanyId, date, 
+    fromCompanyId, toCompanyId, date,
   } = req.body;
   
-  const userId = req.user.id; 
+  const userId = req.user.id;
   
   try {
     let finalDate, finalDateKey, finalDayOfYear;
@@ -484,22 +446,30 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         finalDateKey = _getDateKey(finalDate);
         finalDayOfYear = _getDayOfYear(finalDate);
     } else if (dayOfYear) {
-        finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); 
-        finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear);
+        finalDayOfYear = dayOfYear;
+        const year = new Date().getFullYear();
+        finalDate = new Date(year, 0, 1);
+        finalDate.setDate(dayOfYear);
         finalDateKey = _getDateKey(finalDate);
     } else {
         return res.status(400).json({ message: 'Transfer data must include date or dayOfYear.' });
     }
 
     const transferEvent = new Event({
-      type: 'transfer', amount: amount,
-      dayOfYear: finalDayOfYear, cellIndex: cellIndex,
-      fromAccountId: fromAccountId, toAccountId: toAccountId,
-      fromCompanyId: fromCompanyId, toCompanyId: toCompanyId,
-      categoryId: categoryId, isTransfer: true,
+      type: 'transfer',
+      amount: amount,
+      dayOfYear: finalDayOfYear,
+      cellIndex: cellIndex,
+      fromAccountId: fromAccountId,
+      toAccountId: toAccountId,
+      fromCompanyId: fromCompanyId,
+      toCompanyId: toCompanyId,
+      categoryId: categoryId,
+      isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      date: finalDate, dateKey: finalDateKey,
-      userId: userId 
+      date: finalDate,
+      dateKey: finalDateKey,
+      userId: userId
     });
     
     await transferEvent.save();
@@ -513,13 +483,10 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
   }
 });
 
-
-// ---
-// --- ЭНДПОИНТ ИМПОРТА (Обновлен до v2.8) ---
-// ---
+// Эндпоинт импорта
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
-  const { operations, selectedRows } = req.body; 
-  const userId = req.user.id; 
+  const { operations, selectedRows } = req.body;
+  const userId = req.user.id;
   
   if (!Array.isArray(operations) || operations.length === 0) {
     return res.status(400).json({ message: 'Массив operations не предоставлен.' });
@@ -562,7 +529,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         continue;
       }
       
-      const dayOfYear = _getDayOfYear(date); 
+      const dayOfYear = _getDayOfYear(date);
       const dateKey = _getDateKey(date);
       
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
@@ -577,15 +544,22 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       } else {
         nextCellIndex = await getFirstFreeCellIndex(dateKey, userId);
       }
-      cellIndexCache.set(dateKey, nextCellIndex + 1); 
+      cellIndexCache.set(dateKey, nextCellIndex + 1);
       
       const newOperation = {
-        date: date, dayOfYear: dayOfYear, dateKey: dateKey,
-        cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
-        categoryId: categoryId, projectId: projectId, accountId: accountId,
-        companyId: companyId, contractorId: contractorId,
-        isTransfer: false, 
-        userId: userId 
+        date: date,
+        dayOfYear: dayOfYear,
+        dateKey: dateKey,
+        cellIndex: nextCellIndex,
+        type: opData.type,
+        amount: opData.amount,
+        categoryId: categoryId,
+        projectId: projectId,
+        accountId: accountId,
+        companyId: companyId,
+        contractorId: contractorId,
+        isTransfer: false,
+        userId: userId
       };
       
       createdOps.push(newOperation);
@@ -608,11 +582,10 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   }
 });
 
-
-// --- ГЕНЕРАТОР CRUD (Обновлен до v2.8) ---
+// Генератор CRUD
 const generateCRUD = (model, path) => {
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
-        try { 
+        try {
           const userId = req.user.id;
           
           let query = model.find({ userId: userId }).sort({ order: 1 });
@@ -622,7 +595,7 @@ const generateCRUD = (model, path) => {
           }
           
           const items = await query;
-          res.json(items); 
+          res.json(items);
         }
         catch (err) { res.status(500).json({ message: err.message }); }
     });
@@ -639,17 +612,17 @@ const generateCRUD = (model, path) => {
                 order: newOrder,
                 initialBalance: req.body.initialBalance || 0,
                 companyId: req.body.companyId || null,
-                defaultProjectId: req.body.defaultProjectId || null, 
+                defaultProjectId: req.body.defaultProjectId || null,
                 defaultCategoryId: req.body.defaultCategoryId || null,
-                userId: userId 
+                userId: userId
             };
             
             const item = new model(newItemData);
             const newItem = await item.save();
             res.status(201).json(newItem);
-        } catch (err) { 
+        } catch (err) {
             console.error(`Error creating ${path}:`, err);
-            res.status(400).json({ message: err.message }); 
+            res.status(400).json({ message: err.message });
         }
     });
 };
@@ -657,12 +630,12 @@ const generateCRUD = (model, path) => {
 const generateBatchUpdate = (model, path) => {
   app.put(`/api/${path}/batch-update`, isAuthenticated, async (req, res) => {
     try {
-      const items = req.body; 
+      const items = req.body;
       const userId = req.user.id;
 
       const updatePromises = items.map(item => {
         const updateData = {
-          name: item.name, 
+          name: item.name,
           order: item.order
         };
         
@@ -672,7 +645,7 @@ const generateBatchUpdate = (model, path) => {
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
 
         return model.findOneAndUpdate(
-            { _id: item._id, userId: userId }, 
+            { _id: item._id, userId: userId },
             updateData
         );
       });
@@ -692,22 +665,21 @@ const generateBatchUpdate = (model, path) => {
   });
 };
 
-// --- ГЕНЕРИРУЕМ ВСЕ API ---
+// Генерируем все API
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
-generateCRUD(Category, 'categories'); 
+generateCRUD(Category, 'categories');
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 
-// --- ЗАПУСК СЕРВЕРА ---
-
+// Запуск сервера
 if (!DB_URL) {
     console.error('Ошибка: Переменная окружения DB_URL не установлена!');
-    process.exit(1); 
+    process.exit(1);
 }
 
 console.log('Подключаемся к MongoDB...');
@@ -715,17 +687,10 @@ mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
       app.listen(PORT, () => {
-        console.log(`Сервер v3.1 (FINAL-REDIRECT-FIX) запущен на порту ${PORT}`);
+        console.log(`Сервер запущен на порту ${PORT}`);
+        console.log(`Frontend URL: ${FRONTEND_URL}`);
       });
     })
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
-
-console.log('=== ENVIRONMENT VARIABLES ===');
-console.log('APP_HOST_URL:', process.env.APP_HOST_URL);
-console.log('FRONTEND_URL:', FRONTEND_URL);
-console.log('NODE_ENV:', process.env.NODE_ENV);
-console.log('=============================');
-
-
