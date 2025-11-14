@@ -24,7 +24,7 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const DB_URL = process.env.DB_URL; // <-- Читаем из "сейфа"
 
 /**
@@ -738,7 +738,7 @@ mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
       app.listen(PORT, () => {
-        console.log(`Сервер v2.9 (ENV-FIX) запущен на http://localhost:${PORT}`);
+        console.log(`Сервер v2.9 (ENV-FIX) запущен на порту ${PORT}`);
       });
     })
     .catch(err => {
