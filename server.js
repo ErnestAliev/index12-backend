@@ -8,37 +8,35 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
 // --- !!! ИСПРАВЛЕНИЕ GITHUB (Шаг 6) !!! ---
 // Загружаем секреты из .env в process.env
-// Это должно быть в самом верху, до использования process.env
 require('dotenv').config();
 
 const app = express();
 
-// --- !!! ИЗМЕНЕНИЕ v2.8: Настройка CORS для работы с сессиями (credentials) !!! ---
+
+// --- !!! ИСПРАВЛЕНИЕ v3.1: Все переменные читаются из "сейфа" (process.env) !!! ---
+const PORT = process.env.PORT || 3000;
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+const DB_URL = process.env.DB_URL; 
+// --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
+
+// --- !!! ИСПРАВЛЕНО: CORS теперь динамически читает FRONTEND_URL !!! ---
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173', // <-- ИСПРАВЛЕНО
+    origin: FRONTEND_URL, // <-- ИСПОЛЬЗУЕМ ПЕРЕМЕННУЮ (починили блокировку Vercel-доменов)
     credentials: true 
 }));
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v3.0-FINAL-ENV-FIX ---
- * * ВЕРСИЯ: 3.0 - Все переменные вынесены в .env
+ * * --- МЕТКА ВЕРСИИ: v3.1-FINAL-REDIRECT-FIX ---
+ * * ВЕРСИЯ: 3.1 - Устранены конфликты PORT и FRONTEND_URL
  * ДАТА: 2025-11-15
  *
- * ЧТО ИЗМЕНЕНО:
- * 1. (FIX) `PORT` теперь читается из `process.env.PORT`.
- * 2. (FIX) `FRONTEND_URL` теперь читается из `process.env.FRONTEND_URL`.
- * 3. (FIX) `DB_URL` теперь читается из `process.env.DB_URL`.
- * 4. (FIX) `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET` читаются из .env.
- * 5. (FIX) `session secret` читается из .env.
- * 6. (FIX) Все редиректы (`callbackURL`, `failureRedirect`) используют `FRONTEND_URL`.
+ * ЧТО ИСПРАВЛЕНО:
+ * 1. (FIX) `PORT` и `FRONTEND_URL` объявлены до `app.use(cors)`
+ * 2. (FIX) `cors origin` теперь использует динамическую переменную `FRONTEND_URL`.
+ * 3. (FIX) `DB_URL` читается из `process.env`.
  */
 
-
-// --- !!! ИСПРАВЛЕНИЕ: Все переменные читаются из "сейфа" (process.env) !!! ---
-const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
-const DB_URL = process.env.DB_URL; // (Берем из "сейфа" Render)
 
 // --- Схемы ---
 
@@ -120,12 +118,12 @@ const Event = mongoose.model('Event', eventSchema);
 
 
 // =================================================================
-// --- !!! НОВЫЙ КОД: НАСТРОЙКА СЕССИЙ И PASSPORT.JS (Шаг 2) !!! ---
+// --- !!! НАСТРОЙКА СЕССИЙ И PASSPORT.JS (Шаг 2) !!! ---
 // =================================================================
 
 // 1. Настройка Сессий (Express-Session)
 app.use(session({
-    // !!! ИСПРАВЛЕНИЕ GITHUB: Читаем секрет из .env !!!
+    // Читаем секрет из .env
     secret: process.env.GOOGLE_CLIENT_SECRET, 
     resave: false,
     saveUninitialized: false, 
@@ -142,12 +140,11 @@ app.use(passport.session());
 
 // 3. Настройка Google Strategy
 passport.use(new GoogleStrategy({
-    // !!! ИСПРАВЛЕНИЕ GITHUB: Читаем ключи из .env (process.env) !!!
+    // Читаем ключи из .env (process.env)
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     
-    // !!! ИСПРАВЛЕНИЕ: URL обратного вызова теперь динамический !!!
-    // (Render/Google не знают, что такое :3000, поэтому мы убираем порт)
+    // URL обратного вызова теперь относительный
     callbackURL: '/auth/google/callback', 
     
     scope: ['profile', 'email'] 
@@ -191,10 +188,9 @@ passport.deserializeUser(async (id, done) => {
 
 
 // ---
-// --- !!! ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ОБНОВЛЕНЫ для userId) !!! ---
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 // ---
 
-// (Вспомогательные функции _getDayOfYear, _getDateKey, _parseDateKey - БЕЗ ИЗМЕНЕНИЙ)
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
@@ -214,9 +210,6 @@ const _parseDateKey = (dateKey) => {
 };
 
 
-/**
- * Находит или создает сущность по имени (ОБНОВЛЕНО ДЛЯ userId)
- */
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) {
     return null;
@@ -269,9 +262,6 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
   }
 };
 
-/**
- * Находит первый свободный cellIndex для заданного dateKey (ОБНОВЛЕНО ДЛЯ userId)
- */
 const getFirstFreeCellIndex = async (dateKey, userId) => {
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
@@ -283,33 +273,29 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
+
 // ---
-// --- !!! КОНЕЦ ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ !!! ---
+// --- МАРШРУТЫ АУТЕНТИФИКАЦИИ ---
 // ---
 
-
-// =================================================================
-// --- !!! НОВЫЙ КОД: МАРШРУТЫ АУТЕНТИФИКАЦИИ (Шаг 2) !!! ---
-// =================================================================
-
-// 1. Маршрут "Логин" (сюда фронтенд направит пользователя)
+// 1. Маршрут "Логин"
 app.get('/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
-// 2. Callback-маршрут (сюда Google вернет пользователя)
-// !!! ИСПРАВЛЕНО: Редиректы теперь используют FRONTEND_URL !!!
+// 2. Callback-маршрут
 app.get('/auth/google/callback', 
   passport.authenticate('google', { 
-      failureRedirect: `${FRONTEND_URL}/login-failed` // <-- ИСПРАВЛЕНО
+      // !!! ИСПРАВЛЕНО: Редиректы теперь используют FRONTEND_URL !!!
+      failureRedirect: `${FRONTEND_URL}/login-failed` 
   }),
   (req, res) => {
     // Успешная аутентификация, редирект на главную страницу фронтенда
-    res.redirect(FRONTEND_URL); // <-- ИСПРАВЛЕНО
+    res.redirect(FRONTEND_URL); 
   }
 );
 
-// 3. Маршрут "Кто я?" (для проверки сессии при загрузке)
+// 3. Маршрут "Кто я?"
 app.get('/api/auth/me', (req, res) => {
   if (req.isAuthenticated()) { 
     res.json(req.user);
@@ -333,9 +319,9 @@ app.post('/api/auth/logout', (req, res, next) => {
 });
 
 
-// =================================================================
-// --- !!! НОВЫЙ КОД: Middleware "КПП" (Шаг 2) !!! ---
-// =================================================================
+// ---
+// --- Middleware "КПП" ---
+// ---
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) {
         return next(); 
@@ -345,7 +331,6 @@ function isAuthenticated(req, res, next) {
 
 
 // --- API ДЛЯ ОПЕРАЦИЙ (Events) ---
-// !!! ВСЕ МАРШРУТЫ НИЖЕ ТЕПЕРЬ ЗАЩИЩЕНЫ `isAuthenticated` И ФИЛЬТРУЮТ ПО `userId` !!!
 
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
@@ -514,7 +499,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
 
 // ---
-// --- !!! ЭНДПОИНТ ИМПОРТА (Обновлен до v2.8) !!! ---
+// --- ЭНДПОИНТ ИМПОРТА (Обновлен до v2.8) ---
 // ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
@@ -704,10 +689,9 @@ generateBatchUpdate(Project, 'projects');
 
 // --- ЗАПУСК СЕРВЕРА ---
 
-// (Проверяем, что DB_URL вообще существует, прежде чем запускать)
 if (!DB_URL) {
     console.error('Ошибка: Переменная окружения DB_URL не установлена!');
-    process.exit(1); // Выход с ошибкой
+    process.exit(1); 
 }
 
 console.log('Подключаемся к MongoDB...');
@@ -715,8 +699,7 @@ mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
       app.listen(PORT, () => {
-        // !!! ИСПРАВЛЕНО: Лог теперь правильный !!!
-        console.log(`Сервер v3.0 (FINAL-ENV-FIX) запущен на порту ${PORT}`);
+        console.log(`Сервер v3.1 (FINAL-REDIRECT-FIX) запущен на порту ${PORT}`);
       });
     })
     .catch(err => {
