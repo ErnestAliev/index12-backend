@@ -23,9 +23,11 @@ const DB_URL = process.env.DB_URL;
 
 // НОВЫЙ КОД (Принимает оба домена: с www и без www)
 const ALLOWED_ORIGINS = [
-    FRONTEND_URL, // https://index12.com
-    FRONTEND_URL.replace('https://', 'https://www.'), // https://www.index12.com
-    'http://localhost:5173' // Для локального тестирования
+   FRONTEND_URL, // https://www.index12.com
+   FRONTEND_URL.replace('https://', 'https://www.'), // https://www.index12.com
+   'http://localhost:5173', // Для локального тестирования
+   'https://index12-frontend-git-main-ernests-projects-a0f1e55e.vercel.app',
+   'https://index12-frontend-qd71uaai4-ernests-projects-a0f1e55e.vercel.app'
 ];
 
 app.use(cors({
@@ -719,5 +721,11 @@ mongoose.connect(DB_URL)
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
+
+console.log('=== ENVIRONMENT VARIABLES ===');
+console.log('APP_HOST_URL:', process.env.APP_HOST_URL);
+console.log('FRONTEND_URL:', FRONTEND_URL);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('=============================');
 
 
