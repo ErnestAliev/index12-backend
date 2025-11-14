@@ -20,11 +20,24 @@ const DB_URL = process.env.DB_URL;
 // --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
 
 // --- !!! ИСПРАВЛЕНО: CORS теперь динамически читает FRONTEND_URL !!! ---
+// НОВЫЙ КОД (Принимает оба домена: с www и без www)
+const ALLOWED_ORIGINS = [
+    FRONTEND_URL,
+    FRONTEND_URL.replace('https://', 'https://www.'), // Разрешаем www-версию
+    'http://localhost:5173', // Для локального тестирования
+    'https://index12-frontend-*.vercel.app' // Для Vercel Preview (на всякий случай)
+];
+
 app.use(cors({
-    origin: FRONTEND_URL, // <-- ИСПОЛЬЗУЕМ ПЕРЕМЕННУЮ (починили блокировку Vercel-доменов)
+    origin: (origin, callback) => {
+        if (!origin || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     credentials: true 
 }));
-app.use(express.json({ limit: '10mb' }));
 
 /**
  * * --- МЕТКА ВЕРСИИ: v3.1-FINAL-REDIRECT-FIX ---
