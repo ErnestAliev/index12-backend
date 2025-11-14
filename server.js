@@ -19,21 +19,20 @@ const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 // --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
 
-// --- !!! ИСПРАВЛЕНО: CORS теперь динамически читает FRONTEND_URL !!! ---
 // НОВЫЙ КОД (Принимает оба домена: с www и без www)
 const ALLOWED_ORIGINS = [
-    FRONTEND_URL,
-    FRONTEND_URL.replace('https://', 'https://www.'), // Разрешаем www-версию
-    'http://localhost:5173', // Для локального тестирования
-    'https://index12-frontend-*.vercel.app' // Для Vercel Preview (на всякий случай)
+    FRONTEND_URL, // https://index12.com
+    FRONTEND_URL.replace('https://', 'https://www.'), // https://www.index12.com
+    'http://localhost:5173' // Для локального тестирования
 ];
 
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
+        // Проверяем, есть ли текущий запрос в списке разрешенных
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
             callback(null, true);
         } else {
-            callback(new Error('Not allowed by CORS'));
+            callback(new Error(`Not allowed by CORS: Origin ${origin} is not in [${ALLOWED_ORIGINS.join(', ')}]`));
         }
     },
     credentials: true 
