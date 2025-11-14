@@ -15,7 +15,8 @@ const app = express();
 
 // --- !!! ИСПРАВЛЕНИЕ v3.1: Все переменные читаются из "сейфа" (process.env) !!! ---
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+// !!! ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ !!!
+const FRONTEND_URL = process.env.APP_HOST_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 // --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
 
@@ -717,3 +718,4 @@ mongoose.connect(DB_URL)
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
+
