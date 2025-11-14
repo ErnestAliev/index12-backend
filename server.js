@@ -25,7 +25,7 @@ app.use(express.json({ limit: '10mb' }));
 
 
 const PORT = 3000;
-const DB_URL = "mongodb+srv://ernestalievae_db_user:IDLINSpfMSAtxiOf@cluster0.zpq0ot5.mongodb.net/my-service-db?retryWrites=true&w=majority";
+const DB_URL = process.env.DB_URL; // <-- Читаем из "сейфа"
 
 /**
  * * --- МЕТКА ВЕРСИИ: v2.9-ENV-FIX ---
@@ -738,4 +738,5 @@ mongoose.connect(DB_URL)
     })
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
+
     });
