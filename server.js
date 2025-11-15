@@ -138,11 +138,15 @@ passport.use(new GoogleStrategy({
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
+      console.log('Google OAuth callback received for profile:', profile.id);
+      
       let user = await User.findOne({ googleId: profile.id });
 
       if (user) {
+        console.log('Existing user found:', user.email);
         return done(null, user);
       } else {
+        console.log('Creating new user for:', profile.emails[0].value);
         const newUser = new User({
           googleId: profile.id,
           name: profile.displayName,
@@ -153,6 +157,7 @@ passport.use(new GoogleStrategy({
         return done(null, newUser);
       }
     } catch (err) {
+      console.error('Error in Google OAuth callback:', err);
       return done(err, null);
     }
   }
@@ -694,4 +699,5 @@ mongoose.connect(DB_URL)
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
+
 
