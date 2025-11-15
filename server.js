@@ -6,7 +6,7 @@ const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
-require('dotenv').config();
+
 
 const app = express();
 
@@ -621,3 +621,4 @@ mongoose.connect(DB_URL)
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
+
