@@ -6,21 +6,25 @@ const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 
-// --- !!! ИСПРАВЛЕНИЕ GITHUB (Шаг 6) !!! ---
-// Загружаем секреты из .env в process.env
 require('dotenv').config();
 
 const app = express();
 
+// --- !!! ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ (v3.2): "Доверять прокси" !!! ---
+// Эта строка заставляет Express (и Passport) "видеть",
+// что Render работает по HTTPS, и правильно генерировать
+// https://api.index12.com/auth/google/callback
+app.set('trust proxy', 1); 
+// --- КОНЕЦ ФИНАЛЬНОГО ИСПРАВЛЕНИЯ ---
+
 
 // --- !!! ИСПРАВЛЕНИЕ v3.1: Все переменные читаются из "сейфа" (process.env) !!! ---
 const PORT = process.env.PORT || 3000;
-// !!! ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ !!!
-const FRONTEND_URL = process.env.APP_HOST_URL || 'http://localhost:5173';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 // --- КОНЕЦ ИСПРАВЛЕНИЯ !!! ---
 
-// НОВЫЙ КОД (Принимает оба домена: с www и без www)
+// --- !!! ИСПРАВЛЕНО (v3.1): CORS теперь динамический !!! ---
 const ALLOWED_ORIGINS = [
     FRONTEND_URL, // https://index12.com
     FRONTEND_URL.replace('https://', 'https://www.'), // https://www.index12.com
@@ -30,7 +34,7 @@ const ALLOWED_ORIGINS = [
 app.use(cors({
     origin: (origin, callback) => {
         // Проверяем, есть ли текущий запрос в списке разрешенных
-        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+        if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
             callback(null, true);
         } else {
             callback(new Error(`Not allowed by CORS: Origin ${origin} is not in [${ALLOWED_ORIGINS.join(', ')}]`));
@@ -38,24 +42,21 @@ app.use(cors({
     },
     credentials: true 
 }));
+// --- КОНЕЦ ИСПРАВЛЕНИЯ CORS ---
+
+app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v3.1-FINAL-REDIRECT-FIX ---
- * * ВЕРСИЯ: 3.1 - Устранены конфликты PORT и FRONTEND_URL
+ * * --- МЕТКА ВЕРСИИ: v3.2-HTTPS-PROXY-FIX ---
+ * * ВЕРСИЯ: 3.2 - Исправлен http/https (redirect_uri_mismatch)
  * ДАТА: 2025-11-15
  *
  * ЧТО ИСПРАВЛЕНО:
- * 1. (FIX) `PORT` и `FRONTEND_URL` объявлены до `app.use(cors)`
- * 2. (FIX) `cors origin` теперь использует динамическую переменную `FRONTEND_URL`.
- * 3. (FIX) `DB_URL` читается из `process.env`.
+ * 1. (FIX) Добавлен `app.set('trust proxy', 1);`
  */
 
 
 // --- Схемы ---
-
-// =================================================================
-// --- !!! НОВАЯ СХЕМА: User (Шаг 2) !!! ---
-// =================================================================
 const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
@@ -63,11 +64,6 @@ const userSchema = new mongoose.Schema({
     avatarUrl: String, 
 });
 const User = mongoose.model('User', userSchema);
-
-
-// =================================================================
-// --- !!! ОБНОВЛЕННЫЕ СХЕМЫ (с userId) (Шаг 2) !!! ---
-// =================================================================
 
 const accountSchema = new mongoose.Schema({ 
   name: String, 
@@ -130,42 +126,33 @@ const eventSchema = new mongoose.Schema({
 const Event = mongoose.model('Event', eventSchema);
 
 
-// =================================================================
-// --- !!! НАСТРОЙКА СЕССИЙ И PASSPORT.JS (Шаг 2) !!! ---
-// =================================================================
+// --- НАСТРОЙКА СЕССИЙ И PASSPORT.JS ---
 
-// 1. Настройка Сессий (Express-Session)
 app.use(session({
-    // Читаем секрет из .env
     secret: process.env.GOOGLE_CLIENT_SECRET, 
     resave: false,
     saveUninitialized: false, 
     cookie: { 
-        secure: process.env.NODE_ENV === 'production', // true для https (Render), false для http (localhost)
+        secure: true, // (v3.1) Было `process.env.NODE_ENV === 'production'`, теперь всегда `true`
         httpOnly: true, 
-        maxAge: 1000 * 60 * 60 * 24 * 7 // Сессия живет 7 дней
+        maxAge: 1000 * 60 * 60 * 24 * 7 
     }
 }));
 
-// 2. Инициализация Passport
 app.use(passport.initialize());
 app.use(passport.session()); 
 
-// 3. Настройка Google Strategy
 passport.use(new GoogleStrategy({
-    // Читаем ключи из .env (process.env)
     clientID: process.env.GOOGLE_CLIENT_ID,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    
-    // URL обратного вызова теперь относительный
+    // (v3.1) URL обратного вызова теперь относительный
+    // (v3.2) `app.set('trust proxy', 1)` теперь исправит его на https
     callbackURL: '/auth/google/callback', 
-    
     scope: ['profile', 'email'] 
   },
   async (accessToken, refreshToken, profile, done) => {
     try {
       let user = await User.findOne({ googleId: profile.id });
-
       if (user) {
         return done(null, user);
       } else {
@@ -184,12 +171,9 @@ passport.use(new GoogleStrategy({
   }
 ));
 
-// 4. Сериализация
 passport.serializeUser((user, done) => {
     done(null, user.id); 
 });
-
-// 5. Десериализация
 passport.deserializeUser(async (id, done) => {
     try {
         const user = await User.findById(id);
@@ -200,10 +184,7 @@ passport.deserializeUser(async (id, done) => {
 });
 
 
-// ---
 // --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-// ---
-
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
@@ -221,51 +202,39 @@ const _parseDateKey = (dateKey) => {
     const [year, doy] = dateKey.split('-').map(Number);
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
-
-
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) {
     return null;
   }
-  
   const trimmedName = name.trim();
   const lowerName = trimmedName.toLowerCase();
-  
   if (cache[lowerName]) {
     return cache[lowerName];
   }
-  
   const escapeRegExp = (string) => {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   };
-  
   const trimmedNameEscaped = escapeRegExp(trimmedName);
   const regex = new RegExp(`^\\s*${trimmedNameEscaped}\\s*$`, 'i');
-  
   const existing = await model.findOne({ 
       name: { $regex: regex }, 
       userId: userId 
   });
-  
   if (existing) {
     cache[lowerName] = existing._id; 
     return existing._id;
   }
-  
   try {
     let createData = { 
         name: trimmedName,
         userId: userId 
     }; 
-    
     if (model.schema.paths.order) {
         const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
         createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0;
     }
-    
     const newEntity = new model(createData);
     await newEntity.save();
-    
     console.log(`[Import] Создана '${model.modelName}': ${trimmedName} для User ${userId}`);
     cache[lowerName] = newEntity._id;
     return newEntity._id;
@@ -274,11 +243,9 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     return null;
   }
 };
-
 const getFirstFreeCellIndex = async (dateKey, userId) => {
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
-    
     let idx = 0;
     while (used.has(idx)) {
         idx++;
@@ -287,28 +254,18 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
 };
 
 
-// ---
 // --- МАРШРУТЫ АУТЕНТИФИКАЦИИ ---
-// ---
-
-// 1. Маршрут "Логин"
 app.get('/auth/google',
   passport.authenticate('google', { scope: ['profile', 'email'] })
 );
-
-// 2. Callback-маршрут
 app.get('/auth/google/callback', 
   passport.authenticate('google', { 
-      // !!! ИСПРАВЛЕНО: Редиректы теперь используют FRONTEND_URL !!!
       failureRedirect: `${FRONTEND_URL}/login-failed` 
   }),
   (req, res) => {
-    // Успешная аутентификация, редирект на главную страницу фронтенда
     res.redirect(FRONTEND_URL); 
   }
 );
-
-// 3. Маршрут "Кто я?"
 app.get('/api/auth/me', (req, res) => {
   if (req.isAuthenticated()) { 
     res.json(req.user);
@@ -316,8 +273,6 @@ app.get('/api/auth/me', (req, res) => {
     res.status(401).json({ message: 'No user authenticated' });
   }
 });
-
-// 4. Маршрут "Выход"
 app.post('/api/auth/logout', (req, res, next) => {
   req.logout((err) => {
     if (err) { return next(err); }
@@ -332,9 +287,7 @@ app.post('/api/auth/logout', (req, res, next) => {
 });
 
 
-// ---
 // --- Middleware "КПП" ---
-// ---
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) {
         return next(); 
@@ -344,14 +297,11 @@ function isAuthenticated(req, res, next) {
 
 
 // --- API ДЛЯ ОПЕРАЦИЙ (Events) ---
-
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; 
         const userId = req.user.id; 
-        
         let query = { userId: userId }; 
-        
         if (dateKey) {
             query.dateKey = dateKey;
         } else if (day) {
@@ -359,13 +309,11 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         } else {
             return res.status(400).json({ message: 'Missing required parameter: day or dateKey.' });
         }
-        
         const events = await Event.find(query) 
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
             .populate('fromCompanyId').populate('toCompanyId');
-        
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -375,7 +323,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         const data = req.body;
         const userId = req.user.id; 
         let date, dateKey, dayOfYear;
-
         if (data.dateKey) {
             dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date);
         } else if (data.date) {
@@ -386,7 +333,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         } else {
             return res.status(400).json({ message: 'Operation data must include date, dateKey, or dayOfYear.' });
         }
-
         const newEvent = new Event({
           ...data,
           date: date,
@@ -394,7 +340,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
           dayOfYear: dayOfYear,
           userId: userId 
         });
-        
         await newEvent.save();
         await newEvent.populate([
             'accountId', 'companyId', 'contractorId', 'projectId', 'categoryId',
@@ -412,7 +357,6 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
     const updatedData = { ...req.body }; 
-    
     if (updatedData.dateKey) {
         updatedData.date = _parseDateKey(updatedData.dateKey);
         updatedData.dayOfYear = _getDayOfYear(updatedData.date);
@@ -427,17 +371,14 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
         updatedData.date.setDate(updatedData.dayOfYear);
         updatedData.dateKey = _getDateKey(updatedData.date);
     }
-    
     const updatedEvent = await Event.findOneAndUpdate(
         { _id: id, userId: userId }, 
         updatedData, 
         { new: true }
     );
-    
     if (!updatedEvent) {
         return res.status(404).json({ message: 'Операция не найдена или принадлежит другому пользователю' });
     }
-    
     await updatedEvent.populate([
         'accountId', 'companyId', 'contractorId', 'projectId', 'categoryId',
         'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId'
@@ -452,9 +393,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-
     const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
-    
     if (!deletedEvent) {
       return res.status(404).json({ message: 'Операция не найдена или принадлежит другому пользователю' });
     }
@@ -464,18 +403,15 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   }
 });
 
-// --- API ДЛЯ ПЕРЕВОДОВ (Обновлен до v2.8) ---
+// --- API ДЛЯ ПЕРЕВОДОВ ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
     amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex,
     fromCompanyId, toCompanyId, date, 
   } = req.body;
-  
   const userId = req.user.id; 
-  
   try {
     let finalDate, finalDateKey, finalDayOfYear;
-    
     if (date) {
         finalDate = new Date(date);
         finalDateKey = _getDateKey(finalDate);
@@ -487,7 +423,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     } else {
         return res.status(400).json({ message: 'Transfer data must include date or dayOfYear.' });
     }
-
     const transferEvent = new Event({
       type: 'transfer', amount: amount,
       dayOfYear: finalDayOfYear, cellIndex: cellIndex,
@@ -498,12 +433,10 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
       date: finalDate, dateKey: finalDateKey,
       userId: userId 
     });
-    
     await transferEvent.save();
     await transferEvent.populate([
         'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId'
     ]);
-    
     res.status(201).json(transferEvent);
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -511,17 +444,13 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 });
 
 
-// ---
-// --- ЭНДПОИНТ ИМПОРТА (Обновлен до v2.8) ---
-// ---
+// --- ЭНДПОИНТ ИМПОРТА ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
   const userId = req.user.id; 
-  
   if (!Array.isArray(operations) || operations.length === 0) {
     return res.status(400).json({ message: 'Массив operations не предоставлен.' });
   }
-  
   let rowsToImport;
   if (selectedRows && Array.isArray(selectedRows)) {
     const selectedSet = new Set(selectedRows);
@@ -529,21 +458,16 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   } else {
     rowsToImport = operations;
   }
-  
   console.log(`[Import] Запрос на импорт ${rowsToImport.length} операций для User ${userId}.`);
-  
   const caches = {
     categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {},
   };
-  
   const createdOps = [];
   const errors = [];
   const cellIndexCache = new Map();
-  
   try {
     for (let i = 0; i < rowsToImport.length; i++) {
       const opData = rowsToImport[i];
-      
       if (opData.type === 'transfer') {
         console.warn(`[Import] Пропуск (Transfer): ${opData.date}.`);
         continue;
@@ -552,22 +476,18 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         errors.push(`Строка ${i}: Отсутствуют (Дата, Сумма, Тип).`);
         continue;
       }
-      
       const date = new Date(opData.date);
       if (isNaN(date.getTime())) {
         errors.push(`Строка ${i}: Неверный формат даты (${opData.date}).`);
         continue;
       }
-      
       const dayOfYear = _getDayOfYear(date); 
       const dateKey = _getDateKey(date);
-      
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
-      
       let nextCellIndex;
       if (cellIndexCache.has(dateKey)) {
         nextCellIndex = cellIndexCache.get(dateKey);
@@ -575,7 +495,6 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         nextCellIndex = await getFirstFreeCellIndex(dateKey, userId);
       }
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
-      
       const newOperation = {
         date: date, dayOfYear: dayOfYear, dateKey: dateKey,
         cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
@@ -584,10 +503,8 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         isTransfer: false, 
         userId: userId 
       };
-      
       createdOps.push(newOperation);
     }
-    
     if (createdOps.length > 0) {
       const insertedDocs = await Event.insertMany(createdOps);
       console.log(`[Import] Успешно вставлено ${insertedDocs.length} операций для User ${userId}.`);
@@ -596,9 +513,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       console.log('[Import] Нет операций для вставки.');
       res.status(200).json([]);
     }
-    
     if (errors.length > 0) console.warn('[Import] Были ошибки:', errors);
-
   } catch (err) {
     console.error('[Import] Критическая ошибка:', err);
     res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message });
@@ -606,18 +521,15 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
 });
 
 
-// --- ГЕНЕРАТОР CRUD (Обновлен до v2.8) ---
+// --- ГЕНЕРАТОР CRUD ---
 const generateCRUD = (model, path) => {
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { 
           const userId = req.user.id;
-          
           let query = model.find({ userId: userId }).sort({ order: 1 });
-          
           if (path === 'contractors') {
             query = query.populate('defaultProjectId').populate('defaultCategoryId');
           }
-          
           const items = await query;
           res.json(items); 
         }
@@ -627,10 +539,8 @@ const generateCRUD = (model, path) => {
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
-            
             const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
             const newOrder = maxOrderDoc ? maxOrderDoc.order + 1 : 0;
-
             const newItemData = {
                 ...req.body,
                 order: newOrder,
@@ -640,7 +550,6 @@ const generateCRUD = (model, path) => {
                 defaultCategoryId: req.body.defaultCategoryId || null,
                 userId: userId 
             };
-            
             const item = new model(newItemData);
             const newItem = await item.save();
             res.status(201).json(newItem);
@@ -656,32 +565,26 @@ const generateBatchUpdate = (model, path) => {
     try {
       const items = req.body; 
       const userId = req.user.id;
-
       const updatePromises = items.map(item => {
         const updateData = {
           name: item.name, 
           order: item.order
         };
-        
         if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
         if (item.companyId !== undefined) updateData.companyId = item.companyId;
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
-
         return model.findOneAndUpdate(
             { _id: item._id, userId: userId }, 
             updateData
         );
       });
-      
       await Promise.all(updatePromises);
-      
       let query = model.find({ userId: userId }).sort({ order: 1 });
       if (path === 'contractors') {
         query = query.populate('defaultProjectId').populate('defaultCategoryId');
       }
       const updatedItems = await query;
-          
       res.status(200).json(updatedItems);
     } catch (err) {
       res.status(400).json({ message: err.message });
@@ -712,11 +615,9 @@ mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
       app.listen(PORT, () => {
-        console.log(`Сервер v3.1 (FINAL-REDIRECT-FIX) запущен на порту ${PORT}`);
+        console.log(`Сервер v3.2 (HTTPS-PROXY-FIX) запущен на порту ${PORT}`);
       });
     })
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
-
-
