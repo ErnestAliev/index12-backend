@@ -9,6 +9,15 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 // Загружаем секреты из .env
 require('dotenv').config();
 
+// Отладочное логирование переменных окружения
+console.log('=== GOOGLE OAUTH CONFIGURATION ===');
+console.log('GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? 'SET' : 'NOT SET');
+console.log('GOOGLE_CLIENT_SECRET:', process.env.GOOGLE_CLIENT_SECRET ? 'SET' : 'NOT SET');
+if (process.env.GOOGLE_CLIENT_ID) {
+  console.log('Client ID starts with:', process.env.GOOGLE_CLIENT_ID.substring(0, 20) + '...');
+}
+console.log('==================================');
+
 const app = express();
 
 // Конфигурация
@@ -699,5 +708,3 @@ mongoose.connect(DB_URL)
     .catch(err => {
       console.error('Ошибка подключения к MongoDB:', err);
     });
-
-
