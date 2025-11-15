@@ -22,7 +22,7 @@ const app = express();
 
 // Конфигурация
 const PORT = process.env.PORT || 3000;
-const FRONTEND_URL = 'https://www.index12.com'; // Жестко задаем правильный URL
+const FRONTEND_URL = 'https://www.index12.com';
 const DB_URL = process.env.DB_URL;
 
 console.log('=== SERVER CONFIGURATION ===');
@@ -128,10 +128,9 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     cookie: { 
-        secure: true, // true для HTTPS
+        secure: true,
         httpOnly: true,
-        maxAge: 1000 * 60 * 60 * 24 * 7,
-        domain: '.index12.com' // Работает для всех поддоменов index12.com
+        maxAge: 1000 * 60 * 60 * 24 * 7
     }
 }));
 
