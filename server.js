@@ -47,12 +47,13 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v3.2-HTTPS-PROXY-FIX ---
- * * ВЕРСИЯ: 3.2 - Исправлен http/https (redirect_uri_mismatch)
- * ДАТА: 2025-11-15
+ * * --- МЕТКА ВЕРСИИ: v3.3-CATEGORY-FIX ---
+ * * ВЕРСИЯ: 3.3 - Добавлен batch-update для категорий
+ * ДАТА: 2025-11-16
  *
  * ЧТО ИСПРАВЛЕНО:
- * 1. (FIX) Добавлен `app.set('trust proxy', 1);`
+ * 1. (CRITICAL) Добавлена строка `generateBatchUpdate(Category, 'categories');`.
+ * Это исправляет ошибку 404 при попытке переименовать категорию на фронтенде.
  */
 
 
@@ -602,6 +603,8 @@ generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
+// 🔴 ДОБАВЛЕНО (FIX): Маршрут для batch-update категорий
+generateBatchUpdate(Category, 'categories'); 
 
 // --- ЗАПУСК СЕРВЕРА ---
 
@@ -615,7 +618,7 @@ mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
       app.listen(PORT, () => {
-        console.log(`Сервер v3.2 (HTTPS-PROXY-FIX) запущен на порту ${PORT}`);
+        console.log(`Сервер v3.3 (CATEGORY-FIX) запущен на порту ${PORT}`);
       });
     })
     .catch(err => {
