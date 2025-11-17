@@ -406,6 +406,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
 });
 
 // 🔴 НОВЫЙ ЭНДПОИНТ ДЛЯ ЭКСПОРТА (v10.0)
+// 🔴 v10.5: Изменена сортировка на `date: 1` (от старых к новым) для расчета "Остатка"
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -424,7 +425,8 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
             .populate('individualId')
             .populate('fromIndividualId')
             .populate('toIndividualId')
-            .sort({ date: -1 }); // Сортируем от новых к старым (для удобства)
+            // 🔴 ИЗМЕНЕНИЕ v10.5: Сортируем от СТАРЫХ к НОВЫМ
+            .sort({ date: 1 }); 
         
         res.json(allEvents);
     } catch (err) {
@@ -587,6 +589,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v9.0 (Individuals) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v10.5 (Export Fix) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
