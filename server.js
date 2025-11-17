@@ -1,22 +1,3 @@
-/**
- * * --- МЕТКА ВЕРСИИ: v10.0-TRANSFER-LOGIC ---
- * * ВЕРСИЯ: 10.0 - Новая логика импорта/экспорта переводов
- * ДАТА: 2025-11-17
- *
- * ЧТО ИЗМЕНЕНО:
- * 1. GET /api/operations/all (Экспорт): Теперь также
- * популирует (populate) from/to Account/Company
- * для корректного экспорта переводов.
- * 2. POST /api/import/operations (Импорт): Полностью
- * переписан.
- * - Больше не пропускает `type: 'transfer'`.
- * - Сначала импортирует все 'income' и 'expense'.
- * - Затем ищет парные 'transfer' строки (Расход + Доход).
- * - Находит пары по Дате, Сумме и логике
- * (Company/Contractor).
- * - Создает из 2-х CSV строк 1 "Перевод" в БД.
- */
-
 // backend/server.js
 const express = require('express');
 const cors = require('cors');
@@ -55,9 +36,17 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v8.0-DELETE-ENTITIES ---
- * * ВЕРСИЯ: 8.0 - Реализация каскадного удаления
- * ДАТА: 2025-11-16
+ * * --- МЕТКА ВЕРСИИ: v8.2-INDIVIDUALS-STEP2 ---
+ * * ВЕРСИЯ: 8.2 - Добавление API для "Мои Физлица"
+ * ДАТА: 17.11.2025
+ *
+ * ЧТО ИЗМЕНЕНО:
+ * 1. Добавлена схема и модель `Individual` (Физлицо).
+ * 2. `accountSchema` обновлена, добавлено поле `individualId`.
+ * 3. `eventSchema` обновлена, добавлены `individualId`, `fromIndividualId`, `toIndividualId`.
+ * 4. API /api/transfers (POST) обновлен для поддержки `fromIndividualId`, `toIndividualId`.
+ * 5. CRUD, BatchUpdate, DeleteWithCascade сгенерированы для '/api/individuals'.
+ * 6. /api/import/operations обновлен для распознавания `individual`.
  */
 
 // --- Схемы ---
@@ -74,6 +63,7 @@ const accountSchema = new mongoose.Schema({
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
+  individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null }, // 🔴 ДОБАВЛЕНО
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -84,6 +74,15 @@ const companySchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Company = mongoose.model('Company', companySchema);
+
+// 🔴 ДОБАВЛЕНО: Схема для Физлиц (аналогично Company)
+const individualSchema = new mongoose.Schema({ 
+  name: String, 
+  order: { type: Number, default: 0 },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+});
+const Individual = mongoose.model('Individual', individualSchema);
+
 
 const contractorSchema = new mongoose.Schema({ 
   name: String, 
@@ -117,12 +116,15 @@ const eventSchema = new mongoose.Schema({
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // 🔴 ДОБАВЛЕНО
     isTransfer: { type: Boolean, default: false },
     transferGroupId: String,
     fromAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     toAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
+    fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // 🔴 ДОБАВЛЕНО
+    toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // 🔴 ДОБАВЛЕНО
     date: { type: Date }, 
     dateKey: { type: String, index: true }, // YYYY-DOY
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
@@ -264,7 +266,10 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
-            .populate('fromCompanyId').populate('toCompanyId');
+            .populate('fromCompanyId').populate('toCompanyId')
+            .populate('individualId') // 🔴 ДОБАВЛЕНО
+            .populate('fromIndividualId') // 🔴 ДОБАВЛЕНО
+            .populate('toIndividualId'); // 🔴 ДОБАВЛЕНО
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -284,7 +289,7 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         } else { return res.status(400).json({ message: 'Operation data must include date, dateKey, or dayOfYear.' }); }
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         await newEvent.save();
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId', 'fromIndividualId', 'toIndividualId']); // 🔴 ДОБАВЛЕНО
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -301,7 +306,7 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     }
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Операция не найдена' }); }
-    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId']);
+    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId', 'fromIndividualId', 'toIndividualId']); // 🔴 ДОБАВЛЕНО
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -316,35 +321,9 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// 🔴 ИЗМЕНЕНИЕ v10.0: Обновляем populate для экспорта
-app.get('/api/operations/all', isAuthenticated, async (req, res) => {
-    try {
-        const userId = req.user.id; 
-        
-        const events = await Event.find({ userId: userId }) 
-            .populate('accountId', 'name')
-            .populate('companyId', 'name')
-            .populate('contractorId', 'name')
-            .populate('projectId', 'name')
-            .populate('categoryId', 'name')
-            // Добавляем populate для from/to
-            .populate('fromAccountId', 'name')
-            .populate('toAccountId', 'name')
-            .populate('fromCompanyId', 'name')
-            .populate('toCompanyId', 'name')
-            .sort({ date: 1 }); 
-
-        res.json(events);
-    } catch (err) { 
-        console.error('Ошибка экспорта:', err);
-        res.status(500).json({ message: `Ошибка экспорта: ${err.message}` }); 
-    }
-});
-
-
 // --- API ДЛЯ ПЕРЕВОДОВ ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
-  const { amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, fromCompanyId, toCompanyId, date } = req.body;
+  const { amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, fromCompanyId, toCompanyId, date, fromIndividualId, toIndividualId } = req.body; // 🔴 ДОБАВЛЕНО fromIndividualId, toIndividualId
   const userId = req.user.id; 
   try {
     let finalDate, finalDateKey, finalDayOfYear;
@@ -357,170 +336,54 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     const transferEvent = new Event({
       type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
       fromAccountId, toAccountId, fromCompanyId, toCompanyId, categoryId, isTransfer: true,
+      fromIndividualId, toIndividualId, // 🔴 ДОБАВЛЕНО
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey, userId
     });
     await transferEvent.save();
-    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId']);
+    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId', 'fromIndividualId', 'toIndividualId']); // 🔴 ДОБАВЛЕНО
     res.status(201).json(transferEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 
-// --- ЭНДПОИНТ ИМПОРТА (🔴 ИЗМЕНЕНИЕ v10.0: Полностью переписан) ---
+// --- ЭНДПОИНТ ИМПОРТА ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
   const userId = req.user.id; 
-
-  if (!Array.isArray(operations) || operations.length === 0) {
-    return res.status(400).json({ message: 'Массив operations не предоставлен.' });
-  }
-
-  // 1. Фильтруем только выбранные строки
-  const selectedIndices = new Set(selectedRows);
-  const rowsToImport = operations.filter((_, index) => selectedIndices.has(index));
-
-  // 2. Кэши для поиска/создания сущностей
-  const caches = {
-    categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}
-  };
-  
-  // Кэш для поиска ID (используется для сопоставления переводов)
-  const nameToIdCache = {
-     // Заполним их, чтобы не делать лишних запросов
-     companies: new Map((await Company.find({ userId })).map(c => [c.name.toLowerCase().trim(), c._id])),
-     accounts: new Map((await Account.find({ userId })).map(a => [a.name.toLowerCase().trim(), a._id])),
-     categories: new Map((await Category.find({ userId })).map(c => [c.name.toLowerCase().trim(), c._id])),
-  };
-
-  // 3. Разделяем операции
-  const normalOpsData = [];
-  const transferOpsData = [];
-  
-  for (const opData of rowsToImport) {
-    if (!opData.date || !opData.amount || !opData.type) continue;
-    
-    if (opData.type === 'transfer') {
-      transferOpsData.push(opData);
-    } else if (opData.type === 'income' || opData.type === 'expense') {
-      normalOpsData.push(opData);
-    }
-  }
-
+  if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Массив operations не предоставлен.' }); }
+  let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
+  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {} }; // 🔴 ДОБАВЛЕНО individuals
   const createdOps = [];
-  const createdTransfers = [];
   const cellIndexCache = new Map();
-
   try {
-    // 4. Обрабатываем обычные "Доход" / "Расход"
-    for (const opData of normalOpsData) {
+    for (let i = 0; i < rowsToImport.length; i++) {
+      const opData = rowsToImport[i];
+      if (opData.type === 'transfer') continue;
+      if (!opData.date || !opData.amount || !opData.type) continue;
       const date = new Date(opData.date);
       if (isNaN(date.getTime())) continue;
-      
-      const dayOfYear = _getDayOfYear(date); 
-      const dateKey = _getDateKey(date);
-      
+      const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
-      
-      let nextCellIndex = cellIndexCache.has(dateKey) 
-        ? cellIndexCache.get(dateKey) 
-        : await getFirstFreeCellIndex(dateKey, userId);
+      const individualId = await findOrCreateEntity(Individual, opData.individual, caches.individuals, userId); // 🔴 ДОБАВЛЕНО
+      let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
-      
       createdOps.push({
-        date, dayOfYear, dateKey, cellIndex: nextCellIndex, 
-        type: opData.type, amount: opData.amount, 
+        date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
         categoryId, projectId, accountId, companyId, contractorId, 
+        individualId, // 🔴 ДОБАВЛЕНО
         isTransfer: false, userId
       });
     }
-
-    // 5. Обрабатываем "Переводы"
-    const transferCategoryName = 'перевод';
-    const transferCategoryId = await findOrCreateEntity(Category, transferCategoryName, caches.categories, userId);
-
-    const usedTransferIndices = new Set();
-    
-    for (let i = 0; i < transferOpsData.length; i++) {
-      if (usedTransferIndices.has(i)) continue;
-      
-      const expOp = transferOpsData[i]; // Потенциальный расход
-      if (expOp.amount > 0) continue; // Ищем только расходы
-
-      const expAmount = Math.abs(expOp.amount);
-      
-      // Ищем пару (Доход)
-      let foundPairIndex = -1;
-      for (let j = 0; j < transferOpsData.length; j++) {
-        if (i === j || usedTransferIndices.has(j)) continue;
-        
-        const incOp = transferOpsData[j];
-        if (incOp.amount < 0) continue; // Ищем только доходы
-        
-        // Проверяем совпадение
-        const isMatch = incOp.amount === expAmount &&
-                        incOp.date === expOp.date &&
-                        incOp.company.toLowerCase().trim() === expOp.contractor.toLowerCase().trim() &&
-                        incOp.contractor.toLowerCase().trim() === expOp.company.toLowerCase().trim();
-        
-        if (isMatch) {
-          foundPairIndex = j;
-          break;
-        }
-      }
-      
-      if (foundPairIndex !== -1) {
-        // Пара найдена!
-        const incOp = transferOpsData[foundPairIndex];
-        usedTransferIndices.add(i);
-        usedTransferIndices.add(foundPairIndex);
-        
-        const date = new Date(expOp.date);
-        const dayOfYear = _getDayOfYear(date);
-        const dateKey = _getDateKey(date);
-        
-        // Нам нужны ID. Мы могли создать их на шаге 4, или они уже были.
-        // `findOrCreateEntity` использует кэш, так что это быстро.
-        const fromCompanyId  = await findOrCreateEntity(Company, expOp.company, caches.companies, userId);
-        const fromAccountId  = await findOrCreateEntity(Account, expOp.account, caches.accounts, userId);
-        const toCompanyId    = await findOrCreateEntity(Company, incOp.company, caches.companies, userId);
-        const toAccountId    = await findOrCreateEntity(Account, incOp.account, caches.accounts, userId);
-
-        let nextCellIndex = cellIndexCache.has(dateKey) 
-          ? cellIndexCache.get(dateKey) 
-          : await getFirstFreeCellIndex(dateKey, userId);
-        cellIndexCache.set(dateKey, nextCellIndex + 1);
-
-        createdTransfers.push({
-          date, dayOfYear, dateKey, cellIndex: nextCellIndex,
-          type: 'transfer',
-          isTransfer: true,
-          amount: expAmount, // В БД храним положительную сумму перевода
-          categoryId: transferCategoryId,
-          fromAccountId,
-          fromCompanyId,
-          toAccountId,
-          toCompanyId,
-          transferGroupId: `tr_import_${Date.now()}_${i}`,
-          userId
-        });
-      }
-    }
-
-    // 6. Вставляем все в БД
-    const insertedOps = (createdOps.length > 0) ? await Event.insertMany(createdOps) : [];
-    const insertedTransfers = (createdTransfers.length > 0) ? await Event.insertMany(createdTransfers) : [];
-    
-    res.status(201).json([...insertedOps, ...insertedTransfers]);
-
-  } catch (err) {
-    console.error("Ошибка импорта:", err);
-    res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message });
-  }
+    if (createdOps.length > 0) {
+      const insertedDocs = await Event.insertMany(createdOps);
+      res.status(201).json(insertedDocs);
+    } else { res.status(200).json([]); }
+  } catch (err) { res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message }); }
 });
 
 
@@ -531,6 +394,7 @@ const generateCRUD = (model, path) => {
           const userId = req.user.id;
           let query = model.find({ userId: userId }).sort({ order: 1 });
           if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
+          if (path === 'accounts') { query = query.populate('companyId').populate('individualId'); } // 🔴 ДОБАВЛЕНО populate individualId
           res.json(await query); 
         }
         catch (err) { res.status(500).json({ message: err.message }); }
@@ -544,6 +408,7 @@ const generateCRUD = (model, path) => {
                 order: maxOrderDoc ? maxOrderDoc.order + 1 : 0,
                 initialBalance: req.body.initialBalance || 0,
                 companyId: req.body.companyId || null,
+                individualId: req.body.individualId || null, // 🔴 ДОБАВЛЕНО
                 defaultProjectId: req.body.defaultProjectId || null, 
                 defaultCategoryId: req.body.defaultCategoryId || null,
                 userId: userId 
@@ -561,6 +426,7 @@ const generateBatchUpdate = (model, path) => {
         const updateData = { name: item.name, order: item.order };
         if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
         if (item.companyId !== undefined) updateData.companyId = item.companyId;
+        if (item.individualId !== undefined) updateData.individualId = item.individualId; // 🔴 ДОБАВЛЕНО
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
         return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData);
@@ -568,11 +434,13 @@ const generateBatchUpdate = (model, path) => {
       await Promise.all(updatePromises);
       let query = model.find({ userId: userId }).sort({ order: 1 });
       if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
+      if (path === 'accounts') { query = query.populate('companyId').populate('individualId'); } // 🔴 ДОБАВЛЕНО populate individualId
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
 };
 
+// 🔴 НОВАЯ ФУНКЦИЯ: Генерация DELETE с логикой каскадного удаления
 const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
     try {
@@ -588,8 +456,11 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 
       // 2. Обрабатываем связанные операции (Event)
       if (deleteOperations === 'true') {
+        // Вариант А: Удаляем все операции, где используется эта сущность
+        
         let query = { userId, [foreignKeyField]: id };
         
+        // Особая логика для счетов, компаний, физлиц (они бывают from/to в переводах)
         if (foreignKeyField === 'accountId') {
            await Event.deleteMany({ 
              userId, 
@@ -600,7 +471,13 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
              userId, 
              $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] 
            });
+        } else if (foreignKeyField === 'individualId') { // 🔴 ДОБАВЛЕНО
+           await Event.deleteMany({ 
+             userId, 
+             $or: [ { individualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] 
+           });
         } else {
+           // Обычное удаление (projects, contractors, categories)
            await Event.deleteMany(query);
         }
 
@@ -617,6 +494,10 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
            await Event.updateMany({ userId, companyId: id }, { companyId: null });
            await Event.updateMany({ userId, fromCompanyId: id }, { fromCompanyId: null });
            await Event.updateMany({ userId, toCompanyId: id }, { toCompanyId: null });
+        } else if (foreignKeyField === 'individualId') { // 🔴 ДОБАВЛЕНО
+           await Event.updateMany({ userId, individualId: id }, { individualId: null });
+           await Event.updateMany({ userId, fromIndividualId: id }, { fromIndividualId: null });
+           await Event.updateMany({ userId, toIndividualId: id }, { toIndividualId: null });
         } else {
            await Event.updateMany(query, update);
         }
@@ -636,18 +517,22 @@ generateCRUD(Company, 'companies');
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
+generateCRUD(Individual, 'individuals'); // 🔴 ДОБАВЛЕНО
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
+generateBatchUpdate(Individual, 'individuals'); // 🔴 ДОБАВЛЕНО
 
+// 🔴 Генерируем DELETE с привязкой к полю в Event
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
 generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
+generateDeleteWithCascade(Individual, 'individuals', 'individualId'); // 🔴 ДОБАВЛЕНО
 
 
 // --- ЗАПУСК СЕРВЕРА ---
@@ -657,6 +542,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v10.0 (TRANSFER LOGIC) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v8.2 (INDIVIDUALS) запущен на порту ${PORT}`); }); // 🔴 Обновлена версия
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
