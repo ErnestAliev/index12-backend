@@ -1,3 +1,16 @@
+/**
+ * * --- МЕТКА ВЕРСИИ: v8.2-EXPORT ---
+ * * ВЕРСИЯ: 8.2 - Добавление функции экспорта
+ * ДАТА: 2025-11-17
+ *
+ * ЧТО ИЗМЕНЕНО (v8.2):
+ * 1. Добавлен новый маршрут GET /api/operations/all.
+ * 2. Маршрут извлекает все операции (кроме переводов) с populate имен 
+ * для подготовки к CSV-экспорту.
+ *
+ * * ПРЕДЫДУЩАЯ ВЕРСИЯ: v8.0-DELETE-ENTITIES
+ */
+
 // backend/server.js
 const express = require('express');
 const cors = require('cors');
@@ -302,6 +315,33 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// 🔴 НАЧАЛО: НОВЫЙ МАРШРУТ ДЛЯ ЭКСПОРТА (v8.2)
+app.get('/api/operations/all', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id; 
+        
+        // Находим все события пользователя, делаем populate только нужных полей (name)
+        // и сортируем по дате
+        const events = await Event.find({ 
+            userId: userId, 
+            isTransfer: { $ne: true }, // Исключаем переводы
+            type: { $ne: 'transfer' } 
+        }) 
+            .populate('accountId', 'name')
+            .populate('companyId', 'name')
+            .populate('contractorId', 'name')
+            .populate('projectId', 'name')
+            .populate('categoryId', 'name')
+            .sort({ date: 1 }); // Сортируем от старых к новым
+
+        res.json(events);
+    } catch (err) { 
+        console.error('Ошибка экспорта:', err);
+        res.status(500).json({ message: `Ошибка экспорта: ${err.message}` }); 
+    }
+});
+// 🔴 КОНЕЦ: НОВЫЙ МАРШРУТ ДЛЯ ЭКСПОРТА
+
 // --- API ДЛЯ ПЕРЕВОДОВ ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, fromCompanyId, toCompanyId, date } = req.body;
@@ -501,13 +541,14 @@ generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
 
-// --- ЗАПУСК СЕРВЕРА ---
+// --- ЗАПУСК СЕРВERA ---
 if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
 
 console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v8.0 (DELETE) запущен на порту ${PORT}`); });
+      // 🔴 ИЗМЕНЕНИЕ: Обновлена версия в логе
+      app.listen(PORT, () => { console.log(`Сервер v8.2 (EXPORT) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
