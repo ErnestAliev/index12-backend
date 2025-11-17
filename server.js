@@ -1,14 +1,20 @@
 /**
- * * --- МЕТКА ВЕРСИИ: v8.2-EXPORT ---
- * * ВЕРСИЯ: 8.2 - Добавление функции экспорта
+ * * --- МЕТКА ВЕРСИИ: v10.0-TRANSFER-LOGIC ---
+ * * ВЕРСИЯ: 10.0 - Новая логика импорта/экспорта переводов
  * ДАТА: 2025-11-17
  *
- * ЧТО ИЗМЕНЕНО (v8.2):
- * 1. Добавлен новый маршрут GET /api/operations/all.
- * 2. Маршрут извлекает все операции (кроме переводов) с populate имен 
- * для подготовки к CSV-экспорту.
- *
- * * ПРЕДЫДУЩАЯ ВЕРСИЯ: v8.0-DELETE-ENTITIES
+ * ЧТО ИЗМЕНЕНО:
+ * 1. GET /api/operations/all (Экспорт): Теперь также
+ * популирует (populate) from/to Account/Company
+ * для корректного экспорта переводов.
+ * 2. POST /api/import/operations (Импорт): Полностью
+ * переписан.
+ * - Больше не пропускает `type: 'transfer'`.
+ * - Сначала импортирует все 'income' и 'expense'.
+ * - Затем ищет парные 'transfer' строки (Расход + Доход).
+ * - Находит пары по Дате, Сумме и логике
+ * (Company/Contractor).
+ * - Создает из 2-х CSV строк 1 "Перевод" в БД.
  */
 
 // backend/server.js
@@ -52,11 +58,6 @@ app.use(express.json({ limit: '10mb' }));
  * * --- МЕТКА ВЕРСИИ: v8.0-DELETE-ENTITIES ---
  * * ВЕРСИЯ: 8.0 - Реализация каскадного удаления
  * ДАТА: 2025-11-16
- *
- * ЧТО ИЗМЕНЕНО:
- * 1. Добавлена функция `generateDeleteWithCascade`.
- * 2. Для каждого типа сущности (Account, Company...) теперь генерируется DELETE маршрут.
- * 3. Логика: ?deleteOperations=true -> удаляем Event, иначе update Event set field=null.
  */
 
 // --- Схемы ---
@@ -315,24 +316,23 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// 🔴 НАЧАЛО: НОВЫЙ МАРШРУТ ДЛЯ ЭКСПОРТА (v8.2)
+// 🔴 ИЗМЕНЕНИЕ v10.0: Обновляем populate для экспорта
 app.get('/api/operations/all', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id; 
         
-        // Находим все события пользователя, делаем populate только нужных полей (name)
-        // и сортируем по дате
-        const events = await Event.find({ 
-            userId: userId, 
-            isTransfer: { $ne: true }, // Исключаем переводы
-            type: { $ne: 'transfer' } 
-        }) 
+        const events = await Event.find({ userId: userId }) 
             .populate('accountId', 'name')
             .populate('companyId', 'name')
             .populate('contractorId', 'name')
             .populate('projectId', 'name')
             .populate('categoryId', 'name')
-            .sort({ date: 1 }); // Сортируем от старых к новым
+            // Добавляем populate для from/to
+            .populate('fromAccountId', 'name')
+            .populate('toAccountId', 'name')
+            .populate('fromCompanyId', 'name')
+            .populate('toCompanyId', 'name')
+            .sort({ date: 1 }); 
 
         res.json(events);
     } catch (err) { 
@@ -340,7 +340,7 @@ app.get('/api/operations/all', isAuthenticated, async (req, res) => {
         res.status(500).json({ message: `Ошибка экспорта: ${err.message}` }); 
     }
 });
-// 🔴 КОНЕЦ: НОВЫЙ МАРШРУТ ДЛЯ ЭКСПОРТА
+
 
 // --- API ДЛЯ ПЕРЕВОДОВ ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
@@ -367,40 +367,160 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 });
 
 
-// --- ЭНДПОИНТ ИМПОРТА ---
+// --- ЭНДПОИНТ ИМПОРТА (🔴 ИЗМЕНЕНИЕ v10.0: Полностью переписан) ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
   const userId = req.user.id; 
-  if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Массив operations не предоставлен.' }); }
-  let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
-  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {} };
+
+  if (!Array.isArray(operations) || operations.length === 0) {
+    return res.status(400).json({ message: 'Массив operations не предоставлен.' });
+  }
+
+  // 1. Фильтруем только выбранные строки
+  const selectedIndices = new Set(selectedRows);
+  const rowsToImport = operations.filter((_, index) => selectedIndices.has(index));
+
+  // 2. Кэши для поиска/создания сущностей
+  const caches = {
+    categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}
+  };
+  
+  // Кэш для поиска ID (используется для сопоставления переводов)
+  const nameToIdCache = {
+     // Заполним их, чтобы не делать лишних запросов
+     companies: new Map((await Company.find({ userId })).map(c => [c.name.toLowerCase().trim(), c._id])),
+     accounts: new Map((await Account.find({ userId })).map(a => [a.name.toLowerCase().trim(), a._id])),
+     categories: new Map((await Category.find({ userId })).map(c => [c.name.toLowerCase().trim(), c._id])),
+  };
+
+  // 3. Разделяем операции
+  const normalOpsData = [];
+  const transferOpsData = [];
+  
+  for (const opData of rowsToImport) {
+    if (!opData.date || !opData.amount || !opData.type) continue;
+    
+    if (opData.type === 'transfer') {
+      transferOpsData.push(opData);
+    } else if (opData.type === 'income' || opData.type === 'expense') {
+      normalOpsData.push(opData);
+    }
+  }
+
   const createdOps = [];
+  const createdTransfers = [];
   const cellIndexCache = new Map();
+
   try {
-    for (let i = 0; i < rowsToImport.length; i++) {
-      const opData = rowsToImport[i];
-      if (opData.type === 'transfer') continue;
-      if (!opData.date || !opData.amount || !opData.type) continue;
+    // 4. Обрабатываем обычные "Доход" / "Расход"
+    for (const opData of normalOpsData) {
       const date = new Date(opData.date);
       if (isNaN(date.getTime())) continue;
-      const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
+      
+      const dayOfYear = _getDayOfYear(date); 
+      const dateKey = _getDateKey(date);
+      
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
-      let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
+      
+      let nextCellIndex = cellIndexCache.has(dateKey) 
+        ? cellIndexCache.get(dateKey) 
+        : await getFirstFreeCellIndex(dateKey, userId);
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
+      
       createdOps.push({
-        date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
-        categoryId, projectId, accountId, companyId, contractorId, isTransfer: false, userId
+        date, dayOfYear, dateKey, cellIndex: nextCellIndex, 
+        type: opData.type, amount: opData.amount, 
+        categoryId, projectId, accountId, companyId, contractorId, 
+        isTransfer: false, userId
       });
     }
-    if (createdOps.length > 0) {
-      const insertedDocs = await Event.insertMany(createdOps);
-      res.status(201).json(insertedDocs);
-    } else { res.status(200).json([]); }
-  } catch (err) { res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message }); }
+
+    // 5. Обрабатываем "Переводы"
+    const transferCategoryName = 'перевод';
+    const transferCategoryId = await findOrCreateEntity(Category, transferCategoryName, caches.categories, userId);
+
+    const usedTransferIndices = new Set();
+    
+    for (let i = 0; i < transferOpsData.length; i++) {
+      if (usedTransferIndices.has(i)) continue;
+      
+      const expOp = transferOpsData[i]; // Потенциальный расход
+      if (expOp.amount > 0) continue; // Ищем только расходы
+
+      const expAmount = Math.abs(expOp.amount);
+      
+      // Ищем пару (Доход)
+      let foundPairIndex = -1;
+      for (let j = 0; j < transferOpsData.length; j++) {
+        if (i === j || usedTransferIndices.has(j)) continue;
+        
+        const incOp = transferOpsData[j];
+        if (incOp.amount < 0) continue; // Ищем только доходы
+        
+        // Проверяем совпадение
+        const isMatch = incOp.amount === expAmount &&
+                        incOp.date === expOp.date &&
+                        incOp.company.toLowerCase().trim() === expOp.contractor.toLowerCase().trim() &&
+                        incOp.contractor.toLowerCase().trim() === expOp.company.toLowerCase().trim();
+        
+        if (isMatch) {
+          foundPairIndex = j;
+          break;
+        }
+      }
+      
+      if (foundPairIndex !== -1) {
+        // Пара найдена!
+        const incOp = transferOpsData[foundPairIndex];
+        usedTransferIndices.add(i);
+        usedTransferIndices.add(foundPairIndex);
+        
+        const date = new Date(expOp.date);
+        const dayOfYear = _getDayOfYear(date);
+        const dateKey = _getDateKey(date);
+        
+        // Нам нужны ID. Мы могли создать их на шаге 4, или они уже были.
+        // `findOrCreateEntity` использует кэш, так что это быстро.
+        const fromCompanyId  = await findOrCreateEntity(Company, expOp.company, caches.companies, userId);
+        const fromAccountId  = await findOrCreateEntity(Account, expOp.account, caches.accounts, userId);
+        const toCompanyId    = await findOrCreateEntity(Company, incOp.company, caches.companies, userId);
+        const toAccountId    = await findOrCreateEntity(Account, incOp.account, caches.accounts, userId);
+
+        let nextCellIndex = cellIndexCache.has(dateKey) 
+          ? cellIndexCache.get(dateKey) 
+          : await getFirstFreeCellIndex(dateKey, userId);
+        cellIndexCache.set(dateKey, nextCellIndex + 1);
+
+        createdTransfers.push({
+          date, dayOfYear, dateKey, cellIndex: nextCellIndex,
+          type: 'transfer',
+          isTransfer: true,
+          amount: expAmount, // В БД храним положительную сумму перевода
+          categoryId: transferCategoryId,
+          fromAccountId,
+          fromCompanyId,
+          toAccountId,
+          toCompanyId,
+          transferGroupId: `tr_import_${Date.now()}_${i}`,
+          userId
+        });
+      }
+    }
+
+    // 6. Вставляем все в БД
+    const insertedOps = (createdOps.length > 0) ? await Event.insertMany(createdOps) : [];
+    const insertedTransfers = (createdTransfers.length > 0) ? await Event.insertMany(createdTransfers) : [];
+    
+    res.status(201).json([...insertedOps, ...insertedTransfers]);
+
+  } catch (err) {
+    console.error("Ошибка импорта:", err);
+    res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message });
+  }
 });
 
 
@@ -453,7 +573,6 @@ const generateBatchUpdate = (model, path) => {
   });
 };
 
-// 🔴 НОВАЯ ФУНКЦИЯ: Генерация DELETE с логикой каскадного удаления
 const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
     try {
@@ -469,17 +588,9 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 
       // 2. Обрабатываем связанные операции (Event)
       if (deleteOperations === 'true') {
-        // Вариант А: Удаляем все операции, где используется эта сущность
-        // Примечание: Для переводов это удалит транзакцию.
-        // Для счетов (accountId) это удалит fromAccountId и toAccountId.
-        // Для надежности проверяем оба поля для счетов/компаний в переводах, если нужно.
-        
         let query = { userId, [foreignKeyField]: id };
         
-        // Особая логика для счетов и компаний (они бывают from/to в переводах)
         if (foreignKeyField === 'accountId') {
-           // Удаляем события, где этот счет главный, ИЛИ where fromAccount/toAccount
-           // Проще всего удалить любые события, где упоминается ID
            await Event.deleteMany({ 
              userId, 
              $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] 
@@ -490,7 +601,6 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
              $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] 
            });
         } else {
-           // Обычное удаление (projects, contractors, categories)
            await Event.deleteMany(query);
         }
 
@@ -533,7 +643,6 @@ generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
 
-// 🔴 Генерируем DELETE с привязкой к полю в Event
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
 generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
@@ -541,14 +650,13 @@ generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
 
-// --- ЗАПУСК СЕРВERA ---
+// --- ЗАПУСК СЕРВЕРА ---
 if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
 
 console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      // 🔴 ИЗМЕНЕНИЕ: Обновлена версия в логе
-      app.listen(PORT, () => { console.log(`Сервер v8.2 (EXPORT) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v10.0 (TRANSFER LOGIC) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
