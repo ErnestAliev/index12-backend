@@ -405,6 +405,34 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message }); }
 });
 
+// 🔴 НОВЫЙ ЭНДПОИНТ ДЛЯ ЭКСПОРТА (v10.0)
+app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        // Находим все операции пользователя
+        const allEvents = await Event.find({ userId: userId })
+            // Заполняем все связанные поля, как в ImportExportModal
+            .populate('accountId')
+            .populate('companyId')
+            .populate('contractorId')
+            .populate('projectId')
+            .populate('categoryId')
+            .populate('fromAccountId')
+            .populate('toAccountId')
+            .populate('fromCompanyId')
+            .populate('toCompanyId')
+            .populate('individualId')
+            .populate('fromIndividualId')
+            .populate('toIndividualId')
+            .sort({ date: -1 }); // Сортируем от новых к старым (для удобства)
+        
+        res.json(allEvents);
+    } catch (err) {
+        console.error("Ошибка при экспорте /all-for-export:", err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
 
 // --- ГЕНЕРАТОР CRUD ---
 const generateCRUD = (model, path) => {
