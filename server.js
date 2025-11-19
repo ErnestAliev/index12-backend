@@ -36,13 +36,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v11.0-FIX-CATEGORY-ORDER ---
- * * ВЕРСИЯ: 11.0 - Исправление сортировки категорий
- * * ДАТА: 2025-11-19
+ * * --- МЕТКА ВЕРСИИ: v12.0-FIX-DUPLICATE-CATS ---
+ * * ВЕРСИЯ: 12.0 - Исправление дублирования системных категорий
+ * * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. (FIX) В `categorySchema` добавлено поле `order: { type: Number, default: 0 }`.
- * Ранее оно отсутствовало, из-за чего drag-and-drop в категориях не сохранялся.
+ * 1. (FIX) getSystemCategory: Хелпер для поиска/создания ЕДИНОЙ системной категории.
+ * 2. (FIX) /api/transfers: Использует getSystemCategory для привязки к "Проводки".
+ * 3. (FIX) findOrCreateEntity: Улучшен поиск регистронезависимых дубликатов.
  */
 
 // --- Схемы ---
@@ -94,7 +95,6 @@ const projectSchema = new mongoose.Schema({
 });
 const Project = mongoose.model('Project', projectSchema);
 
-// 🟢 FIX: Добавлено поле order для сохранения сортировки
 const categorySchema = new mongoose.Schema({ 
   name: String,
   order: { type: Number, default: 0 }, 
@@ -122,25 +122,19 @@ const eventSchema = new mongoose.Schema({
     fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     date: { type: Date }, 
-    dateKey: { type: String, index: true }, // YYYY-DOY
+    dateKey: { type: String, index: true }, 
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
 
 
-// --- НАСТРОЙКА СЕССИЙ И PASSPORT.JS ---
-
+// --- AUTH SETUP ---
 app.use(session({
     secret: process.env.GOOGLE_CLIENT_SECRET, 
     resave: false,
     saveUninitialized: false, 
-    cookie: { 
-        secure: true,
-        httpOnly: true, 
-        maxAge: 1000 * 60 * 60 * 24 * 7 
-    }
+    cookie: { secure: true, httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
-
 app.use(passport.initialize());
 app.use(passport.session()); 
 
@@ -153,9 +147,8 @@ passport.use(new GoogleStrategy({
   async (accessToken, refreshToken, profile, done) => {
     try {
       let user = await User.findOne({ googleId: profile.id });
-      if (user) {
-        return done(null, user);
-      } else {
+      if (user) { return done(null, user); } 
+      else {
         const newUser = new User({
           googleId: profile.id,
           name: profile.displayName,
@@ -165,19 +158,14 @@ passport.use(new GoogleStrategy({
         await newUser.save();
         return done(null, newUser); 
       }
-    } catch (err) {
-      return done(err, null);
-    }
+    } catch (err) { return done(err, null); }
   }
 ));
-
 passport.serializeUser((user, done) => { done(null, user.id); });
-passport.deserializeUser(async (id, done) => {
-    try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); }
-});
+passport.deserializeUser(async (id, done) => { try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); } });
 
 
-// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+// --- HELPERS ---
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
@@ -193,16 +181,26 @@ const _parseDateKey = (dateKey) => {
     const [year, doy] = dateKey.split('-').map(Number);
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
+
+// 🟢 Улучшенный поиск сущностей (предотвращает дубли по регистру)
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
   const lowerName = trimmedName.toLowerCase();
+  
+  // Кэш
   if (cache[lowerName]) { return cache[lowerName]; }
-  const escapeRegExp = (string) => { return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
-  const trimmedNameEscaped = escapeRegExp(trimmedName);
-  const regex = new RegExp(`^\\s*${trimmedNameEscaped}\\s*$`, 'i');
+  
+  // Поиск в БД (case-insensitive)
+  const regex = new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
   const existing = await model.findOne({ name: { $regex: regex }, userId: userId });
-  if (existing) { cache[lowerName] = existing._id; return existing._id; }
+  
+  if (existing) { 
+      cache[lowerName] = existing._id; 
+      return existing._id; 
+  }
+  
+  // Создание
   try {
     let createData = { name: trimmedName, userId: userId }; 
     if (model.schema.paths.order) {
@@ -215,6 +213,7 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     return newEntity._id;
   } catch (err) { return null; }
 };
+
 const getFirstFreeCellIndex = async (dateKey, userId) => {
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
@@ -222,8 +221,26 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
+// 🟢 NEW: Получение ЕДИНОЙ системной категории
+const getSystemCategory = async (userId, systemName = 'Проводки') => {
+    // Ищем все категории с похожим именем (Перевод, Проводки, Transfer)
+    const regex = new RegExp(`^(${systemName}|Перевод|Transfer|Проводка)$`, 'i');
+    const categories = await Category.find({ name: { $regex: regex }, userId: userId }).sort({ _id: 1 });
+    
+    if (categories.length > 0) {
+        // Если есть дубликаты, берем ПЕРВУЮ. 
+        // (В будущем можно добавить миграцию для слияния, но пока достаточно не создавать новые)
+        return categories[0]._id;
+    }
+    
+    // Если нет - создаем
+    const newCat = new Category({ name: systemName, userId: userId, order: -1 }); // order -1 чтобы была вверху или скрыта
+    await newCat.save();
+    return newCat._id;
+};
 
-// --- МАРШРУТЫ АУТЕНТИФИКАЦИИ ---
+
+// --- AUTH ROUTES ---
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', 
   passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }),
@@ -242,15 +259,13 @@ app.post('/api/auth/logout', (req, res, next) => {
   });
 });
 
-
-// --- Middleware "КПП" ---
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) { return next(); }
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
 
-// --- API ДЛЯ ОПЕРАЦИЙ (Events) ---
+// --- EVENTS API ---
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; 
@@ -263,9 +278,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
             .populate('fromCompanyId').populate('toCompanyId')
-            .populate('individualId')
-            .populate('fromIndividualId')
-            .populate('toIndividualId');
+            .populate('individualId').populate('fromIndividualId').populate('toIndividualId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -275,21 +288,14 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         const data = req.body;
         const userId = req.user.id; 
         let date, dateKey, dayOfYear;
-        if (data.dateKey) {
-            dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date);
-        } else if (data.date) {
-            date = new Date(data.date); dateKey = _getDateKey(date); dayOfYear = _getDayOfYear(date);
-        } else if (data.dayOfYear) {
-            dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); 
-            date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date);
-        } else { return res.status(400).json({ message: 'Operation data must include date, dateKey, or dayOfYear.' }); }
+        if (data.dateKey) { dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date); } 
+        else if (data.date) { date = new Date(data.date); dateKey = _getDateKey(date); dayOfYear = _getDayOfYear(date); } 
+        else if (data.dayOfYear) { dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date); } 
+        else { return res.status(400).json({ message: 'Operation data must include date.' }); }
+        
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         await newEvent.save();
-        await newEvent.populate([
-            'accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 
-            'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId',
-            'individualId', 'fromIndividualId', 'toIndividualId'
-        ]);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId']);
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -299,83 +305,84 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
     const updatedData = { ...req.body }; 
-    if (updatedData.dateKey) {
-        updatedData.date = _parseDateKey(updatedData.dateKey); updatedData.dayOfYear = _getDayOfYear(updatedData.date);
-    } else if (updatedData.date) {
-        updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date);
-    }
+    if (updatedData.dateKey) { updatedData.date = _parseDateKey(updatedData.dateKey); updatedData.dayOfYear = _getDayOfYear(updatedData.date); } 
+    else if (updatedData.date) { updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date); }
+    
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
-    if (!updatedEvent) { return res.status(404).json({ message: 'Операция не найдена' }); }
-    await updatedEvent.populate([
-        'accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 
-        'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId',
-        'individualId', 'fromIndividualId', 'toIndividualId'
-    ]);
+    if (!updatedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
+    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId']);
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
+    const { id } = req.params; const userId = req.user.id;
     const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
-    if (!deletedEvent) { return res.status(404).json({ message: 'Операция не найдена' }); }
+    if (!deletedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
     res.status(200).json(deletedEvent); 
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// --- API ДЛЯ ПЕРЕВОДОВ ---
+
+// --- 🟢 TRANSFERS API (FIXED) ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
-    amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, 
+    amount, fromAccountId, toAccountId, dayOfYear, cellIndex, 
     fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date 
+    // categoryId игнорируем, сами найдем системную
   } = req.body;
   const userId = req.user.id; 
   try {
     let finalDate, finalDateKey, finalDayOfYear;
-    if (date) {
-        finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate);
-    } else if (dayOfYear) {
-        finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); 
-        finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear); finalDateKey = _getDateKey(finalDate);
-    } else { return res.status(400).json({ message: 'Transfer data must include date or dayOfYear.' }); }
+    if (date) { finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate); } 
+    else if (dayOfYear) { finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear); finalDateKey = _getDateKey(finalDate); } 
+    else { return res.status(400).json({ message: 'Transfer data must include date.' }); }
+    
+    // 🟢 Ищем/создаем одну "Проводку"
+    const systemCategoryId = await getSystemCategory(userId, 'Проводки');
+
     const transferEvent = new Event({
       type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
-      fromAccountId, toAccountId, fromCompanyId, toCompanyId, 
-      fromIndividualId, toIndividualId,
-      categoryId, isTransfer: true,
+      fromAccountId, toAccountId, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId,
+      categoryId: systemCategoryId, // Привязываем к системной
+      isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey, userId
     });
     await transferEvent.save();
-    await transferEvent.populate([
-        'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId',
-        'fromIndividualId', 'toIndividualId'
-    ]);
+    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId', 'fromIndividualId', 'toIndividualId']);
     res.status(201).json(transferEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 
-// --- ЭНДПОИНТ ИМПОРТА ---
+// --- IMPORT API ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
   const userId = req.user.id; 
-  if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Массив operations не предоставлен.' }); }
+  if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Empty operations array.' }); }
   let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
   
   const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {} };
   const createdOps = [];
   const cellIndexCache = new Map();
+
   try {
+    // Предзагрузка системной категории, чтобы импорт не создавал дубли
+    const systemCatId = await getSystemCategory(userId, 'Проводки');
+    caches.categories['проводки'] = systemCatId;
+    caches.categories['перевод'] = systemCatId;
+    caches.categories['transfer'] = systemCatId;
+
     for (let i = 0; i < rowsToImport.length; i++) {
       const opData = rowsToImport[i];
       if (opData.type === 'transfer') continue;
       if (!opData.date || !opData.amount || !opData.type) continue;
-      const date = new Date(opData.date);
-      if (isNaN(date.getTime())) continue;
+      
+      const date = new Date(opData.date); if (isNaN(date.getTime())) continue;
       const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
+      
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
@@ -385,10 +392,11 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       
       let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
+      
       createdOps.push({
-        date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
-        categoryId, projectId, accountId, companyId, contractorId, 
-        individualId,
+        date, dayOfYear, dateKey, cellIndex: nextCellIndex, 
+        type: opData.type, amount: opData.amount, 
+        categoryId, projectId, accountId, companyId, contractorId, individualId,
         isTransfer: false, userId
       });
     }
@@ -396,36 +404,24 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       const insertedDocs = await Event.insertMany(createdOps);
       res.status(201).json(insertedDocs);
     } else { res.status(200).json([]); }
-  } catch (err) { res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message }); }
+  } catch (err) { res.status(500).json({ message: 'Import error', details: err.message }); }
 });
+
 
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const allEvents = await Event.find({ userId: userId })
-            .populate('accountId')
-            .populate('companyId')
-            .populate('contractorId')
-            .populate('projectId')
-            .populate('categoryId')
-            .populate('fromAccountId')
-            .populate('toAccountId')
-            .populate('fromCompanyId')
-            .populate('toCompanyId')
-            .populate('individualId')
-            .populate('fromIndividualId')
-            .populate('toIndividualId')
+            .populate('accountId').populate('companyId').populate('contractorId').populate('projectId').populate('categoryId')
+            .populate('fromAccountId').populate('toAccountId').populate('fromCompanyId').populate('toCompanyId')
+            .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
             .sort({ date: 1 }); 
-        
         res.json(allEvents);
-    } catch (err) {
-        console.error("Ошибка при экспорте /all-for-export:", err);
-        res.status(500).json({ message: err.message });
-    }
+    } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 
-// --- ГЕНЕРАТОР CRUD ---
+// --- CRUD ---
 const generateCRUD = (model, path) => {
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { 
@@ -440,6 +436,16 @@ const generateCRUD = (model, path) => {
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
+            
+            // 🟢 Если создаем категорию, проверим на дубликат по имени
+            if (path === 'categories' && req.body.name) {
+                const existing = await model.findOne({ 
+                    userId, 
+                    name: { $regex: new RegExp(`^${req.body.name.trim()}$`, 'i') } 
+                });
+                if (existing) return res.status(200).json(existing);
+            }
+
             const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
             const newItem = new model({
                 ...req.body,
@@ -486,36 +492,23 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
       const userId = req.user.id;
 
       const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
-      if (!deletedEntity) {
-        return res.status(404).json({ message: 'Entity not found' });
-      }
+      if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
 
       if (deleteOperations === 'true') {
         let query = { userId, [foreignKeyField]: id };
-        
         if (foreignKeyField === 'accountId') {
-           await Event.deleteMany({ 
-             userId, 
-             $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] 
-           });
+           await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
         } else if (foreignKeyField === 'companyId') {
-           await Event.deleteMany({ 
-             userId, 
-             $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] 
-           });
+           await Event.deleteMany({ userId, $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] });
         } else if (foreignKeyField === 'individualId') {
-           await Event.deleteMany({ 
-             userId, 
-             $or: [ { individualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] 
-           });
+           await Event.deleteMany({ userId, $or: [ { individualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
         } else {
            await Event.deleteMany(query);
         }
-
       } else {
+        // Set null
         let update = { [foreignKeyField]: null };
         let query = { userId, [foreignKeyField]: id };
-
         if (foreignKeyField === 'accountId') {
            await Event.updateMany({ userId, accountId: id }, { accountId: null });
            await Event.updateMany({ userId, fromAccountId: id }, { fromAccountId: null });
@@ -532,16 +525,11 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
            await Event.updateMany(query, update);
         }
       }
-
       res.status(200).json({ message: 'Deleted successfully', id });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: err.message });
-    }
+    } catch (err) { res.status(500).json({ message: err.message }); }
   });
 };
 
-// --- ГЕНЕРИРУЕМ ВСЕ API ---
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
 generateCRUD(Individual, 'individuals'); 
@@ -564,13 +552,10 @@ generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
 
-// --- ЗАПУСК СЕРВЕРА ---
-if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
-
-console.log('Подключаемся к MongoDB...');
+if (!DB_URL) { console.error('Error: DB_URL missing'); process.exit(1); }
 mongoose.connect(DB_URL)
     .then(() => {
-      console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v11.0 (Category Sort Fix) запущен на порту ${PORT}`); });
+      console.log('MongoDB connected.');
+      app.listen(PORT, () => { console.log(`Server v12.0 (Fix Dup Cats) running on port ${PORT}`); });
     })
-    .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
+    .catch(err => { console.error('MongoDB connection error:', err); });
