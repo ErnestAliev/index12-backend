@@ -36,13 +36,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v9.0-LIABILITIES ---
- * * ВЕРСИЯ: 9.0 - Добавлено поле totalDealAmount
- * ДАТА: 2025-11-20
+ * * --- МЕТКА ВЕРСИИ: v10.0-SYSTEM-CATEGORY ---
+ * * ВЕРСИЯ: 10.0 - Системная категория "Предоплата"
+ * * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. В `eventSchema` добавлено поле `totalDealAmount` (Number).
- * Оно нужно для расчета "Нам должны" (Общая сумма сделки - Внесенная сумма).
+ * 1. В `categorySchema` добавлено поле `isSystem` (Boolean).
+ * 2. В `GET /api/categories` добавлена авто-генерация категории "Предоплата".
+ * 3. В `DELETE /api/categories/:id` добавлен запрет на удаление системных категорий.
  */
 
 // --- Схемы ---
@@ -88,6 +89,8 @@ const Project = mongoose.model('Project', projectSchema);
 
 const categorySchema = new mongoose.Schema({ 
   name: String,
+  // 🟢 v10.0: Флаг системной категории
+  isSystem: { type: Boolean, default: false },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Category = mongoose.model('Category', categorySchema);
@@ -109,11 +112,8 @@ const eventSchema = new mongoose.Schema({
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     date: { type: Date }, 
-    dateKey: { type: String, index: true }, // YYYY-DOY
-    
-    // 🟢 v9.0: Поле для "Умной предоплаты"
+    dateKey: { type: String, index: true }, 
     totalDealAmount: { type: Number, default: 0 },
-
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
@@ -372,6 +372,27 @@ const generateCRUD = (model, path) => {
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { 
           const userId = req.user.id;
+          
+          // 🟢 v10.0: СПЕЦИАЛЬНАЯ ЛОГИКА ДЛЯ КАТЕГОРИЙ
+          // При запросе категорий проверяем наличие системной "Предоплата"
+          if (path === 'categories') {
+              const systemName = 'Предоплата';
+              const exists = await Category.findOne({ 
+                  userId, 
+                  name: { $regex: new RegExp(`^${systemName}$`, 'i') } 
+              });
+              
+              if (!exists) {
+                  const newSystemCat = new Category({ 
+                      name: systemName, 
+                      userId, 
+                      isSystem: true // 🟢 Флаг
+                  });
+                  await newSystemCat.save();
+                  console.log(`[SERVER] Системная категория "${systemName}" создана для user ${userId}`);
+              }
+          }
+
           let query = model.find({ userId: userId }).sort({ order: 1 });
           if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
           res.json(await query); 
@@ -416,33 +437,29 @@ const generateBatchUpdate = (model, path) => {
   });
 };
 
-// 🔴 НОВАЯ ФУНКЦИЯ: Генерация DELETE с логикой каскадного удаления
 const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
     try {
       const { id } = req.params;
-      const { deleteOperations } = req.query; // 'true' или 'false'
+      const { deleteOperations } = req.query; 
       const userId = req.user.id;
 
-      // 1. Сначала удаляем саму сущность
+      // 🟢 v10.0: Защита системных категорий от удаления
+      if (path === 'categories') {
+          const cat = await model.findOne({ _id: id, userId });
+          if (cat && cat.isSystem) {
+              return res.status(403).json({ message: 'Нельзя удалить системную категорию.' });
+          }
+      }
+
       const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
       if (!deletedEntity) {
         return res.status(404).json({ message: 'Entity not found' });
       }
 
-      // 2. Обрабатываем связанные операции (Event)
       if (deleteOperations === 'true') {
-        // Вариант А: Удаляем все операции, где используется эта сущность
-        // Примечание: Для переводов это удалит транзакцию.
-        // Для счетов (accountId) это удалит fromAccountId и toAccountId.
-        // Для надежности проверяем оба поля для счетов/компаний в переводах, если нужно.
-        
         let query = { userId, [foreignKeyField]: id };
-        
-        // Особая логика для счетов и компаний (они бывают from/to в переводах)
         if (foreignKeyField === 'accountId') {
-           // Удаляем события, где этот счет главный, ИЛИ where fromAccount/toAccount
-           // Проще всего удалить любые события, где упоминается ID
            await Event.deleteMany({ 
              userId, 
              $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] 
@@ -453,15 +470,12 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
              $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] 
            });
         } else {
-           // Обычное удаление (projects, contractors, categories)
            await Event.deleteMany(query);
         }
 
       } else {
-        // Вариант Б: Оставляем операции, но обнуляем ссылку (SET NULL)
         let update = { [foreignKeyField]: null };
         let query = { userId, [foreignKeyField]: id };
-
         if (foreignKeyField === 'accountId') {
            await Event.updateMany({ userId, accountId: id }, { accountId: null });
            await Event.updateMany({ userId, fromAccountId: id }, { fromAccountId: null });
@@ -496,7 +510,6 @@ generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
 
-// 🔴 Генерируем DELETE с привязкой к полю в Event
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
 generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
@@ -511,6 +524,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v9.0 (Liabilities Update) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v10.0 (System Category) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
