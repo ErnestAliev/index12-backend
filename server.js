@@ -36,14 +36,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v12.0-FIX-DUPLICATE-CATS ---
- * * ВЕРСИЯ: 12.0 - Исправление дублирования системных категорий
+ * * --- МЕТКА ВЕРСИИ: v13.0-OBLIGATIONS-SCHEMA ---
+ * * ВЕРСИЯ: 13.0 - Реализация Сценария Расчетов (Обязательства)
  * * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. (FIX) getSystemCategory: Хелпер для поиска/создания ЕДИНОЙ системной категории.
- * 2. (FIX) /api/transfers: Использует getSystemCategory для привязки к "Проводки".
- * 3. (FIX) findOrCreateEntity: Улучшен поиск регистронезависимых дубликатов.
+ * 1. (SCHEMA) eventSchema: Добавлены поля isDeal, dealTotal, parentDealId.
+ * 2. (LOGIC) ensureSystemCategories: Функция создания категорий Предоплата/Доплата/Постоплата.
+ * 3. (AUTH) /api/auth/me: Вызывает ensureSystemCategories при входе.
  */
 
 // --- Схемы ---
@@ -122,7 +122,13 @@ const eventSchema = new mongoose.Schema({
     fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     date: { type: Date }, 
-    dateKey: { type: String, index: true }, 
+    dateKey: { type: String, index: true },
+    
+    // 🟢 NEW: Поля для Обязательств (Deals)
+    isDeal: { type: Boolean, default: false }, // Флаг начала сделки (Предоплата)
+    dealTotal: { type: Number, default: 0 },   // Общая сумма сделки
+    parentDealId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null }, // Ссылка на родительскую сделку (для Доплаты/Постоплаты/Актов)
+    
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
@@ -228,15 +234,27 @@ const getSystemCategory = async (userId, systemName = 'Проводки') => {
     const categories = await Category.find({ name: { $regex: regex }, userId: userId }).sort({ _id: 1 });
     
     if (categories.length > 0) {
-        // Если есть дубликаты, берем ПЕРВУЮ. 
-        // (В будущем можно добавить миграцию для слияния, но пока достаточно не создавать новые)
         return categories[0]._id;
     }
     
     // Если нет - создаем
-    const newCat = new Category({ name: systemName, userId: userId, order: -1 }); // order -1 чтобы была вверху или скрыта
+    const newCat = new Category({ name: systemName, userId: userId, order: -1 });
     await newCat.save();
     return newCat._id;
+};
+
+// 🟢 NEW: Гарантия наличия категорий для сделок
+const ensureDealCategories = async (userId) => {
+    const dealCategories = ['Предоплата', 'Доплата', 'Постоплата'];
+    for (const catName of dealCategories) {
+        const regex = new RegExp(`^${catName}$`, 'i');
+        const exists = await Category.findOne({ name: { $regex: regex }, userId: userId });
+        if (!exists) {
+            const newCat = new Category({ name: catName, userId: userId, order: 0 });
+            await newCat.save();
+            console.log(`[System] Created category: ${catName} for user ${userId}`);
+        }
+    }
 };
 
 
@@ -246,8 +264,12 @@ app.get('/auth/google/callback',
   passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }),
   (req, res) => { res.redirect(FRONTEND_URL); }
 );
-app.get('/api/auth/me', (req, res) => {
-  if (req.isAuthenticated()) { res.json(req.user); } else { res.status(401).json({ message: 'No user authenticated' }); }
+app.get('/api/auth/me', async (req, res) => {
+  if (req.isAuthenticated()) { 
+      // 🟢 NEW: Гарантируем категории при каждом входе/проверке
+      await ensureDealCategories(req.user.id);
+      res.json(req.user); 
+  } else { res.status(401).json({ message: 'No user authenticated' }); }
 });
 app.post('/api/auth/logout', (req, res, next) => {
   req.logout((err) => {
@@ -278,7 +300,9 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
             .populate('fromCompanyId').populate('toCompanyId')
-            .populate('individualId').populate('fromIndividualId').populate('toIndividualId');
+            .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
+            // 🟢 Populate для сделок
+            .populate('parentDealId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -293,9 +317,16 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         else if (data.dayOfYear) { dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date); } 
         else { return res.status(400).json({ message: 'Operation data must include date.' }); }
         
-        const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
+        // 🟢 Добавляем поля сделки в создание
+        const newEvent = new Event({ 
+            ...data, 
+            date, dateKey, dayOfYear, userId,
+            isDeal: data.isDeal || false,
+            dealTotal: data.dealTotal || 0,
+            parentDealId: data.parentDealId || null
+        });
         await newEvent.save();
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId', 'parentDealId']);
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -310,7 +341,7 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
-    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId']);
+    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId', 'parentDealId']);
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -320,6 +351,9 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params; const userId = req.user.id;
     const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
     if (!deletedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
+    
+    // 🟢 Опционально: Можно было бы удалять зависимые доплаты, но ТЗ не требует cascade delete сделок
+    
     res.status(200).json(deletedEvent); 
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -330,7 +364,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
     amount, fromAccountId, toAccountId, dayOfYear, cellIndex, 
     fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date 
-    // categoryId игнорируем, сами найдем системную
   } = req.body;
   const userId = req.user.id; 
   try {
@@ -339,13 +372,12 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     else if (dayOfYear) { finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear); finalDateKey = _getDateKey(finalDate); } 
     else { return res.status(400).json({ message: 'Transfer data must include date.' }); }
     
-    // 🟢 Ищем/создаем одну "Проводку"
     const systemCategoryId = await getSystemCategory(userId, 'Проводки');
 
     const transferEvent = new Event({
       type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
       fromAccountId, toAccountId, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId,
-      categoryId: systemCategoryId, // Привязываем к системной
+      categoryId: systemCategoryId, 
       isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey, userId
@@ -369,7 +401,6 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const cellIndexCache = new Map();
 
   try {
-    // Предзагрузка системной категории, чтобы импорт не создавал дубли
     const systemCatId = await getSystemCategory(userId, 'Проводки');
     caches.categories['проводки'] = systemCatId;
     caches.categories['перевод'] = systemCatId;
@@ -415,6 +446,7 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
             .populate('accountId').populate('companyId').populate('contractorId').populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId').populate('fromCompanyId').populate('toCompanyId')
             .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
+            .populate('parentDealId')
             .sort({ date: 1 }); 
         res.json(allEvents);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -437,7 +469,6 @@ const generateCRUD = (model, path) => {
         try {
             const userId = req.user.id;
             
-            // 🟢 Если создаем категорию, проверим на дубликат по имени
             if (path === 'categories' && req.body.name) {
                 const existing = await model.findOne({ 
                     userId, 
@@ -556,6 +587,6 @@ if (!DB_URL) { console.error('Error: DB_URL missing'); process.exit(1); }
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB connected.');
-      app.listen(PORT, () => { console.log(`Server v12.0 (Fix Dup Cats) running on port ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Server v13.0 (Obligations Schema) running on port ${PORT}`); });
     })
     .catch(err => { console.error('MongoDB connection error:', err); });
