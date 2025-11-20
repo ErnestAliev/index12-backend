@@ -27,7 +27,7 @@ app.use(cors({
         if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
             callback(null, true);
         } else {
-            callback(null, true); // Разрешаем для отладки, если ориджин не совпал
+            callback(null, true); // Разрешаем для отладки
         }
     },
     credentials: true 
@@ -36,15 +36,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v11.0-SEPARATE-COLLECTION ---
- * * ВЕРСИЯ: 11.0 - Отдельная коллекция Prepayments
+ * * --- МЕТКА ВЕРСИИ: v12.0-SEPARATE-COLLECTION ---
+ * * ВЕРСИЯ: 12.0 - Создание отдельной коллекции Prepayments
  * * ДАТА: 2025-11-20
  *
- * ЧТО ИЗМЕНЕНО:
- * 1. (NEW) Добавлена схема `Prepayment` (коллекция `prepayments`).
- * 2. (RESTORE) Восстановлена схема `Individual` (коллекция `individuals`).
- * 3. (UPDATE) В `Event` добавлено поле `prepaymentId`.
- * 4. (DEL) Удалена логика isSystem из Category.
+ * ЧТО ИСПРАВЛЕНО:
+ * 1. (NEW) Схема `Prepayment` (коллекция `prepayments`).
+ * 2. (UPDATE) В `Event` добавлено поле `prepaymentId`.
+ * 3. (RESTORE) Восстановлены `Individual` (Физлица).
  */
 
 // --- Схемы ---
@@ -61,7 +60,7 @@ const accountSchema = new mongoose.Schema({
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
-  individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null }, // Ссылка на физлицо
+  individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -73,7 +72,7 @@ const companySchema = new mongoose.Schema({
 });
 const Company = mongoose.model('Company', companySchema);
 
-// 🟢 ВОССТАНОВЛЕНО: Физлица
+// 🟢 ФИЗЛИЦА (Восстановлено)
 const individualSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
@@ -81,9 +80,9 @@ const individualSchema = new mongoose.Schema({
 });
 const Individual = mongoose.model('Individual', individualSchema);
 
-// 🟢 НОВОЕ: Предоплата (Отдельная ветка)
+// 🟢 ПРЕДОПЛАТА (НОВАЯ ОТДЕЛЬНАЯ КОЛЛЕКЦИЯ)
 const prepaymentSchema = new mongoose.Schema({ 
-  name: String, // Например "Предоплата"
+  name: String, // "Предоплата"
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
@@ -106,7 +105,6 @@ const Project = mongoose.model('Project', projectSchema);
 
 const categorySchema = new mongoose.Schema({ 
   name: String,
-  // isSystem убрали, теперь Предоплата живет отдельно
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Category = mongoose.model('Category', categorySchema);
@@ -116,13 +114,14 @@ const eventSchema = new mongoose.Schema({
     cellIndex: Number, 
     type: String, 
     amount: Number,
+    
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
-    // 🟢 Ссылка на новую коллекцию
+    // 🟢 Ссылка на Prepayment (новая коллекция)
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
     
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
-    individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // Ссылка на физлицо
+    individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     
@@ -144,17 +143,12 @@ const eventSchema = new mongoose.Schema({
 const Event = mongoose.model('Event', eventSchema);
 
 
-// --- НАСТРОЙКА СЕССИЙ И PASSPORT.JS ---
-
+// --- CONFIG ---
 app.use(session({
     secret: process.env.GOOGLE_CLIENT_SECRET, 
     resave: false,
     saveUninitialized: false, 
-    cookie: { 
-        secure: true,
-        httpOnly: true, 
-        maxAge: 1000 * 60 * 60 * 24 * 7 
-    }
+    cookie: { secure: true, httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
 
 app.use(passport.initialize());
@@ -169,9 +163,8 @@ passport.use(new GoogleStrategy({
   async (accessToken, refreshToken, profile, done) => {
     try {
       let user = await User.findOne({ googleId: profile.id });
-      if (user) {
-        return done(null, user);
-      } else {
+      if (user) { return done(null, user); } 
+      else {
         const newUser = new User({
           googleId: profile.id,
           name: profile.displayName,
@@ -181,9 +174,7 @@ passport.use(new GoogleStrategy({
         await newUser.save();
         return done(null, newUser); 
       }
-    } catch (err) {
-      return done(err, null);
-    }
+    } catch (err) { return done(err, null); }
   }
 ));
 
@@ -192,8 +183,7 @@ passport.deserializeUser(async (id, done) => {
     try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); }
 });
 
-
-// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+// --- HELPERS ---
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
@@ -238,8 +228,7 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
-
-// --- МАРШРУТЫ АУТЕНТИФИКАЦИИ ---
+// --- AUTH ROUTES ---
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', 
   passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }),
@@ -258,15 +247,13 @@ app.post('/api/auth/logout', (req, res, next) => {
   });
 });
 
-
-// --- Middleware "КПП" ---
+// --- MIDDLEWARE ---
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) { return next(); }
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
-
-// --- API ДЛЯ ОПЕРАЦИЙ (Events) ---
+// --- EVENTS API ---
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; 
@@ -276,10 +263,12 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         else { return res.status(400).json({ message: 'Missing required parameter: day or dateKey.' }); }
         const events = await Event.find(query) 
             .populate('accountId').populate('companyId').populate('contractorId')
-            .populate('projectId').populate('categoryId').populate('prepaymentId') // 🟢 populate prepaymentId
+            .populate('projectId').populate('categoryId')
+            .populate('prepaymentId') // 🟢
+            .populate('individualId') // 🟢
             .populate('fromAccountId').populate('toAccountId')
-            .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
-            .populate('fromCompanyId').populate('toCompanyId');
+            .populate('fromCompanyId').populate('toCompanyId')
+            .populate('fromIndividualId').populate('toIndividualId'); // 🟢
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -362,7 +351,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const userId = req.user.id; 
   if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Массив operations не предоставлен.' }); }
   let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
-  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {} };
+  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {}, prepayments: {} };
   const createdOps = [];
   const cellIndexCache = new Map();
   try {
@@ -374,14 +363,13 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       if (isNaN(date.getTime())) continue;
       const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
       
-      // При импорте пока предполагаем обычные категории
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
-      
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
       const individualId = await findOrCreateEntity(Individual, opData.individual, caches.individuals, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
+      
       let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
       createdOps.push({
@@ -399,14 +387,15 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
 
 // --- ГЕНЕРАТОР CRUD ---
 const generateCRUD = (model, path) => {
+    // GET
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { 
           const userId = req.user.id;
           
-          // 🟢 АВТО-СОЗДАНИЕ СИСТЕМНОЙ "ПРЕДОПЛАТЫ" В ОТДЕЛЬНОЙ КОЛЛЕКЦИИ
+          // 🟢 АВТО-СОЗДАНИЕ ПРЕДОПЛАТЫ ПРИ GET-ЗАПРОСЕ
           if (path === 'prepayments') {
               const systemName = 'Предоплата';
-              const exists = await model.findOne({ userId }); // У нас одна предоплата
+              const exists = await model.findOne({ userId });
               if (!exists) {
                   const newSystemEntity = new model({ name: systemName, userId });
                   await newSystemEntity.save();
@@ -414,7 +403,7 @@ const generateCRUD = (model, path) => {
               }
           }
 
-          let query = model.find({ userId: userId }).sort({ _id: 1 }); // Или order
+          let query = model.find({ userId: userId }).sort({ _id: 1 });
           if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
           
           if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
@@ -423,6 +412,7 @@ const generateCRUD = (model, path) => {
         catch (err) { res.status(500).json({ message: err.message }); }
     });
     
+    // POST
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
@@ -449,6 +439,7 @@ const generateCRUD = (model, path) => {
     });
 };
 
+// --- BATCH UPDATE ---
 const generateBatchUpdate = (model, path) => {
   app.put(`/api/${path}/batch-update`, isAuthenticated, async (req, res) => {
     try {
@@ -471,6 +462,7 @@ const generateBatchUpdate = (model, path) => {
   });
 };
 
+// --- DELETE ---
 const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
     try {
@@ -483,6 +475,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 
       if (deleteOperations === 'true') {
         let query = { userId, [foreignKeyField]: id };
+        // Для особых полей (account/company/individual) удаляем ссылки отовсюду
         if (foreignKeyField === 'accountId') {
            await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
         } else if (foreignKeyField === 'companyId') {
@@ -516,36 +509,37 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   });
 };
 
-// --- ГЕНЕРИРУЕМ ВСЕ API ---
+// --- 🟢 РЕГИСТРАЦИЯ МАРШРУТОВ ---
+// Порядок важен, чтобы не было конфликтов
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
-generateCRUD(Individual, 'individuals'); // 🟢 ВОССТАНОВЛЕНО
+generateCRUD(Individual, 'individuals'); // 🟢 Исправлено 404
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
-generateCRUD(Prepayment, 'prepayments'); // 🟢 НОВОЕ: API для предоплат
+generateCRUD(Prepayment, 'prepayments'); // 🟢 Новая коллекция
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
-generateBatchUpdate(Individual, 'individuals'); // 🟢
+generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
 
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
-generateDeleteWithCascade(Individual, 'individuals', 'individualId'); // 🟢
+generateDeleteWithCascade(Individual, 'individuals', 'individualId');
 generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
-// --- ЗАПУСК СЕРВЕРА ---
+// --- START ---
 if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
 
 console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v11.0 (Prepayment Collection) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v12.0 (Individuals + Prepayments Fixed) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
