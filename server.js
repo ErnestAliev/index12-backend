@@ -37,13 +37,14 @@ app.use(express.json({ limit: '10mb' }));
 
 /**
  * * --- МЕТКА ВЕРСИИ: v10.0-SYSTEM-CATEGORY ---
- * * ВЕРСИЯ: 10.0 - Системная категория "Предоплата"
+ * * ВЕРСИЯ: 10.0 - Системная категория "Предоплата" и поле totalDealAmount
  * * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
  * 1. В `categorySchema` добавлено поле `isSystem` (Boolean).
- * 2. В `GET /api/categories` добавлена авто-генерация категории "Предоплата".
- * 3. В `DELETE /api/categories/:id` добавлен запрет на удаление системных категорий.
+ * 2. В `eventSchema` добавлено поле `totalDealAmount` (Number).
+ * 3. В `GET /api/categories` добавлена авто-генерация категории "Предоплата".
+ * 4. В `DELETE /api/categories/:id` добавлен запрет на удаление системных категорий.
  */
 
 // --- Схемы ---
@@ -113,6 +114,7 @@ const eventSchema = new mongoose.Schema({
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     date: { type: Date }, 
     dateKey: { type: String, index: true }, 
+    // 🟢 v10.0: Общая сумма сделки для предоплат
     totalDealAmount: { type: Number, default: 0 },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
