@@ -36,13 +36,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v13.1-CLEANUP ---
- * * ВЕРСИЯ: 13.1 - Удаление Legacy категорий из авто-создания
- * * ДАТА: 2025-11-20
+ * * --- МЕТКА ВЕРСИИ: v8.0-DELETE-ENTITIES ---
+ * * ВЕРСИЯ: 8.0 - Реализация каскадного удаления
+ * ДАТА: 2025-11-16
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. (LOGIC) ensureDealCategories: Теперь создает ТОЛЬКО "Предоплата".
- * "Доплата" и "Постоплата" удалены из списка инициализации.
+ * 1. Добавлена функция `generateDeleteWithCascade`.
+ * 2. Для каждого типа сущности (Account, Company...) теперь генерируется DELETE маршрут.
+ * 3. Логика: ?deleteOperations=true -> удаляем Event, иначе update Event set field=null.
  */
 
 // --- Схемы ---
@@ -59,7 +60,6 @@ const accountSchema = new mongoose.Schema({
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
-  individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -70,13 +70,6 @@ const companySchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Company = mongoose.model('Company', companySchema);
-
-const individualSchema = new mongoose.Schema({ 
-  name: String, 
-  order: { type: Number, default: 0 },
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
-});
-const Individual = mongoose.model('Individual', individualSchema);
 
 const contractorSchema = new mongoose.Schema({ 
   name: String, 
@@ -96,7 +89,6 @@ const Project = mongoose.model('Project', projectSchema);
 
 const categorySchema = new mongoose.Schema({ 
   name: String,
-  order: { type: Number, default: 0 }, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Category = mongoose.model('Category', categorySchema);
@@ -109,7 +101,6 @@ const eventSchema = new mongoose.Schema({
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
-    individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     isTransfer: { type: Boolean, default: false },
@@ -118,28 +109,26 @@ const eventSchema = new mongoose.Schema({
     toAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
-    fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
-    toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     date: { type: Date }, 
-    dateKey: { type: String, index: true },
-    
-    // Поля для Обязательств (Deals)
-    isDeal: { type: Boolean, default: false }, // Флаг начала сделки (Предоплата)
-    dealTotal: { type: Number, default: 0 },   // Общая сумма сделки
-    parentDealId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null }, // Ссылка на родительскую сделку (для Доплаты/Постоплаты/Актов)
-    
+    dateKey: { type: String, index: true }, // YYYY-DOY
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
 
 
-// --- AUTH SETUP ---
+// --- НАСТРОЙКА СЕССИЙ И PASSPORT.JS ---
+
 app.use(session({
     secret: process.env.GOOGLE_CLIENT_SECRET, 
     resave: false,
     saveUninitialized: false, 
-    cookie: { secure: true, httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
+    cookie: { 
+        secure: true,
+        httpOnly: true, 
+        maxAge: 1000 * 60 * 60 * 24 * 7 
+    }
 }));
+
 app.use(passport.initialize());
 app.use(passport.session()); 
 
@@ -152,8 +141,9 @@ passport.use(new GoogleStrategy({
   async (accessToken, refreshToken, profile, done) => {
     try {
       let user = await User.findOne({ googleId: profile.id });
-      if (user) { return done(null, user); } 
-      else {
+      if (user) {
+        return done(null, user);
+      } else {
         const newUser = new User({
           googleId: profile.id,
           name: profile.displayName,
@@ -163,14 +153,19 @@ passport.use(new GoogleStrategy({
         await newUser.save();
         return done(null, newUser); 
       }
-    } catch (err) { return done(err, null); }
+    } catch (err) {
+      return done(err, null);
+    }
   }
 ));
+
 passport.serializeUser((user, done) => { done(null, user.id); });
-passport.deserializeUser(async (id, done) => { try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); } });
+passport.deserializeUser(async (id, done) => {
+    try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); }
+});
 
 
-// --- HELPERS ---
+// --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
@@ -186,18 +181,16 @@ const _parseDateKey = (dateKey) => {
     const [year, doy] = dateKey.split('-').map(Number);
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
-
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
   const lowerName = trimmedName.toLowerCase();
   if (cache[lowerName]) { return cache[lowerName]; }
-  const regex = new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+  const escapeRegExp = (string) => { return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+  const trimmedNameEscaped = escapeRegExp(trimmedName);
+  const regex = new RegExp(`^\\s*${trimmedNameEscaped}\\s*$`, 'i');
   const existing = await model.findOne({ name: { $regex: regex }, userId: userId });
-  if (existing) { 
-      cache[lowerName] = existing._id; 
-      return existing._id; 
-  }
+  if (existing) { cache[lowerName] = existing._id; return existing._id; }
   try {
     let createData = { name: trimmedName, userId: userId }; 
     if (model.schema.paths.order) {
@@ -210,7 +203,6 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     return newEntity._id;
   } catch (err) { return null; }
 };
-
 const getFirstFreeCellIndex = async (dateKey, userId) => {
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
@@ -218,42 +210,15 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
-const getSystemCategory = async (userId, systemName = 'Проводки') => {
-    const regex = new RegExp(`^(${systemName}|Перевод|Transfer|Проводка)$`, 'i');
-    const categories = await Category.find({ name: { $regex: regex }, userId: userId }).sort({ _id: 1 });
-    if (categories.length > 0) { return categories[0]._id; }
-    const newCat = new Category({ name: systemName, userId: userId, order: -1 });
-    await newCat.save();
-    return newCat._id;
-};
 
-// 🟢 UPDATED: Гарантия ТОЛЬКО Предоплаты (v13.1)
-const ensureDealCategories = async (userId) => {
-    // Убраны 'Доплата', 'Постоплата'
-    const dealCategories = ['Предоплата'];
-    for (const catName of dealCategories) {
-        const regex = new RegExp(`^${catName}$`, 'i');
-        const exists = await Category.findOne({ name: { $regex: regex }, userId: userId });
-        if (!exists) {
-            const newCat = new Category({ name: catName, userId: userId, order: 0 });
-            await newCat.save();
-            console.log(`[System] Created category: ${catName} for user ${userId}`);
-        }
-    }
-};
-
-
-// --- AUTH ROUTES ---
+// --- МАРШРУТЫ АУТЕНТИФИКАЦИИ ---
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', 
   passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }),
   (req, res) => { res.redirect(FRONTEND_URL); }
 );
-app.get('/api/auth/me', async (req, res) => {
-  if (req.isAuthenticated()) { 
-      await ensureDealCategories(req.user.id);
-      res.json(req.user); 
-  } else { res.status(401).json({ message: 'No user authenticated' }); }
+app.get('/api/auth/me', (req, res) => {
+  if (req.isAuthenticated()) { res.json(req.user); } else { res.status(401).json({ message: 'No user authenticated' }); }
 });
 app.post('/api/auth/logout', (req, res, next) => {
   req.logout((err) => {
@@ -265,13 +230,15 @@ app.post('/api/auth/logout', (req, res, next) => {
   });
 });
 
+
+// --- Middleware "КПП" ---
 function isAuthenticated(req, res, next) {
     if (req.isAuthenticated()) { return next(); }
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
 
-// --- EVENTS API ---
+// --- API ДЛЯ ОПЕРАЦИЙ (Events) ---
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; 
@@ -283,9 +250,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
             .populate('fromAccountId').populate('toAccountId')
-            .populate('fromCompanyId').populate('toCompanyId')
-            .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
-            .populate('parentDealId');
+            .populate('fromCompanyId').populate('toCompanyId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -295,20 +260,17 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         const data = req.body;
         const userId = req.user.id; 
         let date, dateKey, dayOfYear;
-        if (data.dateKey) { dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date); } 
-        else if (data.date) { date = new Date(data.date); dateKey = _getDateKey(date); dayOfYear = _getDayOfYear(date); } 
-        else if (data.dayOfYear) { dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date); } 
-        else { return res.status(400).json({ message: 'Operation data must include date.' }); }
-        
-        const newEvent = new Event({ 
-            ...data, 
-            date, dateKey, dayOfYear, userId,
-            isDeal: data.isDeal || false,
-            dealTotal: data.dealTotal || 0,
-            parentDealId: data.parentDealId || null
-        });
+        if (data.dateKey) {
+            dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date);
+        } else if (data.date) {
+            date = new Date(data.date); dateKey = _getDateKey(date); dayOfYear = _getDayOfYear(date);
+        } else if (data.dayOfYear) {
+            dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); 
+            date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date);
+        } else { return res.status(400).json({ message: 'Operation data must include date, dateKey, or dayOfYear.' }); }
+        const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         await newEvent.save();
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId', 'parentDealId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId']);
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -318,128 +280,97 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
     const updatedData = { ...req.body }; 
-    if (updatedData.dateKey) { updatedData.date = _parseDateKey(updatedData.dateKey); updatedData.dayOfYear = _getDayOfYear(updatedData.date); } 
-    else if (updatedData.date) { updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date); }
-    
+    if (updatedData.dateKey) {
+        updatedData.date = _parseDateKey(updatedData.dateKey); updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+    } else if (updatedData.date) {
+        updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+    }
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
-    if (!updatedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
-    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'individualId', 'parentDealId']);
+    if (!updatedEvent) { return res.status(404).json({ message: 'Операция не найдена' }); }
+    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId']);
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
-    const { id } = req.params; const userId = req.user.id;
+    const { id } = req.params;
+    const userId = req.user.id;
     const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
-    if (!deletedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
+    if (!deletedEvent) { return res.status(404).json({ message: 'Операция не найдена' }); }
     res.status(200).json(deletedEvent); 
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-
-// --- TRANSFERS API ---
+// --- API ДЛЯ ПЕРЕВОДОВ ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
-  const { 
-    amount, fromAccountId, toAccountId, dayOfYear, cellIndex, 
-    fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date, categoryId 
-  } = req.body;
+  const { amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, fromCompanyId, toCompanyId, date } = req.body;
   const userId = req.user.id; 
   try {
     let finalDate, finalDateKey, finalDayOfYear;
-    if (date) { finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate); } 
-    else if (dayOfYear) { finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear); finalDateKey = _getDateKey(finalDate); } 
-    else { return res.status(400).json({ message: 'Transfer data must include date.' }); }
-    
-    const catId = categoryId || await getSystemCategory(userId, 'Проводки');
-
+    if (date) {
+        finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate);
+    } else if (dayOfYear) {
+        finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); 
+        finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear); finalDateKey = _getDateKey(finalDate);
+    } else { return res.status(400).json({ message: 'Transfer data must include date or dayOfYear.' }); }
     const transferEvent = new Event({
       type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
-      fromAccountId, toAccountId, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId,
-      categoryId: catId, 
-      isTransfer: true,
+      fromAccountId, toAccountId, fromCompanyId, toCompanyId, categoryId, isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey, userId
     });
     await transferEvent.save();
-    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId', 'fromIndividualId', 'toIndividualId']);
+    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId']);
     res.status(201).json(transferEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
 
-// --- IMPORT API ---
+// --- ЭНДПОИНТ ИМПОРТА ---
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; 
   const userId = req.user.id; 
-  if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Empty operations array.' }); }
+  if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Массив operations не предоставлен.' }); }
   let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
-  
-  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {} };
+  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {} };
   const createdOps = [];
   const cellIndexCache = new Map();
-
   try {
-    const systemCatId = await getSystemCategory(userId, 'Проводки');
-    caches.categories['проводки'] = systemCatId;
-    caches.categories['перевод'] = systemCatId;
-    caches.categories['transfer'] = systemCatId;
-
     for (let i = 0; i < rowsToImport.length; i++) {
       const opData = rowsToImport[i];
       if (opData.type === 'transfer') continue;
       if (!opData.date || !opData.amount || !opData.type) continue;
-      
-      const date = new Date(opData.date); if (isNaN(date.getTime())) continue;
+      const date = new Date(opData.date);
+      if (isNaN(date.getTime())) continue;
       const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
-      
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
-      const individualId = await findOrCreateEntity(Individual, opData.individual, caches.individuals, userId);
-      
       let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
-      
       createdOps.push({
-        date, dayOfYear, dateKey, cellIndex: nextCellIndex, 
-        type: opData.type, amount: opData.amount, 
-        categoryId, projectId, accountId, companyId, contractorId, individualId,
-        isTransfer: false, userId
+        date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
+        categoryId, projectId, accountId, companyId, contractorId, isTransfer: false, userId
       });
     }
     if (createdOps.length > 0) {
       const insertedDocs = await Event.insertMany(createdOps);
       res.status(201).json(insertedDocs);
     } else { res.status(200).json([]); }
-  } catch (err) { res.status(500).json({ message: 'Import error', details: err.message }); }
+  } catch (err) { res.status(500).json({ message: 'Ошибка сервера при импорте.', details: err.message }); }
 });
 
 
-app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const allEvents = await Event.find({ userId: userId })
-            .populate('accountId').populate('companyId').populate('contractorId').populate('projectId').populate('categoryId')
-            .populate('fromAccountId').populate('toAccountId').populate('fromCompanyId').populate('toCompanyId')
-            .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
-            .populate('parentDealId')
-            .sort({ date: 1 }); 
-        res.json(allEvents);
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-
-// --- CRUD ---
+// --- ГЕНЕРАТОР CRUD ---
 const generateCRUD = (model, path) => {
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { 
           const userId = req.user.id;
           let query = model.find({ userId: userId }).sort({ order: 1 });
           if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
-          if (path === 'accounts') { query = query.populate('companyId').populate('individualId'); }
           res.json(await query); 
         }
         catch (err) { res.status(500).json({ message: err.message }); }
@@ -447,22 +378,12 @@ const generateCRUD = (model, path) => {
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
-            
-            if (path === 'categories' && req.body.name) {
-                const existing = await model.findOne({ 
-                    userId, 
-                    name: { $regex: new RegExp(`^${req.body.name.trim()}$`, 'i') } 
-                });
-                if (existing) return res.status(200).json(existing);
-            }
-
             const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
             const newItem = new model({
                 ...req.body,
                 order: maxOrderDoc ? maxOrderDoc.order + 1 : 0,
                 initialBalance: req.body.initialBalance || 0,
                 companyId: req.body.companyId || null,
-                individualId: req.body.individualId || null,
                 defaultProjectId: req.body.defaultProjectId || null, 
                 defaultCategoryId: req.body.defaultCategoryId || null,
                 userId: userId 
@@ -480,7 +401,6 @@ const generateBatchUpdate = (model, path) => {
         const updateData = { name: item.name, order: item.order };
         if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
         if (item.companyId !== undefined) updateData.companyId = item.companyId;
-        if (item.individualId !== undefined) updateData.individualId = item.individualId;
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
         return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData);
@@ -488,37 +408,57 @@ const generateBatchUpdate = (model, path) => {
       await Promise.all(updatePromises);
       let query = model.find({ userId: userId }).sort({ order: 1 });
       if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
-      if (path === 'accounts') { query = query.populate('companyId').populate('individualId'); }
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
 };
 
+// 🔴 НОВАЯ ФУНКЦИЯ: Генерация DELETE с логикой каскадного удаления
 const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
     try {
       const { id } = req.params;
-      const { deleteOperations } = req.query; 
+      const { deleteOperations } = req.query; // 'true' или 'false'
       const userId = req.user.id;
 
+      // 1. Сначала удаляем саму сущность
       const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
-      if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
+      if (!deletedEntity) {
+        return res.status(404).json({ message: 'Entity not found' });
+      }
 
+      // 2. Обрабатываем связанные операции (Event)
       if (deleteOperations === 'true') {
+        // Вариант А: Удаляем все операции, где используется эта сущность
+        // Примечание: Для переводов это удалит транзакцию.
+        // Для счетов (accountId) это удалит fromAccountId и toAccountId.
+        // Для надежности проверяем оба поля для счетов/компаний в переводах, если нужно.
+        
         let query = { userId, [foreignKeyField]: id };
+        
+        // Особая логика для счетов и компаний (они бывают from/to в переводах)
         if (foreignKeyField === 'accountId') {
-           await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
+           // Удаляем события, где этот счет главный, ИЛИ where fromAccount/toAccount
+           // Проще всего удалить любые события, где упоминается ID
+           await Event.deleteMany({ 
+             userId, 
+             $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] 
+           });
         } else if (foreignKeyField === 'companyId') {
-           await Event.deleteMany({ userId, $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] });
-        } else if (foreignKeyField === 'individualId') {
-           await Event.deleteMany({ userId, $or: [ { individualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
+           await Event.deleteMany({ 
+             userId, 
+             $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] 
+           });
         } else {
+           // Обычное удаление (projects, contractors, categories)
            await Event.deleteMany(query);
         }
+
       } else {
-        // Set null
+        // Вариант Б: Оставляем операции, но обнуляем ссылку (SET NULL)
         let update = { [foreignKeyField]: null };
         let query = { userId, [foreignKeyField]: id };
+
         if (foreignKeyField === 'accountId') {
            await Event.updateMany({ userId, accountId: id }, { accountId: null });
            await Event.updateMany({ userId, fromAccountId: id }, { fromAccountId: null });
@@ -527,45 +467,47 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
            await Event.updateMany({ userId, companyId: id }, { companyId: null });
            await Event.updateMany({ userId, fromCompanyId: id }, { fromCompanyId: null });
            await Event.updateMany({ userId, toCompanyId: id }, { toCompanyId: null });
-        } else if (foreignKeyField === 'individualId') {
-           await Event.updateMany({ userId, individualId: id }, { individualId: null });
-           await Event.updateMany({ userId, fromIndividualId: id }, { fromIndividualId: null });
-           await Event.updateMany({ userId, toIndividualId: id }, { toIndividualId: null });
         } else {
            await Event.updateMany(query, update);
         }
       }
+
       res.status(200).json({ message: 'Deleted successfully', id });
-    } catch (err) { res.status(500).json({ message: err.message }); }
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: err.message });
+    }
   });
 };
 
+// --- ГЕНЕРИРУЕМ ВСЕ API ---
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
-generateCRUD(Individual, 'individuals'); 
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
-generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
 
+// 🔴 Генерируем DELETE с привязкой к полю в Event
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
-generateDeleteWithCascade(Individual, 'individuals', 'individualId');
 generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
 
-if (!DB_URL) { console.error('Error: DB_URL missing'); process.exit(1); }
+// --- ЗАПУСК СЕРВЕРА ---
+if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
+
+console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
-      console.log('MongoDB connected.');
-      app.listen(PORT, () => { console.log(`Server v13.1 (Cleanup) running on port ${PORT}`); });
+      console.log('MongoDB подключена успешно.');
+      app.listen(PORT, () => { console.log(`Сервер v8.0 (DELETE) запущен на порту ${PORT}`); });
     })
-    .catch(err => { console.error('MongoDB connection error:', err); });
+    .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
