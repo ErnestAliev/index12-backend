@@ -36,14 +36,13 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v8.0-DELETE-ENTITIES ---
- * * ВЕРСИЯ: 8.0 - Реализация каскадного удаления
- * ДАТА: 2025-11-16
+ * * --- МЕТКА ВЕРСИИ: v9.0-LIABILITIES ---
+ * * ВЕРСИЯ: 9.0 - Добавлено поле totalDealAmount
+ * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. Добавлена функция `generateDeleteWithCascade`.
- * 2. Для каждого типа сущности (Account, Company...) теперь генерируется DELETE маршрут.
- * 3. Логика: ?deleteOperations=true -> удаляем Event, иначе update Event set field=null.
+ * 1. В `eventSchema` добавлено поле `totalDealAmount` (Number).
+ * Оно нужно для расчета "Нам должны" (Общая сумма сделки - Внесенная сумма).
  */
 
 // --- Схемы ---
@@ -111,6 +110,10 @@ const eventSchema = new mongoose.Schema({
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     date: { type: Date }, 
     dateKey: { type: String, index: true }, // YYYY-DOY
+    
+    // 🟢 v9.0: Поле для "Умной предоплаты"
+    totalDealAmount: { type: Number, default: 0 },
+
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
@@ -508,6 +511,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v8.0 (DELETE) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v9.0 (Liabilities Update) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
