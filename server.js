@@ -36,14 +36,13 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v13.0-OBLIGATIONS-SCHEMA ---
- * * ВЕРСИЯ: 13.0 - Реализация Сценария Расчетов (Обязательства)
+ * * --- МЕТКА ВЕРСИИ: v13.1-CLEANUP ---
+ * * ВЕРСИЯ: 13.1 - Удаление Legacy категорий из авто-создания
  * * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. (SCHEMA) eventSchema: Добавлены поля isDeal, dealTotal, parentDealId.
- * 2. (LOGIC) ensureSystemCategories: Функция создания категорий Предоплата/Доплата/Постоплата.
- * 3. (AUTH) /api/auth/me: Вызывает ensureSystemCategories при входе.
+ * 1. (LOGIC) ensureDealCategories: Теперь создает ТОЛЬКО "Предоплата".
+ * "Доплата" и "Постоплата" удалены из списка инициализации.
  */
 
 // --- Схемы ---
@@ -124,7 +123,7 @@ const eventSchema = new mongoose.Schema({
     date: { type: Date }, 
     dateKey: { type: String, index: true },
     
-    // 🟢 NEW: Поля для Обязательств (Deals)
+    // Поля для Обязательств (Deals)
     isDeal: { type: Boolean, default: false }, // Флаг начала сделки (Предоплата)
     dealTotal: { type: Number, default: 0 },   // Общая сумма сделки
     parentDealId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null }, // Ссылка на родительскую сделку (для Доплаты/Постоплаты/Актов)
@@ -188,25 +187,17 @@ const _parseDateKey = (dateKey) => {
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
 
-// 🟢 Улучшенный поиск сущностей (предотвращает дубли по регистру)
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
   const lowerName = trimmedName.toLowerCase();
-  
-  // Кэш
   if (cache[lowerName]) { return cache[lowerName]; }
-  
-  // Поиск в БД (case-insensitive)
   const regex = new RegExp(`^${trimmedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
   const existing = await model.findOne({ name: { $regex: regex }, userId: userId });
-  
   if (existing) { 
       cache[lowerName] = existing._id; 
       return existing._id; 
   }
-  
-  // Создание
   try {
     let createData = { name: trimmedName, userId: userId }; 
     if (model.schema.paths.order) {
@@ -227,25 +218,19 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
-// 🟢 NEW: Получение ЕДИНОЙ системной категории
 const getSystemCategory = async (userId, systemName = 'Проводки') => {
-    // Ищем все категории с похожим именем (Перевод, Проводки, Transfer)
     const regex = new RegExp(`^(${systemName}|Перевод|Transfer|Проводка)$`, 'i');
     const categories = await Category.find({ name: { $regex: regex }, userId: userId }).sort({ _id: 1 });
-    
-    if (categories.length > 0) {
-        return categories[0]._id;
-    }
-    
-    // Если нет - создаем
+    if (categories.length > 0) { return categories[0]._id; }
     const newCat = new Category({ name: systemName, userId: userId, order: -1 });
     await newCat.save();
     return newCat._id;
 };
 
-// 🟢 NEW: Гарантия наличия категорий для сделок
+// 🟢 UPDATED: Гарантия ТОЛЬКО Предоплаты (v13.1)
 const ensureDealCategories = async (userId) => {
-    const dealCategories = ['Предоплата', 'Доплата', 'Постоплата'];
+    // Убраны 'Доплата', 'Постоплата'
+    const dealCategories = ['Предоплата'];
     for (const catName of dealCategories) {
         const regex = new RegExp(`^${catName}$`, 'i');
         const exists = await Category.findOne({ name: { $regex: regex }, userId: userId });
@@ -266,7 +251,6 @@ app.get('/auth/google/callback',
 );
 app.get('/api/auth/me', async (req, res) => {
   if (req.isAuthenticated()) { 
-      // 🟢 NEW: Гарантируем категории при каждом входе/проверке
       await ensureDealCategories(req.user.id);
       res.json(req.user); 
   } else { res.status(401).json({ message: 'No user authenticated' }); }
@@ -301,7 +285,6 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             .populate('fromAccountId').populate('toAccountId')
             .populate('fromCompanyId').populate('toCompanyId')
             .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
-            // 🟢 Populate для сделок
             .populate('parentDealId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -317,7 +300,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         else if (data.dayOfYear) { dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date); } 
         else { return res.status(400).json({ message: 'Operation data must include date.' }); }
         
-        // 🟢 Добавляем поля сделки в создание
         const newEvent = new Event({ 
             ...data, 
             date, dateKey, dayOfYear, userId,
@@ -351,19 +333,16 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params; const userId = req.user.id;
     const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
     if (!deletedEvent) { return res.status(404).json({ message: 'Operation not found' }); }
-    
-    // 🟢 Опционально: Можно было бы удалять зависимые доплаты, но ТЗ не требует cascade delete сделок
-    
     res.status(200).json(deletedEvent); 
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 
-// --- 🟢 TRANSFERS API (FIXED) ---
+// --- TRANSFERS API ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
     amount, fromAccountId, toAccountId, dayOfYear, cellIndex, 
-    fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date 
+    fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date, categoryId 
   } = req.body;
   const userId = req.user.id; 
   try {
@@ -372,12 +351,12 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     else if (dayOfYear) { finalDayOfYear = dayOfYear; const year = new Date().getFullYear(); finalDate = new Date(year, 0, 1); finalDate.setDate(dayOfYear); finalDateKey = _getDateKey(finalDate); } 
     else { return res.status(400).json({ message: 'Transfer data must include date.' }); }
     
-    const systemCategoryId = await getSystemCategory(userId, 'Проводки');
+    const catId = categoryId || await getSystemCategory(userId, 'Проводки');
 
     const transferEvent = new Event({
       type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
       fromAccountId, toAccountId, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId,
-      categoryId: systemCategoryId, 
+      categoryId: catId, 
       isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey, userId
@@ -587,6 +566,6 @@ if (!DB_URL) { console.error('Error: DB_URL missing'); process.exit(1); }
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB connected.');
-      app.listen(PORT, () => { console.log(`Server v13.0 (Obligations Schema) running on port ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Server v13.1 (Cleanup) running on port ${PORT}`); });
     })
     .catch(err => { console.error('MongoDB connection error:', err); });
