@@ -36,14 +36,12 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v12.0-SEPARATE-COLLECTION ---
- * * ВЕРСИЯ: 12.0 - Создание отдельной коллекции Prepayments
+ * * --- МЕТКА ВЕРСИИ: v12.1-EXPORT-ROUTE-FIX ---
+ * * ВЕРСИЯ: 12.1 - Добавлен маршрут экспорта
  * * ДАТА: 2025-11-20
  *
  * ЧТО ИСПРАВЛЕНО:
- * 1. (NEW) Схема `Prepayment` (коллекция `prepayments`).
- * 2. (UPDATE) В `Event` добавлено поле `prepaymentId`.
- * 3. (RESTORE) Восстановлены `Individual` (Физлица).
+ * 1. (FIX) Добавлен эндпоинт GET /api/events/all-for-export для исправления 404 ошибки при экспорте.
  */
 
 // --- Схемы ---
@@ -254,6 +252,25 @@ function isAuthenticated(req, res, next) {
 }
 
 // --- EVENTS API ---
+
+// 🟢 НОВЫЙ ЭНДПОИНТ ДЛЯ ЭКСПОРТА
+app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        // Получаем все операции пользователя, сортируем по дате
+        const events = await Event.find({ userId: userId })
+            .sort({ date: 1 }) 
+            .populate('accountId').populate('companyId').populate('contractorId')
+            .populate('projectId').populate('categoryId')
+            .populate('prepaymentId') 
+            .populate('individualId') 
+            .populate('fromAccountId').populate('toAccountId')
+            .populate('fromCompanyId').populate('toCompanyId')
+            .populate('fromIndividualId').populate('toIndividualId'); 
+        res.json(events);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; 
@@ -540,6 +557,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v12.0 (Individuals + Prepayments Fixed) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v12.1 (Export Route Fix) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
