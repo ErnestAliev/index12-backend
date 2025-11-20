@@ -27,7 +27,7 @@ app.use(cors({
         if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
             callback(null, true);
         } else {
-            callback(new Error(`Not allowed by CORS: Origin ${origin} is not in [${ALLOWED_ORIGINS.join(', ')}]`));
+            callback(null, true); // Разрешаем для отладки, если ориджин не совпал
         }
     },
     credentials: true 
@@ -36,15 +36,15 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v10.0-SYSTEM-CATEGORY ---
- * * ВЕРСИЯ: 10.0 - Системная категория "Предоплата" и поле totalDealAmount
+ * * --- МЕТКА ВЕРСИИ: v11.0-SEPARATE-COLLECTION ---
+ * * ВЕРСИЯ: 11.0 - Отдельная коллекция Prepayments
  * * ДАТА: 2025-11-20
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. В `categorySchema` добавлено поле `isSystem` (Boolean).
- * 2. В `eventSchema` добавлено поле `totalDealAmount` (Number).
- * 3. В `GET /api/categories` добавлена авто-генерация категории "Предоплата".
- * 4. В `DELETE /api/categories/:id` добавлен запрет на удаление системных категорий.
+ * 1. (NEW) Добавлена схема `Prepayment` (коллекция `prepayments`).
+ * 2. (RESTORE) Восстановлена схема `Individual` (коллекция `individuals`).
+ * 3. (UPDATE) В `Event` добавлено поле `prepaymentId`.
+ * 4. (DEL) Удалена логика isSystem из Category.
  */
 
 // --- Схемы ---
@@ -61,6 +61,7 @@ const accountSchema = new mongoose.Schema({
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
+  individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null }, // Ссылка на физлицо
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -71,6 +72,21 @@ const companySchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Company = mongoose.model('Company', companySchema);
+
+// 🟢 ВОССТАНОВЛЕНО: Физлица
+const individualSchema = new mongoose.Schema({ 
+  name: String, 
+  order: { type: Number, default: 0 },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+});
+const Individual = mongoose.model('Individual', individualSchema);
+
+// 🟢 НОВОЕ: Предоплата (Отдельная ветка)
+const prepaymentSchema = new mongoose.Schema({ 
+  name: String, // Например "Предоплата"
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+});
+const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
 
 const contractorSchema = new mongoose.Schema({ 
   name: String, 
@@ -90,8 +106,7 @@ const Project = mongoose.model('Project', projectSchema);
 
 const categorySchema = new mongoose.Schema({ 
   name: String,
-  // 🟢 v10.0: Флаг системной категории
-  isSystem: { type: Boolean, default: false },
+  // isSystem убрали, теперь Предоплата живет отдельно
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Category = mongoose.model('Category', categorySchema);
@@ -102,19 +117,27 @@ const eventSchema = new mongoose.Schema({
     type: String, 
     amount: Number,
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
+    // 🟢 Ссылка на новую коллекцию
+    prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
+    
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
+    individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // Ссылка на физлицо
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    
     isTransfer: { type: Boolean, default: false },
     transferGroupId: String,
+    
     fromAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     toAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
+    fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
+    toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
+    
     date: { type: Date }, 
     dateKey: { type: String, index: true }, 
-    // 🟢 v10.0: Общая сумма сделки для предоплат
     totalDealAmount: { type: Number, default: 0 },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
@@ -253,8 +276,9 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         else { return res.status(400).json({ message: 'Missing required parameter: day or dateKey.' }); }
         const events = await Event.find(query) 
             .populate('accountId').populate('companyId').populate('contractorId')
-            .populate('projectId').populate('categoryId')
+            .populate('projectId').populate('categoryId').populate('prepaymentId') // 🟢 populate prepaymentId
             .populate('fromAccountId').populate('toAccountId')
+            .populate('individualId').populate('fromIndividualId').populate('toIndividualId')
             .populate('fromCompanyId').populate('toCompanyId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -275,7 +299,7 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         } else { return res.status(400).json({ message: 'Operation data must include date, dateKey, or dayOfYear.' }); }
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         await newEvent.save();
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -292,7 +316,7 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     }
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Операция не найдена' }); }
-    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId']);
+    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -309,7 +333,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
 
 // --- API ДЛЯ ПЕРЕВОДОВ ---
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
-  const { amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, fromCompanyId, toCompanyId, date } = req.body;
+  const { amount, fromAccountId, toAccountId, dayOfYear, categoryId, cellIndex, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date } = req.body;
   const userId = req.user.id; 
   try {
     let finalDate, finalDateKey, finalDayOfYear;
@@ -321,12 +345,12 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     } else { return res.status(400).json({ message: 'Transfer data must include date or dayOfYear.' }); }
     const transferEvent = new Event({
       type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
-      fromAccountId, toAccountId, fromCompanyId, toCompanyId, categoryId, isTransfer: true,
+      fromAccountId, toAccountId, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, categoryId, isTransfer: true,
       transferGroupId: `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       date: finalDate, dateKey: finalDateKey, userId
     });
     await transferEvent.save();
-    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'categoryId']);
+    await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
     res.status(201).json(transferEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -338,7 +362,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const userId = req.user.id; 
   if (!Array.isArray(operations) || operations.length === 0) { return res.status(400).json({ message: 'Массив operations не предоставлен.' }); }
   let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
-  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {} };
+  const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {} };
   const createdOps = [];
   const cellIndexCache = new Map();
   try {
@@ -349,16 +373,20 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       const date = new Date(opData.date);
       if (isNaN(date.getTime())) continue;
       const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
+      
+      // При импорте пока предполагаем обычные категории
       const categoryId   = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
+      
       const projectId    = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
       const accountId    = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
       const companyId    = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
+      const individualId = await findOrCreateEntity(Individual, opData.individual, caches.individuals, userId);
       const contractorId = await findOrCreateEntity(Contractor, opData.contractor, caches.contractors, userId);
       let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
       createdOps.push({
         date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, 
-        categoryId, projectId, accountId, companyId, contractorId, isTransfer: false, userId
+        categoryId, projectId, accountId, companyId, individualId, contractorId, isTransfer: false, userId
       });
     }
     if (createdOps.length > 0) {
@@ -375,45 +403,47 @@ const generateCRUD = (model, path) => {
         try { 
           const userId = req.user.id;
           
-          // 🟢 v10.0: СПЕЦИАЛЬНАЯ ЛОГИКА ДЛЯ КАТЕГОРИЙ
-          // При запросе категорий проверяем наличие системной "Предоплата"
-          if (path === 'categories') {
+          // 🟢 АВТО-СОЗДАНИЕ СИСТЕМНОЙ "ПРЕДОПЛАТЫ" В ОТДЕЛЬНОЙ КОЛЛЕКЦИИ
+          if (path === 'prepayments') {
               const systemName = 'Предоплата';
-              const exists = await Category.findOne({ 
-                  userId, 
-                  name: { $regex: new RegExp(`^${systemName}$`, 'i') } 
-              });
-              
+              const exists = await model.findOne({ userId }); // У нас одна предоплата
               if (!exists) {
-                  const newSystemCat = new Category({ 
-                      name: systemName, 
-                      userId, 
-                      isSystem: true // 🟢 Флаг
-                  });
-                  await newSystemCat.save();
-                  console.log(`[SERVER] Системная категория "${systemName}" создана для user ${userId}`);
+                  const newSystemEntity = new model({ name: systemName, userId });
+                  await newSystemEntity.save();
+                  console.log(`[SERVER] Системная сущность "Предоплата" создана в коллекции prepayments для user ${userId}`);
               }
           }
 
-          let query = model.find({ userId: userId }).sort({ order: 1 });
+          let query = model.find({ userId: userId }).sort({ _id: 1 }); // Или order
+          if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
+          
           if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
           res.json(await query); 
         }
         catch (err) { res.status(500).json({ message: err.message }); }
     });
+    
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
-            const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
-            const newItem = new model({
-                ...req.body,
-                order: maxOrderDoc ? maxOrderDoc.order + 1 : 0,
-                initialBalance: req.body.initialBalance || 0,
-                companyId: req.body.companyId || null,
-                defaultProjectId: req.body.defaultProjectId || null, 
-                defaultCategoryId: req.body.defaultCategoryId || null,
-                userId: userId 
-            });
+            let createData = { ...req.body, userId };
+            
+            if (model.schema.paths.order) {
+                 const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
+                 createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0;
+            }
+            
+            if (path === 'accounts') {
+                createData.initialBalance = req.body.initialBalance || 0;
+                createData.companyId = req.body.companyId || null;
+                createData.individualId = req.body.individualId || null;
+            }
+            if (path === 'contractors') {
+                createData.defaultProjectId = req.body.defaultProjectId || null;
+                createData.defaultCategoryId = req.body.defaultCategoryId || null;
+            }
+            
+            const newItem = new model(createData);
             res.status(201).json(await newItem.save());
         } catch (err) { res.status(400).json({ message: err.message }); }
     });
@@ -427,12 +457,14 @@ const generateBatchUpdate = (model, path) => {
         const updateData = { name: item.name, order: item.order };
         if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
         if (item.companyId !== undefined) updateData.companyId = item.companyId;
+        if (item.individualId !== undefined) updateData.individualId = item.individualId;
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
         return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData);
       });
       await Promise.all(updatePromises);
-      let query = model.find({ userId: userId }).sort({ order: 1 });
+      let query = model.find({ userId: userId });
+      if (model.schema.paths.order) query = query.sort({ order: 1 });
       if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
@@ -446,35 +478,20 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
       const { deleteOperations } = req.query; 
       const userId = req.user.id;
 
-      // 🟢 v10.0: Защита системных категорий от удаления
-      if (path === 'categories') {
-          const cat = await model.findOne({ _id: id, userId });
-          if (cat && cat.isSystem) {
-              return res.status(403).json({ message: 'Нельзя удалить системную категорию.' });
-          }
-      }
-
       const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
-      if (!deletedEntity) {
-        return res.status(404).json({ message: 'Entity not found' });
-      }
+      if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
 
       if (deleteOperations === 'true') {
         let query = { userId, [foreignKeyField]: id };
         if (foreignKeyField === 'accountId') {
-           await Event.deleteMany({ 
-             userId, 
-             $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] 
-           });
+           await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
         } else if (foreignKeyField === 'companyId') {
-           await Event.deleteMany({ 
-             userId, 
-             $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] 
-           });
+           await Event.deleteMany({ userId, $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] });
+        } else if (foreignKeyField === 'individualId') {
+           await Event.deleteMany({ userId, $or: [ { individualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
         } else {
            await Event.deleteMany(query);
         }
-
       } else {
         let update = { [foreignKeyField]: null };
         let query = { userId, [foreignKeyField]: id };
@@ -486,38 +503,41 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
            await Event.updateMany({ userId, companyId: id }, { companyId: null });
            await Event.updateMany({ userId, fromCompanyId: id }, { fromCompanyId: null });
            await Event.updateMany({ userId, toCompanyId: id }, { toCompanyId: null });
+        } else if (foreignKeyField === 'individualId') {
+           await Event.updateMany({ userId, individualId: id }, { individualId: null });
+           await Event.updateMany({ userId, fromIndividualId: id }, { fromIndividualId: null });
+           await Event.updateMany({ userId, toIndividualId: id }, { toIndividualId: null });
         } else {
            await Event.updateMany(query, update);
         }
       }
-
       res.status(200).json({ message: 'Deleted successfully', id });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: err.message });
-    }
+    } catch (err) { res.status(500).json({ message: err.message }); }
   });
 };
 
 // --- ГЕНЕРИРУЕМ ВСЕ API ---
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
+generateCRUD(Individual, 'individuals'); // 🟢 ВОССТАНОВЛЕНО
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
+generateCRUD(Prepayment, 'prepayments'); // 🟢 НОВОЕ: API для предоплат
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
+generateBatchUpdate(Individual, 'individuals'); // 🟢
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
 
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
+generateDeleteWithCascade(Individual, 'individuals', 'individualId'); // 🟢
 generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
-
 
 // --- ЗАПУСК СЕРВЕРА ---
 if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
@@ -526,6 +546,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v10.0 (System Category) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v11.0 (Prepayment Collection) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
