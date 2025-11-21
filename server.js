@@ -36,13 +36,14 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v13.0-SNAPSHOT-LOGIC ---
- * * ВЕРСИЯ: 13.0 - Логика "Сейф с итогом" (Snapshot)
+ * * --- МЕТКА ВЕРСИИ: v14.0-FULL-SNAPSHOT ---
+ * * ВЕРСИЯ: 14.0 - Полная реализация "Сейф с итогом"
  * * ДАТА: 2025-11-21
  *
  * ЧТО ИЗМЕНЕНО:
- * 1. (NEW) Добавлен endpoint GET /api/snapshot.
- * Он считает баланс счетов и итоги категорий "до текущей секунды" на сервере.
+ * 1. (UPDATE) /api/snapshot теперь считает балансы для ВСЕХ сущностей:
+ * Счета, Компании, Физлица, Контрагенты, Проекты.
+ * 2. (LOGIC) Учитывает переводы между компаниями/физлицами.
  */
 
 // --- Схемы ---
@@ -255,12 +256,11 @@ function isAuthenticated(req, res, next) {
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
-        const now = new Date(); // Точка отсчета (сейчас)
+        const now = new Date(); // Точка отсчета
 
-        // 1. Получаем все счета, чтобы учесть начальный баланс
+        // 1. СЧЕТА: Учитываем начальный баланс
         const accounts = await Account.find({ userId });
         
-        // Инициализируем балансы счетов начальными значениями
         const accountBalances = {};
         let totalSystemBalance = 0;
         
@@ -270,73 +270,93 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             totalSystemBalance += init;
         });
 
-        // Инициализируем итоги по категориям
-        const categoryTotals = {};
+        // Инициализируем остальные балансы
+        const companyBalances = {};
+        const individualBalances = {};
+        const contractorBalances = {};
+        const projectBalances = {};
+        const categoryTotals = {}; // { id: { income, expense, total } }
 
-        // 2. Получаем ВСЕ операции ДО текущего момента
-        // Используем lean() для скорости, нам не нужны методы модели
+        // Хелпер для безопасного суммирования
+        const addToBalance = (map, id, amount) => {
+            if (!id) return;
+            const key = id.toString();
+            if (map[key] === undefined) map[key] = 0;
+            map[key] += amount;
+        };
+
+        // 2. ЗАГРУЖАЕМ ИСТОРИЮ (Все события <= now)
         const pastEvents = await Event.find({ 
             userId: userId,
             date: { $lte: now } 
         }).lean();
 
-        // 3. Пробегаем и считаем
+        // 3. ПРОБЕГАЕМ ПО ВСЕМ ОПЕРАЦИЯМ
         for (const op of pastEvents) {
             const amount = op.amount || 0;
             const absAmount = Math.abs(amount);
 
-            // --- Обработка СЧЕТОВ ---
+            // --- ЛОГИКА ПЕРЕВОДОВ ---
             if (op.isTransfer || op.type === 'transfer') {
-                // Перевод: минус с From, плюс на To
-                if (op.fromAccountId) {
-                    const fId = op.fromAccountId.toString();
-                    if (accountBalances[fId] === undefined) accountBalances[fId] = 0;
-                    accountBalances[fId] -= absAmount;
-                }
-                if (op.toAccountId) {
-                    const tId = op.toAccountId.toString();
-                    if (accountBalances[tId] === undefined) accountBalances[tId] = 0;
-                    accountBalances[tId] += absAmount;
-                }
-                // Общий баланс системы от перевода внутри системы не меняется
-            } else {
-                // Доход/Расход
-                if (op.accountId) {
-                    const aId = op.accountId.toString();
-                    if (accountBalances[aId] === undefined) accountBalances[aId] = 0;
-                    
-                    // Доход: +amount, Расход: -abs(amount) (обычно amount уже отрицательный, но страхуемся)
-                    if (op.type === 'income') {
-                        accountBalances[aId] += amount;
-                        totalSystemBalance += amount;
-                    } else if (op.type === 'expense') {
-                        accountBalances[aId] -= absAmount;
-                        totalSystemBalance -= absAmount;
-                    }
-                }
-            }
-
-            // --- Обработка КАТЕГОРИЙ ---
-            if (!op.isTransfer && op.type !== 'transfer' && op.categoryId) {
-                const cId = op.categoryId.toString();
-                if (!categoryTotals[cId]) categoryTotals[cId] = { income: 0, expense: 0, total: 0 };
+                // Счета
+                addToBalance(accountBalances, op.fromAccountId, -absAmount);
+                addToBalance(accountBalances, op.toAccountId, absAmount);
                 
-                if (op.type === 'income') {
-                    categoryTotals[cId].income += amount;
-                    categoryTotals[cId].total += amount;
-                } else {
-                    categoryTotals[cId].expense += absAmount;
-                    categoryTotals[cId].total -= absAmount;
+                // Компании
+                addToBalance(companyBalances, op.fromCompanyId, -absAmount);
+                addToBalance(companyBalances, op.toCompanyId, absAmount);
+                
+                // Физлица
+                addToBalance(individualBalances, op.fromIndividualId, -absAmount);
+                addToBalance(individualBalances, op.toIndividualId, absAmount);
+                
+                // TotalSystemBalance при переводе не меняется
+            } 
+            // --- ЛОГИКА ДОХОДОВ / РАСХОДОВ ---
+            else {
+                const isIncome = op.type === 'income';
+                // В базе расход может храниться как -100 или 100 (type='expense').
+                // Обычно мы сохраняем signed amount. Проверим: если type=expense, amount должен быть отриц.
+                // Но для надежности используем absAmount с нужным знаком.
+                
+                const signedAmount = isIncome ? absAmount : -absAmount;
+
+                // Общий баланс
+                totalSystemBalance += signedAmount;
+
+                // Балансы сущностей
+                addToBalance(accountBalances, op.accountId, signedAmount);
+                addToBalance(companyBalances, op.companyId, signedAmount);
+                addToBalance(individualBalances, op.individualId, signedAmount);
+                addToBalance(contractorBalances, op.contractorId, signedAmount);
+                addToBalance(projectBalances, op.projectId, signedAmount);
+
+                // Категории
+                if (op.categoryId) {
+                    const cId = op.categoryId.toString();
+                    if (!categoryTotals[cId]) categoryTotals[cId] = { income: 0, expense: 0, total: 0 };
+                    
+                    if (isIncome) {
+                        categoryTotals[cId].income += absAmount;
+                        categoryTotals[cId].total += absAmount;
+                    } else {
+                        categoryTotals[cId].expense += absAmount;
+                        categoryTotals[cId].total -= absAmount;
+                    }
                 }
             }
         }
 
-        // 4. Отдаем готовый Снапшот
+        // 4. ОТДАЕМ РЕЗУЛЬТАТ
         res.json({
             timestamp: now,
             totalBalance: totalSystemBalance,
-            accountBalances: accountBalances, // { id: balance }
-            categoryTotals: categoryTotals    // { id: { income, expense, total } }
+            accountBalances,
+            companyBalances,
+            individualBalances,
+            contractorBalances,
+            projectBalances,
+            categoryTotals
         });
 
     } catch (err) {
@@ -651,6 +671,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v13.0 (Snapshot Logic) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v14.0 (Full Snapshot) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
