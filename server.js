@@ -35,6 +35,15 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 
+/**
+ * * --- МЕТКА ВЕРСИИ: v12.1-EXPORT-ROUTE-FIX ---
+ * * ВЕРСИЯ: 12.1 - Добавлен маршрут экспорта
+ * * ДАТА: 2025-11-20
+ *
+ * ЧТО ИСПРАВЛЕНО:
+ * 1. (FIX) Добавлен эндпоинт GET /api/events/all-for-export для исправления 404 ошибки при экспорте.
+ */
+
 // --- Схемы ---
 const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
@@ -61,6 +70,7 @@ const companySchema = new mongoose.Schema({
 });
 const Company = mongoose.model('Company', companySchema);
 
+// 🟢 ФИЗЛИЦА (Восстановлено)
 const individualSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
@@ -68,8 +78,9 @@ const individualSchema = new mongoose.Schema({
 });
 const Individual = mongoose.model('Individual', individualSchema);
 
+// 🟢 ПРЕДОПЛАТА (НОВАЯ ОТДЕЛЬНАЯ КОЛЛЕКЦИЯ)
 const prepaymentSchema = new mongoose.Schema({ 
-  name: String, 
+  name: String, // "Предоплата"
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
@@ -103,6 +114,7 @@ const eventSchema = new mongoose.Schema({
     amount: Number,
     
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
+    // 🟢 Ссылка на Prepayment (новая коллекция)
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
     
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
@@ -184,7 +196,7 @@ const _parseDateKey = (dateKey) => {
     if (typeof dateKey !== 'string' || !dateKey.includes('-')) { return new Date(); }
     const [year, doy] = dateKey.split('-').map(Number);
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
-  };
+};
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
@@ -239,124 +251,13 @@ function isAuthenticated(req, res, next) {
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
-// 🟢 НОВЫЙ API: SNAPSHOT БАЛАНСОВ (ВСЯ ИСТОРИЯ)
-app.get('/api/balances/snapshot', isAuthenticated, async (req, res) => {
-    try {
-        const userId = req.user.id;
-        // Считаем до конца текущего дня (чтобы включить сегодняшние операции в "Текущий итог")
-        const now = new Date();
-        now.setHours(23, 59, 59, 999); 
-
-        const [
-            incomesExpenses,
-            transfersOut,
-            transfersIn
-        ] = await Promise.all([
-            // 1. Обычные операции (Доходы/Расходы)
-            Event.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $lte: now }, isTransfer: false } },
-                { $group: {
-                    _id: null,
-                    // Группировка по счетам
-                    accounts: { $push: { k: { $toString: "$accountId" }, v: "$amount" } },
-                    // Группировка по категориям
-                    categories: { $push: { k: { $toString: "$categoryId" }, v: "$amount" } },
-                    // Группировка по предоплатам (если есть)
-                    prepayments: { $push: { k: { $toString: "$prepaymentId" }, v: "$amount" } },
-                    // Группировка по компаниям
-                    companies: { $push: { k: { $toString: "$companyId" }, v: "$amount" } },
-                    // Группировка по контрагентам
-                    contractors: { $push: { k: { $toString: "$contractorId" }, v: "$amount" } },
-                    // Группировка по проектам
-                    projects: { $push: { k: { $toString: "$projectId" }, v: "$amount" } },
-                    // Группировка по физлицам
-                    individuals: { $push: { k: { $toString: "$individualId" }, v: "$amount" } },
-                }}
-            ]),
-            // 2. Переводы (Исходящие) -> вычитаем сумму
-            Event.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $lte: now }, isTransfer: true } },
-                { $group: {
-                    _id: null,
-                    accounts: { $push: { k: { $toString: "$fromAccountId" }, v: "$amount" } },
-                    companies: { $push: { k: { $toString: "$fromCompanyId" }, v: "$amount" } },
-                    individuals: { $push: { k: { $toString: "$fromIndividualId" }, v: "$amount" } }
-                }}
-            ]),
-            // 3. Переводы (Входящие) -> прибавляем сумму
-            Event.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $lte: now }, isTransfer: true } },
-                { $group: {
-                    _id: null,
-                    accounts: { $push: { k: { $toString: "$toAccountId" }, v: "$amount" } },
-                    companies: { $push: { k: { $toString: "$toCompanyId" }, v: "$amount" } },
-                    individuals: { $push: { k: { $toString: "$toIndividualId" }, v: "$amount" } }
-                }}
-            ])
-        ]);
-
-        const snapshot = {
-            accounts: {},
-            categories: {},
-            companies: {},
-            contractors: {},
-            projects: {},
-            individuals: {},
-            // Для спец категорий
-            prepayments: {} 
-        };
-
-        // Хелпер для суммирования
-        const addToMap = (mapName, items, multiplier = 1) => {
-            if (!items) return;
-            items.forEach(item => {
-                if (item.k && item.k !== 'null') { // Пропускаем null ключи
-                    if (!snapshot[mapName][item.k]) snapshot[mapName][item.k] = 0;
-                    snapshot[mapName][item.k] += (item.v * multiplier);
-                }
-            });
-        };
-
-        // Обрабатываем Доходы/Расходы
-        if (incomesExpenses[0]) {
-            addToMap('accounts', incomesExpenses[0].accounts);
-            addToMap('categories', incomesExpenses[0].categories);
-            // Предоплаты тоже считаются как категории в UI, но можно отдельно
-            addToMap('categories', incomesExpenses[0].prepayments); 
-            addToMap('companies', incomesExpenses[0].companies);
-            addToMap('contractors', incomesExpenses[0].contractors);
-            addToMap('projects', incomesExpenses[0].projects);
-            addToMap('individuals', incomesExpenses[0].individuals);
-        }
-
-        // Обрабатываем Переводы (Исходящие = минус)
-        if (transfersOut[0]) {
-            addToMap('accounts', transfersOut[0].accounts, -1); // Вычитаем
-            addToMap('companies', transfersOut[0].companies, -1);
-            addToMap('individuals', transfersOut[0].individuals, -1);
-        }
-
-        // Обрабатываем Переводы (Входящие = плюс)
-        if (transfersIn[0]) {
-            addToMap('accounts', transfersIn[0].accounts, 1);
-            addToMap('companies', transfersIn[0].companies, 1);
-            addToMap('individuals', transfersIn[0].individuals, 1);
-        }
-
-        res.json(snapshot);
-
-    } catch (err) {
-        console.error("Error calculating snapshot:", err);
-        res.status(500).json({ message: err.message });
-    }
-});
-
 // --- EVENTS API ---
 
-// 🟢 ЭНДПОИНТ ДЛЯ ЭКСПОРТА
+// 🟢 НОВЫЙ ЭНДПОИНТ ДЛЯ ЭКСПОРТА
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
+        // Получаем все операции пользователя, сортируем по дате
         const events = await Event.find({ userId: userId })
             .sort({ date: 1 }) 
             .populate('accountId').populate('companyId').populate('contractorId')
@@ -380,11 +281,11 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         const events = await Event.find(query) 
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
-            .populate('prepaymentId')
-            .populate('individualId')
+            .populate('prepaymentId') // 🟢
+            .populate('individualId') // 🟢
             .populate('fromAccountId').populate('toAccountId')
             .populate('fromCompanyId').populate('toCompanyId')
-            .populate('fromIndividualId').populate('toIndividualId');
+            .populate('fromIndividualId').populate('toIndividualId'); // 🟢
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -508,7 +409,7 @@ const generateCRUD = (model, path) => {
         try { 
           const userId = req.user.id;
           
-          // АВТО-СОЗДАНИЕ ПРЕДОПЛАТЫ ПРИ GET-ЗАПРОСЕ
+          // 🟢 АВТО-СОЗДАНИЕ ПРЕДОПЛАТЫ ПРИ GET-ЗАПРОСЕ
           if (path === 'prepayments') {
               const systemName = 'Предоплата';
               const exists = await model.findOne({ userId });
@@ -591,6 +492,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 
       if (deleteOperations === 'true') {
         let query = { userId, [foreignKeyField]: id };
+        // Для особых полей (account/company/individual) удаляем ссылки отовсюду
         if (foreignKeyField === 'accountId') {
            await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
         } else if (foreignKeyField === 'companyId') {
@@ -624,14 +526,15 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   });
 };
 
-// --- РЕГИСТРАЦИЯ МАРШРУТОВ ---
+// --- 🟢 РЕГИСТРАЦИЯ МАРШРУТОВ ---
+// Порядок важен, чтобы не было конфликтов
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
-generateCRUD(Individual, 'individuals'); 
+generateCRUD(Individual, 'individuals'); // 🟢 Исправлено 404
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
-generateCRUD(Prepayment, 'prepayments'); 
+generateCRUD(Prepayment, 'prepayments'); // 🟢 Новая коллекция
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
@@ -654,6 +557,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v13.0 (SNAPSHOT LOGIC) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v12.1 (Export Route Fix) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
