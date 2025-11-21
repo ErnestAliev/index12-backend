@@ -36,12 +36,13 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 /**
- * * --- МЕТКА ВЕРСИИ: v12.1-EXPORT-ROUTE-FIX ---
- * * ВЕРСИЯ: 12.1 - Добавлен маршрут экспорта
- * * ДАТА: 2025-11-20
+ * * --- МЕТКА ВЕРСИИ: v13.0-SNAPSHOT-LOGIC ---
+ * * ВЕРСИЯ: 13.0 - Логика "Сейф с итогом" (Snapshot)
+ * * ДАТА: 2025-11-21
  *
- * ЧТО ИСПРАВЛЕНО:
- * 1. (FIX) Добавлен эндпоинт GET /api/events/all-for-export для исправления 404 ошибки при экспорте.
+ * ЧТО ИЗМЕНЕНО:
+ * 1. (NEW) Добавлен endpoint GET /api/snapshot.
+ * Он считает баланс счетов и итоги категорий "до текущей секунды" на сервере.
  */
 
 // --- Схемы ---
@@ -70,7 +71,7 @@ const companySchema = new mongoose.Schema({
 });
 const Company = mongoose.model('Company', companySchema);
 
-// 🟢 ФИЗЛИЦА (Восстановлено)
+// 🟢 ФИЗЛИЦА
 const individualSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
@@ -78,9 +79,9 @@ const individualSchema = new mongoose.Schema({
 });
 const Individual = mongoose.model('Individual', individualSchema);
 
-// 🟢 ПРЕДОПЛАТА (НОВАЯ ОТДЕЛЬНАЯ КОЛЛЕКЦИЯ)
+// 🟢 ПРЕДОПЛАТА
 const prepaymentSchema = new mongoose.Schema({ 
-  name: String, // "Предоплата"
+  name: String, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
@@ -114,7 +115,6 @@ const eventSchema = new mongoose.Schema({
     amount: Number,
     
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
-    // 🟢 Ссылка на Prepayment (новая коллекция)
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
     
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
@@ -251,9 +251,104 @@ function isAuthenticated(req, res, next) {
     res.status(401).json({ message: 'Unauthorized. Please log in.' });
 }
 
+// --- 🟢 SNAPSHOT API (НОВАЯ ЛОГИКА) ---
+app.get('/api/snapshot', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const now = new Date(); // Точка отсчета (сейчас)
+
+        // 1. Получаем все счета, чтобы учесть начальный баланс
+        const accounts = await Account.find({ userId });
+        
+        // Инициализируем балансы счетов начальными значениями
+        const accountBalances = {};
+        let totalSystemBalance = 0;
+        
+        accounts.forEach(acc => {
+            const init = acc.initialBalance || 0;
+            accountBalances[acc._id.toString()] = init;
+            totalSystemBalance += init;
+        });
+
+        // Инициализируем итоги по категориям
+        const categoryTotals = {};
+
+        // 2. Получаем ВСЕ операции ДО текущего момента
+        // Используем lean() для скорости, нам не нужны методы модели
+        const pastEvents = await Event.find({ 
+            userId: userId,
+            date: { $lte: now } 
+        }).lean();
+
+        // 3. Пробегаем и считаем
+        for (const op of pastEvents) {
+            const amount = op.amount || 0;
+            const absAmount = Math.abs(amount);
+
+            // --- Обработка СЧЕТОВ ---
+            if (op.isTransfer || op.type === 'transfer') {
+                // Перевод: минус с From, плюс на To
+                if (op.fromAccountId) {
+                    const fId = op.fromAccountId.toString();
+                    if (accountBalances[fId] === undefined) accountBalances[fId] = 0;
+                    accountBalances[fId] -= absAmount;
+                }
+                if (op.toAccountId) {
+                    const tId = op.toAccountId.toString();
+                    if (accountBalances[tId] === undefined) accountBalances[tId] = 0;
+                    accountBalances[tId] += absAmount;
+                }
+                // Общий баланс системы от перевода внутри системы не меняется
+            } else {
+                // Доход/Расход
+                if (op.accountId) {
+                    const aId = op.accountId.toString();
+                    if (accountBalances[aId] === undefined) accountBalances[aId] = 0;
+                    
+                    // Доход: +amount, Расход: -abs(amount) (обычно amount уже отрицательный, но страхуемся)
+                    if (op.type === 'income') {
+                        accountBalances[aId] += amount;
+                        totalSystemBalance += amount;
+                    } else if (op.type === 'expense') {
+                        accountBalances[aId] -= absAmount;
+                        totalSystemBalance -= absAmount;
+                    }
+                }
+            }
+
+            // --- Обработка КАТЕГОРИЙ ---
+            if (!op.isTransfer && op.type !== 'transfer' && op.categoryId) {
+                const cId = op.categoryId.toString();
+                if (!categoryTotals[cId]) categoryTotals[cId] = { income: 0, expense: 0, total: 0 };
+                
+                if (op.type === 'income') {
+                    categoryTotals[cId].income += amount;
+                    categoryTotals[cId].total += amount;
+                } else {
+                    categoryTotals[cId].expense += absAmount;
+                    categoryTotals[cId].total -= absAmount;
+                }
+            }
+        }
+
+        // 4. Отдаем готовый Снапшот
+        res.json({
+            timestamp: now,
+            totalBalance: totalSystemBalance,
+            accountBalances: accountBalances, // { id: balance }
+            categoryTotals: categoryTotals    // { id: { income, expense, total } }
+        });
+
+    } catch (err) {
+        console.error('Snapshot Error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+
 // --- EVENTS API ---
 
-// 🟢 НОВЫЙ ЭНДПОИНТ ДЛЯ ЭКСПОРТА
+// ЭНДПОИНТ ДЛЯ ЭКСПОРТА
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -281,11 +376,11 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         const events = await Event.find(query) 
             .populate('accountId').populate('companyId').populate('contractorId')
             .populate('projectId').populate('categoryId')
-            .populate('prepaymentId') // 🟢
-            .populate('individualId') // 🟢
+            .populate('prepaymentId') 
+            .populate('individualId') 
             .populate('fromAccountId').populate('toAccountId')
             .populate('fromCompanyId').populate('toCompanyId')
-            .populate('fromIndividualId').populate('toIndividualId'); // 🟢
+            .populate('fromIndividualId').populate('toIndividualId'); 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -527,14 +622,13 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 };
 
 // --- 🟢 РЕГИСТРАЦИЯ МАРШРУТОВ ---
-// Порядок важен, чтобы не было конфликтов
 generateCRUD(Account, 'accounts');
 generateCRUD(Company, 'companies');
-generateCRUD(Individual, 'individuals'); // 🟢 Исправлено 404
+generateCRUD(Individual, 'individuals'); 
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
-generateCRUD(Prepayment, 'prepayments'); // 🟢 Новая коллекция
+generateCRUD(Prepayment, 'prepayments'); 
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
@@ -557,6 +651,6 @@ console.log('Подключаемся к MongoDB...');
 mongoose.connect(DB_URL)
     .then(() => {
       console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v12.1 (Export Route Fix) запущен на порту ${PORT}`); });
+      app.listen(PORT, () => { console.log(`Сервер v13.0 (Snapshot Logic) запущен на порту ${PORT}`); });
     })
     .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
