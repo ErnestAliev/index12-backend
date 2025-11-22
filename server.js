@@ -5,16 +5,33 @@ const mongoose = require('mongoose');
 const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const path = require('path'); // Импортируем модуль path для путей
 
-require('dotenv').config();
+// 🟢 ИСПРАВЛЕНИЕ 1: Надежная загрузка .env
+// Ищем файл .env прямо в папке, где лежит этот скрипт (server.js)
+// Это решает проблему "DB_URL не установлена", если запускать node не из той папки
+const envPath = path.resolve(__dirname, '.env');
+require('dotenv').config({ path: envPath });
 
 const app = express();
 
 app.set('trust proxy', 1); 
 
 const PORT = process.env.PORT || 3000;
+// 🟢 ИСПРАВЛЕНИЕ 2: Явное чтение переменных и диагностика
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
+
+console.log('--- ЗАПУСК СЕРВЕРА (v.FIXED) ---');
+console.log('Файл настроек:', envPath);
+if (!DB_URL) {
+    console.error('⚠️  ВНИМАНИЕ: DB_URL не найден в .env! Сервер может не запуститься.');
+} else {
+    // Показываем часть строки подключения для проверки (без пароля)
+    console.log('✅ DB_URL загружен (хост):', DB_URL.split('@')[1] || 'Скрыт');
+}
+console.log('✅ FRONTEND_URL (Redirect):', FRONTEND_URL);
+console.log('--------------------------------');
 
 const ALLOWED_ORIGINS = [
     FRONTEND_URL, 
@@ -144,38 +161,41 @@ const Event = mongoose.model('Event', eventSchema);
 
 // --- CONFIG ---
 app.use(session({
-    secret: process.env.GOOGLE_CLIENT_SECRET, 
+    secret: process.env.SESSION_SECRET || 'dev_secret', // Fallback для dev
     resave: false,
     saveUninitialized: false, 
-    cookie: { secure: true, httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
+    cookie: { secure: process.env.NODE_ENV === 'production', httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
 
 app.use(passport.initialize());
 app.use(passport.session()); 
 
-passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: '/auth/google/callback', 
-    scope: ['profile', 'email'] 
-  },
-  async (accessToken, refreshToken, profile, done) => {
-    try {
-      let user = await User.findOne({ googleId: profile.id });
-      if (user) { return done(null, user); } 
-      else {
-        const newUser = new User({
-          googleId: profile.id,
-          name: profile.displayName,
-          email: profile.emails[0].value,
-          avatarUrl: profile.photos[0] ? profile.photos[0].value : null
-        });
-        await newUser.save();
-        return done(null, newUser); 
+// Конфигурируем Google только если ключи есть (чтобы не падал без них)
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL || '/auth/google/callback', 
+        scope: ['profile', 'email'] 
+      },
+      async (accessToken, refreshToken, profile, done) => {
+        try {
+          let user = await User.findOne({ googleId: profile.id });
+          if (user) { return done(null, user); } 
+          else {
+            const newUser = new User({
+              googleId: profile.id,
+              name: profile.displayName,
+              email: profile.emails[0].value,
+              avatarUrl: profile.photos[0] ? profile.photos[0].value : null
+            });
+            await newUser.save();
+            return done(null, newUser); 
+          }
+        } catch (err) { return done(err, null); }
       }
-    } catch (err) { return done(err, null); }
-  }
-));
+    ));
+}
 
 passport.serializeUser((user, done) => { done(null, user.id); });
 passport.deserializeUser(async (id, done) => {
@@ -228,6 +248,45 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
 };
 
 // --- AUTH ROUTES ---
+
+// 🟢 ИСПРАВЛЕНИЕ 3: Добавляем специальный вход для разработчика (работает только на localhost)
+app.get('/auth/dev-login', async (req, res) => {
+    // Проверяем, что мы на localhost (по настройке FRONTEND_URL)
+    if (!FRONTEND_URL.includes('localhost')) {
+        return res.status(403).send('Dev login is allowed only on localhost environment');
+    }
+
+    try {
+        // Создаем или находим "вечного" тестового пользователя
+        const devEmail = 'developer@local.test';
+        let user = await User.findOne({ email: devEmail });
+        
+        if (!user) {
+            user = new User({
+                googleId: 'dev_local_id_999',
+                email: devEmail,
+                name: 'Разработчик (Local)',
+                avatarUrl: 'https://via.placeholder.com/100x100/333/fff?text=DEV'
+            });
+            await user.save();
+            console.log('✅ Создан локальный пользователь-разработчик');
+        }
+
+        // Принудительно авторизуем его через Passport
+        req.login(user, (err) => {
+            if (err) {
+                console.error('Login error:', err);
+                return res.status(500).send('Login failed');
+            }
+            // Редиректим туда, куда указывает FRONTEND_URL (должно быть localhost:5173)
+            res.redirect(FRONTEND_URL);
+        });
+    } catch (e) {
+        console.error('Dev login error:', e);
+        res.status(500).send(e.message);
+    }
+});
+
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', 
   passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }),
@@ -665,12 +724,18 @@ generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
 // --- START ---
-if (!DB_URL) { console.error('Ошибка: DB_URL не установлена!'); process.exit(1); }
+if (!DB_URL) { 
+    console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найдена!');
+    console.error('Проверьте файл .env в папке backend');
+    process.exit(1); 
+}
 
-console.log('Подключаемся к MongoDB...');
+console.log('--- ПОДКЛЮЧЕНИЕ К MONGODB ---');
 mongoose.connect(DB_URL)
     .then(() => {
-      console.log('MongoDB подключена успешно.');
-      app.listen(PORT, () => { console.log(`Сервер v14.0 (Full Snapshot) запущен на порту ${PORT}`); });
+      console.log('✅ MongoDB подключена успешно.');
+      app.listen(PORT, () => { 
+          console.log(`✅ Сервер v14.1 (Dev Auth) запущен на порту ${PORT}`); 
+      });
     })
-    .catch(err => { console.error('Ошибка подключения к MongoDB:', err); });
+    .catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
