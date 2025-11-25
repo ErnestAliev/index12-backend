@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v17.0-INDIVIDUALS-UPDATE) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v18.0-COUNTERPARTY-INDIVIDUAL) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -68,7 +68,7 @@ const companySchema = new mongoose.Schema({
 });
 const Company = mongoose.model('Company', companySchema);
 
-// 🟢 ОБНОВЛЕНО: Схема Физлица теперь поддерживает дефолтные проекты и категории
+// Схема Физлица
 const individualSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
@@ -122,9 +122,15 @@ const eventSchema = new mongoose.Schema({
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
     
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
+    
+    // Владельцы счета
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
-    contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
+    
+    // Контрагенты
+    contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' }, // Юрлицо (ТОО/ИП)
+    counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // 🟢 НОВОЕ ПОЛЕ: Физлицо-контрагент
+    
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     
     isTransfer: { type: Boolean, default: false },
@@ -292,6 +298,8 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 addToBalance(accountBalances, op.toAccountId, absAmount);
                 addToBalance(companyBalances, op.fromCompanyId, -absAmount);
                 addToBalance(companyBalances, op.toCompanyId, absAmount);
+                
+                // Физлица-владельцы в переводах
                 addToBalance(individualBalances, op.fromIndividualId, -absAmount);
                 addToBalance(individualBalances, op.toIndividualId, absAmount);
             } else {
@@ -299,9 +307,14 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 const signedAmount = isIncome ? absAmount : -absAmount;
                 
                 totalSystemBalance += signedAmount;
+                
                 addToBalance(accountBalances, op.accountId, signedAmount);
                 addToBalance(companyBalances, op.companyId, signedAmount);
-                addToBalance(individualBalances, op.individualId, signedAmount);
+                
+                // 🟢 БАЛАНСЫ ФИЗЛИЦ (Оба поля)
+                addToBalance(individualBalances, op.individualId, signedAmount); // Владелец
+                addToBalance(individualBalances, op.counterpartyIndividualId, signedAmount); // Контрагент (НОВОЕ)
+                
                 addToBalance(contractorBalances, op.contractorId, signedAmount);
                 addToBalance(projectBalances, op.projectId, signedAmount);
 
@@ -321,7 +334,10 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
-        const events = await Event.find({ userId: userId }).sort({ date: 1 }).populate('accountId companyId contractorId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
+        // 🟢 Populate нового поля counterpartyIndividualId
+        const events = await Event.find({ userId: userId })
+            .sort({ date: 1 })
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -330,7 +346,9 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day } = req.query; const userId = req.user.id; let query = { userId: userId }; 
         if (dateKey) { query.dateKey = dateKey; } else if (day) { query.dayOfYear = parseInt(day, 10); } else { return res.status(400).json({ message: 'Missing required parameter' }); }
-        const events = await Event.find(query).populate('accountId companyId contractorId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
+        // 🟢 Populate нового поля counterpartyIndividualId
+        const events = await Event.find(query)
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -347,7 +365,8 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         
         await newEvent.save();
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        // 🟢 Populate нового поля counterpartyIndividualId
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -359,7 +378,8 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     else if (updatedData.date) { updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date); }
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
-    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+    // 🟢 Populate нового поля counterpartyIndividualId
+    await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -564,13 +584,20 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
         let query = { userId, [foreignKeyField]: id };
         if (foreignKeyField === 'accountId') await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
         else if (foreignKeyField === 'companyId') await Event.deleteMany({ userId, $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] });
-        else if (foreignKeyField === 'individualId') await Event.deleteMany({ userId, $or: [ { individualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
+        // 🟢 CASCADE DELETE для Физлиц: ищем в обоих полях
+        else if (foreignKeyField === 'individualId') await Event.deleteMany({ userId, $or: [ { individualId: id }, { counterpartyIndividualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
         else await Event.deleteMany(query);
       } else {
         let update = { [foreignKeyField]: null };
         if (foreignKeyField === 'accountId') { await Event.updateMany({ userId, accountId: id }, { accountId: null }); await Event.updateMany({ userId, fromAccountId: id }, { fromAccountId: null }); await Event.updateMany({ userId, toAccountId: id }, { toAccountId: null }); }
         else if (foreignKeyField === 'companyId') { await Event.updateMany({ userId, companyId: id }, { companyId: null }); await Event.updateMany({ userId, fromCompanyId: id }, { fromCompanyId: null }); await Event.updateMany({ userId, toCompanyId: id }, { toCompanyId: null }); }
-        else if (foreignKeyField === 'individualId') { await Event.updateMany({ userId, individualId: id }, { individualId: null }); await Event.updateMany({ userId, fromIndividualId: id }, { fromIndividualId: null }); await Event.updateMany({ userId, toIndividualId: id }, { toIndividualId: null }); }
+        // 🟢 CASCADE NULLIFY для Физлиц
+        else if (foreignKeyField === 'individualId') { 
+            await Event.updateMany({ userId, individualId: id }, { individualId: null }); 
+            await Event.updateMany({ userId, counterpartyIndividualId: id }, { counterpartyIndividualId: null });
+            await Event.updateMany({ userId, fromIndividualId: id }, { fromIndividualId: null }); 
+            await Event.updateMany({ userId, toIndividualId: id }, { toIndividualId: null }); 
+        }
         else await Event.updateMany({ userId, [foreignKeyField]: id }, update);
       }
       res.status(200).json({ message: 'Deleted', id });
