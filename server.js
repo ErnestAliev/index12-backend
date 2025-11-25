@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v21.0-FIXES) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v22.0-LOGIC-FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -120,20 +120,19 @@ const eventSchema = new mongoose.Schema({
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
     
-    accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
+    accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' }, // Может быть null (для списаний)
     
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' }, 
-    counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, // Физлицо-контрагент
+    counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' }, 
     
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     
     isTransfer: { type: Boolean, default: false },
     isWithdrawal: { type: Boolean, default: false }, 
     
-    // Поле для статуса закрытия (точечное закрытие)
     isClosed: { type: Boolean, default: false },
 
     destination: String, 
@@ -213,6 +212,7 @@ const _parseDateKey = (dateKey) => {
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
 
+// ... (Остальные хелперы без изменений) ...
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
@@ -256,6 +256,7 @@ const findCategoryByName = async (name, userId) => {
 function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
 // --- ROUTES ---
+// (Auth роуты без изменений)
 app.get('/auth/dev-login', async (req, res) => {
     if (!FRONTEND_URL.includes('localhost')) { return res.status(403).send('Dev login is allowed only on localhost environment'); }
     try {
@@ -275,7 +276,7 @@ app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(re
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
 
-// --- SNAPSHOT ---
+// --- SNAPSHOT (ИСПРАВЛЕНО: Учет accountId) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -305,9 +306,13 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 const isIncome = op.type === 'income';
                 const signedAmount = isIncome ? absAmount : -absAmount;
                 
-                totalSystemBalance += signedAmount;
+                // 🟢 ИСПРАВЛЕНО: Общий баланс денег изменяем только если операция привязана к счету
+                if (op.accountId) {
+                    totalSystemBalance += signedAmount;
+                    addToBalance(accountBalances, op.accountId, signedAmount);
+                }
                 
-                addToBalance(accountBalances, op.accountId, signedAmount);
+                // Балансы сущностей меняем в любом случае (обязательства)
                 addToBalance(companyBalances, op.companyId, signedAmount);
                 addToBalance(individualBalances, op.individualId, signedAmount);
                 addToBalance(individualBalances, op.counterpartyIndividualId, signedAmount);
@@ -326,7 +331,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// --- EVENTS ---
+// --- EVENTS ROUTES (Без изменений) ---
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -481,6 +486,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
+// ... (Импорт и CRUD операции без изменений) ...
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; const userId = req.user.id; 
   if (!Array.isArray(operations)) { return res.status(400).json({ message: 'Invalid data' }); }
