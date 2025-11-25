@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v15.0-CONTRACTOR-MULTI) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v16.0-OPTIMIZED-TRANSFERS) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -84,10 +84,10 @@ const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
 const contractorSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
-  defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null }, // Legacy
-  defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }, // Legacy
-  defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }], // 🟢 NEW: Множественные проекты
-  defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }], // 🟢 NEW: Множественные категории
+  defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null }, 
+  defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }, 
+  defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }], 
+  defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }], 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Contractor = mongoose.model('Contractor', contractorSchema);
@@ -111,6 +111,7 @@ const eventSchema = new mongoose.Schema({
     cellIndex: Number, 
     type: String, 
     amount: Number,
+    description: String, // Для хранения заметок о типе перевода
     
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
@@ -199,6 +200,7 @@ const _parseDateKey = (dateKey) => {
     const [year, doy] = dateKey.split('-').map(Number);
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
+
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
@@ -221,12 +223,26 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     return newEntity._id;
   } catch (err) { return null; }
 };
+
 const getFirstFreeCellIndex = async (dateKey, userId) => {
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
     let idx = 0; while (used.has(idx)) { idx++; }
     return idx;
 };
+
+// Хелпер для поиска категории по имени (для "Меж.комп")
+const findCategoryByName = async (name, userId) => {
+    const regex = new RegExp(`^${name}$`, 'i');
+    let cat = await Category.findOne({ name: { $regex: regex }, userId });
+    if (!cat) {
+        cat = new Category({ name: name, userId });
+        await cat.save();
+    }
+    return cat._id;
+};
+
+function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
 // --- ROUTES ---
 app.get('/auth/dev-login', async (req, res) => {
@@ -247,7 +263,6 @@ app.get('/auth/google/callback', passport.authenticate('google', { failureRedire
 app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(req.user); } else { res.status(401).json({ message: 'No user authenticated' }); } });
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
-function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
 // --- SNAPSHOT ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
@@ -354,25 +369,107 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// 🟢 OPTIMIZED TRANSFER ENDPOINT (HANDLES SCENARIOS A, B, C)
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
-  const { amount, fromAccountId, toAccountId, categoryId, cellIndex, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, date, transferGroupId } = req.body;
+  const { 
+      amount, date, 
+      fromAccountId, toAccountId, 
+      fromCompanyId, toCompanyId, 
+      fromIndividualId, toIndividualId, 
+      categoryId,
+      transferPurpose, transferReason, 
+      // Для Меж.компа (Scenario B) нам нужны ID контрагентов, если они уже созданы на клиенте
+      expenseContractorId, incomeContractorId 
+  } = req.body;
+
   const userId = req.user.id; 
+  
   try {
     let finalDate, finalDateKey, finalDayOfYear;
-    if (date) { finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate); } 
-    else { return res.status(400).json({ message: 'Missing date' }); }
+    if (date) { 
+        finalDate = new Date(date); 
+        finalDateKey = _getDateKey(finalDate); 
+        finalDayOfYear = _getDayOfYear(finalDate); 
+    } else { return res.status(400).json({ message: 'Missing date' }); }
+
+    // Сценарий Г: Вывод (Withdrawal)
+    if (transferPurpose === 'personal' && transferReason === 'personal_use') {
+        const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
+        const withdrawalEvent = new Event({
+            type: 'expense', amount: -Math.abs(amount),
+            accountId: fromAccountId,
+            companyId: fromCompanyId, individualId: fromIndividualId,
+            categoryId: null, isWithdrawal: true,
+            destination: 'Личные нужды', description: 'Вывод на личные цели',
+            date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
+        });
+        await withdrawalEvent.save();
+        await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
+        return res.status(201).json(withdrawalEvent); // Возвращаем 1 объект
+    }
+
+    // Сценарий Б: Меж.комп (Inter-Company) -> 2 Операции
+    if (transferPurpose === 'inter_company') {
+        const groupId = `inter_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        
+        // Находим/Создаем категорию "Меж.комп" на сервере, если не передана
+        let interCatId = categoryId;
+        if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
+
+        // Индексы для красивого отображения рядом
+        const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
+        
+        const expenseOp = new Event({
+            type: 'expense', amount: -Math.abs(amount),
+            accountId: fromAccountId, companyId: fromCompanyId, individualId: fromIndividualId,
+            categoryId: interCatId, contractorId: expenseContractorId,
+            description: 'Перевод между компаниями (Исходящий)',
+            transferGroupId: groupId,
+            date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1 + 1, userId
+        });
+
+        const incomeOp = new Event({
+            type: 'income', amount: Math.abs(amount),
+            accountId: toAccountId, companyId: toCompanyId, individualId: toIndividualId,
+            categoryId: interCatId, contractorId: incomeContractorId,
+            description: 'Перевод между компаниями (Входящий)',
+            transferGroupId: groupId,
+            date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1, userId
+        });
+
+        await Promise.all([expenseOp.save(), incomeOp.save()]);
+        
+        // Возвращаем массив для фронта
+        const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
+        await expenseOp.populate(popFields);
+        await incomeOp.populate(popFields);
+        
+        return res.status(201).json([expenseOp, incomeOp]);
+    }
+
+    // Сценарий А (Внутренний) и Сценарий В (Личный - Развитие бизнеса) -> Стандартный Transfer
+    // Они технически идентичны: деньги перемещаются со счета на счет.
+    const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
     
-    const groupId = transferGroupId || `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    
+    const desc = (transferPurpose === 'personal') ? 'Перевод на личную карту (Развитие бизнеса)' : 'Внутренний перевод';
+
     const transferEvent = new Event({
-      type: 'transfer', amount, dayOfYear: finalDayOfYear, cellIndex,
-      fromAccountId, toAccountId, fromCompanyId, toCompanyId, fromIndividualId, toIndividualId, categoryId, isTransfer: true,
+      type: 'transfer', amount: Math.abs(amount), 
+      fromAccountId, toAccountId, 
+      fromCompanyId, toCompanyId, 
+      fromIndividualId, toIndividualId, 
+      categoryId, 
+      isTransfer: true,
       transferGroupId: groupId,
-      date: finalDate, dateKey: finalDateKey, userId
+      description: desc,
+      date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
     });
+    
     await transferEvent.save();
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
-    res.status(201).json(transferEvent);
+    res.status(201).json(transferEvent); // Возвращаем 1 объект
+
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
@@ -415,7 +512,6 @@ const generateCRUD = (model, path) => {
           let query = model.find({ userId: userId }).sort({ _id: 1 });
           if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
           if (path === 'contractors') { 
-              // Загружаем и старые, и новые поля
               query = query.populate('defaultProjectId').populate('defaultCategoryId')
                            .populate('defaultProjectIds').populate('defaultCategoryIds'); 
           }
@@ -441,13 +537,12 @@ const generateBatchUpdate = (model, path) => {
         if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
         if (item.companyId !== undefined) updateData.companyId = item.companyId;
         if (item.individualId !== undefined) updateData.individualId = item.individualId;
-        if (item.contractorId !== undefined) updateData.contractorId = item.contractorId; // 🟢
+        if (item.contractorId !== undefined) updateData.contractorId = item.contractorId; 
         
-        // Legacy & New Fields for Contractors
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
-        if (item.defaultProjectIds !== undefined) updateData.defaultProjectIds = item.defaultProjectIds; // 🟢
-        if (item.defaultCategoryIds !== undefined) updateData.defaultCategoryIds = item.defaultCategoryIds; // 🟢
+        if (item.defaultProjectIds !== undefined) updateData.defaultProjectIds = item.defaultProjectIds; 
+        if (item.defaultCategoryIds !== undefined) updateData.defaultCategoryIds = item.defaultCategoryIds; 
 
         return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData);
       });
