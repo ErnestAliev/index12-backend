@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v16.0-OPTIMIZED-TRANSFERS) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v17.0-INDIVIDUALS-UPDATE) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -68,9 +68,14 @@ const companySchema = new mongoose.Schema({
 });
 const Company = mongoose.model('Company', companySchema);
 
+// 🟢 ОБНОВЛЕНО: Схема Физлица теперь поддерживает дефолтные проекты и категории
 const individualSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
+  defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null }, 
+  defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }, 
+  defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }], 
+  defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }], 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Individual = mongoose.model('Individual', individualSchema);
@@ -111,7 +116,7 @@ const eventSchema = new mongoose.Schema({
     cellIndex: Number, 
     type: String, 
     amount: Number,
-    description: String, // Для хранения заметок о типе перевода
+    description: String,
     
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
@@ -231,7 +236,6 @@ const getFirstFreeCellIndex = async (dateKey, userId) => {
     return idx;
 };
 
-// Хелпер для поиска категории по имени (для "Меж.комп")
 const findCategoryByName = async (name, userId) => {
     const regex = new RegExp(`^${name}$`, 'i');
     let cat = await Category.findOne({ name: { $regex: regex }, userId });
@@ -369,7 +373,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// 🟢 OPTIMIZED TRANSFER ENDPOINT (HANDLES SCENARIOS A, B, C)
+// 🟢 OPTIMIZED TRANSFER ENDPOINT
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
       amount, date, 
@@ -378,7 +382,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
       fromIndividualId, toIndividualId, 
       categoryId,
       transferPurpose, transferReason, 
-      // Для Меж.компа (Scenario B) нам нужны ID контрагентов, если они уже созданы на клиенте
       expenseContractorId, incomeContractorId 
   } = req.body;
 
@@ -392,7 +395,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         finalDayOfYear = _getDayOfYear(finalDate); 
     } else { return res.status(400).json({ message: 'Missing date' }); }
 
-    // Сценарий Г: Вывод (Withdrawal)
     if (transferPurpose === 'personal' && transferReason === 'personal_use') {
         const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
         const withdrawalEvent = new Event({
@@ -405,18 +407,15 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         });
         await withdrawalEvent.save();
         await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
-        return res.status(201).json(withdrawalEvent); // Возвращаем 1 объект
+        return res.status(201).json(withdrawalEvent); 
     }
 
-    // Сценарий Б: Меж.комп (Inter-Company) -> 2 Операции
     if (transferPurpose === 'inter_company') {
         const groupId = `inter_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         
-        // Находим/Создаем категорию "Меж.комп" на сервере, если не передана
         let interCatId = categoryId;
         if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
 
-        // Индексы для красивого отображения рядом
         const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
         
         const expenseOp = new Event({
@@ -439,7 +438,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
         await Promise.all([expenseOp.save(), incomeOp.save()]);
         
-        // Возвращаем массив для фронта
         const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
         await expenseOp.populate(popFields);
         await incomeOp.populate(popFields);
@@ -447,8 +445,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         return res.status(201).json([expenseOp, incomeOp]);
     }
 
-    // Сценарий А (Внутренний) и Сценарий В (Личный - Развитие бизнеса) -> Стандартный Transfer
-    // Они технически идентичны: деньги перемещаются со счета на счет.
     const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
     
@@ -468,7 +464,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     
     await transferEvent.save();
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
-    res.status(201).json(transferEvent); // Возвращаем 1 объект
+    res.status(201).json(transferEvent); 
 
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -511,7 +507,8 @@ const generateCRUD = (model, path) => {
           }
           let query = model.find({ userId: userId }).sort({ _id: 1 });
           if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
-          if (path === 'contractors') { 
+          // 🟢 ОБНОВЛЕНО: Для Физлиц тоже делаем populate, как для Контрагентов
+          if (path === 'contractors' || path === 'individuals') { 
               query = query.populate('defaultProjectId').populate('defaultCategoryId')
                            .populate('defaultProjectIds').populate('defaultCategoryIds'); 
           }
@@ -522,7 +519,8 @@ const generateCRUD = (model, path) => {
         try { const userId = req.user.id; let createData = { ...req.body, userId };
             if (model.schema.paths.order) { const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 }); createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0; }
             if (path === 'accounts') { createData.initialBalance = req.body.initialBalance || 0; createData.companyId = req.body.companyId || null; createData.individualId = req.body.individualId || null; }
-            if (path === 'contractors') { createData.defaultProjectId = req.body.defaultProjectId || null; createData.defaultCategoryId = req.body.defaultCategoryId || null; }
+            // 🟢 ОБНОВЛЕНО: Физлица тоже могут иметь дефолтные проекты/категории
+            if (path === 'contractors' || path === 'individuals') { createData.defaultProjectId = req.body.defaultProjectId || null; createData.defaultCategoryId = req.body.defaultCategoryId || null; }
             const newItem = new model(createData); res.status(201).json(await newItem.save());
         } catch (err) { res.status(400).json({ message: err.message }); }
     });
@@ -549,7 +547,8 @@ const generateBatchUpdate = (model, path) => {
       await Promise.all(updatePromises);
       let query = model.find({ userId: userId });
       if (model.schema.paths.order) query = query.sort({ order: 1 });
-      if (path === 'contractors') query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
+      // 🟢 ОБНОВЛЕНО: Populate для Физлиц тоже
+      if (path === 'contractors' || path === 'individuals') query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
