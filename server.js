@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v14.2-WITHDRAWAL) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v15.0-CONTRACTOR-MULTI) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -56,6 +56,7 @@ const accountSchema = new mongoose.Schema({
   initialBalance: { type: Number, default: 0 },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
   individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
+  contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null }, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -83,8 +84,10 @@ const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
 const contractorSchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
-  defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
-  defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
+  defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null }, // Legacy
+  defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null }, // Legacy
+  defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }], // 🟢 NEW: Множественные проекты
+  defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }], // 🟢 NEW: Множественные категории
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Contractor = mongoose.model('Contractor', contractorSchema);
@@ -103,9 +106,6 @@ const categorySchema = new mongoose.Schema({
 });
 const Category = mongoose.model('Category', categorySchema);
 
-/**
- * * 🟢 ОБНОВЛЕНИЕ СХЕМЫ: Добавлено поле isWithdrawal
- */
 const eventSchema = new mongoose.Schema({
     dayOfYear: Number, 
     cellIndex: Number, 
@@ -122,8 +122,8 @@ const eventSchema = new mongoose.Schema({
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     
     isTransfer: { type: Boolean, default: false },
-    isWithdrawal: { type: Boolean, default: false }, // 🟢 NEW: Флаг вывода средств
-    destination: String, // 🟢 NEW: Поле для "Куда" при выводе (опционально, если используется)
+    isWithdrawal: { type: Boolean, default: false }, 
+    destination: String, 
     transferGroupId: String,
     
     fromAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
@@ -279,8 +279,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 const isIncome = op.type === 'income';
                 const signedAmount = isIncome ? absAmount : -absAmount;
                 
-                // 🟢 ВЫВОД - ЭТО ТОЖЕ РАСХОД, НО ОСОБЫЙ. 
-                // В балансе он уменьшает счет, как обычный расход.
                 totalSystemBalance += signedAmount;
                 addToBalance(accountBalances, op.accountId, signedAmount);
                 addToBalance(companyBalances, op.companyId, signedAmount);
@@ -327,7 +325,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         else if (data.dayOfYear) { dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date); } 
         else { return res.status(400).json({ message: 'Missing date info' }); }
         
-        // 🟢 Сохраняем поля вывода если есть
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         
         await newEvent.save();
@@ -417,7 +414,11 @@ const generateCRUD = (model, path) => {
           }
           let query = model.find({ userId: userId }).sort({ _id: 1 });
           if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
-          if (path === 'contractors') { query = query.populate('defaultProjectId').populate('defaultCategoryId'); }
+          if (path === 'contractors') { 
+              // Загружаем и старые, и новые поля
+              query = query.populate('defaultProjectId').populate('defaultCategoryId')
+                           .populate('defaultProjectIds').populate('defaultCategoryIds'); 
+          }
           res.json(await query); 
         } catch (err) { res.status(500).json({ message: err.message }); }
     });
@@ -440,14 +441,20 @@ const generateBatchUpdate = (model, path) => {
         if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
         if (item.companyId !== undefined) updateData.companyId = item.companyId;
         if (item.individualId !== undefined) updateData.individualId = item.individualId;
+        if (item.contractorId !== undefined) updateData.contractorId = item.contractorId; // 🟢
+        
+        // Legacy & New Fields for Contractors
         if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
         if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
+        if (item.defaultProjectIds !== undefined) updateData.defaultProjectIds = item.defaultProjectIds; // 🟢
+        if (item.defaultCategoryIds !== undefined) updateData.defaultCategoryIds = item.defaultCategoryIds; // 🟢
+
         return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData);
       });
       await Promise.all(updatePromises);
       let query = model.find({ userId: userId });
       if (model.schema.paths.order) query = query.sort({ order: 1 });
-      if (path === 'contractors') query = query.populate('defaultProjectId').populate('defaultCategoryId');
+      if (path === 'contractors') query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
