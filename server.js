@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v22.0-LOGIC-FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v23.0-REALIZATION-FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -212,7 +212,6 @@ const _parseDateKey = (dateKey) => {
     const date = new Date(year, 0, 1); date.setDate(doy); return date;
 };
 
-// ... (Остальные хелперы без изменений) ...
 const findOrCreateEntity = async (model, name, cache, userId) => {
   if (!name || typeof name !== 'string' || name.trim() === '' || !userId) { return null; }
   const trimmedName = name.trim();
@@ -256,7 +255,6 @@ const findCategoryByName = async (name, userId) => {
 function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
 // --- ROUTES ---
-// (Auth роуты без изменений)
 app.get('/auth/dev-login', async (req, res) => {
     if (!FRONTEND_URL.includes('localhost')) { return res.status(403).send('Dev login is allowed only on localhost environment'); }
     try {
@@ -276,7 +274,7 @@ app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(re
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
 
-// --- SNAPSHOT (ИСПРАВЛЕНО: Учет accountId) ---
+// --- SNAPSHOT (ИСПРАВЛЕНО: Учет accountId для денежного баланса) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -306,17 +304,20 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 const isIncome = op.type === 'income';
                 const signedAmount = isIncome ? absAmount : -absAmount;
                 
-                // 🟢 ИСПРАВЛЕНО: Общий баланс денег изменяем только если операция привязана к счету
+                // 🟢 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если нет accountId, деньги не меняются!
+                // (Это "безналичное" списание долга / реализация)
                 if (op.accountId) {
                     totalSystemBalance += signedAmount;
                     addToBalance(accountBalances, op.accountId, signedAmount);
                 }
                 
-                // Балансы сущностей меняем в любом случае (обязательства)
+                // А вот балансы обязательств (кто кому должен) меняются всегда
                 addToBalance(companyBalances, op.companyId, signedAmount);
                 addToBalance(individualBalances, op.individualId, signedAmount);
+                // Для Розницы и Контрагентов
                 addToBalance(individualBalances, op.counterpartyIndividualId, signedAmount);
                 addToBalance(contractorBalances, op.contractorId, signedAmount);
+                
                 addToBalance(projectBalances, op.projectId, signedAmount);
 
                 if (op.categoryId) {
@@ -331,7 +332,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// --- EVENTS ROUTES (Без изменений) ---
+// --- EVENTS ROUTES ---
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -390,7 +391,6 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// 🟢 OPTIMIZED TRANSFER ENDPOINT
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
       amount, date, 
@@ -486,7 +486,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-// ... (Импорт и CRUD операции без изменений) ...
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   const { operations, selectedRows } = req.body; const userId = req.user.id; 
   if (!Array.isArray(operations)) { return res.status(400).json({ message: 'Invalid data' }); }
