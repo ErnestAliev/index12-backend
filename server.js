@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v23.0-REALIZATION-FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v23.1-WRITEOFF-FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -274,11 +274,19 @@ app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(re
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
 
-// --- SNAPSHOT (ИСПРАВЛЕНО: Учет accountId для денежного баланса) ---
+// --- SNAPSHOT (ИСПРАВЛЕНО: Списания не влияют на общие балансы) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const now = new Date();
+        
+        // 1. Находим ID "Розничных клиентов" для проверки списаний
+        const retailInd = await Individual.findOne({ 
+            userId, 
+            name: { $regex: /^(розничные клиенты|розница)$/i } 
+        });
+        const retailIdStr = retailInd ? retailInd._id.toString() : null;
+
         const accounts = await Account.find({ userId });
         const accountBalances = {};
         let totalSystemBalance = 0;
@@ -304,27 +312,35 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 const isIncome = op.type === 'income';
                 const signedAmount = isIncome ? absAmount : -absAmount;
                 
-                // 🟢 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если нет accountId, деньги не меняются!
-                // (Это "безналичное" списание долга / реализация)
+                // 🟢 ПРОВЕРКА НА СПИСАНИЕ (Расходы розницы без счета)
+                let isWriteOff = false;
+                if (op.type === 'expense' && !op.accountId) {
+                    if (retailIdStr && op.counterpartyIndividualId && op.counterpartyIndividualId.toString() === retailIdStr) {
+                        isWriteOff = true;
+                    }
+                }
+
+                // Деньги (Счета) - меняются только если есть счет
                 if (op.accountId) {
                     totalSystemBalance += signedAmount;
                     addToBalance(accountBalances, op.accountId, signedAmount);
                 }
                 
-                // А вот балансы обязательств (кто кому должен) меняются всегда
-                addToBalance(companyBalances, op.companyId, signedAmount);
-                addToBalance(individualBalances, op.individualId, signedAmount);
-                // Для Розницы и Контрагентов
-                addToBalance(individualBalances, op.counterpartyIndividualId, signedAmount);
-                addToBalance(contractorBalances, op.contractorId, signedAmount);
-                
-                addToBalance(projectBalances, op.projectId, signedAmount);
+                // 🟢 ВАЖНО: Если это списание, оно НЕ влияет на балансы сущностей
+                // (кроме расчета долга в виджете Предоплаты, который считается отдельно на фронте)
+                if (!isWriteOff) {
+                    addToBalance(companyBalances, op.companyId, signedAmount);
+                    addToBalance(individualBalances, op.individualId, signedAmount);
+                    addToBalance(individualBalances, op.counterpartyIndividualId, signedAmount);
+                    addToBalance(contractorBalances, op.contractorId, signedAmount);
+                    addToBalance(projectBalances, op.projectId, signedAmount);
 
-                if (op.categoryId) {
-                    const cId = op.categoryId.toString();
-                    if (!categoryTotals[cId]) categoryTotals[cId] = { income: 0, expense: 0, total: 0 };
-                    if (isIncome) { categoryTotals[cId].income += absAmount; categoryTotals[cId].total += absAmount; } 
-                    else { categoryTotals[cId].expense += absAmount; categoryTotals[cId].total -= absAmount; }
+                    if (op.categoryId) {
+                        const cId = op.categoryId.toString();
+                        if (!categoryTotals[cId]) categoryTotals[cId] = { income: 0, expense: 0, total: 0 };
+                        if (isIncome) { categoryTotals[cId].income += absAmount; categoryTotals[cId].total += absAmount; } 
+                        else { categoryTotals[cId].expense += absAmount; categoryTotals[cId].total -= absAmount; }
+                    }
                 }
             }
         }
