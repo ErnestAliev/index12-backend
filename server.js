@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v23.1-WRITEOFF-FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v24.0-AGGREGATION-FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -274,78 +274,241 @@ app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(re
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
 
-// --- SNAPSHOT (ИСПРАВЛЕНО: Списания не влияют на общие балансы) ---
+// --- SNAPSHOT (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ v24.0) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const now = new Date();
         
-        // 1. Находим ID "Розничных клиентов" для проверки списаний
+        // 1. Находим ID "Розничных клиентов" для проверки списаний (для $isWriteOff)
         const retailInd = await Individual.findOne({ 
             userId, 
             name: { $regex: /^(розничные клиенты|розница)$/i } 
         });
-        const retailIdStr = retailInd ? retailInd._id.toString() : null;
+        const retailIdObj = retailInd ? retailInd._id : null;
 
-        const accounts = await Account.find({ userId });
+        // 2. Получаем начальные балансы счетов
+        const accounts = await Account.find({ userId }).lean();
         const accountBalances = {};
         let totalSystemBalance = 0;
-        accounts.forEach(acc => { const init = acc.initialBalance || 0; accountBalances[acc._id.toString()] = init; totalSystemBalance += init; });
+        accounts.forEach(acc => { 
+            const init = acc.initialBalance || 0; 
+            accountBalances[acc._id.toString()] = init; 
+            totalSystemBalance += init; 
+        });
         
-        const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {};
-        const addToBalance = (map, id, amount) => { if (!id) return; const key = id.toString(); if (map[key] === undefined) map[key] = 0; map[key] += amount; };
-
-        const pastEvents = await Event.find({ userId: userId, date: { $lte: now } }).lean();
-
-        for (const op of pastEvents) {
-            const amount = op.amount || 0;
-            const absAmount = Math.abs(amount);
-
-            if (op.isTransfer || op.type === 'transfer') {
-                addToBalance(accountBalances, op.fromAccountId, -absAmount);
-                addToBalance(accountBalances, op.toAccountId, absAmount);
-                addToBalance(companyBalances, op.fromCompanyId, -absAmount);
-                addToBalance(companyBalances, op.toCompanyId, absAmount);
-                addToBalance(individualBalances, op.fromIndividualId, -absAmount);
-                addToBalance(individualBalances, op.toIndividualId, absAmount);
-            } else {
-                const isIncome = op.type === 'income';
-                const signedAmount = isIncome ? absAmount : -absAmount;
-                
-                // 🟢 ПРОВЕРКА НА СПИСАНИЕ (Расходы розницы без счета)
-                let isWriteOff = false;
-                if (op.type === 'expense' && !op.accountId) {
-                    if (retailIdStr && op.counterpartyIndividualId && op.counterpartyIndividualId.toString() === retailIdStr) {
-                        isWriteOff = true;
+        // 3. Агрегация всех событий в БД
+        const aggregationResult = await Event.aggregate([
+            { 
+                $match: { 
+                    userId: new mongoose.Types.ObjectId(userId), 
+                    date: { $lte: now } 
+                } 
+            },
+            {
+                $project: {
+                    type: 1,
+                    amount: 1,
+                    isTransfer: 1,
+                    categoryId: 1,
+                    accountId: 1, fromAccountId: 1, toAccountId: 1,
+                    companyId: 1, fromCompanyId: 1, toCompanyId: 1,
+                    individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
+                    contractorId: 1, projectId: 1,
+                    absAmount: { $abs: "$amount" },
+                    // Флаг списания (Розница)
+                    isWriteOff: {
+                        $and: [
+                            { $eq: ["$type", "expense"] },
+                            { $not: ["$accountId"] }, // accountId пустой/null
+                            { $eq: ["$counterpartyIndividualId", retailIdObj] } // Контрагент - Розница
+                        ]
                     }
                 }
+            },
+            {
+                $facet: {
+                    // --- СЧЕТА ---
+                    accounts: [
+                        {
+                            $project: {
+                                impacts: {
+                                    $cond: {
+                                        if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
+                                        then: [
+                                            { id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } },
+                                            { id: "$toAccountId", val: "$absAmount" }
+                                        ],
+                                        else: {
+                                            $cond: {
+                                                if: "$accountId",
+                                                then: [{ id: "$accountId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }],
+                                                else: []
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        { $unwind: "$impacts" },
+                        { $match: { "impacts.id": { $ne: null } } },
+                        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+                    ],
+                    
+                    // --- КОМПАНИИ ---
+                    companies: [
+                        {
+                            $project: {
+                                impacts: {
+                                    $cond: {
+                                        if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
+                                        then: [
+                                            { id: "$fromCompanyId", val: { $multiply: ["$absAmount", -1] } },
+                                            { id: "$toCompanyId", val: "$absAmount" }
+                                        ],
+                                        else: {
+                                            $cond: {
+                                                if: "$isWriteOff", // Списания не влияют на баланс компаний
+                                                then: [],
+                                                else: [{ id: "$companyId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        { $unwind: "$impacts" },
+                        { $match: { "impacts.id": { $ne: null } } },
+                        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+                    ],
 
-                // Деньги (Счета) - меняются только если есть счет
-                if (op.accountId) {
-                    totalSystemBalance += signedAmount;
-                    addToBalance(accountBalances, op.accountId, signedAmount);
-                }
-                
-                // 🟢 ВАЖНО: Если это списание, оно НЕ влияет на балансы сущностей
-                // (кроме расчета долга в виджете Предоплаты, который считается отдельно на фронте)
-                if (!isWriteOff) {
-                    addToBalance(companyBalances, op.companyId, signedAmount);
-                    addToBalance(individualBalances, op.individualId, signedAmount);
-                    addToBalance(individualBalances, op.counterpartyIndividualId, signedAmount);
-                    addToBalance(contractorBalances, op.contractorId, signedAmount);
-                    addToBalance(projectBalances, op.projectId, signedAmount);
+                    // --- ФИЗЛИЦА (Владельцы и Контрагенты) ---
+                    individuals: [
+                        {
+                            $project: {
+                                impacts: {
+                                    $cond: {
+                                        if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
+                                        then: [
+                                            { id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } },
+                                            { id: "$toIndividualId", val: "$absAmount" }
+                                        ],
+                                        else: {
+                                            $cond: {
+                                                if: "$isWriteOff",
+                                                then: [],
+                                                else: [
+                                                    // Обычные операции влияют и на Владельца (individualId) и на Контрагента (counterpartyIndividualId)
+                                                    { id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } },
+                                                    { id: "$counterpartyIndividualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        { $unwind: "$impacts" },
+                        { $match: { "impacts.id": { $ne: null } } },
+                        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+                    ],
 
-                    if (op.categoryId) {
-                        const cId = op.categoryId.toString();
-                        if (!categoryTotals[cId]) categoryTotals[cId] = { income: 0, expense: 0, total: 0 };
-                        if (isIncome) { categoryTotals[cId].income += absAmount; categoryTotals[cId].total += absAmount; } 
-                        else { categoryTotals[cId].expense += absAmount; categoryTotals[cId].total -= absAmount; }
-                    }
+                    // --- КОНТРАГЕНТЫ (Только обычные операции, не списания) ---
+                    contractors: [
+                        { 
+                            $match: { 
+                                isTransfer: { $ne: true }, type: { $ne: 'transfer' }, 
+                                isWriteOff: false, 
+                                contractorId: { $ne: null } 
+                            } 
+                        },
+                        { 
+                            $group: { 
+                                _id: "$contractorId", 
+                                total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } 
+                            } 
+                        }
+                    ],
+
+                    // --- ПРОЕКТЫ ---
+                    projects: [
+                        { 
+                            $match: { 
+                                isTransfer: { $ne: true }, type: { $ne: 'transfer' }, 
+                                isWriteOff: false, 
+                                projectId: { $ne: null } 
+                            } 
+                        },
+                        { 
+                            $group: { 
+                                _id: "$projectId", 
+                                total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } 
+                            } 
+                        }
+                    ],
+
+                    // --- КАТЕГОРИИ (Итоги) ---
+                    categories: [
+                        { 
+                            $match: { 
+                                isTransfer: { $ne: true }, type: { $ne: 'transfer' }, 
+                                isWriteOff: false, 
+                                categoryId: { $ne: null } 
+                            } 
+                        },
+                        {
+                            $group: {
+                                _id: "$categoryId",
+                                income: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", 0] } },
+                                expense: { $sum: { $cond: [{ $eq: ["$type", "expense"] }, "$absAmount", 0] } },
+                                total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }
+                            }
+                        }
+                    ]
                 }
             }
-        }
-        res.json({ timestamp: now, totalBalance: totalSystemBalance, accountBalances, companyBalances, individualBalances, contractorBalances, projectBalances, categoryTotals });
-    } catch (err) { res.status(500).json({ message: err.message }); }
+        ]);
+
+        // 4. Обработка результатов агрегации
+        const results = aggregationResult[0];
+        
+        const companyBalances = {}; 
+        const individualBalances = {}; 
+        const contractorBalances = {}; 
+        const projectBalances = {}; 
+        const categoryTotals = {};
+
+        // Обновляем балансы счетов (+ начальный)
+        results.accounts.forEach(item => {
+            const id = item._id.toString();
+            if (accountBalances[id] === undefined) accountBalances[id] = 0;
+            accountBalances[id] += item.total;
+            totalSystemBalance += item.total; // Добавляем движение к общему
+        });
+
+        results.companies.forEach(item => companyBalances[item._id.toString()] = item.total);
+        results.individuals.forEach(item => individualBalances[item._id.toString()] = item.total);
+        results.contractors.forEach(item => contractorBalances[item._id.toString()] = item.total);
+        results.projects.forEach(item => projectBalances[item._id.toString()] = item.total);
+        results.categories.forEach(item => {
+            categoryTotals[item._id.toString()] = { income: item.income, expense: item.expense, total: item.total };
+        });
+
+        res.json({ 
+            timestamp: now, 
+            totalBalance: totalSystemBalance, 
+            accountBalances, 
+            companyBalances, 
+            individualBalances, 
+            contractorBalances, 
+            projectBalances, 
+            categoryTotals 
+        });
+
+    } catch (err) { 
+        console.error("Snapshot Error:", err);
+        res.status(500).json({ message: err.message }); 
+    }
 });
 
 // --- EVENTS ROUTES ---
