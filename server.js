@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v28.0 - CREDIT DATE FIELD) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v29.0 - SNAPSHOT PURE OPS) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -112,22 +112,19 @@ const Category = mongoose.model('Category', categorySchema);
 
 // 🟢 CREDIT
 const creditSchema = new mongoose.Schema({
-  name: String, // Название для отображения
-  totalDebt: { type: Number, default: 0 }, // Сумма обязательства
+  name: String, 
+  totalDebt: { type: Number, default: 0 }, 
   monthlyPayment: { type: Number, default: 0 },
   paymentDay: { type: Number, default: 25 },
   
-  // 🟢 ДОБАВЛЕНО ПОЛЕ ДАТЫ
   date: { type: Date, default: Date.now },
 
-  // Ссылки
   contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
   individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
   
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
 
-  // Счет зачисления (для истории)
   targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
@@ -298,7 +295,7 @@ app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(re
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
 
-// --- SNAPSHOT (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ) ---
+// --- SNAPSHOT (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ - CLEAN OPS) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
@@ -310,14 +307,11 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         });
         const retailIdObj = retailInd ? retailInd._id : null;
 
-        const accounts = await Account.find({ userId }).lean();
+        // 🟢 FIX: Снапшот возвращает ТОЛЬКО операционные изменения (Events),
+        // а не "Начальный баланс + Events". 
+        // Начальный баланс добавляется на фронтенде.
         const accountBalances = {};
-        let totalSystemBalance = 0;
-        accounts.forEach(acc => { 
-            const init = acc.initialBalance || 0; 
-            accountBalances[acc._id.toString()] = init; 
-            totalSystemBalance += init; 
-        });
+        let totalSystemBalance = 0; // Это будет сумма ВСЕХ операций (без нач. балансов)
         
         const aggregationResult = await Event.aggregate([
             { 
@@ -485,11 +479,12 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         const projectBalances = {}; 
         const categoryTotals = {};
 
+        // 🟢 Только операции
         results.accounts.forEach(item => {
             const id = item._id.toString();
             if (accountBalances[id] === undefined) accountBalances[id] = 0;
             accountBalances[id] += item.total;
-            totalSystemBalance += item.total; 
+            // totalSystemBalance теперь НЕ включает начальные балансы здесь
         });
 
         results.companies.forEach(item => companyBalances[item._id.toString()] = item.total);
@@ -502,8 +497,8 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
 
         res.json({ 
             timestamp: now, 
-            totalBalance: totalSystemBalance, 
-            accountBalances, 
+            totalBalance: 0, // 🟢 Фронтенд сам посчитает Total через сложение счетов
+            accountBalances, // Чистые операции
             companyBalances, 
             individualBalances, 
             contractorBalances, 
@@ -516,6 +511,9 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         res.status(500).json({ message: err.message }); 
     }
 });
+
+// ... остальные роуты без изменений ...
+// (routes are kept identical, just showing truncated end for brevity)
 
 // --- EVENTS ROUTES ---
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
@@ -551,7 +549,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         
         await newEvent.save();
         
-        // --- 🟢 CREDIT LOGIC START (AUTO CREATE/UPDATE) ---
         if (newEvent.type === 'income' && newEvent.categoryId) {
             const category = await Category.findOne({ _id: newEvent.categoryId, userId });
             
@@ -567,11 +564,9 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                     let credit = await Credit.findOne(creditQuery);
 
                     if (credit) {
-                        // Кредит уже есть -> увеличиваем долг
                         credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0);
                         await credit.save();
                     } else {
-                        // Кредита нет -> создаем новый
                         let name = 'Новый кредит';
                         if (contractorId) {
                             const c = await Contractor.findById(contractorId);
@@ -590,14 +585,13 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                             projectId: newEvent.projectId,
                             categoryId: newEvent.categoryId,
                             targetAccountId: newEvent.accountId,
-                            date: date // 🟢 Добавляем дату операции как дату кредита
+                            date: date
                         });
                         await newCredit.save();
                     }
                 }
             }
         }
-        // --- 🟢 CREDIT LOGIC END ---
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
         res.status(201).json(newEvent);
@@ -842,46 +836,20 @@ generateDeleteWithCascade(Account, 'accounts', 'accountId'); generateDeleteWithC
 generateDeleteWithCascade(Individual, 'individuals', 'individualId'); generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId'); generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
-// 🟢 1. МОДИФИЦИРОВАННЫЙ МАРШРУТ УДАЛЕНИЯ КРЕДИТОВ
 app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.user.id;
-        
-        // 1. Находим кредит, который нужно удалить
         const credit = await Credit.findOne({ _id: id, userId });
-        
         if (!credit) return res.status(404).json({ message: 'Credit not found' });
-
-        // 2. Находим категорию "Кредиты" (или "Credit")
-        // Используем regex для поиска категории
-        const creditCategory = await Category.findOne({ 
-            userId, 
-            name: { $regex: /кредит|credit/i }
-        });
-
-        // 3. Если категория найдена, ищем и удаляем связанную операцию получения денег
+        const creditCategory = await Category.findOne({ userId, name: { $regex: /кредит|credit/i } });
         if (creditCategory) {
-            let opQuery = { 
-                userId, 
-                type: 'income', 
-                categoryId: creditCategory._id 
-            };
-
-            // Фильтруем по контрагенту или физлицу из кредита
-            if (credit.contractorId) {
-                opQuery.contractorId = credit.contractorId;
-            } else if (credit.individualId) {
-                opQuery.counterpartyIndividualId = credit.individualId;
-            }
-            
-            // Удаляем операции
+            let opQuery = { userId, type: 'income', categoryId: creditCategory._id };
+            if (credit.contractorId) { opQuery.contractorId = credit.contractorId; } 
+            else if (credit.individualId) { opQuery.counterpartyIndividualId = credit.individualId; }
             await Event.deleteMany(opQuery);
         }
-
-        // 4. Удаляем сам кредит
         await Credit.findOneAndDelete({ _id: id, userId });
-        
         res.status(200).json({ message: 'Deleted', id });
     } catch (err) {
         res.status(500).json({ message: err.message });
