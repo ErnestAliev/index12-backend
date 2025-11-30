@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v26.0 - CREDIT ENTITY) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v26.1 - CREDIT UPDATED) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -112,15 +112,22 @@ const Category = mongoose.model('Category', categorySchema);
 
 // 🟢 НОВАЯ СХЕМА: CREDIT
 const creditSchema = new mongoose.Schema({
-  name: String, // Название для отображения (дублирует имя кредитора или кастомное)
+  name: String, // Название для отображения
   totalDebt: { type: Number, default: 0 }, // Сумма обязательства
   monthlyPayment: { type: Number, default: 0 },
   paymentDay: { type: Number, default: 25 },
   
-  // Ссылка на кредитора (Контрагент или Физлицо)
+  // Ссылки
   contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
   individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
   
+  // 🟢 ДОБАВЛЕНО: Проект и Категория
+  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
+  categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
+
+  // Счет зачисления (для истории, необязательно для расчетов, но полезно)
+  targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
+
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Credit = mongoose.model('Credit', creditSchema);
@@ -704,9 +711,9 @@ const generateCRUD = (model, path) => {
               query = query.populate('defaultProjectId').populate('defaultCategoryId')
                            .populate('defaultProjectIds').populate('defaultCategoryIds'); 
           }
-          // Если запрашивают кредиты, подтягиваем контрагента и физлицо
+          // Если запрашивают кредиты, подтягиваем связи
           if (path === 'credits') {
-              query = query.populate('contractorId').populate('individualId');
+              query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
           }
           res.json(await query); 
         } catch (err) { res.status(500).json({ message: err.message }); }
@@ -726,23 +733,21 @@ const generateBatchUpdate = (model, path) => {
     try {
       const items = req.body; const userId = req.user.id;
       const updatePromises = items.map(item => {
-        const updateData = { name: item.name, order: item.order };
-        if (item.initialBalance !== undefined) updateData.initialBalance = item.initialBalance;
-        if (item.companyId !== undefined) updateData.companyId = item.companyId;
-        if (item.individualId !== undefined) updateData.individualId = item.individualId;
-        if (item.contractorId !== undefined) updateData.contractorId = item.contractorId; 
+        const updateData = { ...item }; 
+        // Безопасно обновляем поля, удаляя _id из updateData чтобы не было конфликта (хотя findOneAndUpdate игнорирует)
+        delete updateData._id;
+        delete updateData.userId;
         
-        if (item.defaultProjectId !== undefined) updateData.defaultProjectId = item.defaultProjectId;
-        if (item.defaultCategoryId !== undefined) updateData.defaultCategoryId = item.defaultCategoryId;
-        if (item.defaultProjectIds !== undefined) updateData.defaultProjectIds = item.defaultProjectIds; 
-        if (item.defaultCategoryIds !== undefined) updateData.defaultCategoryIds = item.defaultCategoryIds; 
-
-        return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData);
+        return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData, { new: true });
       });
       await Promise.all(updatePromises);
       let query = model.find({ userId: userId });
       if (model.schema.paths.order) query = query.sort({ order: 1 });
       if (path === 'contractors' || path === 'individuals') query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
+      // 🟢 Populate для кредитов после апдейта
+      if (path === 'credits') {
+          query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
+      }
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
@@ -785,6 +790,8 @@ generateCRUD(Credit, 'credits');
 
 generateBatchUpdate(Account, 'accounts'); generateBatchUpdate(Company, 'companies'); generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors'); generateBatchUpdate(Project, 'projects'); generateBatchUpdate(Category, 'categories');
+generateBatchUpdate(Credit, 'credits'); // 🟢 Batch update для кредитов
+
 generateDeleteWithCascade(Account, 'accounts', 'accountId'); generateDeleteWithCascade(Company, 'companies', 'companyId');
 generateDeleteWithCascade(Individual, 'individuals', 'individualId'); generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId'); generateDeleteWithCascade(Category, 'categories', 'categoryId');
