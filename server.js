@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v24.0-AGGREGATION-FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v26.0 - CREDIT ENTITY) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -110,6 +110,21 @@ const categorySchema = new mongoose.Schema({
 });
 const Category = mongoose.model('Category', categorySchema);
 
+// 🟢 НОВАЯ СХЕМА: CREDIT
+const creditSchema = new mongoose.Schema({
+  name: String, // Название для отображения (дублирует имя кредитора или кастомное)
+  totalDebt: { type: Number, default: 0 }, // Сумма обязательства
+  monthlyPayment: { type: Number, default: 0 },
+  paymentDay: { type: Number, default: 25 },
+  
+  // Ссылка на кредитора (Контрагент или Физлицо)
+  contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
+  individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
+  
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+});
+const Credit = mongoose.model('Credit', creditSchema);
+
 const eventSchema = new mongoose.Schema({
     dayOfYear: Number, 
     cellIndex: Number, 
@@ -120,7 +135,7 @@ const eventSchema = new mongoose.Schema({
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
     prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
     
-    accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' }, // Может быть null (для списаний)
+    accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' }, 
     
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
@@ -274,20 +289,18 @@ app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(re
 app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
 
 
-// --- SNAPSHOT (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ v24.0) ---
+// --- SNAPSHOT (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const now = new Date();
         
-        // 1. Находим ID "Розничных клиентов" для проверки списаний (для $isWriteOff)
         const retailInd = await Individual.findOne({ 
             userId, 
             name: { $regex: /^(розничные клиенты|розница)$/i } 
         });
         const retailIdObj = retailInd ? retailInd._id : null;
 
-        // 2. Получаем начальные балансы счетов
         const accounts = await Account.find({ userId }).lean();
         const accountBalances = {};
         let totalSystemBalance = 0;
@@ -297,7 +310,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             totalSystemBalance += init; 
         });
         
-        // 3. Агрегация всех событий в БД
         const aggregationResult = await Event.aggregate([
             { 
                 $match: { 
@@ -316,19 +328,17 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                     individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
                     contractorId: 1, projectId: 1,
                     absAmount: { $abs: "$amount" },
-                    // Флаг списания (Розница)
                     isWriteOff: {
                         $and: [
                             { $eq: ["$type", "expense"] },
-                            { $not: ["$accountId"] }, // accountId пустой/null
-                            { $eq: ["$counterpartyIndividualId", retailIdObj] } // Контрагент - Розница
+                            { $not: ["$accountId"] }, 
+                            { $eq: ["$counterpartyIndividualId", retailIdObj] } 
                         ]
                     }
                 }
             },
             {
                 $facet: {
-                    // --- СЧЕТА ---
                     accounts: [
                         {
                             $project: {
@@ -354,8 +364,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                         { $match: { "impacts.id": { $ne: null } } },
                         { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
                     ],
-                    
-                    // --- КОМПАНИИ ---
                     companies: [
                         {
                             $project: {
@@ -368,7 +376,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                         ],
                                         else: {
                                             $cond: {
-                                                if: "$isWriteOff", // Списания не влияют на баланс компаний
+                                                if: "$isWriteOff", 
                                                 then: [],
                                                 else: [{ id: "$companyId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }]
                                             }
@@ -381,8 +389,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                         { $match: { "impacts.id": { $ne: null } } },
                         { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
                     ],
-
-                    // --- ФИЗЛИЦА (Владельцы и Контрагенты) ---
                     individuals: [
                         {
                             $project: {
@@ -398,7 +404,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                                 if: "$isWriteOff",
                                                 then: [],
                                                 else: [
-                                                    // Обычные операции влияют и на Владельца (individualId) и на Контрагента (counterpartyIndividualId)
                                                     { id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } },
                                                     { id: "$counterpartyIndividualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }
                                                 ]
@@ -412,8 +417,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                         { $match: { "impacts.id": { $ne: null } } },
                         { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
                     ],
-
-                    // --- КОНТРАГЕНТЫ (Только обычные операции, не списания) ---
                     contractors: [
                         { 
                             $match: { 
@@ -429,8 +432,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                             } 
                         }
                     ],
-
-                    // --- ПРОЕКТЫ ---
                     projects: [
                         { 
                             $match: { 
@@ -446,8 +447,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                             } 
                         }
                     ],
-
-                    // --- КАТЕГОРИИ (Итоги) ---
                     categories: [
                         { 
                             $match: { 
@@ -469,7 +468,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             }
         ]);
 
-        // 4. Обработка результатов агрегации
         const results = aggregationResult[0];
         
         const companyBalances = {}; 
@@ -478,12 +476,11 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         const projectBalances = {}; 
         const categoryTotals = {};
 
-        // Обновляем балансы счетов (+ начальный)
         results.accounts.forEach(item => {
             const id = item._id.toString();
             if (accountBalances[id] === undefined) accountBalances[id] = 0;
             accountBalances[id] += item.total;
-            totalSystemBalance += item.total; // Добавляем движение к общему
+            totalSystemBalance += item.total; 
         });
 
         results.companies.forEach(item => companyBalances[item._id.toString()] = item.total);
@@ -707,6 +704,10 @@ const generateCRUD = (model, path) => {
               query = query.populate('defaultProjectId').populate('defaultCategoryId')
                            .populate('defaultProjectIds').populate('defaultCategoryIds'); 
           }
+          // Если запрашивают кредиты, подтягиваем контрагента и физлицо
+          if (path === 'credits') {
+              query = query.populate('contractorId').populate('individualId');
+          }
           res.json(await query); 
         } catch (err) { res.status(500).json({ message: err.message }); }
     });
@@ -779,6 +780,9 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 generateCRUD(Account, 'accounts'); generateCRUD(Company, 'companies'); generateCRUD(Individual, 'individuals'); 
 generateCRUD(Contractor, 'contractors'); generateCRUD(Project, 'projects'); generateCRUD(Category, 'categories'); 
 generateCRUD(Prepayment, 'prepayments'); 
+// 🟢 CRUD для кредитов
+generateCRUD(Credit, 'credits');
+
 generateBatchUpdate(Account, 'accounts'); generateBatchUpdate(Company, 'companies'); generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors'); generateBatchUpdate(Project, 'projects'); generateBatchUpdate(Category, 'categories');
 generateDeleteWithCascade(Account, 'accounts', 'accountId'); generateDeleteWithCascade(Company, 'companies', 'companyId');
