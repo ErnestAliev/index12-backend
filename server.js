@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v29.0 - SNAPSHOT PURE OPS) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v35.0 - SMART DELETE & ROLLBACK) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -110,23 +110,17 @@ const categorySchema = new mongoose.Schema({
 });
 const Category = mongoose.model('Category', categorySchema);
 
-// 🟢 CREDIT
 const creditSchema = new mongoose.Schema({
   name: String, 
   totalDebt: { type: Number, default: 0 }, 
   monthlyPayment: { type: Number, default: 0 },
   paymentDay: { type: Number, default: 25 },
-  
   date: { type: Date, default: Date.now },
-
   contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
   individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
-  
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
-
   targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
-
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Credit = mongoose.model('Credit', creditSchema);
@@ -154,7 +148,15 @@ const eventSchema = new mongoose.Schema({
     isTransfer: { type: Boolean, default: false },
     isWithdrawal: { type: Boolean, default: false }, 
     
-    isClosed: { type: Boolean, default: false },
+    isClosed: { type: Boolean, default: false }, 
+    totalDealAmount: { type: Number, default: 0 }, 
+    parentProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' }, 
+    
+    isDealTranche: { type: Boolean, default: false },
+    isWorkAct: { type: Boolean, default: false },
+
+    // Связь Акта со Сделкой (для каскадного удаления)
+    relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
 
     destination: String, 
     transferGroupId: String,
@@ -168,7 +170,6 @@ const eventSchema = new mongoose.Schema({
     
     date: { type: Date }, 
     dateKey: { type: String, index: true }, 
-    totalDealAmount: { type: Number, default: 0 },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Event = mongoose.model('Event', eventSchema);
@@ -282,7 +283,12 @@ app.get('/auth/dev-login', async (req, res) => {
         const devEmail = 'developer@local.test';
         let user = await User.findOne({ email: devEmail });
         if (!user) {
-            user = new User({ googleId: 'dev_local_id_999', email: devEmail, name: 'Разработчик (Local)', avatarUrl: 'https://via.placeholder.com/100x100/333/fff?text=DEV' });
+            user = new User({ 
+                googleId: 'dev_local_id_999', 
+                email: devEmail, 
+                name: 'Разработчик (Local)', 
+                avatarUrl: 'https://ui-avatars.com/api/?name=Dev+Local&background=0D8ABC&color=fff' 
+            });
             await user.save();
         }
         req.login(user, (err) => { if (err) return res.status(500).send('Login failed'); res.redirect(FRONTEND_URL); });
@@ -292,52 +298,39 @@ app.get('/auth/dev-login', async (req, res) => {
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }), (req, res) => { res.redirect(FRONTEND_URL); });
 app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(req.user); } else { res.status(401).json({ message: 'No user authenticated' }); } });
-app.post('/api/auth/logout', (req, res, next) => { req.logout((err) => { if (err) return next(err); req.session.destroy((err) => { if (err) return res.status(500).json({ message: 'Error' }); res.clearCookie('connect.sid'); res.status(200).json({ message: 'Logged out' }); }); }); });
+app.post('/api/auth/logout', (req, res, next) => { 
+    req.logout((err) => { 
+        if (err) return next(err); 
+        req.session.destroy((err) => { 
+            if (err) return res.status(500).json({ message: 'Error' }); 
+            res.clearCookie('connect.sid'); 
+            res.status(200).json({ message: 'Logged out' }); 
+        }); 
+    }); 
+});
 
 
-// --- SNAPSHOT (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ - CLEAN OPS) ---
+// --- SNAPSHOT (UNCHANGED) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const now = new Date();
         
-        const retailInd = await Individual.findOne({ 
-            userId, 
-            name: { $regex: /^(розничные клиенты|розница)$/i } 
-        });
+        const retailInd = await Individual.findOne({ userId, name: { $regex: /^(розничные клиенты|розница)$/i } });
         const retailIdObj = retailInd ? retailInd._id : null;
 
-        // 🟢 FIX: Снапшот возвращает ТОЛЬКО операционные изменения (Events),
-        // а не "Начальный баланс + Events". 
-        // Начальный баланс добавляется на фронтенде.
-        const accountBalances = {};
-        let totalSystemBalance = 0; // Это будет сумма ВСЕХ операций (без нач. балансов)
-        
         const aggregationResult = await Event.aggregate([
-            { 
-                $match: { 
-                    userId: new mongoose.Types.ObjectId(userId), 
-                    date: { $lte: now } 
-                } 
-            },
+            { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $lte: now } } },
             {
                 $project: {
-                    type: 1,
-                    amount: 1,
-                    isTransfer: 1,
-                    categoryId: 1,
-                    accountId: 1, fromAccountId: 1, toAccountId: 1,
+                    type: 1, amount: 1, isTransfer: 1,
+                    categoryId: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
                     companyId: 1, fromCompanyId: 1, toCompanyId: 1,
                     individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
                     contractorId: 1, projectId: 1,
                     absAmount: { $abs: "$amount" },
-                    isWriteOff: {
-                        $and: [
-                            { $eq: ["$type", "expense"] },
-                            { $not: ["$accountId"] }, 
-                            { $eq: ["$counterpartyIndividualId", retailIdObj] } 
-                        ]
-                    }
+                    isWorkAct: { $ifNull: ["$isWorkAct", false] }, 
+                    isWriteOff: { $and: [ { $eq: ["$type", "expense"] }, { $not: ["$accountId"] }, { $eq: ["$counterpartyIndividualId", retailIdObj] } ] }
                 }
             },
             {
@@ -348,24 +341,13 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                 impacts: {
                                     $cond: {
                                         if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                                        then: [
-                                            { id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } },
-                                            { id: "$toAccountId", val: "$absAmount" }
-                                        ],
-                                        else: {
-                                            $cond: {
-                                                if: "$accountId",
-                                                then: [{ id: "$accountId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }],
-                                                else: []
-                                            }
-                                        }
+                                        then: [ { id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toAccountId", val: "$absAmount" } ],
+                                        else: { $cond: { if: { $and: ["$accountId", { $eq: ["$isWorkAct", false] }] }, then: [{ id: "$accountId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }], else: [] } }
                                     }
                                 }
                             }
                         },
-                        { $unwind: "$impacts" },
-                        { $match: { "impacts.id": { $ne: null } } },
-                        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+                        { $unwind: "$impacts" }, { $match: { "impacts.id": { $ne: null } } }, { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
                     ],
                     companies: [
                         {
@@ -373,24 +355,13 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                 impacts: {
                                     $cond: {
                                         if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                                        then: [
-                                            { id: "$fromCompanyId", val: { $multiply: ["$absAmount", -1] } },
-                                            { id: "$toCompanyId", val: "$absAmount" }
-                                        ],
-                                        else: {
-                                            $cond: {
-                                                if: "$isWriteOff", 
-                                                then: [],
-                                                else: [{ id: "$companyId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }]
-                                            }
-                                        }
+                                        then: [ { id: "$fromCompanyId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toCompanyId", val: "$absAmount" } ],
+                                        else: { $cond: { if: { $or: ["$isWriteOff", "$isWorkAct"] }, then: [], else: [{ id: "$companyId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }] } }
                                     }
                                 }
                             }
                         },
-                        { $unwind: "$impacts" },
-                        { $match: { "impacts.id": { $ne: null } } },
-                        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+                        { $unwind: "$impacts" }, { $match: { "impacts.id": { $ne: null } } }, { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
                     ],
                     individuals: [
                         {
@@ -398,122 +369,44 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                 impacts: {
                                     $cond: {
                                         if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                                        then: [
-                                            { id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } },
-                                            { id: "$toIndividualId", val: "$absAmount" }
-                                        ],
-                                        else: {
-                                            $cond: {
-                                                if: "$isWriteOff",
-                                                then: [],
-                                                else: [
-                                                    { id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } },
-                                                    { id: "$counterpartyIndividualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }
-                                                ]
-                                            }
-                                        }
+                                        then: [ { id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toIndividualId", val: "$absAmount" } ],
+                                        else: { $cond: { if: "$isWriteOff", then: [], else: [ { id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }, { id: "$counterpartyIndividualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } ] } }
                                     }
                                 }
                             }
                         },
-                        { $unwind: "$impacts" },
-                        { $match: { "impacts.id": { $ne: null } } },
-                        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+                        { $unwind: "$impacts" }, { $match: { "impacts.id": { $ne: null } } }, { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
                     ],
                     contractors: [
-                        { 
-                            $match: { 
-                                isTransfer: { $ne: true }, type: { $ne: 'transfer' }, 
-                                isWriteOff: false, 
-                                contractorId: { $ne: null } 
-                            } 
-                        },
-                        { 
-                            $group: { 
-                                _id: "$contractorId", 
-                                total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } 
-                            } 
-                        }
+                        { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, isWorkAct: false, contractorId: { $ne: null } } },
+                        { $group: { _id: "$contractorId", total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
                     ],
                     projects: [
-                        { 
-                            $match: { 
-                                isTransfer: { $ne: true }, type: { $ne: 'transfer' }, 
-                                isWriteOff: false, 
-                                projectId: { $ne: null } 
-                            } 
-                        },
-                        { 
-                            $group: { 
-                                _id: "$projectId", 
-                                total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } 
-                            } 
-                        }
+                        { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, isWorkAct: false, projectId: { $ne: null } } },
+                        { $group: { _id: "$projectId", total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
                     ],
                     categories: [
-                        { 
-                            $match: { 
-                                isTransfer: { $ne: true }, type: { $ne: 'transfer' }, 
-                                isWriteOff: false, 
-                                categoryId: { $ne: null } 
-                            } 
-                        },
-                        {
-                            $group: {
-                                _id: "$categoryId",
-                                income: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", 0] } },
-                                expense: { $sum: { $cond: [{ $eq: ["$type", "expense"] }, "$absAmount", 0] } },
-                                total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }
-                            }
-                        }
+                        { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, categoryId: { $ne: null } } },
+                        { $group: { _id: "$categoryId", income: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", 0] } }, expense: { $sum: { $cond: [{ $eq: ["$type", "expense"] }, "$absAmount", 0] } }, total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
                     ]
                 }
             }
         ]);
 
         const results = aggregationResult[0];
+        // 🟢 FIXED: Added accountBalances definition
+        const accountBalances = {}; const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {};
         
-        const companyBalances = {}; 
-        const individualBalances = {}; 
-        const contractorBalances = {}; 
-        const projectBalances = {}; 
-        const categoryTotals = {};
-
-        // 🟢 Только операции
-        results.accounts.forEach(item => {
-            const id = item._id.toString();
-            if (accountBalances[id] === undefined) accountBalances[id] = 0;
-            accountBalances[id] += item.total;
-            // totalSystemBalance теперь НЕ включает начальные балансы здесь
-        });
-
+        results.accounts.forEach(item => { const id = item._id.toString(); if (accountBalances[id] === undefined) accountBalances[id] = 0; accountBalances[id] += item.total; });
         results.companies.forEach(item => companyBalances[item._id.toString()] = item.total);
         results.individuals.forEach(item => individualBalances[item._id.toString()] = item.total);
         results.contractors.forEach(item => contractorBalances[item._id.toString()] = item.total);
         results.projects.forEach(item => projectBalances[item._id.toString()] = item.total);
-        results.categories.forEach(item => {
-            categoryTotals[item._id.toString()] = { income: item.income, expense: item.expense, total: item.total };
-        });
+        results.categories.forEach(item => { categoryTotals[item._id.toString()] = { income: item.income, expense: item.expense, total: item.total }; });
 
-        res.json({ 
-            timestamp: now, 
-            totalBalance: 0, // 🟢 Фронтенд сам посчитает Total через сложение счетов
-            accountBalances, // Чистые операции
-            companyBalances, 
-            individualBalances, 
-            contractorBalances, 
-            projectBalances, 
-            categoryTotals 
-        });
-
-    } catch (err) { 
-        console.error("Snapshot Error:", err);
-        res.status(500).json({ message: err.message }); 
-    }
+        res.json({ timestamp: now, totalBalance: 0, accountBalances, companyBalances, individualBalances, contractorBalances, projectBalances, categoryTotals });
+    } catch (err) { res.status(500).json({ message: err.message }); }
 });
-
-// ... остальные роуты без изменений ...
-// (routes are kept identical, just showing truncated end for brevity)
 
 // --- EVENTS ROUTES ---
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
@@ -522,6 +415,22 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
         const events = await Event.find({ userId: userId })
             .sort({ date: 1 })
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
+        res.json(events);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/deals/all', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const events = await Event.find({ 
+            userId: userId,
+            $or: [
+                { totalDealAmount: { $gt: 0 } },
+                { isDealTranche: true },
+                { isWorkAct: true } 
+            ]
+        })
+        .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -546,47 +455,24 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         else { return res.status(400).json({ message: 'Missing date info' }); }
         
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
-        
         await newEvent.save();
         
         if (newEvent.type === 'income' && newEvent.categoryId) {
             const category = await Category.findOne({ _id: newEvent.categoryId, userId });
-            
             if (category && /кредит|credit/i.test(category.name)) {
                 const contractorId = newEvent.contractorId;
                 const creditIndividualId = newEvent.counterpartyIndividualId; 
-
                 if (contractorId || creditIndividualId) {
                     let creditQuery = { userId };
                     if (contractorId) creditQuery.contractorId = contractorId;
                     else creditQuery.individualId = creditIndividualId;
-
                     let credit = await Credit.findOne(creditQuery);
-
-                    if (credit) {
-                        credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0);
-                        await credit.save();
-                    } else {
+                    if (credit) { credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0); await credit.save(); } 
+                    else {
                         let name = 'Новый кредит';
-                        if (contractorId) {
-                            const c = await Contractor.findById(contractorId);
-                            if (c) name = c.name;
-                        } else if (creditIndividualId) {
-                            const i = await Individual.findById(creditIndividualId);
-                            if (i) name = i.name;
-                        }
-
-                        const newCredit = new Credit({
-                            name,
-                            totalDebt: newEvent.amount,
-                            contractorId: contractorId || null,
-                            individualId: creditIndividualId || null,
-                            userId,
-                            projectId: newEvent.projectId,
-                            categoryId: newEvent.categoryId,
-                            targetAccountId: newEvent.accountId,
-                            date: date
-                        });
+                        if (contractorId) { const c = await Contractor.findById(contractorId); if (c) name = c.name; } 
+                        else if (creditIndividualId) { const i = await Individual.findById(creditIndividualId); if (i) name = i.name; }
+                        const newCredit = new Credit({ name, totalDebt: newEvent.amount, contractorId: contractorId || null, individualId: creditIndividualId || null, userId, projectId: newEvent.projectId, categoryId: newEvent.categoryId, targetAccountId: newEvent.accountId, date: date });
                         await newCredit.save();
                     }
                 }
@@ -603,6 +489,7 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     const { id } = req.params; const userId = req.user.id; const updatedData = { ...req.body }; 
     if (updatedData.dateKey) { updatedData.date = _parseDateKey(updatedData.dateKey); updatedData.dayOfYear = _getDayOfYear(updatedData.date); } 
     else if (updatedData.date) { updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date); }
+    
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
     await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
@@ -610,12 +497,75 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
+// 🟢 DELETE WITH CASCADE CLEANUP (UPDATED LOGIC)
 app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params; const userId = req.user.id;
-    const deletedEvent = await Event.findOneAndDelete({ _id: id, userId: userId });
-    if (!deletedEvent) { return res.status(404).json({ message: 'Not found' }); }
-    res.status(200).json(deletedEvent); 
+    
+    // 1. Find first to check relations
+    const eventToDelete = await Event.findOne({ _id: id, userId });
+    if (!eventToDelete) { return res.status(404).json({ message: 'Not found' }); }
+
+    // 2. CASCADE DELETE: If deleting a Deal Anchor (Prepayment with Budget) -> Delete EVERYTHING related
+    if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
+        const pId = eventToDelete.projectId;
+        const cId = eventToDelete.categoryId;
+        const contrId = eventToDelete.contractorId;
+        const indId = eventToDelete.counterpartyIndividualId;
+        
+        // Find all ops in this deal context
+        const dealOps = await Event.find({
+            userId,
+            projectId: pId,
+            categoryId: cId,
+            contractorId: contrId,
+            counterpartyIndividualId: indId,
+            $or: [{ type: 'income' }, { isWorkAct: true }]
+        });
+        
+        // Delete all found
+        const idsToDelete = dealOps.map(op => op._id);
+        await Event.deleteMany({ _id: { $in: idsToDelete } });
+        
+        return res.status(200).json({ message: 'Deal and all related transactions deleted', deletedCount: idsToDelete.length });
+    }
+
+    // 3. ROLLBACK LOGIC: If deleting a Tranche (Subsequent payment)
+    if (eventToDelete.isDealTranche && eventToDelete.type === 'income') {
+        // A. Delete associated Work Acts (if any were linked specifically to this tranche)
+        await Event.deleteMany({ relatedEventId: id, userId });
+        
+        // B. Find PREVIOUS tranche (or anchor) to re-open it
+        // Criteria: Same project/contractor, income type, NOT this one, sorted by date desc
+        const prevOp = await Event.findOne({
+            userId,
+            projectId: eventToDelete.projectId,
+            categoryId: eventToDelete.categoryId,
+            contractorId: eventToDelete.contractorId,
+            counterpartyIndividualId: eventToDelete.counterpartyIndividualId,
+            type: 'income',
+            _id: { $ne: id },
+            date: { $lte: eventToDelete.date } // Older or equal date
+        }).sort({ date: -1, createdAt: -1 });
+        
+        // If found, open it
+        if (prevOp) {
+            await Event.updateOne({ _id: prevOp._id }, { isClosed: false });
+        }
+    }
+    
+    // 4. RE-OPEN: If deleting a Work Act, unclose the related Deal (Tranche)
+    if (eventToDelete.isWorkAct && eventToDelete.relatedEventId) {
+        await Event.findOneAndUpdate(
+            { _id: eventToDelete.relatedEventId, userId },
+            { isClosed: false }
+        );
+    }
+
+    // 5. Delete the event itself
+    await Event.deleteOne({ _id: id });
+    
+    res.status(200).json(eventToDelete); 
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -631,21 +581,16 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
   } = req.body;
 
   const userId = req.user.id; 
-  
   try {
     let finalDate, finalDateKey, finalDayOfYear;
-    if (date) { 
-        finalDate = new Date(date); 
-        finalDateKey = _getDateKey(finalDate); 
-        finalDayOfYear = _getDayOfYear(finalDate); 
-    } else { return res.status(400).json({ message: 'Missing date' }); }
+    if (date) { finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate); } 
+    else { return res.status(400).json({ message: 'Missing date' }); }
 
     if (transferPurpose === 'personal' && transferReason === 'personal_use') {
         const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
         const withdrawalEvent = new Event({
             type: 'expense', amount: -Math.abs(amount),
-            accountId: fromAccountId,
-            companyId: fromCompanyId, individualId: fromIndividualId,
+            accountId: fromAccountId, companyId: fromCompanyId, individualId: fromIndividualId,
             categoryId: null, isWithdrawal: true,
             destination: 'Личные нужды', description: 'Вывод на личные цели',
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
@@ -657,10 +602,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
     if (transferPurpose === 'inter_company') {
         const groupId = `inter_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        
         let interCatId = categoryId;
         if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
-
         const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
         
         const expenseOp = new Event({
@@ -671,7 +614,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             transferGroupId: groupId,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1 + 1, userId
         });
-
         const incomeOp = new Event({
             type: 'income', amount: Math.abs(amount),
             accountId: toAccountId, companyId: toCompanyId, individualId: toIndividualId,
@@ -680,33 +622,24 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             transferGroupId: groupId,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1, userId
         });
-
         await Promise.all([expenseOp.save(), incomeOp.save()]);
-        
         const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
-        await expenseOp.populate(popFields);
-        await incomeOp.populate(popFields);
-        
+        await expenseOp.populate(popFields); await incomeOp.populate(popFields);
         return res.status(201).json([expenseOp, incomeOp]);
     }
 
     const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
-    
     const desc = (transferPurpose === 'personal') ? 'Перевод на личную карту (Развитие бизнеса)' : 'Внутренний перевод';
-
     const transferEvent = new Event({
       type: 'transfer', amount: Math.abs(amount), 
       fromAccountId, toAccountId, 
       fromCompanyId, toCompanyId, 
       fromIndividualId, toIndividualId, 
-      categoryId, 
-      isTransfer: true,
-      transferGroupId: groupId,
-      description: desc,
+      categoryId, isTransfer: true,
+      transferGroupId: groupId, description: desc,
       date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
     });
-    
     await transferEvent.save();
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
     res.status(201).json(transferEvent); 
@@ -753,12 +686,9 @@ const generateCRUD = (model, path) => {
           let query = model.find({ userId: userId }).sort({ _id: 1 });
           if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
           if (path === 'contractors' || path === 'individuals') { 
-              query = query.populate('defaultProjectId').populate('defaultCategoryId')
-                           .populate('defaultProjectIds').populate('defaultCategoryIds'); 
+              query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds'); 
           }
-          if (path === 'credits') {
-              query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
-          }
+          if (path === 'credits') { query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId'); }
           res.json(await query); 
         } catch (err) { res.status(500).json({ message: err.message }); }
     });
@@ -777,18 +707,14 @@ const generateBatchUpdate = (model, path) => {
     try {
       const items = req.body; const userId = req.user.id;
       const updatePromises = items.map(item => {
-        const updateData = { ...item }; 
-        delete updateData._id;
-        delete updateData.userId;
+        const updateData = { ...item }; delete updateData._id; delete updateData.userId;
         return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData, { new: true });
       });
       await Promise.all(updatePromises);
       let query = model.find({ userId: userId });
       if (model.schema.paths.order) query = query.sort({ order: 1 });
       if (path === 'contractors' || path === 'individuals') query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
-      if (path === 'credits') {
-          query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
-      }
+      if (path === 'credits') { query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId'); }
       res.status(200).json(await query);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
@@ -825,8 +751,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 
 generateCRUD(Account, 'accounts'); generateCRUD(Company, 'companies'); generateCRUD(Individual, 'individuals'); 
 generateCRUD(Contractor, 'contractors'); generateCRUD(Project, 'projects'); generateCRUD(Category, 'categories'); 
-generateCRUD(Prepayment, 'prepayments'); 
-generateCRUD(Credit, 'credits');
+generateCRUD(Prepayment, 'prepayments'); generateCRUD(Credit, 'credits');
 
 generateBatchUpdate(Account, 'accounts'); generateBatchUpdate(Company, 'companies'); generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors'); generateBatchUpdate(Project, 'projects'); generateBatchUpdate(Category, 'categories');
@@ -838,8 +763,7 @@ generateDeleteWithCascade(Project, 'projects', 'projectId'); generateDeleteWithC
 
 app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
-        const { id } = req.params;
-        const userId = req.user.id;
+        const { id } = req.params; const userId = req.user.id;
         const credit = await Credit.findOne({ _id: id, userId });
         if (!credit) return res.status(404).json({ message: 'Credit not found' });
         const creditCategory = await Category.findOne({ userId, name: { $regex: /кредит|credit/i } });
@@ -851,9 +775,7 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
         }
         await Credit.findOneAndDelete({ _id: id, userId });
         res.status(200).json({ message: 'Deleted', id });
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
+    } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 if (!DB_URL) { console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден!'); process.exit(1); }
