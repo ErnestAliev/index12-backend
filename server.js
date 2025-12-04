@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v35.0 - SMART DELETE & ROLLBACK) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v35.1 - TRANSFER DESCRIPTION FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -606,11 +606,20 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
         const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
         
+        // 🟢 FIX: Определяем корректное описание для перевода от физлица
+        let outDesc = 'Перевод между компаниями (Исходящий)';
+        let inDesc = 'Перевод между компаниями (Входящий)';
+        
+        if (fromIndividualId) {
+            outDesc = 'Вложение средств (Личные -> Бизнес)';
+            inDesc = 'Поступление вложений (Личные -> Бизнес)';
+        }
+        
         const expenseOp = new Event({
             type: 'expense', amount: -Math.abs(amount),
             accountId: fromAccountId, companyId: fromCompanyId, individualId: fromIndividualId,
             categoryId: interCatId, contractorId: expenseContractorId,
-            description: 'Перевод между компаниями (Исходящий)',
+            description: outDesc,
             transferGroupId: groupId,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1 + 1, userId
         });
@@ -618,7 +627,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             type: 'income', amount: Math.abs(amount),
             accountId: toAccountId, companyId: toCompanyId, individualId: toIndividualId,
             categoryId: interCatId, contractorId: incomeContractorId,
-            description: 'Перевод между компаниями (Входящий)',
+            description: inDesc,
             transferGroupId: groupId,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1, userId
         });
