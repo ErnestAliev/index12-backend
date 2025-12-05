@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v35.1 - TRANSFER DESCRIPTION FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v37.0 - TAX FIXES) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -64,6 +64,9 @@ const Account = mongoose.model('Account', accountSchema);
 const companySchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
+  // 🟢 NEW: Настройки налогов
+  taxRegime: { type: String, default: 'simplified' }, // 'simplified' (Упрощенка) | 'our' (ОУР)
+  taxPercent: { type: Number, default: 3 }, // По умолчанию 3%
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Company = mongoose.model('Company', companySchema);
@@ -124,6 +127,20 @@ const creditSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Credit = mongoose.model('Credit', creditSchema);
+
+// 🟢 NEW: Схема налоговых платежей
+const taxPaymentSchema = new mongoose.Schema({
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
+  periodFrom: { type: Date },
+  periodTo: { type: Date },
+  amount: { type: Number, required: true },
+  status: { type: String, default: 'paid' }, // 'paid'
+  date: { type: Date, default: Date.now },
+  description: String,
+  relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' }, // Связь с реальной операцией расхода
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+});
+const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
 
 const eventSchema = new mongoose.Schema({
     dayOfYear: Number, 
@@ -506,6 +523,13 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const eventToDelete = await Event.findOne({ _id: id, userId });
     if (!eventToDelete) { return res.status(404).json({ message: 'Not found' }); }
 
+    // 🟢 FIX 1: Проверяем, есть ли связанный налоговый платеж
+    // Если удаляем операцию расхода по налогу -> удаляем запись в taxes
+    const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
+    if (taxPayment) {
+        await TaxPayment.deleteOne({ _id: taxPayment._id });
+    }
+
     // 2. CASCADE DELETE: If deleting a Deal Anchor (Prepayment with Budget) -> Delete EVERYTHING related
     if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
         const pId = eventToDelete.projectId;
@@ -761,14 +785,36 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
 generateCRUD(Account, 'accounts'); generateCRUD(Company, 'companies'); generateCRUD(Individual, 'individuals'); 
 generateCRUD(Contractor, 'contractors'); generateCRUD(Project, 'projects'); generateCRUD(Category, 'categories'); 
 generateCRUD(Prepayment, 'prepayments'); generateCRUD(Credit, 'credits');
+// 🟢 NEW: CRUD для налогов
+generateCRUD(TaxPayment, 'taxes');
 
 generateBatchUpdate(Account, 'accounts'); generateBatchUpdate(Company, 'companies'); generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors'); generateBatchUpdate(Project, 'projects'); generateBatchUpdate(Category, 'categories');
 generateBatchUpdate(Credit, 'credits'); 
+// 🟢 NEW: Batch update для налогов
+generateBatchUpdate(TaxPayment, 'taxes');
 
 generateDeleteWithCascade(Account, 'accounts', 'accountId'); generateDeleteWithCascade(Company, 'companies', 'companyId');
 generateDeleteWithCascade(Individual, 'individuals', 'individualId'); generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId'); generateDeleteWithCascade(Category, 'categories', 'categoryId');
+
+// 🟢 NEW: Удаление налогового платежа
+app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const userId = req.user.id;
+        const taxPayment = await TaxPayment.findOneAndDelete({ _id: id, userId });
+        if (!taxPayment) return res.status(404).json({ message: 'Not found' });
+
+        // Удаляем связанную операцию (если есть)
+        if (taxPayment.relatedEventId) {
+            await Event.findOneAndDelete({ _id: taxPayment.relatedEventId, userId });
+        }
+        res.status(200).json({ message: 'Deleted', id });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
 
 app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
