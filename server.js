@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v38.0 - CASCADE CREDIT DELETE) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v39.0 - IDEMPOTENT DELETE FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -527,7 +527,11 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     
     // 1. Find first to check relations
     const eventToDelete = await Event.findOne({ _id: id, userId });
-    if (!eventToDelete) { return res.status(404).json({ message: 'Not found' }); }
+    
+    // 🟢 FIX: IDEMPOTENT DELETE - Return 200 even if not found
+    if (!eventToDelete) { 
+        return res.status(200).json({ message: 'Already deleted or not found' }); 
+    }
 
     // 🟢 FIX 1: Проверяем, есть ли связанный налоговый платеж
     // Если удаляем операцию расхода по налогу -> удаляем запись в taxes
