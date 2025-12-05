@@ -6,6 +6,7 @@ const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const path = require('path');
+const MongoStore = require('connect-mongo'); // 🟢 Подключаем connect-mongo
 
 // 🟢 Загрузка .env
 const envPath = path.resolve(__dirname, '.env');
@@ -197,6 +198,11 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'dev_secret',
     resave: false,
     saveUninitialized: false, 
+    // 🟢 Подключаем хранилище MongoDB для сессий
+    store: MongoStore.create({
+        mongoUrl: DB_URL,
+        ttl: 14 * 24 * 60 * 60 // Сессия живет 14 дней
+    }),
     cookie: { secure: process.env.NODE_ENV === 'production', httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
 
