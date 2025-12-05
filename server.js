@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v37.0 - TAX FIXES) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v38.0 - CASCADE CREDIT DELETE) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -528,6 +528,32 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
     if (taxPayment) {
         await TaxPayment.deleteOne({ _id: taxPayment._id });
+    }
+
+    // 🟢 FIX 2: CASCADE CREDIT DELETE
+    // Если удаляем операцию "Доход", которая создала кредит, удаляем и сам кредит
+    if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
+        const category = await Category.findById(eventToDelete.categoryId);
+        if (category && /кредит|credit/i.test(category.name)) {
+            // Ищем кредит, который соответствует параметрам операции
+            const query = { userId };
+            
+            // Привязка по Контрагенту или Физлицу
+            if (eventToDelete.contractorId) {
+                query.contractorId = eventToDelete.contractorId;
+            } else if (eventToDelete.counterpartyIndividualId) {
+                query.individualId = eventToDelete.counterpartyIndividualId;
+            }
+            
+            // Привязка по Проекту (если есть)
+            if (eventToDelete.projectId) {
+                query.projectId = eventToDelete.projectId;
+            }
+
+            // Удаляем соответствующий кредит
+            // (Используем findOneAndDelete, так как предполагаем один активный кредит на поток)
+            await Credit.findOneAndDelete(query);
+        }
     }
 
     // 2. CASCADE DELETE: If deleting a Deal Anchor (Prepayment with Budget) -> Delete EVERYTHING related
