@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v40.2 - RESTORED FORMATTING) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v41.0 - LAYOUT PERSISTENCE) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -47,7 +47,9 @@ const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
     name: String,
-    avatarUrl: String, 
+    avatarUrl: String,
+    // 🟢 NEW: Хранение порядка виджетов
+    dashboardLayout: { type: [String], default: [] }
 });
 const User = mongoose.model('User', userSchema);
 
@@ -328,6 +330,28 @@ app.post('/api/auth/logout', (req, res, next) => {
             res.status(200).json({ message: 'Logged out' }); 
         }); 
     }); 
+});
+
+// 🟢 NEW: Сохранение порядка виджетов
+app.put('/api/user/layout', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { layout } = req.body;
+
+        if (!Array.isArray(layout)) {
+            return res.status(400).json({ message: 'Layout must be an array of strings' });
+        }
+
+        const user = await User.findByIdAndUpdate(
+            userId,
+            { dashboardLayout: layout },
+            { new: true }
+        );
+
+        res.json(user.dashboardLayout);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
 });
 
 
