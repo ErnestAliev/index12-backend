@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v39.0 - IDEMPOTENT DELETE FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v40.2 - RESTORED FORMATTING) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -55,6 +55,8 @@ const accountSchema = new mongoose.Schema({
   name: String, 
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
+  // 🟢 NEW: Флаг исключения из общих расчетов (виджеты "Всего")
+  isExcluded: { type: Boolean, default: false },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
   individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
   contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null }, 
@@ -65,7 +67,6 @@ const Account = mongoose.model('Account', accountSchema);
 const companySchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
-  // 🟢 NEW: Настройки налогов
   taxRegime: { type: String, default: 'simplified' }, // 'simplified' (Упрощенка) | 'our' (ОУР)
   taxPercent: { type: Number, default: 3 }, // По умолчанию 3%
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
@@ -129,7 +130,6 @@ const creditSchema = new mongoose.Schema({
 });
 const Credit = mongoose.model('Credit', creditSchema);
 
-// 🟢 NEW: Схема налоговых платежей
 const taxPaymentSchema = new mongoose.Schema({
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
   periodFrom: { type: Date },
@@ -138,7 +138,7 @@ const taxPaymentSchema = new mongoose.Schema({
   status: { type: String, default: 'paid' }, // 'paid'
   date: { type: Date, default: Date.now },
   description: String,
-  relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' }, // Связь с реальной операцией расхода
+  relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' }, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
@@ -173,7 +173,6 @@ const eventSchema = new mongoose.Schema({
     isDealTranche: { type: Boolean, default: false },
     isWorkAct: { type: Boolean, default: false },
 
-    // Связь Акта со Сделкой (для каскадного удаления)
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
 
     destination: String, 
@@ -198,10 +197,9 @@ app.use(session({
     secret: process.env.SESSION_SECRET || 'dev_secret',
     resave: false,
     saveUninitialized: false, 
-    // 🟢 Подключаем хранилище MongoDB для сессий
     store: MongoStore.create({
         mongoUrl: DB_URL,
-        ttl: 14 * 24 * 60 * 60 // Сессия живет 14 дней
+        ttl: 14 * 24 * 60 * 60 
     }),
     cookie: { secure: process.env.NODE_ENV === 'production', httpOnly: true, maxAge: 1000 * 60 * 60 * 24 * 7 }
 }));
@@ -417,7 +415,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         ]);
 
         const results = aggregationResult[0];
-        // 🟢 FIXED: Added accountBalances definition
         const accountBalances = {}; const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {};
         
         results.accounts.forEach(item => { const id = item._id.toString(); if (accountBalances[id] === undefined) accountBalances[id] = 0; accountBalances[id] += item.total; });
@@ -520,60 +517,43 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-// 🟢 DELETE WITH CASCADE CLEANUP (UPDATED LOGIC)
+// 🟢 DELETE WITH CASCADE CLEANUP
 app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params; const userId = req.user.id;
-    
-    // 1. Find first to check relations
     const eventToDelete = await Event.findOne({ _id: id, userId });
     
-    // 🟢 FIX: IDEMPOTENT DELETE - Return 200 even if not found
     if (!eventToDelete) { 
         return res.status(200).json({ message: 'Already deleted or not found' }); 
     }
 
-    // 🟢 FIX 1: Проверяем, есть ли связанный налоговый платеж
-    // Если удаляем операцию расхода по налогу -> удаляем запись в taxes
     const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
     if (taxPayment) {
         await TaxPayment.deleteOne({ _id: taxPayment._id });
     }
 
-    // 🟢 FIX 2: CASCADE CREDIT DELETE
-    // Если удаляем операцию "Доход", которая создала кредит, удаляем и сам кредит
     if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
         const category = await Category.findById(eventToDelete.categoryId);
         if (category && /кредит|credit/i.test(category.name)) {
-            // Ищем кредит, который соответствует параметрам операции
             const query = { userId };
-            
-            // Привязка по Контрагенту или Физлицу
             if (eventToDelete.contractorId) {
                 query.contractorId = eventToDelete.contractorId;
             } else if (eventToDelete.counterpartyIndividualId) {
                 query.individualId = eventToDelete.counterpartyIndividualId;
             }
-            
-            // Привязка по Проекту (если есть)
             if (eventToDelete.projectId) {
                 query.projectId = eventToDelete.projectId;
             }
-
-            // Удаляем соответствующий кредит
-            // (Используем findOneAndDelete, так как предполагаем один активный кредит на поток)
             await Credit.findOneAndDelete(query);
         }
     }
 
-    // 2. CASCADE DELETE: If deleting a Deal Anchor (Prepayment with Budget) -> Delete EVERYTHING related
     if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
         const pId = eventToDelete.projectId;
         const cId = eventToDelete.categoryId;
         const contrId = eventToDelete.contractorId;
         const indId = eventToDelete.counterpartyIndividualId;
         
-        // Find all ops in this deal context
         const dealOps = await Event.find({
             userId,
             projectId: pId,
@@ -583,20 +563,15 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             $or: [{ type: 'income' }, { isWorkAct: true }]
         });
         
-        // Delete all found
         const idsToDelete = dealOps.map(op => op._id);
         await Event.deleteMany({ _id: { $in: idsToDelete } });
         
         return res.status(200).json({ message: 'Deal and all related transactions deleted', deletedCount: idsToDelete.length });
     }
 
-    // 3. ROLLBACK LOGIC: If deleting a Tranche (Subsequent payment)
     if (eventToDelete.isDealTranche && eventToDelete.type === 'income') {
-        // A. Delete associated Work Acts (if any were linked specifically to this tranche)
         await Event.deleteMany({ relatedEventId: id, userId });
         
-        // B. Find PREVIOUS tranche (or anchor) to re-open it
-        // Criteria: Same project/contractor, income type, NOT this one, sorted by date desc
         const prevOp = await Event.findOne({
             userId,
             projectId: eventToDelete.projectId,
@@ -605,16 +580,14 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             counterpartyIndividualId: eventToDelete.counterpartyIndividualId,
             type: 'income',
             _id: { $ne: id },
-            date: { $lte: eventToDelete.date } // Older or equal date
+            date: { $lte: eventToDelete.date }
         }).sort({ date: -1, createdAt: -1 });
         
-        // If found, open it
         if (prevOp) {
             await Event.updateOne({ _id: prevOp._id }, { isClosed: false });
         }
     }
     
-    // 4. RE-OPEN: If deleting a Work Act, unclose the related Deal (Tranche)
     if (eventToDelete.isWorkAct && eventToDelete.relatedEventId) {
         await Event.findOneAndUpdate(
             { _id: eventToDelete.relatedEventId, userId },
@@ -622,7 +595,6 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         );
     }
 
-    // 5. Delete the event itself
     await Event.deleteOne({ _id: id });
     
     res.status(200).json(eventToDelete); 
@@ -666,7 +638,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
         const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
         
-        // 🟢 FIX: Определяем корректное описание для перевода от физлица
         let outDesc = 'Перевод между компаниями (Исходящий)';
         let inDesc = 'Перевод между компаниями (Входящий)';
         
@@ -818,23 +789,32 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
   });
 };
 
-generateCRUD(Account, 'accounts'); generateCRUD(Company, 'companies'); generateCRUD(Individual, 'individuals'); 
-generateCRUD(Contractor, 'contractors'); generateCRUD(Project, 'projects'); generateCRUD(Category, 'categories'); 
-generateCRUD(Prepayment, 'prepayments'); generateCRUD(Credit, 'credits');
-// 🟢 NEW: CRUD для налогов
+generateCRUD(Account, 'accounts'); 
+generateCRUD(Company, 'companies'); 
+generateCRUD(Individual, 'individuals'); 
+generateCRUD(Contractor, 'contractors'); 
+generateCRUD(Project, 'projects'); 
+generateCRUD(Category, 'categories'); 
+generateCRUD(Prepayment, 'prepayments'); 
+generateCRUD(Credit, 'credits');
 generateCRUD(TaxPayment, 'taxes');
 
-generateBatchUpdate(Account, 'accounts'); generateBatchUpdate(Company, 'companies'); generateBatchUpdate(Individual, 'individuals');
-generateBatchUpdate(Contractor, 'contractors'); generateBatchUpdate(Project, 'projects'); generateBatchUpdate(Category, 'categories');
+generateBatchUpdate(Account, 'accounts'); 
+generateBatchUpdate(Company, 'companies'); 
+generateBatchUpdate(Individual, 'individuals');
+generateBatchUpdate(Contractor, 'contractors'); 
+generateBatchUpdate(Project, 'projects'); 
+generateBatchUpdate(Category, 'categories');
 generateBatchUpdate(Credit, 'credits'); 
-// 🟢 NEW: Batch update для налогов
 generateBatchUpdate(TaxPayment, 'taxes');
 
-generateDeleteWithCascade(Account, 'accounts', 'accountId'); generateDeleteWithCascade(Company, 'companies', 'companyId');
-generateDeleteWithCascade(Individual, 'individuals', 'individualId'); generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
-generateDeleteWithCascade(Project, 'projects', 'projectId'); generateDeleteWithCascade(Category, 'categories', 'categoryId');
+generateDeleteWithCascade(Account, 'accounts', 'accountId'); 
+generateDeleteWithCascade(Company, 'companies', 'companyId');
+generateDeleteWithCascade(Individual, 'individuals', 'individualId'); 
+generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
+generateDeleteWithCascade(Project, 'projects', 'projectId'); 
+generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
-// 🟢 NEW: Удаление налогового платежа
 app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params;
@@ -842,7 +822,6 @@ app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
         const taxPayment = await TaxPayment.findOneAndDelete({ _id: id, userId });
         if (!taxPayment) return res.status(404).json({ message: 'Not found' });
 
-        // Удаляем связанную операцию (если есть)
         if (taxPayment.relatedEventId) {
             await Event.findOneAndDelete({ _id: taxPayment.relatedEventId, userId });
         }
