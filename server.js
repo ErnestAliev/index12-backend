@@ -19,9 +19,9 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v41.0 - LAYOUT PERSISTENCE) ---');
+('--- ЗАПУСК СЕРВЕРА (v41.0 - LAYOUT PERSISTENCE) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
-else console.log('✅ DB_URL загружен');
+else ('✅ DB_URL загружен');
 
 const ALLOWED_ORIGINS = [
     FRONTEND_URL, 
@@ -873,4 +873,4 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
 });
 
 if (!DB_URL) { console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден!'); process.exit(1); }
-mongoose.connect(DB_URL).then(() => { console.log('✅ MongoDB подключена.'); app.listen(PORT, () => { console.log(`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
+mongoose.connect(DB_URL).then(() => { ('✅ MongoDB подключена.'); app.listen(PORT, () => { (`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
