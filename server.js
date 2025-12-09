@@ -1090,3 +1090,5 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
 
 if (!DB_URL) { console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден!'); process.exit(1); }
 mongoose.connect(DB_URL).then(() => { console.log('✅ MongoDB подключена.'); server.listen(PORT, () => { console.log(`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
+
+
