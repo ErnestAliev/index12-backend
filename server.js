@@ -6,29 +6,60 @@ const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const path = require('path');
-const MongoStore = require('connect-mongo'); // 🟢 Подключаем connect-mongo
+const MongoStore = require('connect-mongo');
+const http = require('http'); // 🟢 Native Node.js HTTP module
+const socketIo = require('socket.io'); // 🟢 Socket.io
 
 // 🟢 Загрузка .env
 const envPath = path.resolve(__dirname, '.env');
 require('dotenv').config({ path: envPath });
 
 const app = express();
+// 🟢 Создаем HTTP сервер явно для Socket.io
+const server = http.createServer(app);
+
 app.set('trust proxy', 1); 
 
 const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v41.0 - LAYOUT PERSISTENCE) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v42.0 - FULL RESTORED + REALTIME) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
 const ALLOWED_ORIGINS = [
     FRONTEND_URL, 
     FRONTEND_URL.replace('https://', 'https://www.'), 
-    'http://localhost:5173'
+    'http://localhost:5173',
+    'http://127.0.0.1:5173'
 ];
 
+// 🟢 Настройка Socket.io с CORS
+const io = socketIo(server, {
+    cors: {
+        origin: (origin, callback) => {
+            if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
+                callback(null, true);
+            } else {
+                callback(null, true); // Разрешаем для разработки, в проде лучше строже
+            }
+        },
+        methods: ["GET", "POST", "PUT", "DELETE"],
+        credentials: true
+    }
+});
+
+// 🟢 Логика Socket.io
+io.on('connection', (socket) => {
+    socket.on('join', (userId) => {
+        if (userId) {
+            socket.join(userId);
+        }
+    });
+});
+
+// Middleware для CORS (Express)
 app.use(cors({
     origin: (origin, callback) => {
         if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
@@ -41,14 +72,21 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// --- СХЕМЫ ---
+// 🟢 Middleware для проброса IO в запросы
+app.use((req, res, next) => {
+    req.io = io;
+    next();
+});
+
+// --- СХЕМЫ (ВОССТАНОВЛЕНЫ ВСЕ) ---
 const userSchema = new mongoose.Schema({
     googleId: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true },
     name: String,
     avatarUrl: String,
-    // 🟢 NEW: Хранение порядка виджетов
+    // Хранение порядка виджетов
     dashboardLayout: { type: [String], default: [] }
 });
 const User = mongoose.model('User', userSchema);
@@ -57,7 +95,6 @@ const accountSchema = new mongoose.Schema({
   name: String, 
   order: { type: Number, default: 0 },
   initialBalance: { type: Number, default: 0 },
-  // 🟢 NEW: Флаг исключения из общих расчетов (виджеты "Всего")
   isExcluded: { type: Boolean, default: false },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
   individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
@@ -113,7 +150,10 @@ const Project = mongoose.model('Project', projectSchema);
 const categorySchema = new mongoose.Schema({ 
   name: String,
   order: { type: Number, default: 0 }, 
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  type: { type: String, enum: ['income', 'expense'] }, // Добавлено для совместимости, если нужно
+  color: String,
+  icon: String
 });
 const Category = mongoose.model('Category', categorySchema);
 
@@ -128,20 +168,28 @@ const creditSchema = new mongoose.Schema({
   projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
   targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  // Доп поля для совместимости с v42 если нужно, но схема v41 самодостаточна
+  rate: Number,
+  term: Number,
+  paymentType: { type: String, default: 'annuity' },
+  isRepaid: { type: Boolean, default: false }
 });
 const Credit = mongoose.model('Credit', creditSchema);
 
 const taxPaymentSchema = new mongoose.Schema({
-  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true },
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' }, // Optional in v42
   periodFrom: { type: Date },
   periodTo: { type: Date },
   amount: { type: Number, required: true },
-  status: { type: String, default: 'paid' }, // 'paid'
+  status: { type: String, default: 'paid' }, 
   date: { type: Date, default: Date.now },
   description: String,
   relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' }, 
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  // v42 fields compatibility
+  taxType: String,
+  period: String
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
 
@@ -189,7 +237,14 @@ const eventSchema = new mongoose.Schema({
     
     date: { type: Date }, 
     dateKey: { type: String, index: true }, 
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    
+    // v42 fields
+    excludeFromTotals: { type: Boolean, default: false },
+    isSalary: { type: Boolean, default: false },
+    relatedCreditId: String,
+    relatedTaxId: String,
+    createdAt: { type: Date, default: Date.now }
 });
 const Event = mongoose.model('Event', eventSchema);
 
@@ -240,7 +295,7 @@ passport.deserializeUser(async (id, done) => {
     try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); }
 });
 
-// --- HELPERS ---
+// --- HELPERS (ВОССТАНОВЛЕНЫ) ---
 const _getDayOfYear = (date) => {
   const start = new Date(date.getFullYear(), 0, 0);
   const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60000);
@@ -332,22 +387,19 @@ app.post('/api/auth/logout', (req, res, next) => {
     }); 
 });
 
-// 🟢 NEW: Сохранение порядка виджетов
+// Сохранение порядка виджетов
 app.put('/api/user/layout', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const { layout } = req.body;
-
         if (!Array.isArray(layout)) {
             return res.status(400).json({ message: 'Layout must be an array of strings' });
         }
-
         const user = await User.findByIdAndUpdate(
             userId,
             { dashboardLayout: layout },
             { new: true }
         );
-
         res.json(user.dashboardLayout);
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -524,6 +576,10 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         }
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        
+        // 🟢 Emit Event Added
+        if (req.io) req.io.to(userId).emit('operation_added', newEvent);
+
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
@@ -537,11 +593,15 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
     await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+    
+    // 🟢 Emit Event Updated
+    if (req.io) req.io.to(userId).emit('operation_updated', updatedEvent);
+
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-// 🟢 DELETE WITH CASCADE CLEANUP
+// 🟢 DELETE WITH CASCADE CLEANUP + EMIT
 app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params; const userId = req.user.id;
@@ -554,6 +614,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
     if (taxPayment) {
         await TaxPayment.deleteOne({ _id: taxPayment._id });
+        if (req.io) req.io.to(userId).emit('tax_payment_deleted', taxPayment._id); // Emit side effect
     }
 
     if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
@@ -568,7 +629,11 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             if (eventToDelete.projectId) {
                 query.projectId = eventToDelete.projectId;
             }
-            await Credit.findOneAndDelete(query);
+            const credit = await Credit.findOne(query);
+            if (credit) {
+                 await Credit.deleteOne({ _id: credit._id });
+                 if (req.io) req.io.to(userId).emit('credit_deleted', credit._id); // Emit side effect
+            }
         }
     }
 
@@ -589,6 +654,9 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         
         const idsToDelete = dealOps.map(op => op._id);
         await Event.deleteMany({ _id: { $in: idsToDelete } });
+        
+        // Emit for each deleted op in deal
+        if (req.io) idsToDelete.forEach(delId => req.io.to(userId).emit('operation_deleted', delId));
         
         return res.status(200).json({ message: 'Deal and all related transactions deleted', deletedCount: idsToDelete.length });
     }
@@ -620,6 +688,9 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     }
 
     await Event.deleteOne({ _id: id });
+
+    // 🟢 Emit Event Deleted
+    if (req.io) req.io.to(userId).emit('operation_deleted', id);
     
     res.status(200).json(eventToDelete); 
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -653,6 +724,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         });
         await withdrawalEvent.save();
         await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
+        if (req.io) req.io.to(userId).emit('operation_added', withdrawalEvent);
         return res.status(201).json(withdrawalEvent); 
     }
 
@@ -689,6 +761,10 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         await Promise.all([expenseOp.save(), incomeOp.save()]);
         const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
         await expenseOp.populate(popFields); await incomeOp.populate(popFields);
+        if (req.io) {
+            req.io.to(userId).emit('operation_added', expenseOp);
+            req.io.to(userId).emit('operation_added', incomeOp);
+        }
         return res.status(201).json([expenseOp, incomeOp]);
     }
 
@@ -706,6 +782,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     });
     await transferEvent.save();
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
+    if (req.io) req.io.to(userId).emit('operation_added', transferEvent);
     res.status(201).json(transferEvent); 
 
   } catch (err) { res.status(400).json({ message: err.message }); }
@@ -735,12 +812,19 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
       cellIndexCache.set(dateKey, nextCellIndex + 1); 
       createdOps.push({ date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, categoryId, projectId, accountId, companyId, individualId, contractorId, isTransfer: false, userId });
     }
-    if (createdOps.length > 0) { const insertedDocs = await Event.insertMany(createdOps); res.status(201).json(insertedDocs); } 
+    if (createdOps.length > 0) { 
+        const insertedDocs = await Event.insertMany(createdOps); 
+        // 🟢 Batch Emit is too heavy, maybe just refresh signal? Or emit one by one.
+        // For performance, let's emit a specific 'batch_imported' event.
+        if (req.io) req.io.to(userId).emit('operations_imported', insertedDocs.length);
+        res.status(201).json(insertedDocs); 
+    } 
     else { res.status(200).json([]); }
   } catch (err) { res.status(500).json({ message: 'Import error', details: err.message }); }
 });
 
-const generateCRUD = (model, path) => {
+// 🟢 MODIFIED GENERATOR: Accepts emitEventName
+const generateCRUD = (model, path, emitEventName = null) => {
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { const userId = req.user.id;
           if (path === 'prepayments') {
@@ -761,7 +845,15 @@ const generateCRUD = (model, path) => {
             if (model.schema.paths.order) { const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 }); createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0; }
             if (path === 'accounts') { createData.initialBalance = req.body.initialBalance || 0; createData.companyId = req.body.companyId || null; createData.individualId = req.body.individualId || null; }
             if (path === 'contractors' || path === 'individuals') { createData.defaultProjectId = req.body.defaultProjectId || null; createData.defaultCategoryId = req.body.defaultCategoryId || null; }
-            const newItem = new model(createData); res.status(201).json(await newItem.save());
+            const newItem = new model(createData); 
+            const savedItem = await newItem.save();
+            
+            // 🟢 Emit
+            if (emitEventName && req.io) {
+                 req.io.to(userId).emit(emitEventName + '_added', savedItem);
+            }
+
+            res.status(201).json(savedItem);
         } catch (err) { res.status(400).json({ message: err.message }); }
     });
 };
@@ -820,8 +912,10 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects'); 
 generateCRUD(Category, 'categories'); 
 generateCRUD(Prepayment, 'prepayments'); 
-generateCRUD(Credit, 'credits');
-generateCRUD(TaxPayment, 'taxes');
+
+// 🟢 Credits and Taxes with Realtime Support
+generateCRUD(Credit, 'credits', 'credit'); // Emits credit_added
+generateCRUD(TaxPayment, 'taxes', 'tax_payment'); // Emits tax_payment_added
 
 generateBatchUpdate(Account, 'accounts'); 
 generateBatchUpdate(Company, 'companies'); 
@@ -839,6 +933,16 @@ generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId'); 
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
+// 🟢 Explicit PUT for Credit (to support single edit real-time)
+app.put('/api/credits/:id', isAuthenticated, async (req, res) => {
+    try {
+        const updated = await Credit.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, req.body, { new: true });
+        if (req.io) req.io.to(req.user.id).emit('credit_updated', updated);
+        res.json(updated);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// 🟢 Explicit DELETE for Taxes (with Emit)
 app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params;
@@ -848,13 +952,18 @@ app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
 
         if (taxPayment.relatedEventId) {
             await Event.findOneAndDelete({ _id: taxPayment.relatedEventId, userId });
+             if (req.io) req.io.to(userId).emit('operation_deleted', taxPayment.relatedEventId);
         }
+        
+        if (req.io) req.io.to(userId).emit('tax_payment_deleted', id);
+
         res.status(200).json({ message: 'Deleted', id });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
 });
 
+// 🟢 Explicit DELETE for Credits (with Emit)
 app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params; const userId = req.user.id;
@@ -865,12 +974,19 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
             let opQuery = { userId, type: 'income', categoryId: creditCategory._id };
             if (credit.contractorId) { opQuery.contractorId = credit.contractorId; } 
             else if (credit.individualId) { opQuery.counterpartyIndividualId = credit.individualId; }
-            await Event.deleteMany(opQuery);
+            const ops = await Event.find(opQuery); // Find to emit delete
+            const idsToDelete = ops.map(o => o._id);
+            await Event.deleteMany({ _id: { $in: idsToDelete } });
+            
+            if (req.io) idsToDelete.forEach(opId => req.io.to(userId).emit('operation_deleted', opId));
         }
         await Credit.findOneAndDelete({ _id: id, userId });
+        
+        if (req.io) req.io.to(userId).emit('credit_deleted', id);
+
         res.status(200).json({ message: 'Deleted', id });
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 if (!DB_URL) { console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден!'); process.exit(1); }
-mongoose.connect(DB_URL).then(() => { ('✅ MongoDB подключена.'); app.listen(PORT, () => { (`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
+mongoose.connect(DB_URL).then(() => { console.log('✅ MongoDB подключена.'); server.listen(PORT, () => { console.log(`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
