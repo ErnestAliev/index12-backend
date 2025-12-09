@@ -19,9 +19,9 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-('--- ЗАПУСК СЕРВЕРА (v41.0 - LAYOUT PERSISTENCE) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v41.0 - LAYOUT PERSISTENCE) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
-else ('✅ DB_URL загружен');
+else console.log('✅ DB_URL загружен');
 
 const ALLOWED_ORIGINS = [
     FRONTEND_URL, 
