@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v42.0 - FULL RESTORED + REALTIME) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v43.0 - REALTIME REFACTOR) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -42,7 +42,7 @@ const io = socketIo(server, {
             if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
                 callback(null, true);
             } else {
-                callback(null, true); // Разрешаем для разработки, в проде лучше строже
+                callback(null, true); // Разрешаем для разработки
             }
         },
         methods: ["GET", "POST", "PUT", "DELETE"],
@@ -52,10 +52,17 @@ const io = socketIo(server, {
 
 // 🟢 Логика Socket.io
 io.on('connection', (socket) => {
+    // console.log(`Socket connected: ${socket.id}`);
+    
     socket.on('join', (userId) => {
         if (userId) {
             socket.join(userId);
+            // console.log(`User ${userId} joined room`);
         }
+    });
+
+    socket.on('disconnect', () => {
+        // console.log(`Socket disconnected: ${socket.id}`);
     });
 });
 
@@ -330,6 +337,21 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     }
     const newEntity = new model(createData);
     await newEntity.save();
+    
+    // 🟢 Emit new entity created automatically
+    // Determine type for emit based on model name
+    let type = 'unknown';
+    if (model === Account) type = 'account';
+    if (model === Company) type = 'company';
+    if (model === Individual) type = 'individual';
+    if (model === Contractor) type = 'contractor';
+    if (model === Project) type = 'project';
+    if (model === Category) type = 'category';
+    
+    // We don't have access to req here, so we skip emit in helper or pass io, 
+    // but better to handle it in route. 
+    // For import, we emit 'operations_imported' at the end, which triggers refresh.
+    
     cache[lowerName] = newEntity._id;
     return newEntity._id;
   } catch (err) { return null; }
@@ -563,13 +585,22 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                     if (contractorId) creditQuery.contractorId = contractorId;
                     else creditQuery.individualId = creditIndividualId;
                     let credit = await Credit.findOne(creditQuery);
-                    if (credit) { credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0); await credit.save(); } 
+                    
+                    if (credit) { 
+                        credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0); 
+                        await credit.save();
+                        // 🟢 Emit Credit Updated
+                        if (req.io) req.io.to(userId).emit('credit_updated', credit); 
+                    } 
                     else {
                         let name = 'Новый кредит';
                         if (contractorId) { const c = await Contractor.findById(contractorId); if (c) name = c.name; } 
                         else if (creditIndividualId) { const i = await Individual.findById(creditIndividualId); if (i) name = i.name; }
                         const newCredit = new Credit({ name, totalDebt: newEvent.amount, contractorId: contractorId || null, individualId: creditIndividualId || null, userId, projectId: newEvent.projectId, categoryId: newEvent.categoryId, targetAccountId: newEvent.accountId, date: date });
                         await newCredit.save();
+                        
+                        // 🟢 Emit Credit Added
+                        if (req.io) req.io.to(userId).emit('credit_added', newCredit);
                     }
                 }
             }
@@ -614,7 +645,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
     if (taxPayment) {
         await TaxPayment.deleteOne({ _id: taxPayment._id });
-        if (req.io) req.io.to(userId).emit('tax_payment_deleted', taxPayment._id); // Emit side effect
+        if (req.io) req.io.to(userId).emit('tax_payment_deleted', taxPayment._id); 
     }
 
     if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
@@ -632,7 +663,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             const credit = await Credit.findOne(query);
             if (credit) {
                  await Credit.deleteOne({ _id: credit._id });
-                 if (req.io) req.io.to(userId).emit('credit_deleted', credit._id); // Emit side effect
+                 if (req.io) req.io.to(userId).emit('credit_deleted', credit._id); 
             }
         }
     }
@@ -676,15 +707,22 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         }).sort({ date: -1, createdAt: -1 });
         
         if (prevOp) {
-            await Event.updateOne({ _id: prevOp._id }, { isClosed: false });
+            const updatedPrev = await Event.findOneAndUpdate(
+                { _id: prevOp._id }, 
+                { isClosed: false },
+                { new: true }
+            );
+            if (updatedPrev && req.io) req.io.to(userId).emit('operation_updated', updatedPrev);
         }
     }
     
     if (eventToDelete.isWorkAct && eventToDelete.relatedEventId) {
-        await Event.findOneAndUpdate(
+        const updatedRelated = await Event.findOneAndUpdate(
             { _id: eventToDelete.relatedEventId, userId },
-            { isClosed: false }
+            { isClosed: false },
+            { new: true }
         );
+        if (updatedRelated && req.io) req.io.to(userId).emit('operation_updated', updatedRelated);
     }
 
     await Event.deleteOne({ _id: id });
@@ -814,8 +852,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
     }
     if (createdOps.length > 0) { 
         const insertedDocs = await Event.insertMany(createdOps); 
-        // 🟢 Batch Emit is too heavy, maybe just refresh signal? Or emit one by one.
-        // For performance, let's emit a specific 'batch_imported' event.
+        // 🟢 Batch Emit: notify client to refresh
         if (req.io) req.io.to(userId).emit('operations_imported', insertedDocs.length);
         res.status(201).json(insertedDocs); 
     } 
@@ -825,6 +862,17 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
 
 // 🟢 MODIFIED GENERATOR: Accepts emitEventName
 const generateCRUD = (model, path, emitEventName = null) => {
+    // 🟢 Define event base name from model if not provided
+    if (!emitEventName) {
+        if (model === Account) emitEventName = 'account';
+        else if (model === Company) emitEventName = 'company';
+        else if (model === Individual) emitEventName = 'individual';
+        else if (model === Contractor) emitEventName = 'contractor';
+        else if (model === Project) emitEventName = 'project';
+        else if (model === Category) emitEventName = 'category';
+        else if (model === Prepayment) emitEventName = 'prepayment';
+    }
+
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { const userId = req.user.id;
           if (path === 'prepayments') {
@@ -840,6 +888,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
           res.json(await query); 
         } catch (err) { res.status(500).json({ message: err.message }); }
     });
+    
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try { const userId = req.user.id; let createData = { ...req.body, userId };
             if (model.schema.paths.order) { const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 }); createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0; }
@@ -858,7 +907,17 @@ const generateCRUD = (model, path, emitEventName = null) => {
     });
 };
 
-const generateBatchUpdate = (model, path) => {
+const generateBatchUpdate = (model, path, emitEventName = null) => {
+    // 🟢 Define event base name from model if not provided
+    if (!emitEventName) {
+        if (model === Account) emitEventName = 'account';
+        else if (model === Company) emitEventName = 'company';
+        else if (model === Individual) emitEventName = 'individual';
+        else if (model === Contractor) emitEventName = 'contractor';
+        else if (model === Project) emitEventName = 'project';
+        else if (model === Category) emitEventName = 'category';
+    }
+
   app.put(`/api/${path}/batch-update`, isAuthenticated, async (req, res) => {
     try {
       const items = req.body; const userId = req.user.id;
@@ -871,23 +930,57 @@ const generateBatchUpdate = (model, path) => {
       if (model.schema.paths.order) query = query.sort({ order: 1 });
       if (path === 'contractors' || path === 'individuals') query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
       if (path === 'credits') { query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId'); }
-      res.status(200).json(await query);
+      
+      const updatedList = await query;
+
+      // 🟢 Emit generic update for list refresh
+      if (emitEventName && req.io) {
+          req.io.to(userId).emit(emitEventName + '_list_updated', updatedList);
+      }
+
+      res.status(200).json(updatedList);
     } catch (err) { res.status(400).json({ message: err.message }); }
   });
 };
 
-const generateDeleteWithCascade = (model, path, foreignKeyField) => {
+const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName = null) => {
+     // 🟢 Define event base name
+     if (!emitEventName) {
+        if (model === Account) emitEventName = 'account';
+        else if (model === Company) emitEventName = 'company';
+        else if (model === Individual) emitEventName = 'individual';
+        else if (model === Contractor) emitEventName = 'contractor';
+        else if (model === Project) emitEventName = 'project';
+        else if (model === Category) emitEventName = 'category';
+    }
+
   app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
     try {
       const { id } = req.params; const { deleteOperations } = req.query; const userId = req.user.id;
       const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
       if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
+      
+      let deletedOpsCount = 0;
+      let opsDeleted = false;
+
       if (deleteOperations === 'true') {
         let query = { userId, [foreignKeyField]: id };
-        if (foreignKeyField === 'accountId') await Event.deleteMany({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
-        else if (foreignKeyField === 'companyId') await Event.deleteMany({ userId, $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] });
-        else if (foreignKeyField === 'individualId') await Event.deleteMany({ userId, $or: [ { individualId: id }, { counterpartyIndividualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
-        else await Event.deleteMany(query);
+        
+        let relatedOps;
+        if (foreignKeyField === 'accountId') relatedOps = await Event.find({ userId, $or: [ { accountId: id }, { fromAccountId: id }, { toAccountId: id } ] });
+        else if (foreignKeyField === 'companyId') relatedOps = await Event.find({ userId, $or: [ { companyId: id }, { fromCompanyId: id }, { toCompanyId: id } ] });
+        else if (foreignKeyField === 'individualId') relatedOps = await Event.find({ userId, $or: [ { individualId: id }, { counterpartyIndividualId: id }, { fromIndividualId: id }, { toIndividualId: id } ] });
+        else relatedOps = await Event.find(query);
+
+        const idsToDelete = relatedOps.map(op => op._id);
+        if (idsToDelete.length > 0) {
+            await Event.deleteMany({ _id: { $in: idsToDelete } });
+            deletedOpsCount = idsToDelete.length;
+            opsDeleted = true;
+            // 🟢 Emit deletions for operations
+            if (req.io) idsToDelete.forEach(opId => req.io.to(userId).emit('operation_deleted', opId));
+        }
+
       } else {
         let update = { [foreignKeyField]: null };
         if (foreignKeyField === 'accountId') { await Event.updateMany({ userId, accountId: id }, { accountId: null }); await Event.updateMany({ userId, fromAccountId: id }, { fromAccountId: null }); await Event.updateMany({ userId, toAccountId: id }, { toAccountId: null }); }
@@ -900,7 +993,13 @@ const generateDeleteWithCascade = (model, path, foreignKeyField) => {
         }
         else await Event.updateMany({ userId, [foreignKeyField]: id }, update);
       }
-      res.status(200).json({ message: 'Deleted', id });
+      
+      // 🟢 Emit entity deleted
+      if (emitEventName && req.io) {
+          req.io.to(userId).emit(emitEventName + '_deleted', id);
+      }
+
+      res.status(200).json({ message: 'Deleted', id, deletedOpsCount });
     } catch (err) { res.status(500).json({ message: err.message }); }
   });
 };
@@ -914,8 +1013,8 @@ generateCRUD(Category, 'categories');
 generateCRUD(Prepayment, 'prepayments'); 
 
 // 🟢 Credits and Taxes with Realtime Support
-generateCRUD(Credit, 'credits', 'credit'); // Emits credit_added
-generateCRUD(TaxPayment, 'taxes', 'tax_payment'); // Emits tax_payment_added
+generateCRUD(Credit, 'credits', 'credit'); 
+generateCRUD(TaxPayment, 'taxes', 'tax_payment'); 
 
 generateBatchUpdate(Account, 'accounts'); 
 generateBatchUpdate(Company, 'companies'); 
@@ -923,8 +1022,8 @@ generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors'); 
 generateBatchUpdate(Project, 'projects'); 
 generateBatchUpdate(Category, 'categories');
-generateBatchUpdate(Credit, 'credits'); 
-generateBatchUpdate(TaxPayment, 'taxes');
+generateBatchUpdate(Credit, 'credits', 'credit'); 
+generateBatchUpdate(TaxPayment, 'taxes', 'tax_payment');
 
 generateDeleteWithCascade(Account, 'accounts', 'accountId'); 
 generateDeleteWithCascade(Company, 'companies', 'companyId');
@@ -936,7 +1035,8 @@ generateDeleteWithCascade(Category, 'categories', 'categoryId');
 // 🟢 Explicit PUT for Credit (to support single edit real-time)
 app.put('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
-        const updated = await Credit.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, req.body, { new: true });
+        const updated = await Credit.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, req.body, { new: true })
+            .populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
         if (req.io) req.io.to(req.user.id).emit('credit_updated', updated);
         res.json(updated);
     } catch (err) { res.status(500).json({ message: err.message }); }
