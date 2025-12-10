@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v43.0 - REALTIME REFACTOR) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v44.0 - NO-ECHO FIX) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -86,6 +86,23 @@ app.use((req, res, next) => {
     req.io = io;
     next();
 });
+
+// 🟢 HELPER: Smart Emit (Excludes Sender to prevent duplication)
+// This is the core fix for "Double Records"
+const emitToUser = (req, userId, event, data) => {
+    if (!req.io) return;
+    
+    const socketId = req.headers['x-socket-id'];
+    
+    if (socketId) {
+        // Broadcast to everyone in the room EXCEPT the sender (the one who made the HTTP request)
+        // This prevents the sender from receiving their own creation event while optimistic update is pending
+        req.io.to(userId).except(socketId).emit(event, data);
+    } else {
+        // Fallback: broadcast to everyone if no socket ID header found
+        req.io.to(userId).emit(event, data);
+    }
+};
 
 // --- СХЕМЫ (ВОССТАНОВЛЕНЫ ВСЕ) ---
 const userSchema = new mongoose.Schema({
@@ -338,19 +355,7 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     const newEntity = new model(createData);
     await newEntity.save();
     
-    // 🟢 Emit new entity created automatically
-    // Determine type for emit based on model name
-    let type = 'unknown';
-    if (model === Account) type = 'account';
-    if (model === Company) type = 'company';
-    if (model === Individual) type = 'individual';
-    if (model === Contractor) type = 'contractor';
-    if (model === Project) type = 'project';
-    if (model === Category) type = 'category';
-    
-    // We don't have access to req here, so we skip emit in helper or pass io, 
-    // but better to handle it in route. 
-    // For import, we emit 'operations_imported' at the end, which triggers refresh.
+    // We emit unknown here, but specific handlers below use emitToUser
     
     cache[lowerName] = newEntity._id;
     return newEntity._id;
@@ -589,8 +594,8 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                     if (credit) { 
                         credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0); 
                         await credit.save();
-                        // 🟢 Emit Credit Updated
-                        if (req.io) req.io.to(userId).emit('credit_updated', credit); 
+                        // 🟢 FIX: Exclude sender
+                        emitToUser(req, userId, 'credit_updated', credit);
                     } 
                     else {
                         let name = 'Новый кредит';
@@ -599,8 +604,8 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                         const newCredit = new Credit({ name, totalDebt: newEvent.amount, contractorId: contractorId || null, individualId: creditIndividualId || null, userId, projectId: newEvent.projectId, categoryId: newEvent.categoryId, targetAccountId: newEvent.accountId, date: date });
                         await newCredit.save();
                         
-                        // 🟢 Emit Credit Added
-                        if (req.io) req.io.to(userId).emit('credit_added', newCredit);
+                        // 🟢 FIX: Exclude sender
+                        emitToUser(req, userId, 'credit_added', newCredit);
                     }
                 }
             }
@@ -608,8 +613,8 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
         
-        // 🟢 Emit Event Added
-        if (req.io) req.io.to(userId).emit('operation_added', newEvent);
+        // 🟢 FIX: Exclude sender
+        emitToUser(req, userId, 'operation_added', newEvent);
 
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
@@ -625,8 +630,8 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
     await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
     
-    // 🟢 Emit Event Updated
-    if (req.io) req.io.to(userId).emit('operation_updated', updatedEvent);
+    // 🟢 FIX: Exclude sender
+    emitToUser(req, userId, 'operation_updated', updatedEvent);
 
     res.status(200).json(updatedEvent);
   } catch (err) { res.status(400).json({ message: err.message }); }
@@ -645,7 +650,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
     const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
     if (taxPayment) {
         await TaxPayment.deleteOne({ _id: taxPayment._id });
-        if (req.io) req.io.to(userId).emit('tax_payment_deleted', taxPayment._id); 
+        emitToUser(req, userId, 'tax_payment_deleted', taxPayment._id); 
     }
 
     if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
@@ -663,7 +668,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             const credit = await Credit.findOne(query);
             if (credit) {
                  await Credit.deleteOne({ _id: credit._id });
-                 if (req.io) req.io.to(userId).emit('credit_deleted', credit._id); 
+                 emitToUser(req, userId, 'credit_deleted', credit._id);
             }
         }
     }
@@ -686,8 +691,8 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         const idsToDelete = dealOps.map(op => op._id);
         await Event.deleteMany({ _id: { $in: idsToDelete } });
         
-        // Emit for each deleted op in deal
-        if (req.io) idsToDelete.forEach(delId => req.io.to(userId).emit('operation_deleted', delId));
+        // Emit for each deleted op in deal (Exclude sender for all)
+        if (req.io) idsToDelete.forEach(delId => emitToUser(req, userId, 'operation_deleted', delId));
         
         return res.status(200).json({ message: 'Deal and all related transactions deleted', deletedCount: idsToDelete.length });
     }
@@ -712,7 +717,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
                 { isClosed: false },
                 { new: true }
             );
-            if (updatedPrev && req.io) req.io.to(userId).emit('operation_updated', updatedPrev);
+            if (updatedPrev) emitToUser(req, userId, 'operation_updated', updatedPrev);
         }
     }
     
@@ -722,13 +727,13 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             { isClosed: false },
             { new: true }
         );
-        if (updatedRelated && req.io) req.io.to(userId).emit('operation_updated', updatedRelated);
+        if (updatedRelated) emitToUser(req, userId, 'operation_updated', updatedRelated);
     }
 
     await Event.deleteOne({ _id: id });
 
-    // 🟢 Emit Event Deleted
-    if (req.io) req.io.to(userId).emit('operation_deleted', id);
+    // 🟢 FIX: Exclude sender
+    emitToUser(req, userId, 'operation_deleted', id);
     
     res.status(200).json(eventToDelete); 
   } catch (err) { res.status(500).json({ message: err.message }); }
@@ -762,7 +767,10 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         });
         await withdrawalEvent.save();
         await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
-        if (req.io) req.io.to(userId).emit('operation_added', withdrawalEvent);
+        
+        // 🟢 FIX: Exclude sender
+        emitToUser(req, userId, 'operation_added', withdrawalEvent);
+        
         return res.status(201).json(withdrawalEvent); 
     }
 
@@ -799,10 +807,11 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         await Promise.all([expenseOp.save(), incomeOp.save()]);
         const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
         await expenseOp.populate(popFields); await incomeOp.populate(popFields);
-        if (req.io) {
-            req.io.to(userId).emit('operation_added', expenseOp);
-            req.io.to(userId).emit('operation_added', incomeOp);
-        }
+        
+        // 🟢 FIX: Exclude sender (both events)
+        emitToUser(req, userId, 'operation_added', expenseOp);
+        emitToUser(req, userId, 'operation_added', incomeOp);
+
         return res.status(201).json([expenseOp, incomeOp]);
     }
 
@@ -820,7 +829,10 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     });
     await transferEvent.save();
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
-    if (req.io) req.io.to(userId).emit('operation_added', transferEvent);
+    
+    // 🟢 FIX: Exclude sender
+    emitToUser(req, userId, 'operation_added', transferEvent);
+
     res.status(201).json(transferEvent); 
 
   } catch (err) { res.status(400).json({ message: err.message }); }
@@ -852,8 +864,8 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
     }
     if (createdOps.length > 0) { 
         const insertedDocs = await Event.insertMany(createdOps); 
-        // 🟢 Batch Emit: notify client to refresh
-        if (req.io) req.io.to(userId).emit('operations_imported', insertedDocs.length);
+        // 🟢 Batch Emit: exclude sender to prevent heavy re-fetch on sender side
+        emitToUser(req, userId, 'operations_imported', insertedDocs.length);
         res.status(201).json(insertedDocs); 
     } 
     else { res.status(200).json([]); }
@@ -897,9 +909,9 @@ const generateCRUD = (model, path, emitEventName = null) => {
             const newItem = new model(createData); 
             const savedItem = await newItem.save();
             
-            // 🟢 Emit
-            if (emitEventName && req.io) {
-                 req.io.to(userId).emit(emitEventName + '_added', savedItem);
+            // 🟢 Emit with exclusion
+            if (emitEventName) {
+                 emitToUser(req, userId, emitEventName + '_added', savedItem);
             }
 
             res.status(201).json(savedItem);
@@ -933,9 +945,9 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
       
       const updatedList = await query;
 
-      // 🟢 Emit generic update for list refresh
-      if (emitEventName && req.io) {
-          req.io.to(userId).emit(emitEventName + '_list_updated', updatedList);
+      // 🟢 Emit generic update for list refresh (exclude sender)
+      if (emitEventName) {
+          emitToUser(req, userId, emitEventName + '_list_updated', updatedList);
       }
 
       res.status(200).json(updatedList);
@@ -977,8 +989,8 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
             await Event.deleteMany({ _id: { $in: idsToDelete } });
             deletedOpsCount = idsToDelete.length;
             opsDeleted = true;
-            // 🟢 Emit deletions for operations
-            if (req.io) idsToDelete.forEach(opId => req.io.to(userId).emit('operation_deleted', opId));
+            // 🟢 Emit deletions for operations (Exclude sender)
+            if (req.io) idsToDelete.forEach(opId => emitToUser(req, userId, 'operation_deleted', opId));
         }
 
       } else {
@@ -994,9 +1006,9 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
         else await Event.updateMany({ userId, [foreignKeyField]: id }, update);
       }
       
-      // 🟢 Emit entity deleted
-      if (emitEventName && req.io) {
-          req.io.to(userId).emit(emitEventName + '_deleted', id);
+      // 🟢 Emit entity deleted (Exclude sender)
+      if (emitEventName) {
+          emitToUser(req, userId, emitEventName + '_deleted', id);
       }
 
       res.status(200).json({ message: 'Deleted', id, deletedOpsCount });
@@ -1037,7 +1049,8 @@ app.put('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
         const updated = await Credit.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, req.body, { new: true })
             .populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
-        if (req.io) req.io.to(req.user.id).emit('credit_updated', updated);
+        
+        emitToUser(req, req.user.id, 'credit_updated', updated);
         res.json(updated);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -1052,10 +1065,10 @@ app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
 
         if (taxPayment.relatedEventId) {
             await Event.findOneAndDelete({ _id: taxPayment.relatedEventId, userId });
-             if (req.io) req.io.to(userId).emit('operation_deleted', taxPayment.relatedEventId);
+             emitToUser(req, userId, 'operation_deleted', taxPayment.relatedEventId);
         }
         
-        if (req.io) req.io.to(userId).emit('tax_payment_deleted', id);
+        emitToUser(req, userId, 'tax_payment_deleted', id);
 
         res.status(200).json({ message: 'Deleted', id });
     } catch (err) {
@@ -1078,11 +1091,11 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
             const idsToDelete = ops.map(o => o._id);
             await Event.deleteMany({ _id: { $in: idsToDelete } });
             
-            if (req.io) idsToDelete.forEach(opId => req.io.to(userId).emit('operation_deleted', opId));
+            if (req.io) idsToDelete.forEach(opId => emitToUser(req, userId, 'operation_deleted', opId));
         }
         await Credit.findOneAndDelete({ _id: id, userId });
         
-        if (req.io) req.io.to(userId).emit('credit_deleted', id);
+        emitToUser(req, userId, 'credit_deleted', id);
 
         res.status(200).json({ message: 'Deleted', id });
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -1090,5 +1103,3 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
 
 if (!DB_URL) { console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден!'); process.exit(1); }
 mongoose.connect(DB_URL).then(() => { console.log('✅ MongoDB подключена.'); server.listen(PORT, () => { console.log(`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
-
-
