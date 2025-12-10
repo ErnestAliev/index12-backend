@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v45.0 - FIX DEAL DELETION) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v45.5 - FIX TRANSFER DATEKEY SYNC) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -88,20 +88,28 @@ app.use((req, res, next) => {
 });
 
 // 🟢 HELPER: Smart Emit (Excludes Sender to prevent duplication)
-// This is the core fix for "Double Records"
 const emitToUser = (req, userId, event, data) => {
     if (!req.io) return;
     
+    // Express приводит заголовки к нижнему регистру
     const socketId = req.headers['x-socket-id'];
     
+    // Преобразуем данные в JSON-объект, если это документ Mongoose, 
+    // чтобы избежать проблем с виртуальными полями при сериализации через сокет
+    const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
+    
     if (socketId) {
-        // Broadcast to everyone in the room EXCEPT the sender (the one who made the HTTP request)
-        // This prevents the sender from receiving their own creation event while optimistic update is pending
-        req.io.to(userId).except(socketId).emit(event, data);
+        req.io.to(userId).except(socketId).emit(event, payload);
     } else {
-        // Fallback: broadcast to everyone if no socket ID header found
-        req.io.to(userId).emit(event, data);
+        req.io.to(userId).emit(event, payload);
     }
+};
+
+// 🟢 HELPER: Emit to ALL (Includes Sender)
+const emitToAll = (req, userId, event, data) => {
+    if (!req.io) return;
+    const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
+    req.io.to(userId).emit(event, payload);
 };
 
 // --- СХЕМЫ (ВОССТАНОВЛЕНЫ ВСЕ) ---
@@ -561,10 +569,27 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
-        const { dateKey, day } = req.query; const userId = req.user.id; let query = { userId: userId }; 
-        if (dateKey) { query.dateKey = dateKey; } else if (day) { query.dayOfYear = parseInt(day, 10); } else { return res.status(400).json({ message: 'Missing required parameter' }); }
+        const { dateKey, day, startDate, endDate } = req.query; 
+        const userId = req.user.id; 
+        let query = { userId: userId }; 
+        
+        if (dateKey) { 
+            query.dateKey = dateKey; 
+        } else if (day) { 
+            query.dayOfYear = parseInt(day, 10); 
+        } else if (startDate && endDate) {
+            query.date = {
+                $gte: new Date(startDate),
+                $lte: new Date(endDate)
+            };
+        } else { 
+            return res.status(400).json({ message: 'Missing required parameter: dateKey, day, or startDate/endDate' }); 
+        }
+        
         const events = await Event.find(query)
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
+            .sort({ date: 1 });
+            
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -749,7 +774,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
 
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
-      amount, date, 
+      amount, date, dateKey, // 🟢 Accept dateKey from client
       fromAccountId, toAccountId, 
       fromCompanyId, toCompanyId, 
       fromIndividualId, toIndividualId, 
@@ -759,16 +784,36 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
   } = req.body;
 
   const userId = req.user.id; 
+  
+  // 🟢 HELPER: Safe ObjectID convert (prevents CastError on empty strings)
+  const safeId = (val) => (val && val !== 'null' && val !== 'undefined' && val !== '') ? val : null;
+
   try {
     let finalDate, finalDateKey, finalDayOfYear;
-    if (date) { finalDate = new Date(date); finalDateKey = _getDateKey(finalDate); finalDayOfYear = _getDayOfYear(finalDate); } 
+    if (date) { 
+        finalDate = new Date(date);
+        if (isNaN(finalDate.getTime())) return res.status(400).json({ message: 'Invalid Date format' });
+        
+        // 🟢 FIX: Use client provided dateKey if valid, otherwise recalculate
+        // This fixes the freeze issue where server calculates a different dateKey due to timezone differences
+        if (dateKey && typeof dateKey === 'string' && dateKey.includes('-')) {
+            finalDateKey = dateKey;
+            const [y, d] = dateKey.split('-').map(Number);
+            finalDayOfYear = d;
+        } else {
+            finalDateKey = _getDateKey(finalDate); 
+            finalDayOfYear = _getDayOfYear(finalDate); 
+        }
+    } 
     else { return res.status(400).json({ message: 'Missing date' }); }
 
     if (transferPurpose === 'personal' && transferReason === 'personal_use') {
         const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
         const withdrawalEvent = new Event({
             type: 'expense', amount: -Math.abs(amount),
-            accountId: fromAccountId, companyId: fromCompanyId, individualId: fromIndividualId,
+            accountId: safeId(fromAccountId), 
+            companyId: safeId(fromCompanyId), 
+            individualId: safeId(fromIndividualId),
             categoryId: null, isWithdrawal: true,
             destination: 'Личные нужды', description: 'Вывод на личные цели',
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
@@ -776,7 +821,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         await withdrawalEvent.save();
         await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
         
-        // 🟢 FIX: Exclude sender
+        // 🟢 FIX: Use emitToUser to exclude sender (Sender does Optimistic Update)
         emitToUser(req, userId, 'operation_added', withdrawalEvent);
         
         return res.status(201).json(withdrawalEvent); 
@@ -784,7 +829,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
     if (transferPurpose === 'inter_company') {
         const groupId = `inter_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        let interCatId = categoryId;
+        let interCatId = safeId(categoryId);
         if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
         const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
         
@@ -798,16 +843,22 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         
         const expenseOp = new Event({
             type: 'expense', amount: -Math.abs(amount),
-            accountId: fromAccountId, companyId: fromCompanyId, individualId: fromIndividualId,
-            categoryId: interCatId, contractorId: expenseContractorId,
+            accountId: safeId(fromAccountId), 
+            companyId: safeId(fromCompanyId), 
+            individualId: safeId(fromIndividualId),
+            categoryId: interCatId, 
+            contractorId: safeId(expenseContractorId),
             description: outDesc,
             transferGroupId: groupId,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1 + 1, userId
         });
         const incomeOp = new Event({
             type: 'income', amount: Math.abs(amount),
-            accountId: toAccountId, companyId: toCompanyId, individualId: toIndividualId,
-            categoryId: interCatId, contractorId: incomeContractorId,
+            accountId: safeId(toAccountId), 
+            companyId: safeId(toCompanyId), 
+            individualId: safeId(toIndividualId),
+            categoryId: interCatId, 
+            contractorId: safeId(incomeContractorId),
             description: inDesc,
             transferGroupId: groupId,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1, userId
@@ -816,7 +867,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
         await expenseOp.populate(popFields); await incomeOp.populate(popFields);
         
-        // 🟢 FIX: Exclude sender (both events)
+        // 🟢 FIX: Use emitToUser to exclude sender (Sender does Optimistic Update)
         emitToUser(req, userId, 'operation_added', expenseOp);
         emitToUser(req, userId, 'operation_added', incomeOp);
 
@@ -826,24 +877,36 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
     const desc = (transferPurpose === 'personal') ? 'Перевод на личную карту (Развитие бизнеса)' : 'Внутренний перевод';
+    
+    // 🟢 FIX: Ensuring isTransfer is strictly true
     const transferEvent = new Event({
       type: 'transfer', amount: Math.abs(amount), 
-      fromAccountId, toAccountId, 
-      fromCompanyId, toCompanyId, 
-      fromIndividualId, toIndividualId, 
-      categoryId, isTransfer: true,
+      fromAccountId: safeId(fromAccountId), 
+      toAccountId: safeId(toAccountId), 
+      fromCompanyId: safeId(fromCompanyId), 
+      toCompanyId: safeId(toCompanyId), 
+      fromIndividualId: safeId(fromIndividualId), 
+      toIndividualId: safeId(toIndividualId), 
+      categoryId: safeId(categoryId), 
+      isTransfer: true,
       transferGroupId: groupId, description: desc,
       date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
     });
+    
     await transferEvent.save();
+    
+    // 🟢 FIX: Ensure population matches what frontend expects for 'richOp'
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
     
-    // 🟢 FIX: Exclude sender
+    // 🟢 FIX: Use emitToUser to exclude sender (Sender does Optimistic Update)
     emitToUser(req, userId, 'operation_added', transferEvent);
 
     res.status(201).json(transferEvent); 
 
-  } catch (err) { res.status(400).json({ message: err.message }); }
+  } catch (err) { 
+      console.error('[SERVER ERROR] Transfer failed:', err); // 🟢 Explicit server logging
+      res.status(400).json({ message: err.message }); 
+  }
 });
 
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
