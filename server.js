@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v44.0 - NO-ECHO FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v45.0 - FIX DEAL DELETION) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -246,6 +246,7 @@ const eventSchema = new mongoose.Schema({
     
     isDealTranche: { type: Boolean, default: false },
     isWorkAct: { type: Boolean, default: false },
+    isPrepayment: { type: Boolean }, // 🟢 Added for explicit check
 
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
 
@@ -673,6 +674,9 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         }
     }
 
+    // 🔴 SMART DEAL DELETION FIX
+    // Only delete related events if they are PART OF THE DEAL structure
+    // (Budget > 0, Tranche, or Work Act). Ignore "Fact" incomes.
     if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
         const pId = eventToDelete.projectId;
         const cId = eventToDelete.categoryId;
@@ -685,7 +689,11 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             categoryId: cId,
             contractorId: contrId,
             counterpartyIndividualId: indId,
-            $or: [{ type: 'income' }, { isWorkAct: true }]
+            $or: [
+                { totalDealAmount: { $gt: 0 } }, // Deal starters/extensions
+                { isDealTranche: true },         // Tranches
+                { isWorkAct: true }              // Work Acts
+            ]
         });
         
         const idsToDelete = dealOps.map(op => op._id);
@@ -694,7 +702,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         // Emit for each deleted op in deal (Exclude sender for all)
         if (req.io) idsToDelete.forEach(delId => emitToUser(req, userId, 'operation_deleted', delId));
         
-        return res.status(200).json({ message: 'Deal and all related transactions deleted', deletedCount: idsToDelete.length });
+        return res.status(200).json({ message: 'Deal and related transactions deleted', deletedCount: idsToDelete.length });
     }
 
     if (eventToDelete.isDealTranche && eventToDelete.type === 'income') {
