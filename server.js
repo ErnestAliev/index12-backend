@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v45.5 - FIX TRANSFER DATEKEY SYNC) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v46.0 - REFACTOR STAGE 2 COMPLETED) ---');
 if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
 else console.log('✅ DB_URL загружен');
 
@@ -92,16 +92,21 @@ const emitToUser = (req, userId, event, data) => {
     if (!req.io) return;
     
     // Express приводит заголовки к нижнему регистру
+    // В mainStore.js мы добавили interceptor, который шлет 'x-socket-id'
     const socketId = req.headers['x-socket-id'];
     
-    // Преобразуем данные в JSON-объект, если это документ Mongoose, 
-    // чтобы избежать проблем с виртуальными полями при сериализации через сокет
+    // Преобразуем данные в JSON-объект, если это документ Mongoose
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
     
     if (socketId) {
+        // ⚡️ ИСКЛЮЧАЕМ ОТПРАВИТЕЛЯ, ЧТОБЫ ИЗБЕЖАТЬ ДУБЛЕЙ
+        // Отправитель уже добавил операцию оптимистично
         req.io.to(userId).except(socketId).emit(event, payload);
+        // console.log(`[Socket] Emit '${event}' to ${userId} (excluding ${socketId})`);
     } else {
+        // Если заголовка нет (например, старый клиент или другой источник), шлем всем
         req.io.to(userId).emit(event, payload);
+        // console.log(`[Socket] Emit '${event}' to ${userId} (broadcast all)`);
     }
 };
 
