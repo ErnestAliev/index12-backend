@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v46.3 - DEBUG MONGO CONNECT) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v46.4 - DATE PRIORITY FIX) ---');
 
 // 🟢 CRITICAL CHECK: Проверяем наличие DB_URL сразу, до инициализации зависимых модулей
 if (!DB_URL) {
@@ -611,10 +611,31 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
     try {
         const data = req.body; const userId = req.user.id; 
         let date, dateKey, dayOfYear;
-        if (data.dateKey) { dateKey = data.dateKey; date = _parseDateKey(dateKey); dayOfYear = _getDayOfYear(date); } 
-        else if (data.date) { date = new Date(data.date); dateKey = _getDateKey(date); dayOfYear = _getDayOfYear(date); } 
-        else if (data.dayOfYear) { dayOfYear = data.dayOfYear; const year = new Date().getFullYear(); date = new Date(year, 0, 1); date.setDate(dayOfYear); dateKey = _getDateKey(date); } 
-        else { return res.status(400).json({ message: 'Missing date info' }); }
+        
+        // 🟢 FIX: PRIORITY TO EXACT DATE!
+        // Если клиент прислал точную дату, используем её и вычисляем dateKey из неё.
+        if (data.date) { 
+            date = new Date(data.date); 
+            // dateKey берем из даты, чтобы синхронизировать
+            dateKey = _getDateKey(date); 
+            dayOfYear = _getDayOfYear(date); 
+        } 
+        else if (data.dateKey) { 
+            // Только если даты нет, восстанавливаем из ключа (это ставит 00:00)
+            dateKey = data.dateKey; 
+            date = _parseDateKey(dateKey); 
+            dayOfYear = _getDayOfYear(date); 
+        } 
+        else if (data.dayOfYear) { 
+            dayOfYear = data.dayOfYear; 
+            const year = new Date().getFullYear(); 
+            date = new Date(year, 0, 1); 
+            date.setDate(dayOfYear); 
+            dateKey = _getDateKey(date); 
+        } 
+        else { 
+            return res.status(400).json({ message: 'Missing date info' }); 
+        }
         
         const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
         await newEvent.save();
@@ -662,8 +683,19 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
 app.put('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params; const userId = req.user.id; const updatedData = { ...req.body }; 
-    if (updatedData.dateKey) { updatedData.date = _parseDateKey(updatedData.dateKey); updatedData.dayOfYear = _getDayOfYear(updatedData.date); } 
-    else if (updatedData.date) { updatedData.date = new Date(updatedData.date); updatedData.dateKey = _getDateKey(updatedData.date); updatedData.dayOfYear = _getDayOfYear(updatedData.date); }
+    
+    // 🟢 FIX: PRIORITY TO EXACT DATE IN UPDATE!
+    if (updatedData.date) {
+        updatedData.date = new Date(updatedData.date);
+        // Recalculate key from date to ensure consistency
+        updatedData.dateKey = _getDateKey(updatedData.date);
+        updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+    } 
+    else if (updatedData.dateKey) { 
+        // Fallback to key only if date is missing
+        updatedData.date = _parseDateKey(updatedData.dateKey); 
+        updatedData.dayOfYear = _getDayOfYear(updatedData.date); 
+    }
     
     const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
     if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
