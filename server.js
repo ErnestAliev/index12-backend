@@ -24,9 +24,16 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v46.0 - REFACTOR STAGE 2 COMPLETED) ---');
-if (!DB_URL) console.error('⚠️  ВНИМАНИЕ: DB_URL не найден!');
-else console.log('✅ DB_URL загружен');
+console.log('--- ЗАПУСК СЕРВЕРА (v46.2 - FIX STARTUP CRASH) ---');
+
+// 🟢 CRITICAL CHECK: Проверяем наличие DB_URL сразу, до инициализации зависимых модулей
+if (!DB_URL) {
+    console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден! Сервер не может запуститься.');
+    console.error('👉 Убедитесь, что вы добавили переменную окружения DB_URL в настройках Render.com (Environment Variables).');
+    process.exit(1);
+} else {
+    console.log('✅ DB_URL найден, инициализация...');
+}
 
 const ALLOWED_ORIGINS = [
     FRONTEND_URL, 
@@ -453,6 +460,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
         const now = new Date();
+        now.setHours(23, 59, 59, 999); // 🟢 FIX: Включаем весь текущий день, чтобы избежать рассинхрона
         
         const retailInd = await Individual.findOne({ userId, name: { $regex: /^(розничные клиенты|розница)$/i } });
         const retailIdObj = retailInd ? retailInd._id : null;
@@ -1177,5 +1185,4 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-if (!DB_URL) { console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден!'); process.exit(1); }
 mongoose.connect(DB_URL).then(() => { console.log('✅ MongoDB подключена.'); server.listen(PORT, () => { console.log(`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
