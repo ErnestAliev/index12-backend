@@ -455,12 +455,26 @@ app.put('/api/user/layout', isAuthenticated, async (req, res) => {
 });
 
 
-// --- SNAPSHOT (UNCHANGED) ---
+// --- SNAPSHOT (FIXED: CLIENT TIMEZONE AWARE) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
-        const now = new Date();
-        now.setHours(23, 59, 59, 999); // 🟢 FIX: Включаем весь текущий день, чтобы избежать рассинхрона
+        
+        // 🟢 FIX: Определяем "Сейчас" на основе времени клиента, если оно передано.
+        // Если клиент прислал ?date=..., используем этот день как "сегодня".
+        // Иначе берем серверное время.
+        let now;
+        if (req.query.date) {
+            now = new Date(req.query.date);
+            if (isNaN(now.getTime())) now = new Date(); // Fallback
+        } else {
+            now = new Date();
+        }
+        
+        // Устанавливаем конец этого дня (23:59:59.999)
+        now.setHours(23, 59, 59, 999); 
+        
+        // console.log(`[Snapshot] Calculating balance up to: ${now.toISOString()} (Client date: ${req.query.date || 'Auto'})`);
         
         const retailInd = await Individual.findOne({ userId, name: { $regex: /^(розничные клиенты|розница)$/i } });
         const retailIdObj = retailInd ? retailInd._id : null;
