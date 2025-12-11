@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v46.2 - FIX STARTUP CRASH) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v46.3 - DEBUG MONGO CONNECT) ---');
 
 // 🟢 CRITICAL CHECK: Проверяем наличие DB_URL сразу, до инициализации зависимых модулей
 if (!DB_URL) {
@@ -1185,4 +1185,16 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-mongoose.connect(DB_URL).then(() => { console.log('✅ MongoDB подключена.'); server.listen(PORT, () => { console.log(`✅ Сервер запущен на порту ${PORT}`); }); }).catch(err => { console.error('❌ Ошибка подключения к MongoDB:', err); });
+console.log('⏳ Попытка подключения к MongoDB...');
+mongoose.connect(DB_URL)
+    .then(() => { 
+        console.log('✅ MongoDB подключена.'); 
+        server.listen(PORT, () => { 
+            console.log(`✅ Сервер запущен на порту ${PORT}`); 
+        }); 
+    })
+    .catch(err => { 
+        console.error('❌ Ошибка подключения к MongoDB:', err); 
+        console.error('👉 Проверьте IP Whitelist в MongoDB Atlas (Network Access). Render использует динамические IP, поэтому нужно разрешить доступ для всех (0.0.0.0/0).');
+        process.exit(1); 
+    });
