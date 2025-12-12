@@ -24,7 +24,7 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v47.0 - SNAPSHOT TIMEZONE FIX) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v48.0 - TIMEZONE FIX / DATEKEY TRUST) ---');
 
 // 🟢 CRITICAL CHECK: Проверяем наличие DB_URL сразу, до инициализации зависимых модулей
 if (!DB_URL) {
@@ -627,13 +627,26 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         const data = req.body; const userId = req.user.id; 
         let date, dateKey, dayOfYear;
         
-        // 🟢 FIX: PRIORITY TO EXACT DATE!
-        // Если клиент прислал точную дату, используем её и вычисляем dateKey из неё.
+        // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
+        // Это предотвращает сдвиг даты при пересечении 00:00 из-за UTC сервера
         if (data.date) { 
             date = new Date(data.date); 
-            // dateKey берем из даты, чтобы синхронизировать
-            dateKey = _getDateKey(date); 
-            dayOfYear = _getDayOfYear(date); 
+            
+            // Если клиент прислал dateKey - ВЕРИМ ЕМУ!
+            if (data.dateKey) {
+                dateKey = data.dateKey;
+                // Пытаемся восстановить dayOfYear из ключа (YYYY-DOY)
+                const parts = dateKey.split('-');
+                if (parts.length === 2) {
+                    dayOfYear = parseInt(parts[1], 10);
+                } else {
+                    dayOfYear = _getDayOfYear(date);
+                }
+            } else {
+                // Если нет ключа - считаем сами (как раньше)
+                dateKey = _getDateKey(date); 
+                dayOfYear = _getDayOfYear(date); 
+            }
         } 
         else if (data.dateKey) { 
             // Только если даты нет, восстанавливаем из ключа (это ставит 00:00)
@@ -702,9 +715,20 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     // 🟢 FIX: PRIORITY TO EXACT DATE IN UPDATE!
     if (updatedData.date) {
         updatedData.date = new Date(updatedData.date);
-        // Recalculate key from date to ensure consistency
-        updatedData.dateKey = _getDateKey(updatedData.date);
-        updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+        
+        // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
+        if (updatedData.dateKey) {
+            // Если клиент прислал dateKey, используем его, чтобы не пересчитывать в "вчера" из-за UTC
+            // (DayOfYear тоже обновляем, если можно)
+            const parts = updatedData.dateKey.split('-');
+            if (parts.length === 2) {
+                updatedData.dayOfYear = parseInt(parts[1], 10);
+            }
+        } else {
+             // Иначе пересчитываем (рискованно при 00:xx, но лучше чем ничего)
+             updatedData.dateKey = _getDateKey(updatedData.date);
+             updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+        }
     } 
     else if (updatedData.dateKey) { 
         // Fallback to key only if date is missing
