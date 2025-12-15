@@ -24,12 +24,11 @@ const PORT = process.env.PORT || 3000;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const DB_URL = process.env.DB_URL; 
 
-console.log('--- ЗАПУСК СЕРВЕРА (v48.0 - TIMEZONE FIX / DATEKEY TRUST) ---');
+console.log('--- ЗАПУСК СЕРВЕРА (v49.0 - PERFORMANCE OPTIMIZED / LEAN QUERIES) ---');
 
-// 🟢 CRITICAL CHECK: Проверяем наличие DB_URL сразу, до инициализации зависимых модулей
+// 🟢 CRITICAL CHECK: Проверяем наличие DB_URL сразу
 if (!DB_URL) {
     console.error('❌ КРИТИЧЕСКАЯ ОШИБКА: DB_URL не найден! Сервер не может запуститься.');
-    console.error('👉 Убедитесь, что вы добавили переменную окружения DB_URL в настройках Render.com (Environment Variables).');
     process.exit(1);
 } else {
     console.log('✅ DB_URL найден, инициализация...');
@@ -49,7 +48,7 @@ const io = socketIo(server, {
             if (!origin || ALLOWED_ORIGINS.includes(origin) || (origin && origin.endsWith('.vercel.app'))) {
                 callback(null, true);
             } else {
-                callback(null, true); // Разрешаем для разработки
+                callback(null, true); 
             }
         },
         methods: ["GET", "POST", "PUT", "DELETE"],
@@ -59,17 +58,10 @@ const io = socketIo(server, {
 
 // 🟢 Логика Socket.io
 io.on('connection', (socket) => {
-    // console.log(`Socket connected: ${socket.id}`);
-    
     socket.on('join', (userId) => {
         if (userId) {
             socket.join(userId);
-            // console.log(`User ${userId} joined room`);
         }
-    });
-
-    socket.on('disconnect', () => {
-        // console.log(`Socket disconnected: ${socket.id}`);
     });
 });
 
@@ -97,27 +89,16 @@ app.use((req, res, next) => {
 // 🟢 HELPER: Smart Emit (Excludes Sender to prevent duplication)
 const emitToUser = (req, userId, event, data) => {
     if (!req.io) return;
-    
-    // Express приводит заголовки к нижнему регистру
-    // В mainStore.js мы добавили interceptor, который шлет 'x-socket-id'
     const socketId = req.headers['x-socket-id'];
-    
-    // Преобразуем данные в JSON-объект, если это документ Mongoose
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
     
     if (socketId) {
-        // ⚡️ ИСКЛЮЧАЕМ ОТПРАВИТЕЛЯ, ЧТОБЫ ИЗБЕЖАТЬ ДУБЛЕЙ
-        // Отправитель уже добавил операцию оптимистично
         req.io.to(userId).except(socketId).emit(event, payload);
-        // console.log(`[Socket] Emit '${event}' to ${userId} (excluding ${socketId})`);
     } else {
-        // Если заголовка нет (например, старый клиент или другой источник), шлем всем
         req.io.to(userId).emit(event, payload);
-        // console.log(`[Socket] Emit '${event}' to ${userId} (broadcast all)`);
     }
 };
 
-// 🟢 HELPER: Emit to ALL (Includes Sender)
 const emitToAll = (req, userId, event, data) => {
     if (!req.io) return;
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
@@ -130,7 +111,6 @@ const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     name: String,
     avatarUrl: String,
-    // Хранение порядка виджетов
     dashboardLayout: { type: [String], default: [] }
 });
 const User = mongoose.model('User', userSchema);
@@ -150,8 +130,8 @@ const Account = mongoose.model('Account', accountSchema);
 const companySchema = new mongoose.Schema({ 
   name: String, 
   order: { type: Number, default: 0 },
-  taxRegime: { type: String, default: 'simplified' }, // 'simplified' (Упрощенка) | 'our' (ОУР)
-  taxPercent: { type: Number, default: 3 }, // По умолчанию 3%
+  taxRegime: { type: String, default: 'simplified' }, 
+  taxPercent: { type: Number, default: 3 }, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
 });
 const Company = mongoose.model('Company', companySchema);
@@ -195,7 +175,7 @@ const categorySchema = new mongoose.Schema({
   name: String,
   order: { type: Number, default: 0 }, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  type: { type: String, enum: ['income', 'expense'] }, // Добавлено для совместимости, если нужно
+  type: { type: String, enum: ['income', 'expense'] }, 
   color: String,
   icon: String
 });
@@ -213,7 +193,6 @@ const creditSchema = new mongoose.Schema({
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
   targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  // Доп поля для совместимости с v42 если нужно, но схема v41 самодостаточна
   rate: Number,
   term: Number,
   paymentType: { type: String, default: 'annuity' },
@@ -222,7 +201,7 @@ const creditSchema = new mongoose.Schema({
 const Credit = mongoose.model('Credit', creditSchema);
 
 const taxPaymentSchema = new mongoose.Schema({
-  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' }, // Optional in v42
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' }, 
   periodFrom: { type: Date },
   periodTo: { type: Date },
   amount: { type: Number, required: true },
@@ -231,7 +210,6 @@ const taxPaymentSchema = new mongoose.Schema({
   description: String,
   relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' }, 
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  // v42 fields compatibility
   taxType: String,
   period: String
 });
@@ -266,7 +244,7 @@ const eventSchema = new mongoose.Schema({
     
     isDealTranche: { type: Boolean, default: false },
     isWorkAct: { type: Boolean, default: false },
-    isPrepayment: { type: Boolean }, // 🟢 Added for explicit check
+    isPrepayment: { type: Boolean }, 
 
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
 
@@ -284,13 +262,16 @@ const eventSchema = new mongoose.Schema({
     dateKey: { type: String, index: true }, 
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     
-    // v42 fields
     excludeFromTotals: { type: Boolean, default: false },
     isSalary: { type: Boolean, default: false },
     relatedCreditId: String,
     relatedTaxId: String,
     createdAt: { type: Date, default: Date.now }
 });
+
+// 🟢 PERFORMANCE: Индекс для ускорения range-запросов ($gte, $lte)
+eventSchema.index({ userId: 1, date: 1 });
+
 const Event = mongoose.model('Event', eventSchema);
 
 
@@ -376,8 +357,6 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     const newEntity = new model(createData);
     await newEntity.save();
     
-    // We emit unknown here, but specific handlers below use emitToUser
-    
     cache[lowerName] = newEntity._id;
     return newEntity._id;
   } catch (err) { return null; }
@@ -459,23 +438,15 @@ app.put('/api/user/layout', isAuthenticated, async (req, res) => {
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
-        
-        // 🟢 FIX: Рассинхрон времени (Слепая зона).
-        // Если клиент передал свое локальное время (req.query.date),
-        // мы считаем баланс на конец ЭТОГО дня.
-        // Если нет - используем серверное время (что и вызывает баг, если сервер в прошлом).
         let now;
         if (req.query.date) {
             now = new Date(req.query.date);
-            if (isNaN(now.getTime())) now = new Date(); // Fallback
+            if (isNaN(now.getTime())) now = new Date(); 
         } else {
             now = new Date();
         }
         
-        // Устанавливаем конец этого дня (23:59:59.999)
         now.setHours(23, 59, 59, 999); 
-        
-        // console.log(`[Snapshot] Calculating balance up to: ${now.toISOString()} (Client date: ${req.query.date || 'Auto'})`);
         
         const retailInd = await Individual.findOne({ userId, name: { $regex: /^(розничные клиенты|розница)$/i } });
         const retailIdObj = retailInd ? retailInd._id : null;
@@ -572,7 +543,9 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
+        // 🟢 PERFORMANCE: .lean() used
         const events = await Event.find({ userId: userId })
+            .lean()
             .sort({ date: 1 })
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId'); 
         res.json(events);
@@ -582,6 +555,7 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
 app.get('/api/deals/all', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
+        // 🟢 PERFORMANCE: .lean() used
         const events = await Event.find({ 
             userId: userId,
             $or: [
@@ -590,6 +564,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
                 { isWorkAct: true } 
             ]
         })
+        .lean()
         .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -614,7 +589,9 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameter: dateKey, day, or startDate/endDate' }); 
         }
         
+        // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
         const events = await Event.find(query)
+            .lean()
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
             
@@ -628,14 +605,10 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
         let date, dateKey, dayOfYear;
         
         // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
-        // Это предотвращает сдвиг даты при пересечении 00:00 из-за UTC сервера
         if (data.date) { 
             date = new Date(data.date); 
-            
-            // Если клиент прислал dateKey - ВЕРИМ ЕМУ!
             if (data.dateKey) {
                 dateKey = data.dateKey;
-                // Пытаемся восстановить dayOfYear из ключа (YYYY-DOY)
                 const parts = dateKey.split('-');
                 if (parts.length === 2) {
                     dayOfYear = parseInt(parts[1], 10);
@@ -643,13 +616,11 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                     dayOfYear = _getDayOfYear(date);
                 }
             } else {
-                // Если нет ключа - считаем сами (как раньше)
                 dateKey = _getDateKey(date); 
                 dayOfYear = _getDayOfYear(date); 
             }
         } 
         else if (data.dateKey) { 
-            // Только если даты нет, восстанавливаем из ключа (это ставит 00:00)
             dateKey = data.dateKey; 
             date = _parseDateKey(dateKey); 
             dayOfYear = _getDayOfYear(date); 
@@ -682,7 +653,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                     if (credit) { 
                         credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0); 
                         await credit.save();
-                        // 🟢 FIX: Exclude sender
                         emitToUser(req, userId, 'credit_updated', credit);
                     } 
                     else {
@@ -692,7 +662,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
                         const newCredit = new Credit({ name, totalDebt: newEvent.amount, contractorId: contractorId || null, individualId: creditIndividualId || null, userId, projectId: newEvent.projectId, categoryId: newEvent.categoryId, targetAccountId: newEvent.accountId, date: date });
                         await newCredit.save();
                         
-                        // 🟢 FIX: Exclude sender
                         emitToUser(req, userId, 'credit_added', newCredit);
                     }
                 }
@@ -701,7 +670,6 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
         
-        // 🟢 FIX: Exclude sender
         emitToUser(req, userId, 'operation_added', newEvent);
 
         res.status(201).json(newEvent);
@@ -712,26 +680,19 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
   try {
     const { id } = req.params; const userId = req.user.id; const updatedData = { ...req.body }; 
     
-    // 🟢 FIX: PRIORITY TO EXACT DATE IN UPDATE!
     if (updatedData.date) {
         updatedData.date = new Date(updatedData.date);
-        
-        // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
         if (updatedData.dateKey) {
-            // Если клиент прислал dateKey, используем его, чтобы не пересчитывать в "вчера" из-за UTC
-            // (DayOfYear тоже обновляем, если можно)
             const parts = updatedData.dateKey.split('-');
             if (parts.length === 2) {
                 updatedData.dayOfYear = parseInt(parts[1], 10);
             }
         } else {
-             // Иначе пересчитываем (рискованно при 00:xx, но лучше чем ничего)
              updatedData.dateKey = _getDateKey(updatedData.date);
              updatedData.dayOfYear = _getDayOfYear(updatedData.date);
         }
     } 
     else if (updatedData.dateKey) { 
-        // Fallback to key only if date is missing
         updatedData.date = _parseDateKey(updatedData.dateKey); 
         updatedData.dayOfYear = _getDayOfYear(updatedData.date); 
     }
@@ -740,7 +701,6 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
     await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
     
-    // 🟢 FIX: Exclude sender
     emitToUser(req, userId, 'operation_updated', updatedEvent);
 
     res.status(200).json(updatedEvent);
@@ -783,9 +743,6 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
         }
     }
 
-    // 🔴 SMART DEAL DELETION FIX
-    // Only delete related events if they are PART OF THE DEAL structure
-    // (Budget > 0, Tranche, or Work Act). Ignore "Fact" incomes.
     if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
         const pId = eventToDelete.projectId;
         const cId = eventToDelete.categoryId;
@@ -799,16 +756,15 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
             contractorId: contrId,
             counterpartyIndividualId: indId,
             $or: [
-                { totalDealAmount: { $gt: 0 } }, // Deal starters/extensions
-                { isDealTranche: true },         // Tranches
-                { isWorkAct: true }              // Work Acts
+                { totalDealAmount: { $gt: 0 } }, 
+                { isDealTranche: true },         
+                { isWorkAct: true }              
             ]
         });
         
         const idsToDelete = dealOps.map(op => op._id);
         await Event.deleteMany({ _id: { $in: idsToDelete } });
         
-        // Emit for each deleted op in deal (Exclude sender for all)
         if (req.io) idsToDelete.forEach(delId => emitToUser(req, userId, 'operation_deleted', delId));
         
         return res.status(200).json({ message: 'Deal and related transactions deleted', deletedCount: idsToDelete.length });
@@ -849,7 +805,6 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
 
     await Event.deleteOne({ _id: id });
 
-    // 🟢 FIX: Exclude sender
     emitToUser(req, userId, 'operation_deleted', id);
     
     res.status(200).json(eventToDelete); 
@@ -858,7 +813,7 @@ app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
 
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
   const { 
-      amount, date, dateKey, // 🟢 Accept dateKey from client
+      amount, date, dateKey, 
       fromAccountId, toAccountId, 
       fromCompanyId, toCompanyId, 
       fromIndividualId, toIndividualId, 
@@ -869,7 +824,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
   const userId = req.user.id; 
   
-  // 🟢 HELPER: Safe ObjectID convert (prevents CastError on empty strings)
   const safeId = (val) => (val && val !== 'null' && val !== 'undefined' && val !== '') ? val : null;
 
   try {
@@ -878,8 +832,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         finalDate = new Date(date);
         if (isNaN(finalDate.getTime())) return res.status(400).json({ message: 'Invalid Date format' });
         
-        // 🟢 FIX: Use client provided dateKey if valid, otherwise recalculate
-        // This fixes the freeze issue where server calculates a different dateKey due to timezone differences
         if (dateKey && typeof dateKey === 'string' && dateKey.includes('-')) {
             finalDateKey = dateKey;
             const [y, d] = dateKey.split('-').map(Number);
@@ -905,7 +857,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         await withdrawalEvent.save();
         await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
         
-        // 🟢 FIX: Use emitToUser to exclude sender (Sender does Optimistic Update)
         emitToUser(req, userId, 'operation_added', withdrawalEvent);
         
         return res.status(201).json(withdrawalEvent); 
@@ -951,7 +902,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
         await expenseOp.populate(popFields); await incomeOp.populate(popFields);
         
-        // 🟢 FIX: Use emitToUser to exclude sender (Sender does Optimistic Update)
         emitToUser(req, userId, 'operation_added', expenseOp);
         emitToUser(req, userId, 'operation_added', incomeOp);
 
@@ -962,7 +912,6 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
     const desc = (transferPurpose === 'personal') ? 'Перевод на личную карту (Развитие бизнеса)' : 'Внутренний перевод';
     
-    // 🟢 FIX: Ensuring isTransfer is strictly true
     const transferEvent = new Event({
       type: 'transfer', amount: Math.abs(amount), 
       fromAccountId: safeId(fromAccountId), 
@@ -979,16 +928,14 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     
     await transferEvent.save();
     
-    // 🟢 FIX: Ensure population matches what frontend expects for 'richOp'
     await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
     
-    // 🟢 FIX: Use emitToUser to exclude sender (Sender does Optimistic Update)
     emitToUser(req, userId, 'operation_added', transferEvent);
 
     res.status(201).json(transferEvent); 
 
   } catch (err) { 
-      console.error('[SERVER ERROR] Transfer failed:', err); // 🟢 Explicit server logging
+      console.error('[SERVER ERROR] Transfer failed:', err); 
       res.status(400).json({ message: err.message }); 
   }
 });
@@ -1019,7 +966,6 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
     }
     if (createdOps.length > 0) { 
         const insertedDocs = await Event.insertMany(createdOps); 
-        // 🟢 Batch Emit: exclude sender to prevent heavy re-fetch on sender side
         emitToUser(req, userId, 'operations_imported', insertedDocs.length);
         res.status(201).json(insertedDocs); 
     } 
@@ -1027,9 +973,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
   } catch (err) { res.status(500).json({ message: 'Import error', details: err.message }); }
 });
 
-// 🟢 MODIFIED GENERATOR: Accepts emitEventName
 const generateCRUD = (model, path, emitEventName = null) => {
-    // 🟢 Define event base name from model if not provided
     if (!emitEventName) {
         if (model === Account) emitEventName = 'account';
         else if (model === Company) emitEventName = 'company';
@@ -1064,7 +1008,6 @@ const generateCRUD = (model, path, emitEventName = null) => {
             const newItem = new model(createData); 
             const savedItem = await newItem.save();
             
-            // 🟢 Emit with exclusion
             if (emitEventName) {
                  emitToUser(req, userId, emitEventName + '_added', savedItem);
             }
@@ -1075,7 +1018,6 @@ const generateCRUD = (model, path, emitEventName = null) => {
 };
 
 const generateBatchUpdate = (model, path, emitEventName = null) => {
-    // 🟢 Define event base name from model if not provided
     if (!emitEventName) {
         if (model === Account) emitEventName = 'account';
         else if (model === Company) emitEventName = 'company';
@@ -1100,7 +1042,6 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
       
       const updatedList = await query;
 
-      // 🟢 Emit generic update for list refresh (exclude sender)
       if (emitEventName) {
           emitToUser(req, userId, emitEventName + '_list_updated', updatedList);
       }
@@ -1111,7 +1052,6 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
 };
 
 const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName = null) => {
-     // 🟢 Define event base name
      if (!emitEventName) {
         if (model === Account) emitEventName = 'account';
         else if (model === Company) emitEventName = 'company';
@@ -1144,7 +1084,6 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
             await Event.deleteMany({ _id: { $in: idsToDelete } });
             deletedOpsCount = idsToDelete.length;
             opsDeleted = true;
-            // 🟢 Emit deletions for operations (Exclude sender)
             if (req.io) idsToDelete.forEach(opId => emitToUser(req, userId, 'operation_deleted', opId));
         }
 
@@ -1161,7 +1100,6 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
         else await Event.updateMany({ userId, [foreignKeyField]: id }, update);
       }
       
-      // 🟢 Emit entity deleted (Exclude sender)
       if (emitEventName) {
           emitToUser(req, userId, emitEventName + '_deleted', id);
       }
@@ -1179,7 +1117,6 @@ generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories'); 
 generateCRUD(Prepayment, 'prepayments'); 
 
-// 🟢 Credits and Taxes with Realtime Support
 generateCRUD(Credit, 'credits', 'credit'); 
 generateCRUD(TaxPayment, 'taxes', 'tax_payment'); 
 
@@ -1199,7 +1136,6 @@ generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId'); 
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
-// 🟢 Explicit PUT for Credit (to support single edit real-time)
 app.put('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
         const updated = await Credit.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, req.body, { new: true })
@@ -1210,7 +1146,6 @@ app.put('/api/credits/:id', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-// 🟢 Explicit DELETE for Taxes (with Emit)
 app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params;
@@ -1231,7 +1166,6 @@ app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
     }
 });
 
-// 🟢 Explicit DELETE for Credits (with Emit)
 app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params; const userId = req.user.id;
@@ -1242,7 +1176,7 @@ app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
             let opQuery = { userId, type: 'income', categoryId: creditCategory._id };
             if (credit.contractorId) { opQuery.contractorId = credit.contractorId; } 
             else if (credit.individualId) { opQuery.counterpartyIndividualId = credit.individualId; }
-            const ops = await Event.find(opQuery); // Find to emit delete
+            const ops = await Event.find(opQuery); 
             const idsToDelete = ops.map(o => o._id);
             await Event.deleteMany({ _id: { $in: idsToDelete } });
             
