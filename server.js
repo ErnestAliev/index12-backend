@@ -402,7 +402,30 @@ app.get('/auth/dev-login', async (req, res) => {
 
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }), (req, res) => { res.redirect(FRONTEND_URL); });
-app.get('/api/auth/me', (req, res) => { if (req.isAuthenticated()) { res.json(req.user); } else { res.status(401).json({ message: 'No user authenticated' }); } });
+app.get('/api/auth/me', async (req, res) => {
+    try {
+        if (!req.isAuthenticated()) {
+            return res.status(401).json({ message: 'No user authenticated' });
+        }
+
+        const userId = req.user.id;
+
+        // Earliest operation date for this user (used by frontend to cap “all-time” loads)
+        const firstEvent = await Event.findOne({ userId: userId })
+            .sort({ date: 1 })
+            .select('date')
+            .lean();
+
+        const baseUser = (req.user && typeof req.user.toJSON === 'function') ? req.user.toJSON() : req.user;
+
+        res.json({
+            ...baseUser,
+            minEventDate: firstEvent ? firstEvent.date : null
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
 app.post('/api/auth/logout', (req, res, next) => { 
     req.logout((err) => { 
         if (err) return next(err); 
