@@ -8,6 +8,7 @@ const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const path = require('path');
 const MongoStore = require('connect-mongo');
 const http = require('http'); // 🟢 Native Node.js HTTP module
+const https = require('https'); // 🟣 OpenAI API (HTTPS)
 const socketIo = require('socket.io'); // 🟢 Socket.io
 
 // 🟢 Загрузка .env
@@ -381,6 +382,241 @@ const findCategoryByName = async (name, userId) => {
 
 function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
+// =================================================================
+// 🟣 AI ASSISTANT (READ-ONLY) — MVP
+// =================================================================
+const AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+const _endOfToday = () => {
+    const d = new Date();
+    d.setHours(23, 59, 59, 999);
+    return d;
+};
+
+const _startOfDaysAgo = (days) => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    d.setDate(d.getDate() - (days - 1));
+    return d;
+};
+
+const _formatTenge = (n) => {
+    const num = Number(n || 0);
+    try {
+        return new Intl.NumberFormat('ru-RU').format(Math.round(num)) + ' ₸';
+    } catch (_) {
+        return String(Math.round(num)) + ' ₸';
+    }
+};
+
+const _isAiAllowed = (req) => {
+    try {
+        if (!req.user || !req.user.email) return false;
+        if ((process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true') return true;
+
+        const allowEmails = (process.env.AI_ALLOW_EMAILS || '')
+            .split(',')
+            .map(s => s.trim().toLowerCase())
+            .filter(Boolean);
+
+        // Dev convenience: allow on localhost by default
+        if (!allowEmails.length && (FRONTEND_URL || '').includes('localhost')) return true;
+
+        return allowEmails.includes(String(req.user.email).toLowerCase());
+    } catch (_) {
+        return false;
+    }
+};
+
+const _aggregateAccountBalances = async (userId, now) => {
+    const aggregationResult = await Event.aggregate([
+        { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $lte: now }, excludeFromTotals: { $ne: true } } },
+        {
+            $project: {
+                type: 1,
+                amount: 1,
+                isTransfer: 1,
+                accountId: 1,
+                fromAccountId: 1,
+                toAccountId: 1,
+                absAmount: { $abs: "$amount" },
+                isWorkAct: { $ifNull: ["$isWorkAct", false] }
+            }
+        },
+        {
+            $project: {
+                impacts: {
+                    $cond: {
+                        if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
+                        then: [
+                            { id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } },
+                            { id: "$toAccountId", val: "$absAmount" }
+                        ],
+                        else: {
+                            $cond: {
+                                if: { $and: ["$accountId", { $eq: ["$isWorkAct", false] }] },
+                                then: [
+                                    {
+                                        id: "$accountId",
+                                        val: {
+                                            $cond: [
+                                                { $eq: ["$type", "income"] },
+                                                "$absAmount",
+                                                { $multiply: ["$absAmount", -1] }
+                                            ]
+                                        }
+                                    }
+                                ],
+                                else: []
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        { $unwind: "$impacts" },
+        { $match: { "impacts.id": { $ne: null } } },
+        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } }
+    ]);
+
+    const map = {};
+    aggregationResult.forEach(item => { map[item._id.toString()] = item.total; });
+    return map;
+};
+
+const _topExpensesByCategory = async (userId, days = 30, limit = 10) => {
+    const now = _endOfToday();
+    const from = _startOfDaysAgo(days);
+
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                type: 'expense',
+                isTransfer: { $ne: true },
+                categoryId: { $ne: null }
+            }
+        },
+        { $project: { categoryId: 1, absAmount: { $abs: "$amount" } } },
+        { $group: { _id: "$categoryId", total: { $sum: "$absAmount" } } },
+        { $sort: { total: -1 } },
+        { $limit: limit }
+    ]);
+
+    const ids = rows.map(r => r._id).filter(Boolean);
+    const cats = await Category.find({ _id: { $in: ids }, userId }).select('name').lean();
+    const catMap = new Map(cats.map(c => [c._id.toString(), c.name]));
+
+    return rows.map(r => ({
+        categoryId: r._id,
+        categoryName: catMap.get(String(r._id)) || 'Без категории',
+        total: r.total
+    }));
+};
+
+const _periodTotals = async (userId, days = 30) => {
+    const now = _endOfToday();
+    const from = _startOfDaysAgo(days);
+
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: { $in: ['income', 'expense'] }
+            }
+        },
+        { $project: { type: 1, absAmount: { $abs: "$amount" } } },
+        {
+            $group: {
+                _id: "$type",
+                total: { $sum: "$absAmount" }
+            }
+        }
+    ]);
+
+    let income = 0;
+    let expense = 0;
+    rows.forEach(r => {
+        if (r._id === 'income') income = r.total;
+        if (r._id === 'expense') expense = r.total;
+    });
+    return { income, expense, net: income - expense, from, now };
+};
+
+const _upcomingOps = async (userId, daysAhead = 14, limit = 15) => {
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+
+    const to = new Date();
+    to.setHours(23, 59, 59, 999);
+    to.setDate(to.getDate() + daysAhead);
+
+    const ops = await Event.find({
+        userId,
+        date: { $gt: from, $lte: to },
+        excludeFromTotals: { $ne: true }
+    })
+    .sort({ date: 1 })
+    .limit(limit)
+    .select('date type amount description accountId companyId contractorId projectId categoryId isTransfer')
+    .populate('accountId companyId contractorId projectId categoryId')
+    .lean();
+
+    return ops;
+};
+
+const _openAiChat = async (messages, { temperature = 0.2, maxTokens = 220 } = {}) => {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error('OPENAI_API_KEY is missing');
+
+    const payload = JSON.stringify({
+        model: AI_MODEL,
+        messages,
+        temperature,
+        max_tokens: maxTokens
+    });
+
+    return new Promise((resolve, reject) => {
+        const req2 = https.request(
+            {
+                hostname: 'api.openai.com',
+                path: '/v1/chat/completions',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(payload),
+                    'Authorization': `Bearer ${apiKey}`
+                }
+            },
+            (resp) => {
+                let data = '';
+                resp.on('data', (chunk) => { data += chunk; });
+                resp.on('end', () => {
+                    try {
+                        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+                            return reject(new Error(`OpenAI HTTP ${resp.statusCode}: ${data}`));
+                        }
+                        const json = JSON.parse(data);
+                        const text = json?.choices?.[0]?.message?.content || '';
+                        resolve(text.trim());
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            }
+        );
+
+        req2.on('error', reject);
+        req2.write(payload);
+        req2.end();
+    });
+};
+
 // --- ROUTES ---
 app.get('/auth/dev-login', async (req, res) => {
     if (!FRONTEND_URL.includes('localhost')) { return res.status(403).send('Dev login is allowed only on localhost environment'); }
@@ -426,6 +662,7 @@ app.get('/api/auth/me', async (req, res) => {
         res.status(500).json({ message: err.message });
     }
 });
+
 app.post('/api/auth/logout', (req, res, next) => { 
     req.logout((err) => { 
         if (err) return next(err); 
@@ -435,6 +672,139 @@ app.post('/api/auth/logout', (req, res, next) => {
             res.status(200).json({ message: 'Logged out' }); 
         }); 
     }); 
+});
+
+// =================================================================
+// 🟣 AI QUERY (READ-ONLY)
+// Frontend expects: POST { message } -> { text }
+// =================================================================
+
+app.get('/api/ai/ping', (req, res) => {
+    res.json({
+        ok: true,
+        ts: new Date().toISOString(),
+        isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
+        email: req.user?.email || null
+    });
+});
+app.post('/api/ai/query', isAuthenticated, async (req, res) => {
+    try {
+        if (!_isAiAllowed(req)) {
+            return res.status(402).json({ message: 'AI not activated' });
+        }
+
+        const userId = req.user.id;
+        const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
+        const q = qRaw.trim();
+        if (!q) return res.status(400).json({ message: 'Empty message' });
+
+        const qLower = q.toLowerCase();
+
+        // ===== Deterministic answers for the main MVP queries (faster + more accurate) =====
+        if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
+            const now = _endOfToday();
+            const balancesDelta = await _aggregateAccountBalances(userId, now);
+            const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
+
+            let lines = ['Счета:'];
+            let total = 0;
+
+            accounts
+                .filter(a => !a.isExcluded)
+                .forEach(a => {
+                    const id = a._id.toString();
+                    const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
+                    total += bal;
+                    lines.push(`${a.name}: ${_formatTenge(bal)}`);
+                });
+
+            lines.push(`Итого: ${_formatTenge(total)}`);
+            return res.json({ text: lines.join('\n') });
+        }
+
+        if (qLower.includes('топ') && qLower.includes('расход')) {
+            const rows = await _topExpensesByCategory(userId, 30, 10);
+            if (!rows.length) return res.json({ text: 'За 30 дней расходов нет.' });
+
+            let lines = ['Топ расходов за 30 дней:'];
+            rows.forEach((r, idx) => {
+                lines.push(`${idx + 1}) ${r.categoryName}: ${_formatTenge(r.total)}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        if (qLower.includes('отчет') || qLower.includes('отчёт')) {
+            const p = await _periodTotals(userId, 30);
+            const lines = [
+                'Отчет за 30 дней:',
+                `Доход: ${_formatTenge(p.income)}`,
+                `Расход: ${_formatTenge(p.expense)}`,
+                `Итог: ${_formatTenge(p.net)}`
+            ];
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // ===== Fallback to OpenAI for arbitrary questions =====
+        const now = _endOfToday();
+        const balancesDelta = await _aggregateAccountBalances(userId, now);
+        const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
+
+        const accContext = accounts
+            .filter(a => !a.isExcluded)
+            .slice(0, 30)
+            .map(a => {
+                const id = a._id.toString();
+                const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
+                return { name: a.name, balance: Math.round(bal) };
+            });
+
+        const top30 = await _topExpensesByCategory(userId, 30, 10);
+        const totals30 = await _periodTotals(userId, 30);
+        const upcoming = await _upcomingOps(userId, 14, 12);
+
+        const context = {
+            asOf: now.toISOString(),
+            accounts: accContext,
+            totals30: { income: Math.round(totals30.income), expense: Math.round(totals30.expense), net: Math.round(totals30.net) },
+            topExpenses30: top30.map(r => ({ name: r.categoryName, total: Math.round(r.total) })),
+            upcoming: upcoming.map(op => ({
+                date: op.date,
+                type: op.type,
+                amount: Math.round(op.amount || 0),
+                account: op.accountId?.name || null,
+                company: op.companyId?.name || null,
+                contractor: op.contractorId?.name || null,
+                project: op.projectId?.name || null,
+                category: op.categoryId?.name || null,
+                description: op.description || null
+            }))
+        };
+
+        const system = [
+            'Ты — AI помощник INDEX12.',
+            'Доступ только read-only. Никаких действий/созданий операций не предлагай как выполненные.',
+            'Отвечай КОРОТКО, удобно для пересылки в WhatsApp.',
+            'Без процентов. Только абсолютные цифры.',
+            'Если данных недостаточно — прямо скажи, чего не хватает.'
+        ].join(' ');
+
+        const userMsg = [
+            `Вопрос пользователя: ${q}`,
+            'Контекст данных (JSON):',
+            JSON.stringify(context)
+        ].join('\n');
+
+        const answer = await _openAiChat([
+            { role: 'system', content: system },
+            { role: 'user', content: userMsg }
+        ], { temperature: 0.2, maxTokens: 220 });
+
+        return res.json({ text: answer || 'Ок.' });
+
+    } catch (err) {
+        console.error('[AI] Error:', err?.message || err);
+        return res.status(500).json({ message: 'AI error' });
+    }
 });
 
 // Сохранение порядка виджетов
