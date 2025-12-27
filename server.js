@@ -1397,6 +1397,7 @@ app.get('/api/ai/ping', (req, res) => {
     }
   });
 });
+
 app.post('/api/ai/query', isAuthenticated, async (req, res) => {
     try {
         if (!_isAiAllowed(req)) {
