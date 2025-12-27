@@ -400,13 +400,56 @@ const _startOfDaysAgo = (days) => {
     return d;
 };
 
-const _formatTenge = (n) => {
+const _fmtIntRu = (n) => {
     const num = Number(n || 0);
     try {
-        return new Intl.NumberFormat('ru-RU').format(Math.round(num)) + ' ₸';
+        // ru-RU часто возвращает NBSP (\u00A0) — для WhatsApp/копирования заменяем на обычный пробел
+        return new Intl.NumberFormat('ru-RU')
+            .format(Math.round(num))
+            .replace(/\u00A0/g, ' ');
     } catch (_) {
-        return String(Math.round(num)) + ' ₸';
+        return String(Math.round(num));
     }
+};
+
+const _formatTenge = (n) => {
+    const num = Number(n || 0);
+    const sign = num < 0 ? '- ' : '';
+    return sign + _fmtIntRu(Math.abs(num)) + ' ₸';
+};
+
+const _normalizeSpaces = (s) => String(s || '').replace(/\u00A0/g, ' ');
+
+// Подчищаем ответы AI: разделители тысяч + валюта в строках с денежным смыслом
+const _postFormatAiAnswer = (text) => {
+    const moneyKw = /(доход|расход|итог|итого|баланс|счет|сч[её]т|сч[её]та|оборот|сумма|долг|плат[её]ж|налог|перевод|вывод|кредит)/i;
+
+    return _normalizeSpaces(text)
+        .split('\n')
+        .map((line) => {
+            let s = _normalizeSpaces(line).trim();
+            if (!s) return '';
+
+            // Если строка про деньги — форматируем слитные большие числа (>= 4 цифр)
+            if (moneyKw.test(s) || /₸/.test(s)) {
+                s = s.replace(/(?<!\d)(-?\d{4,})(?!\d)/g, (m) => {
+                    const num = Number(m);
+                    if (!Number.isFinite(num)) return m;
+                    // только число (без ₸), чтобы не дублировать валюту
+                    const sign = num < 0 ? '-' : '';
+                    return sign + _fmtIntRu(Math.abs(num));
+                });
+
+                // Если есть цифры, но нет валюты — в конце строки добавим ₸ (страховка)
+                if (/\d/.test(s) && !/₸/.test(s)) {
+                    s = s + ' ₸';
+                }
+            }
+
+            return s;
+        })
+        .filter(Boolean)
+        .join('\n');
 };
 
 const _fmtDate = (d) => {
@@ -973,7 +1016,11 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             .map(a => {
                 const id = a._id.toString();
                 const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
-                return { name: a.name, balance: Math.round(bal) };
+                return {
+                    name: a.name,
+                    balance: Math.round(bal),
+                    balanceKZT: _formatTenge(bal)
+                };
             });
 
         const top30 = await _topExpensesByCategory(userId, 30, 10, now);
@@ -983,12 +1030,24 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const context = {
             asOf: now.toISOString(),
             accounts: accContext,
-            totals30: { income: Math.round(totals30.income), expense: Math.round(totals30.expense), net: Math.round(totals30.net) },
-            topExpenses30: top30.map(r => ({ name: r.categoryName, total: Math.round(r.total) })),
+            totals30: {
+                income: Math.round(totals30.income),
+                expense: Math.round(totals30.expense),
+                net: Math.round(totals30.net),
+                incomeKZT: _formatTenge(totals30.income),
+                expenseKZT: _formatTenge(totals30.expense),
+                netKZT: _formatTenge(totals30.net)
+            },
+            topExpenses30: top30.map(r => ({
+                name: r.categoryName,
+                total: Math.round(r.total),
+                totalKZT: _formatTenge(r.total)
+            })),
             upcoming: upcoming.map(op => ({
                 date: op.date,
                 type: op.type,
                 amount: Math.round(op.amount || 0),
+                amountKZT: _formatTenge(op.amount || 0),
                 account: op.accountId?.name || null,
                 company: op.companyId?.name || null,
                 contractor: op.contractorId?.name || null,
@@ -1003,8 +1062,10 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             'Доступ только read-only. Никаких действий/созданий операций не предлагай как выполненные.',
             'Отвечай КОРОТКО, удобно для пересылки в WhatsApp.',
             'Без процентов. Только абсолютные цифры.',
+            'Все денежные суммы всегда показывай в KZT строго в формате: 1 234 567 ₸ (пробелы между тысячами, знак ₸ обязателен).',
+            'Если используешь суммы — опирайся на контекст и по возможности используй поля *KZT (balanceKZT, amountKZT, incomeKZT и т.д.).',
             'Ответ максимум 8 строк. Без воды. Сначала цифры, потом 1 вывод/совет.',
-            'Если данных недостаточно — прямо скажи, чего не хватает.'
+            'Если данных недостаточно — прямо скажи, чего не хватает (период/счет/проект).' 
         ].join(' ');
 
         const userMsg = [
@@ -1021,16 +1082,18 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const maxLines = qLower.includes('подроб') ? 20 : 8;
         const cleaned = String(answer || '')
             .split('\n')
-            .map(s => s.trim())
+            .map(s => _normalizeSpaces(s).trim())
             .filter(Boolean)
             .slice(0, maxLines)
             .join('\n');
 
-        const hasDigits = /\d/.test(cleaned);
+        const finalText = _postFormatAiAnswer(cleaned);
+
+        const hasDigits = /\d/.test(finalText);
         if (!hasDigits) {
             return res.json({ text: 'Недостаточно данных в контексте (укажи период/счет/проект).' });
         }
-        return res.json({ text: cleaned || 'Ок.' });
+        return res.json({ text: finalText || 'Ок.' });
 
     } catch (err) {
         console.error('[AI] Error:', err?.message || err);
