@@ -386,7 +386,36 @@ function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return nex
 // 🟣 AI ASSISTANT (READ-ONLY) — MVP
 // =================================================================
 
+
 const AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+// If user explicitly asks for a certain amount: "топ 10", "покажи 15", "выведи 20 строк"
+// Returns a number or null (meaning: no limit, show everything).
+const _parseExplicitLimitFromQuery = (qLower) => {
+    const q = String(qLower || '');
+
+    // Prefer patterns like "топ 10" / "top 10"
+    let m = q.match(/\b(топ|top)\s*(\d{1,4})\b/i);
+    if (m && m[2]) {
+        const n = Number(m[2]);
+        if (Number.isFinite(n) && n > 0) return Math.min(5000, Math.floor(n));
+    }
+
+    // Generic: "покажи 20", "20 строк", "20 пунктов"
+    m = q.match(/\b(\d{1,4})\b\s*(стр(ок|оки|ока)?|строк|линии|строч|пункт(ов|а|ы)?|позиц(ий|ии|ия)?|items?)?/i);
+    if (m && m[1]) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n) && n > 0) return Math.min(5000, Math.floor(n));
+    }
+
+    return null;
+};
+
+const _maybeSlice = (arr, limit) => {
+    if (!Array.isArray(arr)) return [];
+    if (limit == null) return arr;
+    return arr.slice(0, limit);
+};
 
 const _isIndividualsQuery = (qLower) => {
     const q = String(qLower || '');
@@ -508,9 +537,9 @@ const _getAsOfFromReq = (req) => {
     return d;
 };
 
-const _topNetByField = async (userId, field, days, now, limit = 10) => {
+const _topNetByField = async (userId, field, days, now, limit = null) => {
     const from = _startOfDaysAgo(days);
-    const rows = await Event.aggregate([
+    const pipeline = [
         {
             $match: {
                 userId: new mongoose.Types.ObjectId(userId),
@@ -536,18 +565,20 @@ const _topNetByField = async (userId, field, days, now, limit = 10) => {
                 }
             }
         },
-        { $sort: { total: -1 } },
-        { $limit: limit }
-    ]);
+        { $sort: { total: -1 } }
+    ];
 
+    if (limit != null) pipeline.push({ $limit: limit });
+
+    const rows = await Event.aggregate(pipeline);
     return rows;
 };
 
-const _topAbsByField = async (userId, field, type, days, now, limit = 10) => {
+const _topAbsByField = async (userId, field, type, days, now, limit = null) => {
     const from = _startOfDaysAgo(days);
     const matchType = type === 'income' ? 'income' : 'expense';
 
-    const rows = await Event.aggregate([
+    const pipeline = [
         {
             $match: {
                 userId: new mongoose.Types.ObjectId(userId),
@@ -560,18 +591,20 @@ const _topAbsByField = async (userId, field, type, days, now, limit = 10) => {
         },
         { $project: { ref: `$${field}`, absAmount: { $abs: "$amount" } } },
         { $group: { _id: "$ref", total: { $sum: "$absAmount" } } },
-        { $sort: { total: -1 } },
-        { $limit: limit }
-    ]);
+        { $sort: { total: -1 } }
+    ];
 
+    if (limit != null) pipeline.push({ $limit: limit });
+
+    const rows = await Event.aggregate(pipeline);
     return { rows, from, now };
 };
 
 // === Individuals special aggregation (matches Individuals widget logic closer) ===
-const _topIndividualsNet = async (userId, days, now, retailIdObj = null, limit = 10) => {
+const _topIndividualsNet = async (userId, days, now, retailIdObj = null, limit = null) => {
     const from = _startOfDaysAgo(days);
 
-    const rows = await Event.aggregate([
+    const pipeline = [
         {
             $match: {
                 userId: new mongoose.Types.ObjectId(userId),
@@ -646,18 +679,20 @@ const _topIndividualsNet = async (userId, days, now, retailIdObj = null, limit =
         { $unwind: "$impacts" },
         { $match: { "impacts.id": { $ne: null } } },
         { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } },
-        { $sort: { total: -1 } },
-        { $limit: limit }
-    ]);
+        { $sort: { total: -1 } }
+    ];
 
+    if (limit != null) pipeline.push({ $limit: limit });
+
+    const rows = await Event.aggregate(pipeline);
     return { rows, from, now };
 };
 
-const _topIndividualsAbs = async (userId, type, days, now, retailIdObj = null, limit = 10) => {
+const _topIndividualsAbs = async (userId, type, days, now, retailIdObj = null, limit = null) => {
     const from = _startOfDaysAgo(days);
     const matchType = type === 'income' ? 'income' : 'expense';
 
-    const rows = await Event.aggregate([
+    const pipeline = [
         {
             $match: {
                 userId: new mongoose.Types.ObjectId(userId),
@@ -700,10 +735,12 @@ const _topIndividualsAbs = async (userId, type, days, now, retailIdObj = null, l
         { $unwind: "$refs" },
         { $match: { refs: { $ne: null } } },
         { $group: { _id: "$refs", total: { $sum: "$absAmount" } } },
-        { $sort: { total: -1 } },
-        { $limit: limit }
-    ]);
+        { $sort: { total: -1 } }
+    ];
 
+    if (limit != null) pipeline.push({ $limit: limit });
+
+    const rows = await Event.aggregate(pipeline);
     return { rows, from, now };
 };
 
@@ -782,11 +819,11 @@ const _aggregateAccountBalances = async (userId, now) => {
     return map;
 };
 
-const _topExpensesByCategory = async (userId, days = 30, limit = 10, nowOverride = null) => {
+const _topExpensesByCategory = async (userId, days = 30, limit = null, nowOverride = null) => {
     const now = nowOverride || _endOfToday();
     const from = _startOfDaysAgo(days);
 
-    const rows = await Event.aggregate([
+    const pipeline = [
         {
             $match: {
                 userId: new mongoose.Types.ObjectId(userId),
@@ -799,9 +836,12 @@ const _topExpensesByCategory = async (userId, days = 30, limit = 10, nowOverride
         },
         { $project: { categoryId: 1, absAmount: { $abs: "$amount" } } },
         { $group: { _id: "$categoryId", total: { $sum: "$absAmount" } } },
-        { $sort: { total: -1 } },
-        { $limit: limit }
-    ]);
+        { $sort: { total: -1 } }
+    ];
+
+    if (limit != null) pipeline.push({ $limit: limit });
+
+    const rows = await Event.aggregate(pipeline);
 
     const ids = rows.map(r => r._id).filter(Boolean);
     const cats = await Category.find({ _id: { $in: ids }, userId }).select('name').lean();
@@ -1000,6 +1040,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         if (!q) return res.status(400).json({ message: 'Empty message' });
 
         const qLower = q.toLowerCase();
+        const explicitLimit = _parseExplicitLimitFromQuery(qLower);
 
         const now = _getAsOfFromReq(req);
         const includeHidden = Boolean(req?.body?.includeHidden) || qLower.includes('включая скры') || qLower.includes('скрытые') || qLower.includes('все счета');
@@ -1042,14 +1083,12 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
                     });
                 }
 
-                const wantsFull = /\b(весь|все|полный)\b/i.test(qLower);
-                const maxShow = wantsFull ? 50 : 7;
-
+                const maxShow = explicitLimit; // null => show all
                 const lines = [`Физлица: ${people.length}`];
-                people.slice(0, maxShow).forEach((p, i) => {
+                _maybeSlice(people, maxShow).forEach((p, i) => {
                     lines.push(`${i + 1}) ${p.name || 'Без имени'}`);
                 });
-                if (people.length > maxShow) {
+                if (maxShow != null && people.length > maxShow) {
                     lines.push(`Еще: ${people.length - maxShow}`);
                 }
                 return res.json({ text: lines.join('\n') });
@@ -1063,13 +1102,13 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             let title;
 
             if (wantsExpense && !wantsIncome) {
-                rowsPack = await _topIndividualsAbs(userId, 'expense', days, now, retailIdObj, 10);
+                rowsPack = await _topIndividualsAbs(userId, 'expense', days, now, retailIdObj, explicitLimit);
                 title = `Физлица — расходы за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             } else if (wantsIncome && !wantsExpense) {
-                rowsPack = await _topIndividualsAbs(userId, 'income', days, now, retailIdObj, 10);
+                rowsPack = await _topIndividualsAbs(userId, 'income', days, now, retailIdObj, explicitLimit);
                 title = `Физлица — доход за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             } else {
-                rowsPack = await _topIndividualsNet(userId, days, now, retailIdObj, 10);
+                rowsPack = await _topIndividualsNet(userId, days, now, retailIdObj, explicitLimit);
                 title = `Физлица — итог за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             }
 
@@ -1082,7 +1121,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
             const lines = [title];
             const onlyOne = _wantsOnlyOne(qLower);
-            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
+            const showN = onlyOne ? 1 : explicitLimit;
+            _maybeSlice(rows, showN).forEach((r, i) => {
                 const name = map.get(String(r._id)) || 'Без физлица';
                 let val;
                 if (wantsExpense && !wantsIncome) val = _formatTenge(-Math.abs(r.total));
@@ -1118,7 +1158,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         if (qLower.includes('топ') && qLower.includes('расход')) {
             const days = _parseDaysFromQuery(qLower, 30);
-            const rows = await _topExpensesByCategory(userId, days, 10, now);
+            const rows = await _topExpensesByCategory(userId, days, explicitLimit, now);
             if (!rows.length) return res.json({ text: `За ${days} дней расходов нет.` });
 
             const from = _startOfDaysAgo(days);
@@ -1151,14 +1191,14 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             let title;
 
             if (wantsExpense && !wantsIncome) {
-                rowsPack = await _topAbsByField(userId, 'projectId', 'expense', days, now, 10);
+                rowsPack = await _topAbsByField(userId, 'projectId', 'expense', days, now, explicitLimit);
                 title = `Проекты — расходы за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             } else if (wantsIncome && !wantsExpense) {
-                rowsPack = await _topAbsByField(userId, 'projectId', 'income', days, now, 10);
+                rowsPack = await _topAbsByField(userId, 'projectId', 'income', days, now, explicitLimit);
                 title = `Проекты — доход за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             } else {
                 const from = _startOfDaysAgo(days);
-                const netRows = await _topNetByField(userId, 'projectId', days, now, 10);
+                const netRows = await _topNetByField(userId, 'projectId', days, now, explicitLimit);
                 rowsPack = { rows: netRows, from, now };
                 title = `Проекты — итог за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`;
             }
@@ -1172,7 +1212,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
             const lines = [title];
             const onlyOne = _wantsOnlyOne(qLower);
-            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
+            const showN = onlyOne ? 1 : explicitLimit;
+            _maybeSlice(rows, showN).forEach((r, i) => {
                 const name = map.get(String(r._id)) || 'Без проекта';
                 let val;
                 if (wantsExpense && !wantsIncome) val = _formatTenge(-Math.abs(r.total));
@@ -1196,9 +1237,9 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
                 if (!items.length) return res.json({ text: 'Контрагентов нет.' });
 
                 const lines = [`Контрагенты: ${items.length}`];
-                const maxShow = 7;
-                items.slice(0, maxShow).forEach((p, i) => lines.push(`${i + 1}) ${p.name}`));
-                if (items.length > maxShow) lines.push(`Еще: ${items.length - maxShow}`);
+                const maxShow = explicitLimit; // null => show all
+                _maybeSlice(items, maxShow).forEach((p, i) => lines.push(`${i + 1}) ${p.name}`));
+                if (maxShow != null && items.length > maxShow) lines.push(`Еще: ${items.length - maxShow}`);
                 return res.json({ text: lines.join('\n') });
             }
 
@@ -1206,7 +1247,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const from = _startOfDaysAgo(days);
             const onlyOne = _wantsOnlyOne(qLower);
 
-            const rows = await _topNetByField(userId, 'contractorId', days, now, 10);
+            const rows = await _topNetByField(userId, 'contractorId', days, now, explicitLimit);
             if (!rows.length) return res.json({ text: `Контрагентов за ${days} дней нет.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
@@ -1214,7 +1255,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
             const lines = [`Контрагенты за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
-            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
+            const showN = onlyOne ? 1 : explicitLimit;
+            _maybeSlice(rows, showN).forEach((r, i) => {
                 lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без контрагента'}: ${_formatTenge(r.total)}`);
             });
             return res.json({ text: lines.join('\n') });
@@ -1224,7 +1266,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         if (qLower.includes('категор')) {
             const days = _parseDaysFromQuery(qLower, 30);
             const from = _startOfDaysAgo(days);
-            const rows = await _topNetByField(userId, 'categoryId', days, now, 10);
+            const rows = await _topNetByField(userId, 'categoryId', days, now, explicitLimit);
             if (!rows.length) return res.json({ text: `Категорий за ${days} дней нет.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
@@ -1233,7 +1275,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
             const lines = [`Категории (нетто) за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
             const onlyOne = _wantsOnlyOne(qLower);
-            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
+            const showN = onlyOne ? 1 : explicitLimit;
+            _maybeSlice(rows, showN).forEach((r, i) => {
                 lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без категории'}: ${_formatTenge(r.total)}`);
             });
             return res.json({ text: lines.join('\n') });
