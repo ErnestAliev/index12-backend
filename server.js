@@ -863,6 +863,27 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
             const wantsIncome = /доход|выруч|поступ/i.test(qLower);
 
+            // If user asks for the directory/list of individuals (not analytics)
+            const wantsList = /\b(список|перечисл|покажи|все)\b/i.test(qLower) && !(/расход|доход|итог|топ|за\s*\d+/i.test(qLower));
+            if (wantsList) {
+                const people = await Individual.find({ userId })
+                    .select('name order')
+                    .sort({ order: 1, name: 1 })
+                    .lean();
+
+                if (!people.length) return res.json({ text: 'Физлиц нет.' });
+
+                const lines = [`Физлица: ${people.length}`];
+                const maxShow = 7; // keep WhatsApp short (<= 8 lines total)
+                people.slice(0, maxShow).forEach((p, i) => {
+                    lines.push(`${i + 1}) ${p.name}`);
+                });
+                if (people.length > maxShow) {
+                    lines.push(`Еще: ${people.length - maxShow}`);
+                }
+                return res.json({ text: lines.join('\n') });
+            }
+
             let rowsPack;
             let title;
 
