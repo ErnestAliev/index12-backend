@@ -387,7 +387,44 @@ function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return nex
 // =================================================================
 
 
+
 const AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+// =========================
+// KZ time helpers (Asia/Almaty ~ UTC+05:00)
+// Render чаще работает в UTC, поэтому «сегодня/конец дня» нужно считать вручную.
+// =========================
+const KZ_OFFSET_MS = 5 * 60 * 60 * 1000;
+
+const _kzStartOfDay = (d) => {
+    const t = new Date(d);
+    const shifted = new Date(t.getTime() + KZ_OFFSET_MS);
+    // ВАЖНО: используем UTC-сеттеры, чтобы не зависеть от TZ сервера
+    shifted.setUTCHours(0, 0, 0, 0);
+    return new Date(shifted.getTime() - KZ_OFFSET_MS);
+};
+
+const _kzEndOfDay = (d) => {
+    const start = _kzStartOfDay(d);
+    return new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+};
+
+const _kzDateFromYMD = (y, mIdx, day) => {
+    // Дата в KZ-полуночи, но как UTC-инстанс
+    return new Date(Date.UTC(y, mIdx, day, 0, 0, 0, 0) - KZ_OFFSET_MS);
+};
+
+const _fmtDateKZ = (d) => {
+    try {
+        const x = new Date(new Date(d).getTime() + KZ_OFFSET_MS);
+        const dd = String(x.getUTCDate()).padStart(2, '0');
+        const mm = String(x.getUTCMonth() + 1).padStart(2, '0');
+        const yy = String(x.getUTCFullYear() % 100).padStart(2, '0');
+        return `${dd}.${mm}.${yy}`;
+    } catch (_) {
+        return String(d);
+    }
+};
 
 // If user explicitly asks for a certain amount: "топ 10", "покажи 15", "выведи 20 строк"
 // Returns a number or null (meaning: no limit, show everything).
@@ -428,15 +465,14 @@ const _wantsOnlyOne = (qLower) => {
 };
 
 const _endOfToday = () => {
-    const d = new Date();
-    d.setHours(23, 59, 59, 999);
-    return d;
+    // «Сегодня» по Алматы, не по TZ сервера
+    return _kzEndOfDay(new Date());
 };
 
 const _startOfDaysAgo = (days) => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() - (days - 1));
+    const todayStart = _kzStartOfDay(new Date());
+    const d = new Date(todayStart);
+    d.setTime(d.getTime() - (Math.max(1, Number(days || 1)) - 1) * 24 * 60 * 60 * 1000);
     return d;
 };
 
@@ -508,27 +544,15 @@ const _postFormatAiAnswer = (text) => {
 };
 
 const _fmtDate = (d) => {
-    try {
-        return new Date(d).toLocaleDateString('ru-RU', {
-            day: '2-digit',
-            month: '2-digit',
-            year: '2-digit'
-        });
-    } catch (_) {
-        return String(d);
-    }
+    return _fmtDateKZ(d);
 };
 
 const _startOfDay = (d) => {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    return x;
+    return _kzStartOfDay(d);
 };
 
 const _endOfDay = (d) => {
-    const x = new Date(d);
-    x.setHours(23, 59, 59, 999);
-    return x;
+    return _kzEndOfDay(d);
 };
 
 const _parseRuDateFromText = (text, baseDate = null) => {
@@ -541,7 +565,7 @@ const _parseRuDateFromText = (text, baseDate = null) => {
         const mm = Number(m[2]);
         let yy = Number(m[3]);
         if (yy < 100) yy = 2000 + yy;
-        const d = new Date(yy, mm - 1, dd);
+        const d = _kzDateFromYMD(yy, mm - 1, dd);
         if (!Number.isNaN(d.getTime())) return d;
     }
 
@@ -551,7 +575,7 @@ const _parseRuDateFromText = (text, baseDate = null) => {
         const yy = Number(m[1]);
         const mm = Number(m[2]);
         const dd = Number(m[3]);
-        const d = new Date(yy, mm - 1, dd);
+        const d = _kzDateFromYMD(yy, mm - 1, dd);
         if (!Number.isNaN(d.getTime())) return d;
     }
 
@@ -586,11 +610,11 @@ const _parseRuDateFromText = (text, baseDate = null) => {
 
             // If query says "конец" / "до конца" - return last day of month
             if (/\bдо\s*конц\w*\b/i.test(s) || /\bконец\b/i.test(s)) {
-                return new Date(y, mo.idx + 1, 0);
+                return _kzDateFromYMD(y, mo.idx + 1, 0);
             }
 
             // Otherwise return first day of month
-            return new Date(y, mo.idx, 1);
+            return _kzDateFromYMD(y, mo.idx, 1);
         }
     }
 
@@ -684,13 +708,20 @@ const _resolveRangeFromQuery = async (userId, qLower, nowEndOfToday) => {
 };
 
 const _getAsOfFromReq = (req) => {
-    // Optional: frontend can pass body.asOf (ISO date). Default: end of today.
     const raw = req?.body?.asOf || req?.query?.asOf;
-    if (!raw) return _endOfToday();
+    const todayEnd = _endOfToday();
+
+    if (!raw) return todayEnd;
+
     const d = new Date(raw);
-    if (isNaN(d.getTime())) return _endOfToday();
-    d.setHours(23, 59, 59, 999);
-    return d;
+    if (isNaN(d.getTime())) return todayEnd;
+
+    // Если фронт случайно прислал asOf в будущем (например, 2026-01-01),
+    // то НЕ верим ему и считаем по сегодняшнему дню.
+    const tooFarFuture = d.getTime() > (todayEnd.getTime() + 48 * 60 * 60 * 1000);
+    if (tooFarFuture) return todayEnd;
+
+    return _kzEndOfDay(d);
 };
 
 const _topNetByField = async (userId, field, days, now, limit = null) => {
@@ -1064,6 +1095,103 @@ const _periodTotalsRange = async (userId, from, to) => {
         if (r._id === 'expense') expense = r.total;
     });
     return { income, expense, net: income - expense };
+};
+
+const _topNetByFieldRange = async (userId, field, from, to, limit = null) => {
+    const pipeline = [
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: to },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: { $in: ['income', 'expense'] },
+                [field]: { $ne: null }
+            }
+        },
+        { $project: { ref: `$${field}`, type: 1, absAmount: { $abs: "$amount" } } },
+        {
+            $group: {
+                _id: "$ref",
+                total: {
+                    $sum: {
+                        $cond: [
+                            { $eq: ["$type", "income"] },
+                            "$absAmount",
+                            { $multiply: ["$absAmount", -1] }
+                        ]
+                    }
+                }
+            }
+        },
+        { $sort: { total: -1 } }
+    ];
+    if (limit != null) pipeline.push({ $limit: limit });
+    return Event.aggregate(pipeline);
+};
+
+const _topAbsByFieldRange = async (userId, field, type, from, to, limit = null) => {
+    const matchType = type === 'income' ? 'income' : 'expense';
+    const pipeline = [
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: to },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: matchType,
+                [field]: { $ne: null }
+            }
+        },
+        { $project: { ref: `$${field}`, absAmount: { $abs: "$amount" } } },
+        { $group: { _id: "$ref", total: { $sum: "$absAmount" } } },
+        { $sort: { total: -1 } }
+    ];
+    if (limit != null) pipeline.push({ $limit: limit });
+    return Event.aggregate(pipeline);
+};
+
+// Налоги «накопительно» (как в виджете): доходы по компаниям * ставка компании
+const _calcTaxesAccumulativeRange = async (userId, from, to) => {
+    // 1) Доходы по компаниям
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: to },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: 'income',
+                companyId: { $ne: null }
+            }
+        },
+        { $project: { companyId: 1, absAmount: { $abs: '$amount' } } },
+        { $group: { _id: '$companyId', income: { $sum: '$absAmount' } } }
+    ]);
+
+    if (!rows.length) return { totalTax: 0, items: [] };
+
+    // 2) Ставки компаний
+    const ids = rows.map(r => r._id).filter(Boolean);
+    const companies = await Company.find({ _id: { $in: ids }, userId }).select('name taxPercent taxRegime').lean();
+    const map = new Map(companies.map(c => [c._id.toString(), c]));
+
+    const items = rows.map(r => {
+        const c = map.get(String(r._id));
+        const percent = Number(c?.taxPercent ?? 0);
+        const income = Number(r.income || 0);
+        const tax = income * (percent / 100);
+        return {
+            companyId: r._id,
+            companyName: c?.name || 'Компания',
+            percent,
+            income,
+            tax
+        };
+    }).sort((a, b) => b.tax - a.tax);
+
+    const totalTax = items.reduce((s, x) => s + Number(x.tax || 0), 0);
+    return { totalTax, items };
 };
 
 const _topExpensesByCategoryRange = async (userId, from, to, limit = null) => {
@@ -1766,28 +1894,25 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         // Projects
         if (qLower.includes('проект')) {
-            const days = _parseDaysFromQuery(qLower, 30);
+            // По умолчанию: всё накопительно до сегодня (range уже это делает)
             const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
             const wantsIncome = /доход|выруч|поступ/i.test(qLower);
 
-            let rowsPack;
+            let rows;
             let title;
 
             if (wantsExpense && !wantsIncome) {
-                rowsPack = await _topAbsByField(userId, 'projectId', 'expense', days, now, explicitLimit);
-                title = `Проекты — расходы за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
+                rows = await _topAbsByFieldRange(userId, 'projectId', 'expense', rangeFrom, rangeTo, explicitLimit);
+                title = `Проекты — расходы ${rangeLabel}:`;
             } else if (wantsIncome && !wantsExpense) {
-                rowsPack = await _topAbsByField(userId, 'projectId', 'income', days, now, explicitLimit);
-                title = `Проекты — доход за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
+                rows = await _topAbsByFieldRange(userId, 'projectId', 'income', rangeFrom, rangeTo, explicitLimit);
+                title = `Проекты — доход ${rangeLabel}:`;
             } else {
-                const from = _startOfDaysAgo(days);
-                const netRows = await _topNetByField(userId, 'projectId', days, now, explicitLimit);
-                rowsPack = { rows: netRows, from, now };
-                title = `Проекты — итог за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`;
+                rows = await _topNetByFieldRange(userId, 'projectId', rangeFrom, rangeTo, explicitLimit);
+                title = `Проекты — итог ${rangeLabel}:`;
             }
 
-            const rows = rowsPack.rows || [];
-            if (!rows.length) return res.json({ text: `Проектов за ${days} дней нет.` });
+            if (!rows.length) return res.json({ text: `По проектам данных нет ${rangeLabel}.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
             const items = await Project.find({ _id: { $in: ids }, userId }).select('name').lean();
@@ -1826,18 +1951,17 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
                 return res.json({ text: lines.join('\n') });
             }
 
-            const days = _parseDaysFromQuery(qLower, 30);
-            const from = _startOfDaysAgo(days);
+            // По умолчанию: всё накопительно до сегодня (range уже это делает)
             const onlyOne = _wantsOnlyOne(qLower);
 
-            const rows = await _topNetByField(userId, 'contractorId', days, now, explicitLimit);
-            if (!rows.length) return res.json({ text: `Контрагентов за ${days} дней нет.` });
+            const rows = await _topNetByFieldRange(userId, 'contractorId', rangeFrom, rangeTo, explicitLimit);
+            if (!rows.length) return res.json({ text: `Контрагентов ${rangeLabel} нет.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
             const items = await Contractor.find({ _id: { $in: ids }, userId }).select('name').lean();
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
-            const lines = [`Контрагенты за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            const lines = [`Контрагенты ${rangeLabel}:`];
             const showN = onlyOne ? 1 : explicitLimit;
             _maybeSlice(rows, showN).forEach((r, i) => {
                 lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без контрагента'}: ${_formatTenge(r.total)}`);
@@ -1847,16 +1971,15 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         // Categories (нетто)
         if (qLower.includes('категор')) {
-            const days = _parseDaysFromQuery(qLower, 30);
-            const from = _startOfDaysAgo(days);
-            const rows = await _topNetByField(userId, 'categoryId', days, now, explicitLimit);
-            if (!rows.length) return res.json({ text: `Категорий за ${days} дней нет.` });
+            // По умолчанию: всё накопительно до сегодня (range уже это делает)
+            const rows = await _topNetByFieldRange(userId, 'categoryId', rangeFrom, rangeTo, explicitLimit);
+            if (!rows.length) return res.json({ text: `Категорий ${rangeLabel} нет.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
             const items = await Category.find({ _id: { $in: ids }, userId }).select('name').lean();
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
-            const lines = [`Категории (нетто) за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            const lines = [`Категории (нетто) ${rangeLabel}:`];
             const onlyOne = _wantsOnlyOne(qLower);
             const showN = onlyOne ? 1 : explicitLimit;
             _maybeSlice(rows, showN).forEach((r, i) => {
@@ -1867,35 +1990,46 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         // Taxes
         if (qLower.includes('налог')) {
-            const days = _parseDaysFromQuery(qLower, 30);
-            const from = _startOfDaysAgo(days);
-            const pays = await TaxPayment.find({
-                userId,
-                date: { $gte: from, $lte: now }
-            })
-            .sort({ date: -1 })
-            .limit(10)
-            .populate('companyId')
-            .lean();
+            const wantsPayments = /плат(е|ё)ж|оплат|уплач|taxpayment|платежи/i.test(qLower);
 
-            const sum = pays.reduce((a, x) => a + Number(x.amount || 0), 0);
-            if (!pays.length) return res.json({ text: `Налогов за ${days} дней нет.` });
+            // 1) Если пользователь просит «платежи» — показываем реальные TaxPayment
+            if (wantsPayments) {
+                const pays = await TaxPayment.find({
+                    userId,
+                    date: { $gte: rangeFrom, $lte: rangeTo }
+                })
+                .sort({ date: -1 })
+                .limit(20)
+                .populate('companyId')
+                .lean();
 
-            const lines = [`Налоги за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}): ${_formatTenge(sum)}`];
-            pays.slice(0, 5).forEach((t, i) => {
-                const c = t.companyId?.name ? ` (${t.companyId.name})` : '';
-                lines.push(`${i + 1}) ${_fmtDate(t.date)}: ${_formatTenge(t.amount)}${c}`);
+                const sum = pays.reduce((a, x) => a + Number(x.amount || 0), 0);
+                if (!pays.length) return res.json({ text: `Налоговых платежей нет ${rangeLabel}.` });
+
+                const lines = [`Налоговые платежи ${rangeLabel}: ${_formatTenge(sum)}`];
+                pays.slice(0, 10).forEach((t, i) => {
+                    const c = t.companyId?.name ? ` (${t.companyId.name})` : '';
+                    lines.push(`${i + 1}) ${_fmtDate(t.date)}: ${_formatTenge(t.amount)}${c}`);
+                });
+                return res.json({ text: lines.join('\n') });
+            }
+
+            // 2) Иначе — «накопительно как в виджете»: доходы по компаниям * ставка
+            const calc = await _calcTaxesAccumulativeRange(userId, rangeFrom, rangeTo);
+            if (!calc.items.length) return res.json({ text: `Налогов (расчет) нет ${rangeLabel}.` });
+
+            const lines = [`Налоги (расчет) ${rangeLabel}: ${_formatTenge(calc.totalTax)}`];
+            calc.items.slice(0, 20).forEach((it, i) => {
+                lines.push(`${i + 1}) ${it.companyName}: ${_formatTenge(it.tax)} (ставка ${it.percent}%)`);
             });
             return res.json({ text: lines.join('\n') });
         }
 
         // Transfers
         if (qLower.includes('перевод')) {
-            const days = _parseDaysFromQuery(qLower, 30);
-            const from = _startOfDaysAgo(days);
             const trs = await Event.find({
                 userId,
-                date: { $gte: from, $lte: now },
+                date: { $gte: rangeFrom, $lte: rangeTo },
                 excludeFromTotals: { $ne: true },
                 $or: [{ isTransfer: true }, { type: 'transfer' }]
             })
@@ -1905,9 +2039,9 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             .lean();
 
             const turnover = trs.reduce((a, x) => a + Math.abs(Number(x.amount || 0)), 0);
-            if (!trs.length) return res.json({ text: `Переводов за ${days} дней нет.` });
+            if (!trs.length) return res.json({ text: `Переводов ${rangeLabel} нет.` });
 
-            const lines = [`Переводы за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}): ${trs.length} шт, оборот ${_formatTenge(turnover)}`];
+            const lines = [`Переводы ${rangeLabel}: ${trs.length} шт, оборот ${_formatTenge(turnover)}`];
             trs.slice(0, 4).forEach((t, i) => {
                 const fromA = t.fromAccountId?.name || '—';
                 const toA = t.toAccountId?.name || '—';
