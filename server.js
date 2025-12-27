@@ -1432,17 +1432,6 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const wantsFutureExplicit = /прогноз|будущ|ближайш|ожидаем|план|следующ|вперед|вперёд|после\s*сегодня/i.test(qLower);
         const useFuture = Boolean(wantsFutureExplicit || range?.scope === 'forecast' || (rangeTo && now && rangeTo.getTime() > now.getTime()));
 
-        const visibleAccountIdsRaw = Array.isArray(req?.body?.visibleAccountIds) ? req.body.visibleAccountIds : null;
-        const visibleAccountIds = (visibleAccountIdsRaw || [])
-          .map((id) => {
-            try { return new mongoose.Types.ObjectId(String(id)); } catch (e) { return null; }
-          })
-          .filter(Boolean);
-        const accountMatch = (!includeHidden && visibleAccountIds.length)
-          ? { accountId: { $in: visibleAccountIds } }
-          : {};
-
-
         // Не перехватываем запросы, где пользователь просит разрезы (по проектам/категориям/контрагентам/физлицам/счетам)
         const asksDimension = /проект|категор|контрагент|физ\W*лиц|индивид|счет|счёт|баланс/i.test(qLower);
 
@@ -1462,7 +1451,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const to = useFuture ? rangeTo : now;
 
             const rows = await Event.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, ...accountMatch, excludeFromTotals: { $ne: true }, isTransfer: { $ne: true }, type: 'income' } },
+                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, excludeFromTotals: { $ne: true }, isTransfer: { $ne: true }, type: 'income' } },
                 { $project: { absAmount: { $abs: '$amount' } } },
                 { $group: { _id: null, total: { $sum: '$absAmount' } } }
             ]);
@@ -1488,7 +1477,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const to = useFuture ? rangeTo : now;
 
             const rows = await Event.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, ...accountMatch, excludeFromTotals: { $ne: true }, isTransfer: { $ne: true }, type: 'expense' } },
+                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, excludeFromTotals: { $ne: true }, isTransfer: { $ne: true }, type: 'expense' } },
                 { $project: { absAmount: { $abs: '$amount' } } },
                 { $group: { _id: null, total: { $sum: '$absAmount' } } }
             ]);
@@ -1513,7 +1502,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const to = useFuture ? rangeTo : now;
 
             const rows = await Event.aggregate([
-                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, ...accountMatch, excludeFromTotals: { $ne: true }, $or: [{ isTransfer: true }, { type: 'transfer' }] } },
+                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, excludeFromTotals: { $ne: true }, $or: [{ isTransfer: true }, { type: 'transfer' }] } },
                 { $project: { absAmount: { $abs: '$amount' } } },
                 { $group: { _id: null, total: { $sum: '$absAmount' }, cnt: { $sum: 1 } } }
             ]);
