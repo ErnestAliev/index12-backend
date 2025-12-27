@@ -420,9 +420,15 @@ const _formatTenge = (n) => {
 
 const _normalizeSpaces = (s) => String(s || '').replace(/\u00A0/g, ' ');
 
-// Подчищаем ответы AI: разделители тысяч + валюта в строках с денежным смыслом
 const _postFormatAiAnswer = (text) => {
     const moneyKw = /(доход|расход|итог|итого|баланс|счет|сч[её]т|сч[её]та|оборот|сумма|долг|плат[её]ж|налог|перевод|вывод|кредит)/i;
+
+    // Даты нужно защищать от форматирования чисел (например, 2026 -> 2 026)
+    const dateRe = /\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g;          // 01.01.2026 / 01.01.26
+    const isoDateRe = /\b\d{4}-\d{2}-\d{2}\b/g;                     // 2026-01-01
+
+    // Похоже на сумму: либо 4+ цифры подряд, либо уже сгруппировано пробелами
+    const amountLikeRe = /(-?\d{4,}|-?\d{1,3}(?:[ \u00A0]\d{3})+)/;
 
     return _normalizeSpaces(text)
         .split('\n')
@@ -430,22 +436,31 @@ const _postFormatAiAnswer = (text) => {
             let s = _normalizeSpaces(line).trim();
             if (!s) return '';
 
-            // Если строка про деньги — форматируем слитные большие числа (>= 4 цифр)
+            // Защищаем даты в строке
+            const protectedDates = [];
+            const protect = (m) => {
+                const idx = protectedDates.push(m) - 1;
+                return `__DATE_${idx}__`;
+            };
+            s = s.replace(dateRe, protect).replace(isoDateRe, protect);
+
+            // Форматируем числа только в строках с денежным смыслом
             if (moneyKw.test(s) || /₸/.test(s)) {
                 s = s.replace(/(?<!\d)(-?\d{4,})(?!\d)/g, (m) => {
                     const num = Number(m);
                     if (!Number.isFinite(num)) return m;
-                    // только число (без ₸), чтобы не дублировать валюту
                     const sign = num < 0 ? '-' : '';
                     return sign + _fmtIntRu(Math.abs(num));
                 });
 
-                // Если есть цифры, но нет валюты — в конце строки добавим ₸ (страховка)
-                if (/\d/.test(s) && !/₸/.test(s)) {
+                // Добавляем валюту только если реально есть сумма (а не только даты/периоды)
+                if (amountLikeRe.test(s) && !/₸/.test(s)) {
                     s = s + ' ₸';
                 }
             }
 
+            // Возвращаем защищённые даты обратно
+            s = s.replace(/__DATE_(\d+)__/g, (_, i) => protectedDates[Number(i)] || _);
             return s;
         })
         .filter(Boolean)
@@ -454,7 +469,11 @@ const _postFormatAiAnswer = (text) => {
 
 const _fmtDate = (d) => {
     try {
-        return new Date(d).toLocaleDateString('ru-RU');
+        return new Date(d).toLocaleDateString('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+            year: '2-digit'
+        });
     } catch (_) {
         return String(d);
     }
