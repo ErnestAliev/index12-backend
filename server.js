@@ -1397,7 +1397,6 @@ app.get('/api/ai/ping', (req, res) => {
     }
   });
 });
-
 app.post('/api/ai/query', isAuthenticated, async (req, res) => {
     try {
         if (!_isAiAllowed(req)) {
@@ -1423,6 +1422,119 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const rangeTo = range.to;
         const rangeLabel = range.label;
         const includeHidden = Boolean(req?.body?.includeHidden) || qLower.includes('включая скры') || qLower.includes('скрытые') || qLower.includes('все счета');
+
+        // =========================
+        // ✅ GLOBAL RULE: “ПОКАЖИ <СУЩНОСТЬ>” = ФАКТ ДО asOf (сегодня пользователя)
+        // Будущее показываем ТОЛЬКО если явно просят:
+        // прогноз / будущие / ближайшие / план / вперед и т.д.
+        // =========================
+        const isShowVerb = /\b(покажи|показать|выведи|вывести|отобрази|сколько|сумм(а|у|ы)?|итог|итого|total|show)\b/i.test(qLower);
+        const wantsFutureExplicit = /прогноз|будущ|ближайш|ожидаем|план|следующ|вперед|вперёд|после\s*сегодня/i.test(qLower);
+        const useFuture = Boolean(wantsFutureExplicit || range?.scope === 'forecast' || (rangeTo && now && rangeTo.getTime() > now.getTime()));
+
+        const visibleAccountIdsRaw = Array.isArray(req?.body?.visibleAccountIds) ? req.body.visibleAccountIds : null;
+        const visibleAccountIds = (visibleAccountIdsRaw || [])
+          .map((id) => {
+            try { return new mongoose.Types.ObjectId(String(id)); } catch (e) { return null; }
+          })
+          .filter(Boolean);
+        const accountMatch = (!includeHidden && visibleAccountIds.length)
+          ? { accountId: { $in: visibleAccountIds } }
+          : {};
+
+
+        // Не перехватываем запросы, где пользователь просит разрезы (по проектам/категориям/контрагентам/физлицам/счетам)
+        const asksDimension = /проект|категор|контрагент|физ\W*лиц|индивид|счет|счёт|баланс/i.test(qLower);
+
+        const looksLikeIncome = /(доход|выруч|поступл|поступ)/i.test(qLower);
+        const looksLikeExpense = /(расход|тра(т|чу)|потрат|списан)/i.test(qLower);
+        const looksLikeTransfer = /(перевод|трансфер)/i.test(qLower);
+        const looksLikeTaxes = /налог/i.test(qLower);
+
+        const _tomorrowStartFrom = (d) => {
+            const s = _startOfDay(d);
+            return new Date(s.getTime() + 24 * 60 * 60 * 1000);
+        };
+
+        // ===== ДОХОДЫ (строго факт до today пользователя) =====
+        if ((isShowVerb || qLower.trim() === 'доходы' || qLower.trim() === 'доход') && looksLikeIncome && !asksDimension && !looksLikeExpense && !looksLikeTransfer && !looksLikeTaxes) {
+            const from = useFuture ? _tomorrowStartFrom(now) : rangeFrom;
+            const to = useFuture ? rangeTo : now;
+
+            const rows = await Event.aggregate([
+                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, ...accountMatch, excludeFromTotals: { $ne: true }, isTransfer: { $ne: true }, type: 'income' } },
+                { $project: { absAmount: { $abs: '$amount' } } },
+                { $group: { _id: null, total: { $sum: '$absAmount' } } }
+            ]);
+
+            const total = rows?.[0]?.total || 0;
+
+            // “ближайшие доходы” — список
+            if (/ближайш|следующ/i.test(qLower)) {
+                const ops = await _upcomingOps(userId, 60, 20);
+                const incomes = (Array.isArray(ops) ? ops : []).filter(x => x?.type === 'income' && !x?.isTransfer);
+                const lines = [`Ожидаемые доходы (ближайшие): ${_formatTenge(total)}`];
+                if (!incomes.length) lines.push('Нет ближайших доходов.');
+                else incomes.slice(0, 15).forEach(x => lines.push(`${_fmtDate(x?.date)}: ${_formatTenge(Math.abs(Number(x?.amount || 0)))}${x?.description ? ` (${x.description})` : ''}`));
+                return res.json({ text: lines.join('\n') });
+            }
+
+            return res.json({ text: `${useFuture ? 'Ожидаемые доходы' : 'Доходы'} (до ${_fmtDate(to)}): ${_formatTenge(total)}` });
+        }
+
+        // ===== РАСХОДЫ =====
+        if ((isShowVerb || qLower.trim() === 'расходы' || qLower.trim() === 'расход') && looksLikeExpense && !asksDimension && !looksLikeIncome && !looksLikeTransfer && !looksLikeTaxes) {
+            const from = useFuture ? _tomorrowStartFrom(now) : rangeFrom;
+            const to = useFuture ? rangeTo : now;
+
+            const rows = await Event.aggregate([
+                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, ...accountMatch, excludeFromTotals: { $ne: true }, isTransfer: { $ne: true }, type: 'expense' } },
+                { $project: { absAmount: { $abs: '$amount' } } },
+                { $group: { _id: null, total: { $sum: '$absAmount' } } }
+            ]);
+
+            const total = rows?.[0]?.total || 0;
+
+            if (/ближайш|следующ/i.test(qLower)) {
+                const ops = await _upcomingOps(userId, 60, 20);
+                const expenses = (Array.isArray(ops) ? ops : []).filter(x => x?.type === 'expense' && !x?.isTransfer);
+                const lines = [`Ожидаемые расходы (ближайшие): ${_formatTenge(total)}`];
+                if (!expenses.length) lines.push('Нет ближайших расходов.');
+                else expenses.slice(0, 15).forEach(x => lines.push(`${_fmtDate(x?.date)}: ${_formatTenge(-Math.abs(Number(x?.amount || 0)))}${x?.description ? ` (${x.description})` : ''}`));
+                return res.json({ text: lines.join('\n') });
+            }
+
+            return res.json({ text: `${useFuture ? 'Ожидаемые расходы' : 'Расходы'} (до ${_fmtDate(to)}): ${_formatTenge(-Math.abs(total))}` });
+        }
+
+        // ===== ПЕРЕВОДЫ =====
+        if ((isShowVerb || qLower.trim() === 'переводы' || qLower.trim() === 'перевод') && looksLikeTransfer && !asksDimension && !looksLikeIncome && !looksLikeExpense && !looksLikeTaxes) {
+            const from = useFuture ? _tomorrowStartFrom(now) : rangeFrom;
+            const to = useFuture ? rangeTo : now;
+
+            const rows = await Event.aggregate([
+                { $match: { userId: new mongoose.Types.ObjectId(userId), date: { $gte: from, $lte: to }, ...accountMatch, excludeFromTotals: { $ne: true }, $or: [{ isTransfer: true }, { type: 'transfer' }] } },
+                { $project: { absAmount: { $abs: '$amount' } } },
+                { $group: { _id: null, total: { $sum: '$absAmount' }, cnt: { $sum: 1 } } }
+            ]);
+
+            const total = rows?.[0]?.total || 0;
+            const cnt = rows?.[0]?.cnt || 0;
+
+            return res.json({ text: `${useFuture ? 'Переводы (будущие)' : 'Переводы (факт)'} (до ${_fmtDate(to)}): ${_formatTenge(total)}\nКол-во: ${cnt}` });
+        }
+
+        // ===== НАЛОГИ (накопительно как в виджете) =====
+        if ((isShowVerb || qLower.trim() === 'налоги' || qLower.trim() === 'налог') && looksLikeTaxes && !asksDimension && !looksLikeIncome && !looksLikeExpense && !looksLikeTransfer) {
+            const from = useFuture ? _tomorrowStartFrom(now) : rangeFrom;
+            const to = useFuture ? rangeTo : now;
+
+            const pack = await _calcTaxesAccumulativeRange(userId, from, to);
+            const lines = [`Налоги (накопительно) (до ${_fmtDate(to)}): ${_formatTenge(pack.totalTax)}`];
+            (pack.items || []).slice(0, 10).forEach(it => lines.push(`${it.companyName}: ${_formatTenge(it.tax)} (доход ${_formatTenge(it.income)}; ставка ${it.percent})`));
+            return res.json({ text: lines.join('\n') });
+        }
+
 
         // =========================
         // 🟢 Preferred: use UI-provided aiContext (built from mainStore) to keep AI answers 1:1 with widgets.
