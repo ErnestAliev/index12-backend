@@ -409,6 +409,67 @@ const _formatTenge = (n) => {
     }
 };
 
+const _fmtDate = (d) => {
+    try {
+        return new Date(d).toLocaleDateString('ru-RU');
+    } catch (_) {
+        return String(d);
+    }
+};
+
+const _parseDaysFromQuery = (qLower, fallback = 30) => {
+    // Examples: "за 7 дней", "отчет 14", "топ расходов за 30"
+    const m = String(qLower || '').match(/\b(\d{1,3})\b\s*(дн(ей|я)?|day|days)?/i);
+    const n = m ? Number(m[1]) : NaN;
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.max(1, Math.min(365, Math.floor(n)));
+};
+
+const _getAsOfFromReq = (req) => {
+    // Optional: frontend can pass body.asOf (ISO date). Default: end of today.
+    const raw = req?.body?.asOf || req?.query?.asOf;
+    if (!raw) return _endOfToday();
+    const d = new Date(raw);
+    if (isNaN(d.getTime())) return _endOfToday();
+    d.setHours(23, 59, 59, 999);
+    return d;
+};
+
+const _topNetByField = async (userId, field, days, now, limit = 10) => {
+    const from = _startOfDaysAgo(days);
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: { $in: ['income', 'expense'] },
+                [field]: { $ne: null }
+            }
+        },
+        { $project: { ref: `$${field}`, type: 1, absAmount: { $abs: "$amount" } } },
+        {
+            $group: {
+                _id: "$ref",
+                total: {
+                    $sum: {
+                        $cond: [
+                            { $eq: ["$type", "income"] },
+                            "$absAmount",
+                            { $multiply: ["$absAmount", -1] }
+                        ]
+                    }
+                }
+            }
+        },
+        { $sort: { total: -1 } },
+        { $limit: limit }
+    ]);
+
+    return rows;
+};
+
 const _isAiAllowed = (req) => {
     try {
         if (!req.user || !req.user.email) return false;
@@ -484,8 +545,8 @@ const _aggregateAccountBalances = async (userId, now) => {
     return map;
 };
 
-const _topExpensesByCategory = async (userId, days = 30, limit = 10) => {
-    const now = _endOfToday();
+const _topExpensesByCategory = async (userId, days = 30, limit = 10, nowOverride = null) => {
+    const now = nowOverride || _endOfToday();
     const from = _startOfDaysAgo(days);
 
     const rows = await Event.aggregate([
@@ -516,8 +577,8 @@ const _topExpensesByCategory = async (userId, days = 30, limit = 10) => {
     }));
 };
 
-const _periodTotals = async (userId, days = 30) => {
-    const now = _endOfToday();
+const _periodTotals = async (userId, days = 30, nowOverride = null) => {
+    const now = nowOverride || _endOfToday();
     const from = _startOfDaysAgo(days);
 
     const rows = await Event.aggregate([
@@ -700,17 +761,21 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         const qLower = q.toLowerCase();
 
+        const now = _getAsOfFromReq(req);
+        const includeHidden = Boolean(req?.body?.includeHidden) || qLower.includes('включая скры') || qLower.includes('скрытые') || qLower.includes('все счета');
+
         // ===== Deterministic answers for the main MVP queries (faster + more accurate) =====
         if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
-            const now = _endOfToday();
             const balancesDelta = await _aggregateAccountBalances(userId, now);
             const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
 
             let lines = ['Счета:'];
+            lines.push(`Дата: ${_fmtDate(now)}`);
+            lines.push(`Скрытые счета: ${includeHidden ? 'да' : 'нет'}`);
             let total = 0;
 
             accounts
-                .filter(a => !a.isExcluded)
+                .filter(a => includeHidden ? true : !a.isExcluded)
                 .forEach(a => {
                     const id = a._id.toString();
                     const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
@@ -723,10 +788,12 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         }
 
         if (qLower.includes('топ') && qLower.includes('расход')) {
-            const rows = await _topExpensesByCategory(userId, 30, 10);
-            if (!rows.length) return res.json({ text: 'За 30 дней расходов нет.' });
+            const days = _parseDaysFromQuery(qLower, 30);
+            const rows = await _topExpensesByCategory(userId, days, 10, now);
+            if (!rows.length) return res.json({ text: `За ${days} дней расходов нет.` });
 
-            let lines = ['Топ расходов за 30 дней:'];
+            const from = _startOfDaysAgo(days);
+            let lines = [`Топ расходов за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
             rows.forEach((r, idx) => {
                 lines.push(`${idx + 1}) ${r.categoryName}: ${_formatTenge(r.total)}`);
             });
@@ -734,9 +801,10 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         }
 
         if (qLower.includes('отчет') || qLower.includes('отчёт')) {
-            const p = await _periodTotals(userId, 30);
+            const days = _parseDaysFromQuery(qLower, 30);
+            const p = await _periodTotals(userId, days, now);
             const lines = [
-                'Отчет за 30 дней:',
+                `Отчет за ${days} дней (${_fmtDate(p.from)}–${_fmtDate(p.now)}):`,
                 `Доход: ${_formatTenge(p.income)}`,
                 `Расход: ${_formatTenge(p.expense)}`,
                 `Итог: ${_formatTenge(p.net)}`
@@ -744,8 +812,158 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             return res.json({ text: lines.join('\n') });
         }
 
+        // Projects
+        if (qLower.includes('проект')) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const rows = await _topNetByField(userId, 'projectId', days, now, 10);
+            if (!rows.length) return res.json({ text: `Проектов за ${days} дней нет.` });
+
+            const ids = rows.map(r => r._id).filter(Boolean);
+            const items = await Project.find({ _id: { $in: ids }, userId }).select('name').lean();
+            const map = new Map(items.map(x => [x._id.toString(), x.name]));
+
+            const lines = [`Проекты за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            rows.slice(0, 7).forEach((r, i) => {
+                lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без проекта'}: ${_formatTenge(r.total)}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // Contractors (Контрагенты)
+        if (qLower.includes('контрагент')) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const rows = await _topNetByField(userId, 'contractorId', days, now, 10);
+            if (!rows.length) return res.json({ text: `Контрагентов за ${days} дней нет.` });
+
+            const ids = rows.map(r => r._id).filter(Boolean);
+            const items = await Contractor.find({ _id: { $in: ids }, userId }).select('name').lean();
+            const map = new Map(items.map(x => [x._id.toString(), x.name]));
+
+            const lines = [`Контрагенты за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            rows.slice(0, 7).forEach((r, i) => {
+                lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без контрагента'}: ${_formatTenge(r.total)}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // Categories (нетто)
+        if (qLower.includes('категор')) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const rows = await _topNetByField(userId, 'categoryId', days, now, 10);
+            if (!rows.length) return res.json({ text: `Категорий за ${days} дней нет.` });
+
+            const ids = rows.map(r => r._id).filter(Boolean);
+            const items = await Category.find({ _id: { $in: ids }, userId }).select('name').lean();
+            const map = new Map(items.map(x => [x._id.toString(), x.name]));
+
+            const lines = [`Категории (нетто) за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            rows.slice(0, 7).forEach((r, i) => {
+                lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без категории'}: ${_formatTenge(r.total)}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // Taxes
+        if (qLower.includes('налог')) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const pays = await TaxPayment.find({
+                userId,
+                date: { $gte: from, $lte: now }
+            })
+            .sort({ date: -1 })
+            .limit(10)
+            .populate('companyId')
+            .lean();
+
+            const sum = pays.reduce((a, x) => a + Number(x.amount || 0), 0);
+            if (!pays.length) return res.json({ text: `Налогов за ${days} дней нет.` });
+
+            const lines = [`Налоги за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}): ${_formatTenge(sum)}`];
+            pays.slice(0, 5).forEach((t, i) => {
+                const c = t.companyId?.name ? ` (${t.companyId.name})` : '';
+                lines.push(`${i + 1}) ${_fmtDate(t.date)}: ${_formatTenge(t.amount)}${c}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // Transfers
+        if (qLower.includes('перевод')) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const trs = await Event.find({
+                userId,
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                $or: [{ isTransfer: true }, { type: 'transfer' }]
+            })
+            .sort({ date: -1 })
+            .limit(12)
+            .populate('fromAccountId toAccountId')
+            .lean();
+
+            const turnover = trs.reduce((a, x) => a + Math.abs(Number(x.amount || 0)), 0);
+            if (!trs.length) return res.json({ text: `Переводов за ${days} дней нет.` });
+
+            const lines = [`Переводы за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}): ${trs.length} шт, оборот ${_formatTenge(turnover)}`];
+            trs.slice(0, 4).forEach((t, i) => {
+                const fromA = t.fromAccountId?.name || '—';
+                const toA = t.toAccountId?.name || '—';
+                lines.push(`${i + 1}) ${_fmtDate(t.date)}: ${_formatTenge(t.amount)} (${fromA}→${toA})`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // Withdrawals
+        if (qLower.includes('вывод')) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const ws = await Event.find({
+                userId,
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                isWithdrawal: true
+            })
+            .sort({ date: -1 })
+            .limit(12)
+            .populate('accountId')
+            .lean();
+
+            const sum = ws.reduce((a, x) => a + Math.abs(Number(x.amount || 0)), 0);
+            if (!ws.length) return res.json({ text: `Выводов за ${days} дней нет.` });
+
+            const lines = [`Выводы за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}): ${ws.length} шт, сумма ${_formatTenge(sum)}`];
+            ws.slice(0, 4).forEach((t, i) => {
+                const acc = t.accountId?.name ? ` (${t.accountId.name})` : '';
+                lines.push(`${i + 1}) ${_fmtDate(t.date)}: ${_formatTenge(t.amount)}${acc}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
+        // Credits
+        if (qLower.includes('кредит')) {
+            const credits = await Credit.find({ userId, isRepaid: { $ne: true } })
+                .sort({ date: -1 })
+                .limit(12)
+                .select('name totalDebt monthlyPayment paymentDay')
+                .lean();
+
+            if (!credits.length) return res.json({ text: 'Открытых кредитов нет.' });
+
+            const totalDebt = credits.reduce((a, x) => a + Number(x.totalDebt || 0), 0);
+            const lines = [`Кредиты (открытые): ${credits.length} шт, долг ${_formatTenge(totalDebt)}`];
+            credits.slice(0, 6).forEach((c, i) => {
+                const mp = c.monthlyPayment ? `, платёж ${_formatTenge(c.monthlyPayment)}` : '';
+                const pd = c.paymentDay ? `, день ${c.paymentDay}` : '';
+                lines.push(`${i + 1}) ${c.name}: ${_formatTenge(c.totalDebt)}${mp}${pd}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
         // ===== Fallback to OpenAI for arbitrary questions =====
-        const now = _endOfToday();
         const balancesDelta = await _aggregateAccountBalances(userId, now);
         const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
 
@@ -758,8 +976,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
                 return { name: a.name, balance: Math.round(bal) };
             });
 
-        const top30 = await _topExpensesByCategory(userId, 30, 10);
-        const totals30 = await _periodTotals(userId, 30);
+        const top30 = await _topExpensesByCategory(userId, 30, 10, now);
+        const totals30 = await _periodTotals(userId, 30, now);
         const upcoming = await _upcomingOps(userId, 14, 12);
 
         const context = {
@@ -785,6 +1003,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             'Доступ только read-only. Никаких действий/созданий операций не предлагай как выполненные.',
             'Отвечай КОРОТКО, удобно для пересылки в WhatsApp.',
             'Без процентов. Только абсолютные цифры.',
+            'Ответ максимум 8 строк. Без воды. Сначала цифры, потом 1 вывод/совет.',
             'Если данных недостаточно — прямо скажи, чего не хватает.'
         ].join(' ');
 
@@ -799,7 +1018,19 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             { role: 'user', content: userMsg }
         ], { temperature: 0.2, maxTokens: 220 });
 
-        return res.json({ text: answer || 'Ок.' });
+        const maxLines = qLower.includes('подроб') ? 20 : 8;
+        const cleaned = String(answer || '')
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean)
+            .slice(0, maxLines)
+            .join('\n');
+
+        const hasDigits = /\d/.test(cleaned);
+        if (!hasDigits) {
+            return res.json({ text: 'Недостаточно данных в контексте (укажи период/счет/проект).' });
+        }
+        return res.json({ text: cleaned || 'Ок.' });
 
     } catch (err) {
         console.error('[AI] Error:', err?.message || err);
