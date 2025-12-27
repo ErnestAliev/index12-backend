@@ -519,12 +519,168 @@ const _fmtDate = (d) => {
     }
 };
 
-const _parseDaysFromQuery = (qLower, fallback = 30) => {
-    // Examples: "за 7 дней", "отчет 14", "топ расходов за 30"
-    const m = String(qLower || '').match(/\b(\d{1,3})\b\s*(дн(ей|я)?|day|days)?/i);
+const _startOfDay = (d) => {
+    const x = new Date(d);
+    x.setHours(0, 0, 0, 0);
+    return x;
+};
+
+const _endOfDay = (d) => {
+    const x = new Date(d);
+    x.setHours(23, 59, 59, 999);
+    return x;
+};
+
+const _parseRuDateFromText = (text, baseDate = null) => {
+    const s = String(text || '');
+
+    // dd.mm.yy(yy)
+    let m = s.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
+    if (m) {
+        const dd = Number(m[1]);
+        const mm = Number(m[2]);
+        let yy = Number(m[3]);
+        if (yy < 100) yy = 2000 + yy;
+        const d = new Date(yy, mm - 1, dd);
+        if (!Number.isNaN(d.getTime())) return d;
+    }
+
+    // yyyy-mm-dd
+    m = s.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+    if (m) {
+        const yy = Number(m[1]);
+        const mm = Number(m[2]);
+        const dd = Number(m[3]);
+        const d = new Date(yy, mm - 1, dd);
+        if (!Number.isNaN(d.getTime())) return d;
+    }
+
+    // Month names (with optional year)
+    const months = [
+        { re: /\bянвар\w*\b/i, idx: 0 },
+        { re: /\bфеврал\w*\b/i, idx: 1 },
+        { re: /\bмарт\w*\b/i, idx: 2 },
+        { re: /\bапрел\w*\b/i, idx: 3 },
+        { re: /\bма[йя]\w*\b/i, idx: 4 },
+        { re: /\bиюн\w*\b/i, idx: 5 },
+        { re: /\bиюл\w*\b/i, idx: 6 },
+        { re: /\bавгуст\w*\b/i, idx: 7 },
+        { re: /\bсентябр\w*\b/i, idx: 8 },
+        { re: /\bоктябр\w*\b/i, idx: 9 },
+        { re: /\bноябр\w*\b/i, idx: 10 },
+        { re: /\bдекабр\w*\b/i, idx: 11 }
+    ];
+
+    const base = baseDate ? new Date(baseDate) : new Date();
+
+    // If user types just "февраль" or "до конца февраля" - we can create an anchor date.
+    for (const mo of months) {
+        if (mo.re.test(s)) {
+            // year from query, else base year
+            let y = base.getFullYear();
+            const yM = s.match(/\b(20\d{2}|\d{2})\b/);
+            if (yM) {
+                y = Number(yM[1]);
+                if (y < 100) y = 2000 + y;
+            }
+
+            // If query says "конец" / "до конца" - return last day of month
+            if (/\bдо\s*конц\w*\b/i.test(s) || /\bконец\b/i.test(s)) {
+                return new Date(y, mo.idx + 1, 0);
+            }
+
+            // Otherwise return first day of month
+            return new Date(y, mo.idx, 1);
+        }
+    }
+
+    return null;
+};
+
+// If user explicitly asks: "за 7 дней", "отчет 14", "топ расходов за 30"
+// Returns number or null (meaning: user did NOT ask for day-window)
+const _parseDaysFromQuery = (qLower, fallback = null) => {
+    const m = String(qLower || '').match(/\b(\d{1,4})\b\s*(дн(ей|я)?|day|days)?/i);
     const n = m ? Number(m[1]) : NaN;
     if (!Number.isFinite(n) || n <= 0) return fallback;
-    return Math.max(1, Math.min(365, Math.floor(n)));
+    return Math.max(1, Math.min(3650, Math.floor(n)));
+};
+
+const _getUserMinEventDate = async (userId) => {
+    const first = await Event.findOne({ userId: userId })
+        .sort({ date: 1 })
+        .select('date')
+        .lean();
+    return first?.date ? _startOfDay(first.date) : _startOfDay(new Date());
+};
+
+const _getUserMaxEventDate = async (userId) => {
+    const last = await Event.findOne({ userId: userId })
+        .sort({ date: -1 })
+        .select('date')
+        .lean();
+    return last?.date ? _endOfDay(last.date) : _endOfDay(new Date());
+};
+
+const _resolveRangeFromQuery = async (userId, qLower, nowEndOfToday) => {
+    const q = String(qLower || '');
+
+    const todayStart = _startOfDay(nowEndOfToday);
+    const tomorrowStart = _startOfDay(new Date(todayStart.getTime() + 24 * 60 * 60 * 1000));
+
+    const wantsFuture = /прогноз|будущ|вперед|вперёд|план/i.test(q);
+
+    // explicit "с ... по ..."
+    const between = q.match(/\bс\s+(.+?)\s+по\s+(.+?)\b/i);
+    if (between) {
+        const fromD = _parseRuDateFromText(between[1], todayStart);
+        const toD = _parseRuDateFromText(between[2], todayStart);
+        if (fromD && toD) {
+            return { from: _startOfDay(fromD), to: _endOfDay(toD), label: `(${_fmtDate(fromD)}–${_fmtDate(toD)})`, scope: 'mixed' };
+        }
+    }
+
+    // explicit "до ..." (date or end of month)
+    if (/\bдо\b/i.test(q)) {
+        const toD = _parseRuDateFromText(q, todayStart);
+        if (toD) {
+            const to = _endOfDay(toD);
+            if (to > nowEndOfToday) {
+                // forecast range (tomorrow..to)
+                return { from: tomorrowStart, to, label: `(до ${_fmtDate(toD)})`, scope: 'forecast' };
+            }
+            // fact range (min..to)
+            const minD = await _getUserMinEventDate(userId);
+            return { from: minD, to, label: `(до ${_fmtDate(toD)})`, scope: 'fact' };
+        }
+    }
+
+    // explicit month "за декабрь" / "в декабре" etc.
+    if (/\bза\b/i.test(q) || /\bв\b/i.test(q)) {
+        const moAnchor = _parseRuDateFromText(q, todayStart);
+        if (moAnchor) {
+            const start = new Date(moAnchor.getFullYear(), moAnchor.getMonth(), 1);
+            const end = new Date(moAnchor.getFullYear(), moAnchor.getMonth() + 1, 0);
+            return { from: _startOfDay(start), to: _endOfDay(end), label: `(${_fmtDate(start)}–${_fmtDate(end)})`, scope: (end > nowEndOfToday ? 'mixed' : 'fact') };
+        }
+    }
+
+    // explicit day-window
+    const days = _parseDaysFromQuery(q, null);
+    if (days != null) {
+        const from = _startOfDaysAgo(days);
+        return { from, to: nowEndOfToday, label: `за ${days} дн. (${_fmtDate(from)}–${_fmtDate(nowEndOfToday)})`, scope: 'fact' };
+    }
+
+    // Forecast default: tomorrow..maxEventDate
+    if (wantsFuture) {
+        const maxD = await _getUserMaxEventDate(userId);
+        return { from: tomorrowStart, to: maxD, label: `(${_fmtDate(tomorrowStart)}–${_fmtDate(maxD)})`, scope: 'forecast' };
+    }
+
+    // Default fact: all-time..today
+    const minD = await _getUserMinEventDate(userId);
+    return { from: minD, to: nowEndOfToday, label: `(${_fmtDate(minD)}–${_fmtDate(nowEndOfToday)})`, scope: 'fact' };
 };
 
 const _getAsOfFromReq = (req) => {
@@ -886,6 +1042,62 @@ const _periodTotals = async (userId, days = 30, nowOverride = null) => {
     return { income, expense, net: income - expense, from, now };
 };
 
+const _periodTotalsRange = async (userId, from, to) => {
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: to },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: { $in: ['income', 'expense'] }
+            }
+        },
+        { $project: { type: 1, absAmount: { $abs: '$amount' } } },
+        { $group: { _id: '$type', total: { $sum: '$absAmount' } } }
+    ]);
+
+    let income = 0;
+    let expense = 0;
+    rows.forEach(r => {
+        if (r._id === 'income') income = r.total;
+        if (r._id === 'expense') expense = r.total;
+    });
+    return { income, expense, net: income - expense };
+};
+
+const _topExpensesByCategoryRange = async (userId, from, to, limit = null) => {
+    const pipeline = [
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: to },
+                excludeFromTotals: { $ne: true },
+                type: 'expense',
+                isTransfer: { $ne: true },
+                categoryId: { $ne: null }
+            }
+        },
+        { $project: { categoryId: 1, absAmount: { $abs: '$amount' } } },
+        { $group: { _id: '$categoryId', total: { $sum: '$absAmount' } } },
+        { $sort: { total: -1 } }
+    ];
+
+    if (limit != null) pipeline.push({ $limit: limit });
+
+    const rows = await Event.aggregate(pipeline);
+
+    const ids = rows.map(r => r._id).filter(Boolean);
+    const cats = await Category.find({ _id: { $in: ids }, userId }).select('name').lean();
+    const catMap = new Map(cats.map(c => [c._id.toString(), c.name]));
+
+    return rows.map(r => ({
+        categoryId: r._id,
+        categoryName: catMap.get(String(r._id)) || 'Без категории',
+        total: r.total
+    }));
+};
+
 const _upcomingOps = async (userId, daysAhead = 14, limit = 15) => {
     const from = new Date();
     from.setHours(0, 0, 0, 0);
@@ -1043,7 +1255,365 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const explicitLimit = _parseExplicitLimitFromQuery(qLower);
 
         const now = _getAsOfFromReq(req);
+        // Универсальный диапазон для всех устройств: по умолчанию ФАКТ = всё до сегодня.
+        // Если пользователь просит прогноз/будущее — берём всё после сегодня.
+        // Если пользователь задаёт период ("за декабрь", "до конца февраля", "с ... по ...") — считаем по нему.
+        const range = await _resolveRangeFromQuery(userId, qLower, now);
+        const rangeFrom = range.from;
+        const rangeTo = range.to;
+        const rangeLabel = range.label;
         const includeHidden = Boolean(req?.body?.includeHidden) || qLower.includes('включая скры') || qLower.includes('скрытые') || qLower.includes('все счета');
+
+        // =========================
+        // 🟢 Preferred: use UI-provided aiContext (built from mainStore) to keep AI answers 1:1 with widgets.
+        // Frontend can send: { message, aiContext }
+        // =========================
+        const aiContext = (req.body && req.body.aiContext) ? req.body.aiContext : null;
+
+        const _ctxIsoToLocalDate = (iso) => {
+            const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (!m) return null;
+            const y = Number(m[1]);
+            const mo = Number(m[2]);
+            const da = Number(m[3]);
+            if (!y || !mo || !da) return null;
+            return new Date(y, mo - 1, da);
+        };
+
+        const _ctxFmtIso = (iso) => {
+            const d = _ctxIsoToLocalDate(iso);
+            return d ? _fmtDate(d) : '—';
+        };
+
+        const _ctxParseRuDateFromQuery = (q2) => {
+            const s = String(q2 || '');
+
+            // dd.mm.yy(yy)
+            let m = s.match(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/);
+            if (m) {
+                const dd = Number(m[1]);
+                const mm = Number(m[2]);
+                let yy = Number(m[3]);
+                if (yy < 100) yy = 2000 + yy;
+                const d = new Date(yy, mm - 1, dd);
+                if (!Number.isNaN(d.getTime())) return d;
+            }
+
+            // "до конца февраля", "до конца фев 26"
+            const months = [
+                ['январ', 0], ['феврал', 1], ['март', 2], ['апрел', 3], ['ма[йя]', 4], ['июн', 5],
+                ['июл', 6], ['август', 7], ['сентябр', 8], ['октябр', 9], ['ноябр', 10], ['декабр', 11]
+            ];
+
+            for (const [re, idx] of months) {
+                const rx = new RegExp(`\\b${re}\\w*\\b`, 'i');
+                if (rx.test(s)) {
+                    // year from query, else year from aiContext.today
+                    let y = null;
+                    const yM = s.match(/\b(20\d{2}|\d{2})\b/);
+                    if (yM) {
+                        y = Number(yM[1]);
+                        if (y < 100) y = 2000 + y;
+                    } else {
+                        const td = _ctxIsoToLocalDate(aiContext?.meta?.today);
+                        y = td ? td.getFullYear() : new Date().getFullYear();
+                    }
+
+                    // "конец" => last day of month; otherwise first day
+                    if (/конец/i.test(s) || /до\s*конц/i.test(s)) {
+                        return new Date(y, idx + 1, 0);
+                    }
+                    return new Date(y, idx, 1);
+                }
+            }
+
+            return null;
+        };
+
+        const _ctxWantsFuture = (q2) => {
+            const ql = String(q2 || '');
+            return /прогноз|будущ|вперед|вперёд|план|до\s*конц|до\s*\d{1,2}[./-]\d{1,2}[./-]\d{2,4}/i.test(ql);
+        };
+
+        if (aiContext && aiContext.meta && aiContext.balances) {
+            const useFuture = _ctxWantsFuture(qLower);
+            const todayIso = aiContext?.meta?.today || null;
+            const rangeEndIso = aiContext?.meta?.projection?.rangeEndDate || null;
+            const modeLabel = aiContext?.meta?.projection?.modeLabel || aiContext?.meta?.projection?.mode || null;
+
+            const requestedEnd = _ctxParseRuDateFromQuery(qLower);
+            const rangeEndDate = _ctxIsoToLocalDate(rangeEndIso);
+            if (requestedEnd && rangeEndDate && requestedEnd > rangeEndDate) {
+                const lines = [
+                    `Запрос до: ${_fmtDate(requestedEnd)}`,
+                    `Сейчас прогноз в виджетах только до: ${_ctxFmtIso(rangeEndIso)} (${modeLabel || '—'}).`,
+                    `Переключи режим (1м/3м/6м/1г), чтобы считать дальше.`
+                ];
+                return res.json({ text: lines.join('\n') });
+            }
+
+            const scopeLabel = useFuture ? 'Прогноз' : 'Факт';
+            const scopeToIso = useFuture ? (rangeEndIso || todayIso) : todayIso;
+
+            const balances = aiContext.balances || {};
+            const entities = aiContext.entities || {};
+            const breakdowns = aiContext.breakdowns || {};
+            const ops = aiContext.operations || null;
+
+            const _listByEntity = (arr, title) => {
+                const items = Array.isArray(arr) ? arr : [];
+                if (!items.length) return `${title}: 0`;
+                const lines = [`${title}: ${items.length}`];
+                const limit = explicitLimit; // null => show all
+                _maybeSlice(items, limit).forEach((x, i) => lines.push(`${i + 1}) ${x?.name || 'Без имени'}`));
+                if (limit != null && items.length > limit) lines.push(`Еще: ${items.length - limit}`);
+                return lines.join('\n');
+            };
+
+            // ===== Catalog lists (names only) =====
+            if (_isIndividualsQuery(qLower) && /\b(список|перечисл(?:и|ить)?|все)\b/i.test(qLower)) {
+                return res.json({ text: _listByEntity(entities.individuals, 'Физлица') });
+            }
+            if (qLower.includes('контрагент') && /\b(список|перечисл(?:и|ить)?|все)\b/i.test(qLower) && !(/расход|доход|итог|топ/i.test(qLower))) {
+                return res.json({ text: _listByEntity(entities.contractors, 'Контрагенты') });
+            }
+            if (qLower.includes('проект') && /\b(список|перечисл(?:и|ить)?|все)\b/i.test(qLower) && !(/расход|доход|итог|топ/i.test(qLower))) {
+                return res.json({ text: _listByEntity(entities.projects, 'Проекты') });
+            }
+            if (qLower.includes('категор') && /\b(список|перечисл(?:и|ить)?|все)\b/i.test(qLower) && !(/расход|доход|итог|топ/i.test(qLower))) {
+                return res.json({ text: _listByEntity(entities.categories, 'Категории') });
+            }
+
+            // ===== Accounts (balances) =====
+            if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
+                const list = useFuture ? balances.accountsFuture : balances.accountsCurrent;
+                const rows = Array.isArray(list) ? list : [];
+
+                const activeRows = rows.filter(a => !a?.isExcluded);
+                const hiddenRows = rows.filter(a => !!a?.isExcluded);
+
+                const totalActive = activeRows.reduce((s, a) => s + Number(a?.balance || 0), 0);
+                const totalHidden = hiddenRows.reduce((s, a) => s + Number(a?.balance || 0), 0);
+                const totalAll = totalActive + totalHidden;
+
+                const lines = [
+                    `Счета (${scopeLabel}):`,
+                    `Период: до ${_ctxFmtIso(scopeToIso)}${modeLabel ? ` (${modeLabel})` : ''}`
+                ];
+
+                const limit = explicitLimit; // null => show all
+
+                // Открытые
+                lines.push(`Открытые: ${activeRows.length}`);
+                _maybeSlice(activeRows, limit).forEach((a) => {
+                    lines.push(`${a?.name || '—'}: ${_formatTenge(a?.balance || 0)}`);
+                });
+                if (limit != null && activeRows.length > limit) {
+                    lines.push(`Еще открытые: ${activeRows.length - limit}`);
+                }
+
+                // Скрытые
+                lines.push(`Скрытые: ${hiddenRows.length}`);
+                _maybeSlice(hiddenRows, limit).forEach((a) => {
+                    lines.push(`${a?.name || '—'} (скрыт): ${_formatTenge(a?.balance || 0)}`);
+                });
+                if (limit != null && hiddenRows.length > limit) {
+                    lines.push(`Еще скрытые: ${hiddenRows.length - limit}`);
+                }
+
+                // Итоги
+                lines.push(`Итого открытые: ${_formatTenge(totalActive)}`);
+                lines.push(`Итого скрытые: ${_formatTenge(totalHidden)}`);
+                lines.push(`Итого суммарно: ${_formatTenge(totalAll)}`);
+
+                return res.json({ text: lines.join('\n') });
+            }
+
+            // ===== Report (income/expense/net) from operations if provided =====
+            if (qLower.includes('отчет') || qLower.includes('отчёт')) {
+                if (!ops) {
+                    const lines = [
+                        `Отчет: нет операций в aiContext.`,
+                        `Нужно включить includeOperations=true при сборке aiContext.`
+                    ];
+                    return res.json({ text: lines.join('\n') });
+                }
+                const incomes = useFuture ? (ops.futureIncomes || []) : (ops.currentIncomes || []);
+                const expenses = useFuture ? (ops.futureExpenses || []) : (ops.currentExpenses || []);
+                const inc = incomes.reduce((a, x) => a + Math.abs(Number(x?.amount || 0)), 0);
+                const exp = expenses.reduce((a, x) => a + Math.abs(Number(x?.amount || 0)), 0);
+                const net = inc - exp;
+                const lines = [
+                    `Отчет (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}${modeLabel ? ` (${modeLabel})` : ''}:`,
+                    `Доход: ${_formatTenge(inc)}`,
+                    `Расход: ${_formatTenge(exp)}`,
+                    `Итог: ${_formatTenge(net)}`
+                ];
+                return res.json({ text: lines.join('\n') });
+            }
+
+            // ===== Top expenses by category (from UI breakdowns) =====
+            if (qLower.includes('топ') && qLower.includes('расход')) {
+                const b = useFuture ? (breakdowns.categoriesFuture || {}) : (breakdowns.categoriesCurrent || {});
+                const cats = Array.isArray(entities.categories) ? entities.categories : [];
+                const catMap = new Map(cats.map(c => [String(c.id), c.name]));
+
+                const rows = Object.entries(b || {}).map(([k, v]) => {
+                    const id = String(k || '').replace(/^cat_/, '');
+                    const expense = Math.abs(Number(v?.expense || 0));
+                    return { id, name: catMap.get(id) || 'Без категории', expense };
+                }).filter(r => r.expense > 0).sort((a, b) => b.expense - a.expense);
+
+                if (!rows.length) return res.json({ text: `Расходов нет (${scopeLabel}).` });
+
+                const onlyOne = _wantsOnlyOne(qLower);
+                const showN = onlyOne ? 1 : explicitLimit;
+                const lines = [`Топ расходов (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`];
+                _maybeSlice(rows, showN).forEach((r, i) => {
+                    lines.push(`${i + 1}) ${r.name}: ${_formatTenge(-r.expense)}`);
+                });
+                return res.json({ text: lines.join('\n') });
+            }
+
+            // ===== Projects by expense/income/net (requires ops; otherwise fallback to net balances) =====
+            if (qLower.includes('проект')) {
+                const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
+                const wantsIncome = /доход|выруч|поступ/i.test(qLower);
+
+                const projEntities = Array.isArray(entities.projects) ? entities.projects : [];
+                const projMap = new Map(projEntities.map(p => [String(p.id), p.name]));
+
+                if (ops) {
+                    const incomes = useFuture ? (ops.futureIncomes || []) : (ops.currentIncomes || []);
+                    const expenses = useFuture ? (ops.futureExpenses || []) : (ops.currentExpenses || []);
+
+                    const incBy = {};
+                    const expBy = {};
+
+                    incomes.forEach(op => {
+                        const pid = op?.projectId ? String(op.projectId) : null;
+                        if (!pid) return;
+                        incBy[pid] = (incBy[pid] || 0) + Math.abs(Number(op?.amount || 0));
+                    });
+                    expenses.forEach(op => {
+                        const pid = op?.projectId ? String(op.projectId) : null;
+                        if (!pid) return;
+                        expBy[pid] = (expBy[pid] || 0) + Math.abs(Number(op?.amount || 0));
+                    });
+
+                    const ids = new Set([...Object.keys(incBy), ...Object.keys(expBy)]);
+                    const rows = Array.from(ids).map(id => {
+                        const inc = incBy[id] || 0;
+                        const exp = expBy[id] || 0;
+                        return { id, name: projMap.get(id) || 'Без проекта', income: inc, expense: exp, net: inc - exp };
+                    });
+
+                    let sorted;
+                    let title;
+                    if (wantsExpense && !wantsIncome) {
+                        sorted = rows.sort((a, b) => b.expense - a.expense);
+                        title = `Проекты — расходы (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`;
+                    } else if (wantsIncome && !wantsExpense) {
+                        sorted = rows.sort((a, b) => b.income - a.income);
+                        title = `Проекты — доход (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`;
+                    } else {
+                        sorted = rows.sort((a, b) => b.net - a.net);
+                        title = `Проекты — итог (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`;
+                    }
+
+                    if (!sorted.length) return res.json({ text: `По проектам данных нет (${scopeLabel}).` });
+
+                    const onlyOne = _wantsOnlyOne(qLower);
+                    const showN = onlyOne ? 1 : explicitLimit;
+                    const lines = [title];
+                    _maybeSlice(sorted, showN).forEach((r, i) => {
+                        const val = (wantsExpense && !wantsIncome) ? _formatTenge(-r.expense)
+                            : (wantsIncome && !wantsExpense) ? _formatTenge(r.income)
+                            : _formatTenge(r.net);
+                        lines.push(`${i + 1}) ${r.name}: ${val}`);
+                    });
+                    return res.json({ text: lines.join('\n') });
+                } else {
+                    const list = useFuture ? balances.projectsFuture : balances.projectsCurrent;
+                    const rows = (Array.isArray(list) ? list : []).map(x => ({
+                        id: x?.id ? String(x.id) : null,
+                        name: x?.name || projMap.get(String(x?.id)) || 'Без проекта',
+                        total: Number(x?.balance || 0)
+                    })).filter(r => r.id);
+
+                    if (!rows.length) return res.json({ text: `Проектов нет (${scopeLabel}).` });
+
+                    const title = `Проекты — итог (доход-расход) (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`;
+                    const sorted = rows.sort((a, b) => b.total - a.total);
+                    const onlyOne = _wantsOnlyOne(qLower);
+                    const showN = onlyOne ? 1 : explicitLimit;
+
+                    const lines = [title, 'Для раздельных доход/расход нужны операции (includeOperations=true).'];
+                    _maybeSlice(sorted, showN).forEach((r, i) => lines.push(`${i + 1}) ${r.name}: ${_formatTenge(r.total)}`));
+                    return res.json({ text: lines.join('\n') });
+                }
+            }
+
+            // ===== Individuals net from balances (or ops if user asks income/expense) =====
+            if (_isIndividualsQuery(qLower)) {
+                const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
+                const wantsIncome = /доход|выруч|поступ/i.test(qLower);
+
+                const peopleEntities = Array.isArray(entities.individuals) ? entities.individuals : [];
+                const peopleMap = new Map(peopleEntities.map(p => [String(p.id), p.name]));
+
+                if (ops && (wantsExpense || wantsIncome)) {
+                    const incomes = useFuture ? (ops.futureIncomes || []) : (ops.currentIncomes || []);
+                    const expenses = useFuture ? (ops.futureExpenses || []) : (ops.currentExpenses || []);
+
+                    const incBy = {};
+                    const expBy = {};
+
+                    incomes.forEach(op => {
+                        const iid = op?.individualId ? String(op.individualId) : null;
+                        if (!iid) return;
+                        incBy[iid] = (incBy[iid] || 0) + Math.abs(Number(op?.amount || 0));
+                    });
+                    expenses.forEach(op => {
+                        const iid = op?.individualId ? String(op.individualId) : null;
+                        if (!iid) return;
+                        expBy[iid] = (expBy[iid] || 0) + Math.abs(Number(op?.amount || 0));
+                    });
+
+                    const ids = wantsExpense ? Object.keys(expBy) : Object.keys(incBy);
+                    const rows = ids.map(id => ({
+                        id,
+                        name: peopleMap.get(id) || 'Без физлица',
+                        total: wantsExpense ? expBy[id] : incBy[id]
+                    })).sort((a, b) => b.total - a.total);
+
+                    if (!rows.length) return res.json({ text: `Физлиц нет (${scopeLabel}).` });
+
+                    const onlyOne = _wantsOnlyOne(qLower);
+                    const showN = onlyOne ? 1 : explicitLimit;
+                    const lines = [`Физлица — ${wantsExpense ? 'расходы' : 'доход'} (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`];
+                    _maybeSlice(rows, showN).forEach((r, i) => lines.push(`${i + 1}) ${r.name}: ${_formatTenge(wantsExpense ? -r.total : r.total)}`));
+                    return res.json({ text: lines.join('\n') });
+                }
+
+                const list = useFuture ? balances.individualsFuture : balances.individualsCurrent;
+                const rows = (Array.isArray(list) ? list : []).map(x => ({
+                    id: x?.id ? String(x.id) : null,
+                    name: x?.name || peopleMap.get(String(x?.id)) || 'Без физлица',
+                    total: Number(x?.balance || 0)
+                })).filter(r => r.id);
+
+                if (!rows.length) return res.json({ text: `Физлиц нет (${scopeLabel}).` });
+
+                const sorted = rows.sort((a, b) => b.total - a.total);
+                const onlyOne = _wantsOnlyOne(qLower);
+                const showN = onlyOne ? 1 : explicitLimit;
+
+                const lines = [`Физлица — итог (доход-расход) (${scopeLabel}) до ${_ctxFmtIso(scopeToIso)}:`];
+                _maybeSlice(sorted, showN).forEach((r, i) => lines.push(`${i + 1}) ${r.name}: ${_formatTenge(r.total)}`));
+                return res.json({ text: lines.join('\n') });
+            }
+        }
 
         // Biggest expense (generic) — when user asks "самый большой расход" without specifying dimension
         if (/\bсам(ый|ая|ое|ые)?\b/i.test(qLower) && /расход/i.test(qLower) &&
@@ -1135,34 +1705,48 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         // ===== Deterministic answers for the main MVP queries (faster + more accurate) =====
         if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
+            // Балансы считаем по ФАКТУ (до сегодня), чтобы совпадало на всех устройствах.
             const balancesDelta = await _aggregateAccountBalances(userId, now);
             const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
 
-            let lines = ['Счета:'];
-            lines.push(`Дата: ${_fmtDate(now)}`);
-            lines.push(`Скрытые счета: ${includeHidden ? 'да' : 'нет'}`);
-            let total = 0;
+            const open = [];
+            const hidden = [];
 
-            accounts
-                .filter(a => includeHidden ? true : !a.isExcluded)
-                .forEach(a => {
-                    const id = a._id.toString();
-                    const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
-                    total += bal;
-                    lines.push(`${a.name}: ${_formatTenge(bal)}`);
-                });
+            accounts.forEach(a => {
+                const id = a._id.toString();
+                const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
+                const row = { name: a.name, bal };
+                if (a.isExcluded) hidden.push(row);
+                else open.push(row);
+            });
 
-            lines.push(`Итого: ${_formatTenge(total)}`);
+            const totalOpen = open.reduce((s, x) => s + x.bal, 0);
+            const totalHidden = hidden.reduce((s, x) => s + x.bal, 0);
+            const totalAll = totalOpen + totalHidden;
+
+            const lines = ['Счета (факт):', `Дата: ${_fmtDate(now)}`];
+
+            const limit = explicitLimit; // null => показать всё
+
+            lines.push(`Открытые: ${open.length}`);
+            _maybeSlice(open, limit).forEach(x => lines.push(`${x.name}: ${_formatTenge(x.bal)}`));
+            if (limit != null && open.length > limit) lines.push(`Еще открытые: ${open.length - limit}`);
+            lines.push(`Итого открытые: ${_formatTenge(totalOpen)}`);
+
+            lines.push(`Скрытые: ${hidden.length}`);
+            _maybeSlice(hidden, limit).forEach(x => lines.push(`${x.name}: ${_formatTenge(x.bal)}`));
+            if (limit != null && hidden.length > limit) lines.push(`Еще скрытые: ${hidden.length - limit}`);
+            lines.push(`Итого скрытые: ${_formatTenge(totalHidden)}`);
+
+            lines.push(`Итого суммарно: ${_formatTenge(totalAll)}`);
             return res.json({ text: lines.join('\n') });
         }
 
         if (qLower.includes('топ') && qLower.includes('расход')) {
-            const days = _parseDaysFromQuery(qLower, 30);
-            const rows = await _topExpensesByCategory(userId, days, explicitLimit, now);
-            if (!rows.length) return res.json({ text: `За ${days} дней расходов нет.` });
+            const rows = await _topExpensesByCategoryRange(userId, rangeFrom, rangeTo, explicitLimit);
+            if (!rows.length) return res.json({ text: `Расходов нет ${rangeLabel}.` });
 
-            const from = _startOfDaysAgo(days);
-            let lines = [`Топ расходов за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            const lines = [`Топ расходов ${rangeLabel}:`];
             rows.forEach((r, idx) => {
                 lines.push(`${idx + 1}) ${r.categoryName}: ${_formatTenge(r.total)}`);
             });
@@ -1170,10 +1754,9 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         }
 
         if (qLower.includes('отчет') || qLower.includes('отчёт')) {
-            const days = _parseDaysFromQuery(qLower, 30);
-            const p = await _periodTotals(userId, days, now);
+            const p = await _periodTotalsRange(userId, rangeFrom, rangeTo);
             const lines = [
-                `Отчет за ${days} дней (${_fmtDate(p.from)}–${_fmtDate(p.now)}):`,
+                `Отчет ${rangeLabel}:`,
                 `Доход: ${_formatTenge(p.income)}`,
                 `Расход: ${_formatTenge(p.expense)}`,
                 `Итог: ${_formatTenge(p.net)}`
@@ -1380,55 +1963,64 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         }
 
         // ===== Fallback to OpenAI for arbitrary questions =====
-        const balancesDelta = await _aggregateAccountBalances(userId, now);
-        const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
+        // Prefer uiContext (from widgets) to avoid any async mismatch.
+        const uiContextForModel = (aiContext && aiContext.meta && aiContext.balances) ? aiContext : null;
 
-        const accContext = accounts
-            .filter(a => includeHidden ? true : !a.isExcluded)
-            .slice(0, 30)
-            .map(a => {
-                const id = a._id.toString();
-                const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
-                return {
-                    name: a.name,
-                    balance: Math.round(bal),
-                    balanceKZT: _formatTenge(bal)
-                };
-            });
+        let context;
 
-        const top30 = await _topExpensesByCategory(userId, 30, 10, now);
-        const totals30 = await _periodTotals(userId, 30, now);
-        const upcoming = await _upcomingOps(userId, 14, 12);
+        if (uiContextForModel) {
+            context = uiContextForModel;
+        } else {
+            const balancesDelta = await _aggregateAccountBalances(userId, now);
+            const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
 
-        const context = {
-            asOf: now.toISOString(),
-            accounts: accContext,
-            totals30: {
-                income: Math.round(totals30.income),
-                expense: Math.round(totals30.expense),
-                net: Math.round(totals30.net),
-                incomeKZT: _formatTenge(totals30.income),
-                expenseKZT: _formatTenge(totals30.expense),
-                netKZT: _formatTenge(totals30.net)
-            },
-            topExpenses30: top30.map(r => ({
-                name: r.categoryName,
-                total: Math.round(r.total),
-                totalKZT: _formatTenge(r.total)
-            })),
-            upcoming: upcoming.map(op => ({
-                date: op.date,
-                type: op.type,
-                amount: Math.round(op.amount || 0),
-                amountKZT: _formatTenge(op.amount || 0),
-                account: op.accountId?.name || null,
-                company: op.companyId?.name || null,
-                contractor: op.contractorId?.name || null,
-                project: op.projectId?.name || null,
-                category: op.categoryId?.name || null,
-                description: op.description || null
-            }))
-        };
+            const accContext = accounts
+                .filter(a => includeHidden ? true : !a.isExcluded)
+                .slice(0, 30)
+                .map(a => {
+                    const id = a._id.toString();
+                    const bal = (Number(a.initialBalance || 0) + Number(balancesDelta[id] || 0));
+                    return {
+                        name: a.name,
+                        balance: Math.round(bal),
+                        balanceKZT: _formatTenge(bal)
+                    };
+                });
+
+            const top30 = await _topExpensesByCategoryRange(userId, rangeFrom, rangeTo, 10);
+            const totals30 = await _periodTotalsRange(userId, rangeFrom, rangeTo);
+            const upcoming = await _upcomingOps(userId, 14, 12);
+
+            context = {
+                asOf: now.toISOString(),
+                accounts: accContext,
+                totals: {
+                    income: Math.round(totals30.income),
+                    expense: Math.round(totals30.expense),
+                    net: Math.round(totals30.net),
+                    incomeKZT: _formatTenge(totals30.income),
+                    expenseKZT: _formatTenge(totals30.expense),
+                    netKZT: _formatTenge(totals30.net)
+                },
+                topExpenses: top30.map(r => ({
+                    name: r.categoryName,
+                    total: Math.round(r.total),
+                    totalKZT: _formatTenge(r.total)
+                })),
+                upcoming: upcoming.map(op => ({
+                    date: op.date,
+                    type: op.type,
+                    amount: Math.round(op.amount || 0),
+                    amountKZT: _formatTenge(op.amount || 0),
+                    account: op.accountId?.name || null,
+                    company: op.companyId?.name || null,
+                    contractor: op.contractorId?.name || null,
+                    project: op.projectId?.name || null,
+                    category: op.categoryId?.name || null,
+                    description: op.description || null
+                }))
+            };
+        }
 
         const system = [
             'Ты — AI помощник INDEX12.',
@@ -1439,7 +2031,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             'Даты всегда в формате ДД.ММ.ГГ (например 01.01.26).',
             'Если используешь суммы — опирайся на контекст и по возможности используй поля *KZT (balanceKZT, amountKZT, incomeKZT и т.д.).',
             'Ответ максимум 8 строк. Без воды. Сначала цифры, потом 1 вывод/совет.',
-            'Если данных недостаточно — прямо скажи, чего не хватает (период/счет/проект).' 
+            'Если данных недостаточно — прямо скажи, чего не хватает (период/счет/проект).',
+            'Если считаешь итоги/топы — обязательно укажи период (например: "Период: 01.12.25–31.12.25").'
         ].join(' ');
 
         const userMsg = [
