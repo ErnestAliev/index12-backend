@@ -567,6 +567,146 @@ const _topAbsByField = async (userId, field, type, days, now, limit = 10) => {
     return { rows, from, now };
 };
 
+// === Individuals special aggregation (matches Individuals widget logic closer) ===
+const _topIndividualsNet = async (userId, days, now, retailIdObj = null, limit = 10) => {
+    const from = _startOfDaysAgo(days);
+
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true }
+            }
+        },
+        {
+            $project: {
+                type: 1,
+                absAmount: { $abs: "$amount" },
+                isTransfer: 1,
+                accountId: 1,
+                individualId: 1,
+                counterpartyIndividualId: 1,
+                fromIndividualId: 1,
+                toIndividualId: 1,
+                isWorkAct: { $ifNull: ["$isWorkAct", false] },
+                // same idea as snapshot: treat some write-offs as non-person operations
+                isWriteOff: retailIdObj
+                    ? {
+                        $and: [
+                            { $eq: ["$type", "expense"] },
+                            { $not: ["$accountId"] },
+                            { $eq: ["$counterpartyIndividualId", retailIdObj] }
+                        ]
+                    }
+                    : false
+            }
+        },
+        {
+            $project: {
+                impacts: {
+                    $cond: {
+                        if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
+                        then: [
+                            { id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } },
+                            { id: "$toIndividualId", val: "$absAmount" }
+                        ],
+                        else: {
+                            $cond: {
+                                if: { $or: ["$isWriteOff", "$isWorkAct"] },
+                                then: [],
+                                else: [
+                                    {
+                                        id: "$individualId",
+                                        val: {
+                                            $cond: [
+                                                { $eq: ["$type", "income"] },
+                                                "$absAmount",
+                                                { $multiply: ["$absAmount", -1] }
+                                            ]
+                                        }
+                                    },
+                                    {
+                                        id: "$counterpartyIndividualId",
+                                        val: {
+                                            $cond: [
+                                                { $eq: ["$type", "income"] },
+                                                "$absAmount",
+                                                { $multiply: ["$absAmount", -1] }
+                                            ]
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        { $unwind: "$impacts" },
+        { $match: { "impacts.id": { $ne: null } } },
+        { $group: { _id: "$impacts.id", total: { $sum: "$impacts.val" } } },
+        { $sort: { total: -1 } },
+        { $limit: limit }
+    ]);
+
+    return { rows, from, now };
+};
+
+const _topIndividualsAbs = async (userId, type, days, now, retailIdObj = null, limit = 10) => {
+    const from = _startOfDaysAgo(days);
+    const matchType = type === 'income' ? 'income' : 'expense';
+
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: matchType
+            }
+        },
+        {
+            $project: {
+                absAmount: { $abs: "$amount" },
+                accountId: 1,
+                individualId: 1,
+                counterpartyIndividualId: 1,
+                isWorkAct: { $ifNull: ["$isWorkAct", false] },
+                isWriteOff: retailIdObj
+                    ? {
+                        $and: [
+                            { $eq: ["$type", "expense"] },
+                            { $not: ["$accountId"] },
+                            { $eq: ["$counterpartyIndividualId", retailIdObj] }
+                        ]
+                    }
+                    : false
+            }
+        },
+        {
+            $project: {
+                refs: {
+                    $cond: {
+                        if: { $or: ["$isWriteOff", "$isWorkAct"] },
+                        then: [],
+                        else: ["$individualId", "$counterpartyIndividualId"]
+                    }
+                },
+                absAmount: 1
+            }
+        },
+        { $unwind: "$refs" },
+        { $match: { refs: { $ne: null } } },
+        { $group: { _id: "$refs", total: { $sum: "$absAmount" } } },
+        { $sort: { total: -1 } },
+        { $limit: limit }
+    ]);
+
+    return { rows, from, now };
+};
+
 const _isAiAllowed = (req) => {
     try {
         if (!req.user || !req.user.email) return false;
@@ -884,8 +1024,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
             const wantsIncome = /доход|выруч|поступ/i.test(qLower);
 
-            // If user asks for the directory/list of individuals (not analytics)
-            const wantsList = /\b(список|перечисл|покажи|все)\b/i.test(qLower) && !(/расход|доход|итог|топ|за\s*\d+/i.test(qLower));
+            // "список" / "перечисли" — это всегда каталог, без аналитики
+            const wantsList = /\b(список|перечисл(?:и|ить)?|все)\b/i.test(qLower);
             if (wantsList) {
                 // Some old data could have userId stored as string, so we query both.
                 const people = await Individual.collection
@@ -915,27 +1055,29 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
                 return res.json({ text: lines.join('\n') });
             }
 
+            // Retail clients id (to mimic widget logic for write-offs)
+            const retailInd = await Individual.findOne({ userId, name: { $regex: /^(розничные клиенты|розница)$/i } }).select('_id').lean();
+            const retailIdObj = retailInd ? retailInd._id : null;
+
             let rowsPack;
             let title;
 
             if (wantsExpense && !wantsIncome) {
-                rowsPack = await _topAbsByField(userId, 'individualId', 'expense', days, now, 10);
+                rowsPack = await _topIndividualsAbs(userId, 'expense', days, now, retailIdObj, 10);
                 title = `Физлица — расходы за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             } else if (wantsIncome && !wantsExpense) {
-                rowsPack = await _topAbsByField(userId, 'individualId', 'income', days, now, 10);
+                rowsPack = await _topIndividualsAbs(userId, 'income', days, now, retailIdObj, 10);
                 title = `Физлица — доход за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             } else {
-                const from = _startOfDaysAgo(days);
-                const netRows = await _topNetByField(userId, 'individualId', days, now, 10);
-                rowsPack = { rows: netRows, from, now };
-                title = `Физлица — итог за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`;
+                rowsPack = await _topIndividualsNet(userId, days, now, retailIdObj, 10);
+                title = `Физлица — итог за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
             }
 
             const rows = rowsPack.rows || [];
             if (!rows.length) return res.json({ text: `Физлиц за ${days} дней нет.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
-            const items = await Individual.find({ _id: { $in: ids }, userId }).select('name').lean();
+            const items = await Individual.find({ _id: { $in: ids } }).select('name').lean();
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
             const lines = [title];
