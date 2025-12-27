@@ -393,6 +393,11 @@ const _isIndividualsQuery = (qLower) => {
     return /физ\W*лиц|физ\W*лица|физическ\W*лиц|индивид/i.test(q);
 };
 
+const _wantsOnlyOne = (qLower) => {
+    const q = String(qLower || '');
+    return /\bсам(ый|ая|ое|ые)?\b/i.test(q) || /\bтоп\s*1\b/i.test(q);
+};
+
 const _endOfToday = () => {
     const d = new Date();
     d.setHours(23, 59, 59, 999);
@@ -856,6 +861,19 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const now = _getAsOfFromReq(req);
         const includeHidden = Boolean(req?.body?.includeHidden) || qLower.includes('включая скры') || qLower.includes('скрытые') || qLower.includes('все счета');
 
+        // Biggest expense (generic) — when user asks "самый большой расход" without specifying dimension
+        if (/\bсам(ый|ая|ое|ые)?\b/i.test(qLower) && /расход/i.test(qLower) &&
+            !qLower.includes('проект') && !qLower.includes('категор') && !qLower.includes('контрагент') && !_isIndividualsQuery(qLower)) {
+            const days = _parseDaysFromQuery(qLower, 30);
+            const from = _startOfDaysAgo(days);
+            const rows = await _topExpensesByCategory(userId, days, 1, now);
+            if (!rows.length) return res.json({ text: `За ${days} дней расходов нет.` });
+            const r = rows[0];
+            return res.json({
+                text: `Самый большой расход за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):\n${r.categoryName}: ${_formatTenge(r.total)}`
+            });
+        }
+
         // Individuals (Физлица)
         if (_isIndividualsQuery(qLower)) {
             const days = _parseDaysFromQuery(qLower, 30);
@@ -908,7 +926,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
             const lines = [title];
-            rows.slice(0, 7).forEach((r, i) => {
+            const onlyOne = _wantsOnlyOne(qLower);
+            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
                 const name = map.get(String(r._id)) || 'Без физлица';
                 let val;
                 if (wantsExpense && !wantsIncome) val = _formatTenge(-Math.abs(r.total));
@@ -997,7 +1016,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
             const lines = [title];
-            rows.slice(0, 7).forEach((r, i) => {
+            const onlyOne = _wantsOnlyOne(qLower);
+            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
                 const name = map.get(String(r._id)) || 'Без проекта';
                 let val;
                 if (wantsExpense && !wantsIncome) val = _formatTenge(-Math.abs(r.total));
@@ -1010,8 +1030,27 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
 
         // Contractors (Контрагенты)
         if (qLower.includes('контрагент')) {
+            // Directory list (names only)
+            const wantsList = /\b(список|перечисл|покажи|все)\b/i.test(qLower) && !(/расход|доход|итог|топ|за\s*\d+/i.test(qLower));
+            if (wantsList) {
+                const items = await Contractor.find({ userId })
+                    .select('name order')
+                    .sort({ order: 1, name: 1 })
+                    .lean();
+
+                if (!items.length) return res.json({ text: 'Контрагентов нет.' });
+
+                const lines = [`Контрагенты: ${items.length}`];
+                const maxShow = 7;
+                items.slice(0, maxShow).forEach((p, i) => lines.push(`${i + 1}) ${p.name}`));
+                if (items.length > maxShow) lines.push(`Еще: ${items.length - maxShow}`);
+                return res.json({ text: lines.join('\n') });
+            }
+
             const days = _parseDaysFromQuery(qLower, 30);
             const from = _startOfDaysAgo(days);
+            const onlyOne = _wantsOnlyOne(qLower);
+
             const rows = await _topNetByField(userId, 'contractorId', days, now, 10);
             if (!rows.length) return res.json({ text: `Контрагентов за ${days} дней нет.` });
 
@@ -1020,7 +1059,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
             const lines = [`Контрагенты за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
-            rows.slice(0, 7).forEach((r, i) => {
+            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
                 lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без контрагента'}: ${_formatTenge(r.total)}`);
             });
             return res.json({ text: lines.join('\n') });
@@ -1038,7 +1077,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
             const lines = [`Категории (нетто) за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
-            rows.slice(0, 7).forEach((r, i) => {
+            const onlyOne = _wantsOnlyOne(qLower);
+            rows.slice(0, onlyOne ? 1 : 7).forEach((r, i) => {
                 lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без категории'}: ${_formatTenge(r.total)}`);
             });
             return res.json({ text: lines.join('\n') });
