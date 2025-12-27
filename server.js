@@ -1249,50 +1249,76 @@ const _upcomingOps = async (userId, daysAhead = 14, limit = 15) => {
 };
 
 const _openAiChat = async (messages, { temperature = 0.2, maxTokens = 220 } = {}) => {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) throw new Error('OPENAI_API_KEY is missing');
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    const err = new Error('OPENAI_API_KEY is missing');
+    err.code = 'OPENAI_KEY_MISSING';
+    throw err;
+  }
 
-    const payload = JSON.stringify({
-        model: AI_MODEL,
-        messages,
-        temperature,
-        max_tokens: maxTokens
-    });
+  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const payload = JSON.stringify({
+    model,
+    messages,
+    temperature,
+    max_tokens: maxTokens
+  });
 
-    return new Promise((resolve, reject) => {
-        const req2 = https.request(
-            {
-                hostname: 'api.openai.com',
-                path: '/v1/chat/completions',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(payload),
-                    'Authorization': `Bearer ${apiKey}`
-                }
-            },
-            (resp) => {
-                let data = '';
-                resp.on('data', (chunk) => { data += chunk; });
-                resp.on('end', () => {
-                    try {
-                        if (resp.statusCode < 200 || resp.statusCode >= 300) {
-                            return reject(new Error(`OpenAI HTTP ${resp.statusCode}: ${data}`));
-                        }
-                        const json = JSON.parse(data);
-                        const text = json?.choices?.[0]?.message?.content || '';
-                        resolve(text.trim());
-                    } catch (e) {
-                        reject(e);
-                    }
-                });
+  const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || 20000);
+
+  return new Promise((resolve, reject) => {
+    const req2 = https.request(
+      {
+        hostname: 'api.openai.com',
+        path: '/v1/chat/completions',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+          'Authorization': `Bearer ${apiKey}`
+        }
+      },
+      (resp) => {
+        let data = '';
+        resp.on('data', (chunk) => { data += chunk; });
+        resp.on('end', () => {
+          try {
+            if (resp.statusCode < 200 || resp.statusCode >= 300) {
+              let msg = data;
+              try {
+                const parsed = JSON.parse(data);
+                msg = parsed?.error?.message || msg;
+                const err = new Error(`OpenAI HTTP ${resp.statusCode}: ${msg}`);
+                err.httpStatus = resp.statusCode;
+                err.openai = parsed?.error || null;
+                return reject(err);
+              } catch (_) {
+                const err = new Error(`OpenAI HTTP ${resp.statusCode}: ${msg}`);
+                err.httpStatus = resp.statusCode;
+                return reject(err);
+              }
             }
-        );
 
-        req2.on('error', reject);
-        req2.write(payload);
-        req2.end();
+            const json = JSON.parse(data);
+            const text = json?.choices?.[0]?.message?.content || '';
+            resolve(String(text || '').trim());
+          } catch (e) {
+            const err = new Error(`OpenAI parse error: ${e.message}`);
+            err.httpStatus = resp.statusCode;
+            reject(err);
+          }
+        });
+      }
+    );
+
+    req2.setTimeout(timeoutMs, () => {
+      try { req2.destroy(new Error(`OpenAI timeout after ${timeoutMs}ms`)); } catch (_) {}
     });
+
+    req2.on('error', reject);
+    req2.write(payload);
+    req2.end();
+  });
 };
 
 // --- ROUTES ---
@@ -1358,13 +1384,16 @@ app.post('/api/auth/logout', (req, res, next) => {
 // Frontend expects: POST { message } -> { text }
 // =================================================================
 
-app.get('/api/ai/ping', (req, res) => {
-    res.json({
-        ok: true,
-        ts: new Date().toISOString(),
-        isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
-        email: req.user?.email || null
-    });
+res.json({
+  ok: true,
+  ts: new Date().toISOString(),
+  isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
+  email: req.user?.email || null,
+  ai: {
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    keyPresent: Boolean(process.env.OPENAI_API_KEY),
+    allowAll: String(process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true'
+  }
 });
 app.post('/api/ai/query', isAuthenticated, async (req, res) => {
     try {
