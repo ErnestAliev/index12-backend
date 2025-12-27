@@ -385,7 +385,13 @@ function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return nex
 // =================================================================
 // 🟣 AI ASSISTANT (READ-ONLY) — MVP
 // =================================================================
+
 const AI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+const _isIndividualsQuery = (qLower) => {
+    const q = String(qLower || '');
+    return /физ\W*лиц|физ\W*лица|физическ\W*лиц|индивид/i.test(q);
+};
 
 const _endOfToday = () => {
     const d = new Date();
@@ -424,7 +430,7 @@ const _postFormatAiAnswer = (text) => {
     const moneyKw = /(доход|расход|итог|итого|баланс|счет|сч[её]т|сч[её]та|оборот|сумма|долг|плат[её]ж|налог|перевод|вывод|кредит)/i;
 
     // Даты нужно защищать от форматирования чисел (например, 2026 -> 2 026)
-    const dateRe = /\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/g;          // 01.01.2026 / 01.01.26
+    const dateRe = /\b\d{1,2}[./-]\d{1,2}[./-]\s*\d{2,4}\b/g;       // 01.01.2026 / 01.01. 2026 / 01.01.26
     const isoDateRe = /\b\d{4}-\d{2}-\d{2}\b/g;                     // 2026-01-01
 
     // Похоже на сумму: либо 4+ цифры подряд, либо уже сгруппировано пробелами
@@ -530,6 +536,30 @@ const _topNetByField = async (userId, field, days, now, limit = 10) => {
     ]);
 
     return rows;
+};
+
+const _topAbsByField = async (userId, field, type, days, now, limit = 10) => {
+    const from = _startOfDaysAgo(days);
+    const matchType = type === 'income' ? 'income' : 'expense';
+
+    const rows = await Event.aggregate([
+        {
+            $match: {
+                userId: new mongoose.Types.ObjectId(userId),
+                date: { $gte: from, $lte: now },
+                excludeFromTotals: { $ne: true },
+                isTransfer: { $ne: true },
+                type: matchType,
+                [field]: { $ne: null }
+            }
+        },
+        { $project: { ref: `$${field}`, absAmount: { $abs: "$amount" } } },
+        { $group: { _id: "$ref", total: { $sum: "$absAmount" } } },
+        { $sort: { total: -1 } },
+        { $limit: limit }
+    ]);
+
+    return { rows, from, now };
 };
 
 const _isAiAllowed = (req) => {
@@ -826,6 +856,48 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const now = _getAsOfFromReq(req);
         const includeHidden = Boolean(req?.body?.includeHidden) || qLower.includes('включая скры') || qLower.includes('скрытые') || qLower.includes('все счета');
 
+        // Individuals (Физлица)
+        if (_isIndividualsQuery(qLower)) {
+            const days = _parseDaysFromQuery(qLower, 30);
+
+            const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
+            const wantsIncome = /доход|выруч|поступ/i.test(qLower);
+
+            let rowsPack;
+            let title;
+
+            if (wantsExpense && !wantsIncome) {
+                rowsPack = await _topAbsByField(userId, 'individualId', 'expense', days, now, 10);
+                title = `Физлица — расходы за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
+            } else if (wantsIncome && !wantsExpense) {
+                rowsPack = await _topAbsByField(userId, 'individualId', 'income', days, now, 10);
+                title = `Физлица — доход за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
+            } else {
+                const from = _startOfDaysAgo(days);
+                const netRows = await _topNetByField(userId, 'individualId', days, now, 10);
+                rowsPack = { rows: netRows, from, now };
+                title = `Физлица — итог за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`;
+            }
+
+            const rows = rowsPack.rows || [];
+            if (!rows.length) return res.json({ text: `Физлиц за ${days} дней нет.` });
+
+            const ids = rows.map(r => r._id).filter(Boolean);
+            const items = await Individual.find({ _id: { $in: ids }, userId }).select('name').lean();
+            const map = new Map(items.map(x => [x._id.toString(), x.name]));
+
+            const lines = [title];
+            rows.slice(0, 7).forEach((r, i) => {
+                const name = map.get(String(r._id)) || 'Без физлица';
+                let val;
+                if (wantsExpense && !wantsIncome) val = _formatTenge(-Math.abs(r.total));
+                else if (wantsIncome && !wantsExpense) val = _formatTenge(Math.abs(r.total));
+                else val = _formatTenge(r.total);
+                lines.push(`${i + 1}) ${name}: ${val}`);
+            });
+            return res.json({ text: lines.join('\n') });
+        }
+
         // ===== Deterministic answers for the main MVP queries (faster + more accurate) =====
         if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
             const balancesDelta = await _aggregateAccountBalances(userId, now);
@@ -877,17 +949,40 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         // Projects
         if (qLower.includes('проект')) {
             const days = _parseDaysFromQuery(qLower, 30);
-            const from = _startOfDaysAgo(days);
-            const rows = await _topNetByField(userId, 'projectId', days, now, 10);
+            const wantsExpense = /расход|тра(т|чу)|потрат|минус/i.test(qLower);
+            const wantsIncome = /доход|выруч|поступ/i.test(qLower);
+
+            let rowsPack;
+            let title;
+
+            if (wantsExpense && !wantsIncome) {
+                rowsPack = await _topAbsByField(userId, 'projectId', 'expense', days, now, 10);
+                title = `Проекты — расходы за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
+            } else if (wantsIncome && !wantsExpense) {
+                rowsPack = await _topAbsByField(userId, 'projectId', 'income', days, now, 10);
+                title = `Проекты — доход за ${days} дней (${_fmtDate(rowsPack.from)}–${_fmtDate(rowsPack.now)}):`;
+            } else {
+                const from = _startOfDaysAgo(days);
+                const netRows = await _topNetByField(userId, 'projectId', days, now, 10);
+                rowsPack = { rows: netRows, from, now };
+                title = `Проекты — итог за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`;
+            }
+
+            const rows = rowsPack.rows || [];
             if (!rows.length) return res.json({ text: `Проектов за ${days} дней нет.` });
 
             const ids = rows.map(r => r._id).filter(Boolean);
             const items = await Project.find({ _id: { $in: ids }, userId }).select('name').lean();
             const map = new Map(items.map(x => [x._id.toString(), x.name]));
 
-            const lines = [`Проекты за ${days} дней (${_fmtDate(from)}–${_fmtDate(now)}):`];
+            const lines = [title];
             rows.slice(0, 7).forEach((r, i) => {
-                lines.push(`${i + 1}) ${map.get(String(r._id)) || 'Без проекта'}: ${_formatTenge(r.total)}`);
+                const name = map.get(String(r._id)) || 'Без проекта';
+                let val;
+                if (wantsExpense && !wantsIncome) val = _formatTenge(-Math.abs(r.total));
+                else if (wantsIncome && !wantsExpense) val = _formatTenge(Math.abs(r.total));
+                else val = _formatTenge(r.total);
+                lines.push(`${i + 1}) ${name}: ${val}`);
             });
             return res.json({ text: lines.join('\n') });
         }
@@ -1030,7 +1125,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         const accounts = await Account.find({ userId }).select('name initialBalance isExcluded order').sort({ order: 1 }).lean();
 
         const accContext = accounts
-            .filter(a => !a.isExcluded)
+            .filter(a => includeHidden ? true : !a.isExcluded)
             .slice(0, 30)
             .map(a => {
                 const id = a._id.toString();
@@ -1082,6 +1177,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             'Отвечай КОРОТКО, удобно для пересылки в WhatsApp.',
             'Без процентов. Только абсолютные цифры.',
             'Все денежные суммы всегда показывай в KZT строго в формате: 1 234 567 ₸ (пробелы между тысячами, знак ₸ обязателен).',
+            'Даты всегда в формате ДД.ММ.ГГ (например 01.01.26).',
             'Если используешь суммы — опирайся на контекст и по возможности используй поля *KZT (balanceKZT, amountKZT, incomeKZT и т.д.).',
             'Ответ максимум 8 строк. Без воды. Сначала цифры, потом 1 вывод/совет.',
             'Если данных недостаточно — прямо скажи, чего не хватает (период/счет/проект).' 
