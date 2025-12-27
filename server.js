@@ -803,6 +803,7 @@ app.get('/api/auth/me', async (req, res) => {
         }
 
         const userId = req.user.id;
+        const userObjId = new mongoose.Types.ObjectId(userId);
 
         // Earliest operation date for this user (used by frontend to cap “all-time” loads)
         const firstEvent = await Event.findOne({ userId: userId })
@@ -884,12 +885,16 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             // If user asks for the directory/list of individuals (not analytics)
             const wantsList = /\b(список|перечисл|покажи|все)\b/i.test(qLower) && !(/расход|доход|итог|топ|за\s*\d+/i.test(qLower));
             if (wantsList) {
-                const people = await Individual.find({ userId })
+                const people = await Individual.find({ userId: userObjId })
                     .select('name order')
                     .sort({ order: 1, name: 1 })
                     .lean();
 
-                if (!people.length) return res.json({ text: 'Физлиц нет.' });
+                if (!people.length) {
+                    return res.json({
+                        text: `Физлиц нет для этого аккаунта.\nEmail: ${req.user?.email || '—'}\nUserId: ${userId}`
+                    });
+                }
 
                 const lines = [`Физлица: ${people.length}`];
                 const maxShow = 7; // keep WhatsApp short (<= 8 lines total)
@@ -1033,7 +1038,7 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             // Directory list (names only)
             const wantsList = /\b(список|перечисл|покажи|все)\b/i.test(qLower) && !(/расход|доход|итог|топ|за\s*\d+/i.test(qLower));
             if (wantsList) {
-                const items = await Contractor.find({ userId })
+                const items = await Contractor.find({ userId: userObjId })
                     .select('name order')
                     .sort({ order: 1, name: 1 })
                     .lean();
