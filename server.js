@@ -853,6 +853,8 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
         }
 
         const userId = req.user.id;
+        const userObjId = new mongoose.Types.ObjectId(userId);
+        const userIdStr = String(userId);
         const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
         const q = qRaw.trim();
         if (!q) return res.status(400).json({ message: 'Empty message' });
@@ -885,10 +887,14 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
             // If user asks for the directory/list of individuals (not analytics)
             const wantsList = /\b(список|перечисл|покажи|все)\b/i.test(qLower) && !(/расход|доход|итог|топ|за\s*\d+/i.test(qLower));
             if (wantsList) {
-                const people = await Individual.find({ userId: userObjId })
-                    .select('name order')
+                // Some old data could have userId stored as string, so we query both.
+                const people = await Individual.collection
+                    .find(
+                        { $or: [{ userId: userObjId }, { userId: userIdStr }] },
+                        { projection: { name: 1, order: 1 } }
+                    )
                     .sort({ order: 1, name: 1 })
-                    .lean();
+                    .toArray();
 
                 if (!people.length) {
                     return res.json({
@@ -896,10 +902,12 @@ app.post('/api/ai/query', isAuthenticated, async (req, res) => {
                     });
                 }
 
+                const wantsFull = /\b(весь|все|полный)\b/i.test(qLower);
+                const maxShow = wantsFull ? 50 : 7;
+
                 const lines = [`Физлица: ${people.length}`];
-                const maxShow = 7; // keep WhatsApp short (<= 8 lines total)
                 people.slice(0, maxShow).forEach((p, i) => {
-                    lines.push(`${i + 1}) ${p.name}`);
+                    lines.push(`${i + 1}) ${p.name || 'Без имени'}`);
                 });
                 if (people.length > maxShow) {
                     lines.push(`Еще: ${people.length - maxShow}`);
