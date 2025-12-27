@@ -1384,16 +1384,18 @@ app.post('/api/auth/logout', (req, res, next) => {
 // Frontend expects: POST { message } -> { text }
 // =================================================================
 
-res.json({
-  ok: true,
-  ts: new Date().toISOString(),
-  isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
-  email: req.user?.email || null,
-  ai: {
-    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-    keyPresent: Boolean(process.env.OPENAI_API_KEY),
-    allowAll: String(process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true'
-  }
+app.get('/api/ai/ping', (req, res) => {
+  res.json({
+    ok: true,
+    ts: new Date().toISOString(),
+    isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
+    email: req.user?.email || null,
+    ai: {
+      model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+      keyPresent: Boolean(process.env.OPENAI_API_KEY),
+      allowAll: String(process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true'
+    }
+  });
 });
 app.post('/api/ai/query', isAuthenticated, async (req, res) => {
     try {
