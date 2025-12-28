@@ -6,7 +6,8 @@
 // - Money format: thousands + "₸".
 // - No default "last 30 days" anywhere.
 // - Accounts list must include hidden accounts by default.
-// - If DB has no data OR DB is behind frontend snapshot -> fallback to aiContext from frontend (if provided).
+// - Source of truth is FRONTEND UI snapshot (uiSnapshot). The AI route must not query Mongo for answering.
+// - If uiSnapshot is missing, fallback is aiContext (frontend-prepared), but still NO Mongo queries.
 // - Catalog queries (projects/contractors/categories/individuals/prepayments) return numbered lists without sums.
 
 const express = require('express');
@@ -464,7 +465,167 @@ module.exports = function createAiRouter(deps) {
 
       const aiContext = (req.body && req.body.aiContext) ? req.body.aiContext : null;
 
-      // Fact date (today) must be consistent and should reflect frontend snapshot if server DB is behind.
+
+      // =========================
+      // UI SNAPSHOT MODE (NO MONGO)
+      // =========================
+      const uiSnapshot = (req.body && req.body.uiSnapshot) ? req.body.uiSnapshot : null;
+      const snapWidgets = Array.isArray(uiSnapshot?.widgets) ? uiSnapshot.widgets : null;
+
+      const snapTodayStr = String(uiSnapshot?.meta?.todayStr || _fmtDateKZ(_endOfToday()));
+      const snapFutureStr = String(uiSnapshot?.meta?.futureUntilStr || snapTodayStr);
+
+      const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем|план|следующ|вперед|вперёд|после\s*сегодня/i.test(qLower);
+
+      const _snapTitleTo = (title, toStr) => `${title}. До ${toStr}`;
+      const _findSnapWidget = (key) => (snapWidgets || []).find(w => w && w.key === key) || null;
+
+      const _renderCatalogFromRows = (title, rows) => {
+        const arr = Array.isArray(rows) ? rows : [];
+        if (!arr.length) return `${title}: 0`;
+        const lines = [`${title}: ${arr.length}`];
+        _maybeSlice(arr, explicitLimit).forEach((x, i) => {
+          const name = x?.name || x?.title || 'Без имени';
+          lines.push(`${i + 1}) ${name}`);
+        });
+        return lines.join('\n');
+      };
+
+      const _warnForecastOff = (w) => {
+        if (!wantsFutureSnap) return '';
+        if (w?.showFutureBalance) return '';
+        return 'Прогноз выключен в виджете — на экране вижу только факт.';
+      };
+
+      const _getRows = (w) => {
+        if (!w) return [];
+        if (Array.isArray(w.rows)) return w.rows;
+        if (Array.isArray(w.items)) return w.items;
+        return [];
+      };
+
+      // If we have a UI snapshot, answer STRICTLY from it and return early.
+      if (snapWidgets) {
+        // ---- Catalog-only queries (numbered lists, no sums)
+        if (qLower.includes('проект') && _wantsCatalogOnly(qLower)) {
+          const w = _findSnapWidget('projects');
+          return res.json({ text: _renderCatalogFromRows('Проекты', _getRows(w)) });
+        }
+        if (qLower.includes('контрагент') && _wantsCatalogOnly(qLower)) {
+          const w = _findSnapWidget('contractors');
+          return res.json({ text: _renderCatalogFromRows('Контрагенты', _getRows(w)) });
+        }
+        if (qLower.includes('категор') && _wantsCatalogOnly(qLower)) {
+          const w = _findSnapWidget('categories');
+          return res.json({ text: _renderCatalogFromRows('Категории', _getRows(w)) });
+        }
+        if (_isIndividualsQuery(qLower) && _wantsCatalogOnly(qLower)) {
+          const w = _findSnapWidget('individuals');
+          return res.json({ text: _renderCatalogFromRows('Физлица', _getRows(w)) });
+        }
+
+        // ---- Totals on accounts
+        if (/(всего|итого)/i.test(qLower) && /(счет|счёт|баланс)/i.test(qLower)) {
+          const w = wantsFutureSnap
+            ? (_findSnapWidget('futureTotal') || _findSnapWidget('currentTotal'))
+            : (_findSnapWidget('currentTotal') || _findSnapWidget('futureTotal'));
+
+          if (w && typeof w.totalBalance !== 'undefined') {
+            const toStr = wantsFutureSnap ? snapFutureStr : snapTodayStr;
+            const title = wantsFutureSnap ? 'Всего на счетах (с учетом будущих)' : 'Всего на счетах';
+            const warn = _warnForecastOff(w);
+            const lines = [`${_snapTitleTo(title, toStr)} ${_formatTenge(w.totalBalance)}`];
+            if (warn) lines.push(warn);
+            return res.json({ text: lines.join('\n') });
+          }
+        }
+
+        // ---- Accounts list
+        if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
+          const w = _findSnapWidget('accounts');
+          if (!w) {
+            return res.json({ text: 'Счета: не вижу виджет "Счета/Кассы" на экране.' });
+          }
+
+          const useFuture = Boolean(wantsFutureSnap);
+          const toStr = useFuture ? snapFutureStr : snapTodayStr;
+
+          const rows = _getRows(w);
+          const includeExcludedInTotal = Boolean(uiSnapshot?.ui?.includeExcludedInTotal);
+
+          const total = rows.reduce((s, r) => {
+            if (!includeExcludedInTotal && r?.isExcluded) return s;
+            const v = useFuture ? (Number(r?.futureBalance) || 0) : (Number(r?.balance) || 0);
+            return s + v;
+          }, 0);
+
+          const lines = [`Счета (${useFuture ? 'Прогноз' : 'Факт'}). До ${toStr}`];
+
+          _maybeSlice(rows, explicitLimit).forEach((r) => {
+            const name = r?.name || '—';
+            const hidden = r?.isExcluded ? ' (скрыт)' : '';
+            const moneyText = useFuture
+              ? (r?.futureText || _formatTenge(r?.futureBalance || 0))
+              : (r?.balanceText || _formatTenge(r?.balance || 0));
+            lines.push(`${name}${hidden}: ${moneyText}`);
+          });
+
+          lines.push(`Итого: ${_formatTenge(total)}`);
+
+          const warn = _warnForecastOff(w);
+          if (warn) lines.push(warn);
+
+          return res.json({ text: lines.join('\n') });
+        }
+
+        // ---- Summary widgets: incomes / expenses / transfers / withdrawals
+        const _summaryOut = (key, titleFact, titleFuture) => {
+          const w = _findSnapWidget(key);
+          const rows = _getRows(w);
+          if (!rows.length) return null;
+
+          const row = rows[0];
+          const useFuture = Boolean(wantsFutureSnap);
+          const toStr = useFuture ? snapFutureStr : snapTodayStr;
+          const title = useFuture ? titleFuture : titleFact;
+
+          // Try to use prepared text from widget; fallback to numbers
+          const valText = useFuture
+            ? (row.futureText ?? row.currentText ?? _formatTenge(row.future ?? row.futureBalance ?? row.value ?? 0))
+            : (row.currentText ?? _formatTenge(row.current ?? row.balance ?? row.value ?? 0));
+
+          const lines = [`${_snapTitleTo(title, toStr)} ${String(valText || '').trim()}`];
+          const warn = _warnForecastOff(w);
+          if (warn) lines.push(warn);
+
+          return lines.join('\n');
+        };
+
+        const incomeText = _summaryOut('incomeList', 'Доходы', 'Ожидаемые доходы');
+        if (incomeText && /(доход|выруч|поступл|поступ)/i.test(qLower)) return res.json({ text: incomeText });
+
+        const expenseText = _summaryOut('expenseList', 'Расходы', 'Ожидаемые расходы');
+        if (expenseText && /(расход|тра(т|чу)|потрат|списан)/i.test(qLower)) return res.json({ text: expenseText });
+
+        const transfersText = _summaryOut('transfers', 'Переводы', 'Переводы (прогноз)');
+        if (transfersText && /(перевод|трансфер)/i.test(qLower)) return res.json({ text: transfersText });
+
+        const withdrawalsText = _summaryOut('withdrawalList', 'Выводы', 'Выводы (прогноз)');
+        if (withdrawalsText && /(вывод|выводы|сняти|снять|withdraw)/i.test(qLower)) return res.json({ text: withdrawalsText });
+
+        // ---- Fallback: short, snapshot-only answer
+        const hint = [
+          'Не вижу на экране данных для этого запроса.',
+          'Могу по экрану: счета, всего на счетах, доходы, расходы, переводы, выводы, проекты, контрагенты, категории, физлица.'
+        ].join('\n');
+
+        return res.json({ text: hint });
+      }
+
+      // No uiSnapshot => NO MONGO.
+      return res.status(400).json({ message: 'uiSnapshot is required (no-DB mode)' });
+
+      // Legacy Mongo-based path below is kept for reference only. In no-DB mode it must not run.
       const now = _pickFactAsOf(req, aiContext);
 
       const range = await _resolveRangeFromQuery(userId, qLower, now);
