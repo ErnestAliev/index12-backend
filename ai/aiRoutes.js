@@ -11,6 +11,9 @@
 // - Catalog queries (projects/contractors/categories/individuals/prepayments) return numbered lists without sums.
 
 const express = require('express');
+
+// Visible build marker to confirm which aiRoutes.js is running
+const AIROUTES_VERSION = 'snapshot-ui-v3.4';
 const https = require('https');
 
 module.exports = function createAiRouter(deps) {
@@ -472,13 +475,80 @@ module.exports = function createAiRouter(deps) {
       const uiSnapshot = (req.body && req.body.uiSnapshot) ? req.body.uiSnapshot : null;
       const snapWidgets = Array.isArray(uiSnapshot?.widgets) ? uiSnapshot.widgets : null;
 
-      const snapTodayStr = String(uiSnapshot?.meta?.todayStr || _fmtDateKZ(_endOfToday()));
-      const snapFutureStr = String(uiSnapshot?.meta?.futureUntilStr || snapTodayStr);
+      const snapTodayTitleStr = String(uiSnapshot?.meta?.todayStr || _fmtDateKZ(_endOfToday()));
+      const snapFutureTitleStr = String(uiSnapshot?.meta?.futureUntilStr || snapTodayTitleStr);
 
-      const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем|план|следующ|вперед|вперёд|после\s*сегодня/i.test(qLower);
+      // For lists like "Мои проекты" we want strict DD.MM.YYYY dates.
+      const _fmtDateDDMMYYYY = (any) => {
+        const s = String(any || '').trim();
+        if (!s) return null;
+
+        // YYYY-MM-DD
+        let m = s.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
+        if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+
+        // DD.MM.YYYY or DD.MM.YY
+        m = s.match(/^([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{2,4})$/);
+        if (m) {
+          const dd = String(m[1]).padStart(2, '0');
+          const mm = String(m[2]).padStart(2, '0');
+          let yy = String(m[3]);
+          if (yy.length === 2) yy = '20' + yy;
+          return `${dd}.${mm}.${yy}`;
+        }
+
+        // "28 дек. 2025" / "28 дек. 2025 г."
+        m = s.toLowerCase().match(/\b([0-9]{1,2})\s*(янв|фев|мар|апр|май|мая|июн|июл|авг|сен|сент|окт|ноя|дек)\w*\.?\s*(20\d{2})\b/);
+        if (m) {
+          const dd = String(m[1]).padStart(2, '0');
+          const mon = m[2];
+          const yy = m[3];
+          const map = {
+            янв: '01', фев: '02', мар: '03', апр: '04',
+            май: '05', мая: '05', июн: '06', июл: '07',
+            авг: '08', сен: '09', сент: '09', окт: '10',
+            ноя: '11', дек: '12',
+          };
+          const mm = map[mon] || '01';
+          return `${dd}.${mm}.${yy}`;
+        }
+
+        return null;
+      };
+
+      const _fmtTodayDDMMYYYY = () => {
+        const d = _endOfToday();
+        const x = new Date(new Date(d).getTime() + KZ_OFFSET_MS);
+        const dd = String(x.getUTCDate()).padStart(2, '0');
+        const mm = String(x.getUTCMonth() + 1).padStart(2, '0');
+        const yyyy = String(x.getUTCFullYear());
+        return `${dd}.${mm}.${yyyy}`;
+      };
+
+      const snapTodayDDMMYYYY =
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.today)
+        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.todayIso)
+        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.todayYmd)
+        || _fmtDateDDMMYYYY(snapTodayTitleStr)
+        || _fmtTodayDDMMYYYY();
+
+      const snapFutureDDMMYYYY =
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntil)
+        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilIso)
+        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilStr)
+        || _fmtDateDDMMYYYY(snapFutureTitleStr)
+        || snapTodayDDMMYYYY;
+
+      // Keep original snapshot strings for existing outputs ("До 28 дек. 2025 г.")
+      const snapTodayStr = snapTodayTitleStr;
+      const snapFutureStr = snapFutureTitleStr;
+const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем|план|следующ|вперед|вперёд|после\s*сегодня/i.test(qLower);
 
       const _snapTitleTo = (title, toStr) => `${title}. До ${toStr}`;
-      const _findSnapWidget = (key) => (snapWidgets || []).find(w => w && w.key === key) || null;
+      const _findSnapWidget = (keyOrKeys) => {
+        const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+        return (snapWidgets || []).find(w => w && keys.includes(w.key)) || null;
+      };
 
       const _renderCatalogFromRows = (title, rows) => {
         const arr = Array.isArray(rows) ? rows : [];
@@ -501,122 +571,420 @@ module.exports = function createAiRouter(deps) {
         if (!w) return [];
         if (Array.isArray(w.rows)) return w.rows;
         if (Array.isArray(w.items)) return w.items;
+        if (Array.isArray(w.list)) return w.list;
+        if (Array.isArray(w.data)) return w.data;
+        if (Array.isArray(w.values)) return w.values;
+        if (Array.isArray(w.names)) return w.names.map((name) => ({ name }));
+        if (Array.isArray(w.titles)) return w.titles.map((title) => ({ name: title }));
+        // Sometimes rows are nested
+        if (w.rows && typeof w.rows === 'object' && Array.isArray(w.rows.rows)) return w.rows.rows;
         return [];
       };
 
+      // -------- Render rows exactly like widget: NAME ₸ FACT > FORECAST
+      const _fmtMoneyInline = (v) => {
+        if (v == null) return '0';
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          const neg = v < 0;
+          const abs = Math.abs(v);
+          if (!abs) return '0';
+          return (neg ? '- ' : '') + _fmtIntRu(abs);
+        }
+
+        const s = String(v).replace(/\u00A0/g, ' ').trim();
+        if (!s) return '0';
+
+        // Keep digits/spaces/minus, drop ₸ and other chars
+        const cleaned = s
+          .replace(/₸/g, '')
+          .replace(/[^0-9\s\-]/g, '')
+          .trim();
+
+        if (!cleaned) return '0';
+
+        const neg = /^-/.test(cleaned) || /\s-\s/.test(cleaned) || /-\s*\d/.test(cleaned);
+
+        const digits = cleaned.replace(/[^0-9]/g, '');
+        if (!digits) return '0';
+
+        const num = Number(digits);
+        if (!Number.isFinite(num) || num === 0) return '0';
+
+        return (neg ? '- ' : '') + _fmtIntRu(Math.abs(num));
+      };
+      const _pickFactFuture = (r) => {
+        const _first = (vals) => {
+          for (const v of (vals || [])) {
+            if (v === null || typeof v === 'undefined') continue;
+            if (typeof v === 'string' && String(v).trim() === '') continue;
+            return v;
+          }
+          return null;
+        };
+
+        const _p = (obj, path) => {
+          try {
+            return String(path || '').split('.').reduce((acc, key) => {
+              if (!acc || typeof acc !== 'object') return undefined;
+              return acc[key];
+            }, obj);
+          } catch (_) {
+            return undefined;
+          }
+        };
+
+        const _pairFrom = (val) => {
+          if (val === null || typeof val === 'undefined') return null;
+          const s = String(val);
+          if (!s.includes('>')) return null;
+          const parts = s.split('>');
+          if (parts.length < 2) return null;
+          const left = parts[0];
+          const right = parts.slice(1).join('>');
+          if (String(left).trim() === '' && String(right).trim() === '') return null;
+          return { fact: left, fut: right };
+        };
+
+        // 1) Some widgets store "FACT > FORECAST" as a single text field.
+        const pair = _pairFrom(_first([
+          r?.pairText,
+          r?.valueText,
+          r?.text,
+          r?.displayText,
+          r?.subtitle,
+          r?.subTitle,
+          _p(r, 'value.text'),
+          _p(r, 'valueText'),
+          _p(r, 'summary.text'),
+          _p(r, 'summaryText'),
+        ]));
+        if (pair) {
+          return { fact: _fmtMoneyInline(pair.fact), fut: _fmtMoneyInline(pair.fut) };
+        }
+
+        // 2) Otherwise try many possible field names (flat + nested).
+        const factRaw = _first([
+          r?.currentText, r?.factText,
+          r?.currentValueText, r?.factValueText,
+          r?.currentBalanceText, r?.factBalanceText, r?.balanceText,
+          r?.currentAmountText, r?.factAmountText, r?.amountText,
+          r?.current, r?.fact,
+          r?.currentValue, r?.factValue,
+          r?.currentBalance, r?.factBalance, r?.balance,
+          r?.currentAmount, r?.factAmount, r?.amount,
+          r?.value, r?.sum,
+          _p(r, 'current.text'), _p(r, 'fact.text'),
+          _p(r, 'current.valueText'), _p(r, 'fact.valueText'),
+          _p(r, 'current.value'), _p(r, 'fact.value'),
+          _p(r, 'current.balance'), _p(r, 'fact.balance'),
+          _p(r, 'current.amount'), _p(r, 'fact.amount'),
+          _p(r, 'totals.fact'), _p(r, 'totals.current'),
+          _p(r, 'stats.fact'), _p(r, 'stats.current'),
+        ]) ?? 0;
+
+        const futureRaw = _first([
+          r?.futureText, r?.planText, r?.forecastText,
+          r?.futureValueText, r?.planValueText,
+          r?.futureBalanceText, r?.planBalanceText,
+          r?.futureAmountText, r?.planAmountText,
+          r?.future, r?.plan, r?.forecast,
+          r?.futureValue, r?.planValue,
+          r?.futureBalance, r?.planBalance,
+          r?.futureAmount, r?.planAmount,
+          _p(r, 'future.text'), _p(r, 'plan.text'), _p(r, 'forecast.text'),
+          _p(r, 'future.valueText'), _p(r, 'plan.valueText'),
+          _p(r, 'future.value'), _p(r, 'plan.value'),
+          _p(r, 'future.balance'), _p(r, 'plan.balance'),
+          _p(r, 'future.amount'), _p(r, 'plan.amount'),
+          _p(r, 'totals.future'), _p(r, 'totals.plan'),
+          _p(r, 'stats.future'), _p(r, 'stats.plan'),
+        ]) ?? 0;
+
+        return { fact: _fmtMoneyInline(factRaw), fut: _fmtMoneyInline(futureRaw) };
+      };
+
+      const _renderDualFactForecastList = (title, widget, rows) => {
+        const arr = Array.isArray(rows) ? rows : [];
+
+        const lines = [
+          '===================',
+          `${title}:`,
+          `Факт: до ${snapTodayDDMMYYYY}`,
+          `Прогноз: до ${snapFutureDDMMYYYY}`,
+        ];
+
+        if (!arr.length) {
+          lines.push(`${title}: 0`);
+        } else {
+          _maybeSlice(arr, explicitLimit).forEach((x) => {
+            const name = x?.name || x?.title || x?.label || 'Без имени';
+            const { fact, fut } = _pickFactFuture(x);
+            lines.push(`${name} ₸ ${fact} > ${fut}`);
+          });
+        }
+
+        lines.push('===================');
+
+        if (widget && widget.showFutureBalance !== true) {
+          lines.push('Совет: Если хотите увидеть прогноз — включите прогноз в виджете.');
+        }
+
+        return lines.join('\n');
+      };
+
+      const _wrapBlock = (title, widget, bodyLines) => {
+        const lines = [
+          '===================',
+          `${title}:`,
+          `Факт: до ${snapTodayDDMMYYYY}`,
+          `Прогноз: до ${snapFutureDDMMYYYY}`,
+          ...(Array.isArray(bodyLines) ? bodyLines : []),
+          '===================',
+        ];
+
+        if (widget && widget.showFutureBalance !== true) {
+          lines.push('Совет: Если хотите увидеть прогноз — включите прогноз в виджете.');
+        }
+
+        return lines.join('\n');
+      };
+
+      const _renderDualValueBlock = (title, widget, factRaw, futureRaw) => {
+        const { fact, fut } = _pickFactFuture({ currentText: factRaw, futureText: futureRaw, factText: factRaw, planText: futureRaw });
+        return _wrapBlock(title, widget, [`₸ ${fact} > ${fut}`]);
+      };
+
+      const _renderDualRowsBlock = (title, widget, rows, opts = {}) => {
+        const arr = Array.isArray(rows) ? rows : [];
+        const nameKey = opts.nameKey || null;
+
+        if (!arr.length) {
+          return _wrapBlock(title, widget, [`${title}: 0`]);
+        }
+
+        const body = [];
+        _maybeSlice(arr, explicitLimit).forEach((r) => {
+          const name = nameKey ? (r?.[nameKey]) : (r?.name || r?.title || r?.label || '—');
+          const { fact, fut } = _pickFactFuture(r);
+          body.push(`${name} ₸ ${fact} > ${fut}`);
+        });
+
+        return _wrapBlock(title, widget, body);
+      };
+
+      const _renderAccountsBlock = (widget, rows) => {
+        const arr = Array.isArray(rows) ? rows : [];
+        const includeExcludedInTotal = Boolean(uiSnapshot?.ui?.includeExcludedInTotal);
+
+        const body = [];
+        let factTotal = 0;
+        let futTotal = 0;
+
+        _maybeSlice(arr, explicitLimit).forEach((r) => {
+          const name = r?.name || '—';
+          const hidden = r?.isExcluded ? ' (скрыт)' : '';
+
+          const { fact, fut } = _pickFactFuture({
+            ...r,
+            currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
+            futureText: r?.futureText ?? r?.planText,
+            currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
+            futureBalance: r?.futureBalance ?? r?.planBalance,
+          });
+
+          body.push(`${name}${hidden} ₸ ${fact} > ${fut}`);
+
+          if (!includeExcludedInTotal && r?.isExcluded) return;
+          factTotal += (Number(r?.balance ?? r?.currentBalance ?? r?.factBalance) || 0);
+          futTotal += (Number(r?.futureBalance ?? r?.planBalance) || 0);
+        });
+
+        body.push(`Итого ₸ ${_fmtMoneyInline(factTotal)} > ${_fmtMoneyInline(futTotal)}`);
+
+        return _wrapBlock('Счета', widget, body);
+      };
+
+      const _summaryDual = (keyOrKeys, title) => {
+        const w = _findSnapWidget(keyOrKeys);
+        if (!w) return null;
+
+        const rows = _getRows(w);
+        const r0 = rows && rows.length ? rows[0] : null;
+
+        const factRaw =
+          (r0?.currentText ?? r0?.factText ?? w?.currentText ?? w?.factText ?? w?.summaryCurrentText ?? w?.summaryText ?? w?.valueText ?? w?.text ?? r0?.current ?? r0?.fact ?? r0?.value ?? w?.current ?? w?.fact ?? w?.value ?? 0);
+
+        const futureRaw =
+          (r0?.futureText ?? r0?.planText ?? w?.futureText ?? w?.planText ?? w?.summaryFutureText ?? w?.summaryText ?? w?.valueText ?? w?.text ?? r0?.future ?? r0?.plan ?? w?.future ?? w?.plan ?? 0);
+
+        return _renderDualValueBlock(title, w, factRaw, futureRaw);
+      };
+
+
       // If we have a UI snapshot, answer STRICTLY from it and return early.
       if (snapWidgets) {
+        // ---- Debug: list visible snapshot widgets
+        if (/(что\s*видишь|какие\s*виджеты|виджеты\s*$|snapshot\s*$|debug\s*$)/i.test(qLower)) {
+          const list = (snapWidgets || []).map(w => ({ key: w?.key || null, title: w?.title || w?.name || null }));
+          const lines = [`Вижу виджеты на экране: ${list.length}`];
+          list.forEach((x, i) => lines.push(`${i + 1}) ${x.key || '—'}${x.title ? ` — ${x.title}` : ''}`));
+          return res.json({ text: lines.join('\n') });
+        }
+
         // ---- Catalog-only queries (numbered lists, no sums)
-        if (qLower.includes('проект') && _wantsCatalogOnly(qLower)) {
-          const w = _findSnapWidget('projects');
-          return res.json({ text: _renderCatalogFromRows('Проекты', _getRows(w)) });
+        if (qLower.includes('проект')) {
+          const w = _findSnapWidget(['projects', 'projectList']);
+          return res.json({ text: _renderDualFactForecastList('Мои проекты', w, _getRows(w)) });
         }
-        if (qLower.includes('контрагент') && _wantsCatalogOnly(qLower)) {
-          const w = _findSnapWidget('contractors');
-          return res.json({ text: _renderCatalogFromRows('Контрагенты', _getRows(w)) });
-        }
-        if (qLower.includes('категор') && _wantsCatalogOnly(qLower)) {
-          const w = _findSnapWidget('categories');
-          return res.json({ text: _renderCatalogFromRows('Категории', _getRows(w)) });
-        }
-        if (_isIndividualsQuery(qLower) && _wantsCatalogOnly(qLower)) {
-          const w = _findSnapWidget('individuals');
-          return res.json({ text: _renderCatalogFromRows('Физлица', _getRows(w)) });
-        }
-
-        // ---- Totals on accounts
-        if (/(всего|итого)/i.test(qLower) && /(счет|счёт|баланс)/i.test(qLower)) {
-          const w = wantsFutureSnap
-            ? (_findSnapWidget('futureTotal') || _findSnapWidget('currentTotal'))
-            : (_findSnapWidget('currentTotal') || _findSnapWidget('futureTotal'));
-
-          if (w && typeof w.totalBalance !== 'undefined') {
-            const toStr = wantsFutureSnap ? snapFutureStr : snapTodayStr;
-            const title = wantsFutureSnap ? 'Всего на счетах (с учетом будущих)' : 'Всего на счетах';
-            const warn = _warnForecastOff(w);
-            const lines = [`${_snapTitleTo(title, toStr)} ${_formatTenge(w.totalBalance)}`];
-            if (warn) lines.push(warn);
-            return res.json({ text: lines.join('\n') });
+        if (/(компан|companies|company)/i.test(qLower)) {
+          const w = _findSnapWidget(['companies', 'companyList', 'companiesList', 'myCompanies']);
+          if (!w) {
+            return res.json({ text: 'Компании: не вижу виджет "Мои компании" на экране.' });
           }
+          return res.json({ text: _renderDualFactForecastList('Мои компании', w, _getRows(w)) });
+        }
+        if (qLower.includes('контрагент')) {
+          const w = _findSnapWidget(['contractors', 'contractorList']);
+          return res.json({ text: _renderDualFactForecastList('Мои контрагенты', w, _getRows(w)) });
+        }
+        if (qLower.includes('категор')) {
+          const w = _findSnapWidget(['categories', 'categoryList']);
+          return res.json({ text: _renderDualFactForecastList('Категории', w, _getRows(w)) });
+        }
+        if (_isIndividualsQuery(qLower)) {
+          const w = _findSnapWidget(['individuals', 'persons', 'individualList']);
+          return res.json({ text: _renderDualFactForecastList('Физлица', w, _getRows(w)) });
         }
 
-        // ---- Accounts list
+        // ---- Totals on accounts (unified block style)
+        if (/(всего|итого)/i.test(qLower) && /(счет|счёт|баланс)/i.test(qLower)) {
+          const acc = _findSnapWidget('accounts');
+          const rows = _getRows(acc);
+          const includeExcludedInTotal = Boolean(uiSnapshot?.ui?.includeExcludedInTotal);
+
+          const factTotal = Array.isArray(rows)
+            ? rows.reduce((s, r) => {
+              if (!includeExcludedInTotal && r?.isExcluded) return s;
+              return s + (Number(r?.balance ?? r?.currentBalance ?? r?.factBalance) || 0);
+            }, 0)
+            : 0;
+
+          const futTotal = Array.isArray(rows)
+            ? rows.reduce((s, r) => {
+              if (!includeExcludedInTotal && r?.isExcluded) return s;
+              return s + (Number(r?.futureBalance ?? r?.planBalance) || 0);
+            }, 0)
+            : 0;
+
+          return res.json({ text: _renderDualValueBlock('Всего на счетах', acc || null, factTotal, futTotal) });
+        }
+
+        // ---- Accounts list (unified block style)
         if (qLower.includes('счет') || qLower.includes('счёт') || qLower.includes('баланс')) {
           const w = _findSnapWidget('accounts');
           if (!w) {
             return res.json({ text: 'Счета: не вижу виджет "Счета/Кассы" на экране.' });
           }
-
-          const useFuture = Boolean(wantsFutureSnap);
-          const toStr = useFuture ? snapFutureStr : snapTodayStr;
-
           const rows = _getRows(w);
-          const includeExcludedInTotal = Boolean(uiSnapshot?.ui?.includeExcludedInTotal);
-
-          const total = rows.reduce((s, r) => {
-            if (!includeExcludedInTotal && r?.isExcluded) return s;
-            const v = useFuture ? (Number(r?.futureBalance) || 0) : (Number(r?.balance) || 0);
-            return s + v;
-          }, 0);
-
-          const lines = [`Счета (${useFuture ? 'Прогноз' : 'Факт'}). До ${toStr}`];
-
-          _maybeSlice(rows, explicitLimit).forEach((r) => {
-            const name = r?.name || '—';
-            const hidden = r?.isExcluded ? ' (скрыт)' : '';
-            const moneyText = useFuture
-              ? (r?.futureText || _formatTenge(r?.futureBalance || 0))
-              : (r?.balanceText || _formatTenge(r?.balance || 0));
-            lines.push(`${name}${hidden}: ${moneyText}`);
-          });
-
-          lines.push(`Итого: ${_formatTenge(total)}`);
-
-          const warn = _warnForecastOff(w);
-          if (warn) lines.push(warn);
-
-          return res.json({ text: lines.join('\n') });
+          return res.json({ text: _renderAccountsBlock(w, rows) });
         }
 
-        // ---- Summary widgets: incomes / expenses / transfers / withdrawals
-        const _summaryOut = (key, titleFact, titleFuture) => {
-          const w = _findSnapWidget(key);
+        // ---- Summary widgets (unified block style)
+        const incomeBlock = _summaryDual(['incomeList', 'income', 'incomeSummary'], 'Доходы');
+        if (incomeBlock && /(доход|выруч|поступл|поступ)/i.test(qLower)) return res.json({ text: incomeBlock });
+
+        const expenseBlock = _summaryDual(['expenseList', 'expense', 'expenseSummary'], 'Расходы');
+        if (expenseBlock && /(расход|тра(т|чу)|потрат|списан)/i.test(qLower)) return res.json({ text: expenseBlock });
+
+        const transfersBlock = _summaryDual(['transfers', 'transferList'], 'Переводы');
+        if (transfersBlock && /(перевод|трансфер)/i.test(qLower)) return res.json({ text: transfersBlock });
+
+        const withdrawalsBlock = _summaryDual(['withdrawalList', 'withdrawals', 'withdrawalsList'], 'Выводы');
+        if (withdrawalsBlock && /(вывод|выводы|сняти|снять|withdraw)/i.test(qLower)) return res.json({ text: withdrawalsBlock });
+
+        // ---- Taxes ("Мои налоги")
+        if (/(налог|налоги|tax)/i.test(qLower)) {
+          const w = _findSnapWidget(['taxes', 'tax', 'taxList', 'taxesList']);
+          if (!w) {
+            return res.json({ text: 'Налоги: не вижу виджет "Мои налоги" на экране.' });
+          }
+
           const rows = _getRows(w);
-          if (!rows.length) return null;
+          const body = [];
 
-          const row = rows[0];
-          const useFuture = Boolean(wantsFutureSnap);
-          const toStr = useFuture ? snapFutureStr : snapTodayStr;
-          const title = useFuture ? titleFuture : titleFact;
+          _maybeSlice(rows, explicitLimit).forEach((r) => {
+            const name = r?.name || r?.label || '—';
+            const { fact, fut } = _pickFactFuture({
+              ...r,
+              currentText: r?.currentText ?? r?.factText,
+              futureText: r?.futureText ?? r?.planText ?? r?.futureDeltaText,
+            });
+            body.push(`${name} ₸ ${fact} > ${fut}`);
+          });
 
-          // Try to use prepared text from widget; fallback to numbers
-          const valText = useFuture
-            ? (row.futureText ?? row.currentText ?? _formatTenge(row.future ?? row.futureBalance ?? row.value ?? 0))
-            : (row.currentText ?? _formatTenge(row.current ?? row.balance ?? row.value ?? 0));
+          // Totals if present
+          const factTotRaw = (w?.totals?.totalCurrentDebt ?? w?.totals?.totalCurrent ?? w?.totals?.currentTotal ?? null);
+          const futTotRaw = (w?.totals?.totalFutureDebt ?? w?.totals?.totalFuture ?? w?.totals?.totalPlan ?? w?.totals?.futureTotal ?? null);
+          if (factTotRaw != null || futTotRaw != null) {
+            const factTot = factTotRaw != null ? (-Math.abs(Number(factTotRaw) || 0)) : 0;
+            const futTot = futTotRaw != null ? (-Math.abs(Number(futTotRaw) || 0)) : 0;
+            body.push(`Итого ₸ ${_fmtMoneyInline(factTot)} > ${_fmtMoneyInline(futTot)}`);
+          }
 
-          const lines = [`${_snapTitleTo(title, toStr)} ${String(valText || '').trim()}`];
-          const warn = _warnForecastOff(w);
-          if (warn) lines.push(warn);
+          return res.json({ text: _wrapBlock('Мои налоги', w, body) });
+        }
 
-          return lines.join('\n');
-        };
+        // ---- Prepayments / Liabilities ("Мои предоплаты")
+        if (/(предоплат|аванс|предоплаты|liabilit|prepay)/i.test(qLower)) {
+          const w = _findSnapWidget(['liabilities', 'prepayments', 'prepaymentList']);
+          if (!w) {
+            return res.json({ text: 'Предоплаты: не вижу виджет "Мои предоплаты" на экране.' });
+          }
 
-        const incomeText = _summaryOut('incomeList', 'Доходы', 'Ожидаемые доходы');
-        if (incomeText && /(доход|выруч|поступл|поступ)/i.test(qLower)) return res.json({ text: incomeText });
+          const rows = _getRows(w);
+          const body = [];
 
-        const expenseText = _summaryOut('expenseList', 'Расходы', 'Ожидаемые расходы');
-        if (expenseText && /(расход|тра(т|чу)|потрат|списан)/i.test(qLower)) return res.json({ text: expenseText });
+          _maybeSlice(rows, explicitLimit).forEach((r) => {
+            const label = r?.label || r?.name || '—';
+            const { fact, fut } = _pickFactFuture({
+              ...r,
+              currentText: r?.currentText ?? r?.factText,
+              futureText: r?.futureText ?? r?.planText,
+            });
+            body.push(`${label} ₸ ${fact} > ${fut}`);
+          });
 
-        const transfersText = _summaryOut('transfers', 'Переводы', 'Переводы (прогноз)');
-        if (transfersText && /(перевод|трансфер)/i.test(qLower)) return res.json({ text: transfersText });
+          return res.json({ text: _wrapBlock('Мои предоплаты', w, body) });
+        }
 
-        const withdrawalsText = _summaryOut('withdrawalList', 'Выводы', 'Выводы (прогноз)');
-        if (withdrawalsText && /(вывод|выводы|сняти|снять|withdraw)/i.test(qLower)) return res.json({ text: withdrawalsText });
+        // ---- Credits ("Мои кредиты")
+        if (/(кредит|кредиты|долг|обязательств)/i.test(qLower)) {
+          const w = _findSnapWidget(['credits', 'credit', 'creditList']);
+          if (!w) {
+            return res.json({ text: 'Кредиты: не вижу виджет "Мои кредиты" на экране.' });
+          }
+
+          const rows = _getRows(w);
+          const body = [];
+
+          _maybeSlice(rows, explicitLimit).forEach((r) => {
+            const name = r?.name || r?.label || '—';
+            const { fact, fut } = _pickFactFuture({
+              ...r,
+              currentText: r?.currentText ?? r?.factText,
+              futureText: r?.futureText ?? r?.planText,
+            });
+            body.push(`${name} ₸ ${fact} > ${fut}`);
+          });
+
+          return res.json({ text: _wrapBlock('Мои кредиты', w, body) });
+        }
+
 
         // ---- Fallback: short, snapshot-only answer
         const hint = [
           'Не вижу на экране данных для этого запроса.',
-          'Могу по экрану: счета, всего на счетах, доходы, расходы, переводы, выводы, проекты, контрагенты, категории, физлица.'
+          `Могу по экрану: счета, всего на счетах, доходы, расходы, переводы, выводы, налоги, предоплаты, кредиты, проекты, компании, контрагенты, категории, физлица. (версия: ${AIROUTES_VERSION})`
         ].join('\n');
 
         return res.json({ text: hint });
@@ -680,7 +1048,7 @@ module.exports = function createAiRouter(deps) {
         return lines.join('\n');
       };
 
-      if (qLower.includes('проект') && _wantsCatalogOnly(qLower)) {
+      if (qLower.includes('проект')) {
         const dbRows = await Project.collection
           .find({ $or: [{ userId: userObjId }, { userId: userIdStr }] }, { projection: { name: 1, order: 1 } })
           .sort({ order: 1, name: 1 })
@@ -692,7 +1060,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: _renderCatalog('Проекты', fe) });
       }
 
-      if (qLower.includes('контрагент') && _wantsCatalogOnly(qLower)) {
+      if (qLower.includes('контрагент')) {
         const dbRows = await Contractor.collection
           .find({ $or: [{ userId: userObjId }, { userId: userIdStr }] }, { projection: { name: 1, order: 1 } })
           .sort({ order: 1, name: 1 })
@@ -704,7 +1072,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: _renderCatalog('Контрагенты', fe) });
       }
 
-      if (qLower.includes('категор') && _wantsCatalogOnly(qLower)) {
+      if (qLower.includes('категор')) {
         const dbRows = await Category.collection
           .find({ $or: [{ userId: userObjId }, { userId: userIdStr }] }, { projection: { name: 1, order: 1, type: 1 } })
           .sort({ order: 1, name: 1 })
@@ -716,7 +1084,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: _renderCatalog('Категории', fe) });
       }
 
-      if (_isIndividualsQuery(qLower) && _wantsCatalogOnly(qLower)) {
+      if (_isIndividualsQuery(qLower)) {
         const dbRows = await Individual.collection
           .find({ $or: [{ userId: userObjId }, { userId: userIdStr }] }, { projection: { name: 1, order: 1 } })
           .sort({ order: 1, name: 1 })
