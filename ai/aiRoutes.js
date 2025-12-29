@@ -13,7 +13,7 @@
 const express = require('express');
 
 // Visible build marker to confirm which aiRoutes.js is running
-const AIROUTES_VERSION = 'snapshot-ui-v3.5';
+const AIROUTES_VERSION = 'snapshot-ui-v3.6-diag';
 
 const https = require('https');
 
@@ -44,6 +44,7 @@ const _getChatSession = (userId) => {
       limit: 10,
     },
     pending: null,
+    history: [],
   };
   _chatSessions.set(key, fresh);
   return fresh;
@@ -61,6 +62,36 @@ const _clearPending = (userId) => {
   if (!s) return;
   s.pending = null;
   s.expiresAt = Date.now() + SESSION_TTL_MS;
+};
+
+// =========================
+// CHAT HISTORY HELPERS
+// =========================
+const HISTORY_MAX_MESSAGES = 40; // last 40 messages total (user+assistant)
+
+const _pushHistory = (userId, role, content) => {
+  const s = _getChatSession(userId);
+  if (!s) return;
+  if (!Array.isArray(s.history)) s.history = [];
+
+  const msg = {
+    role: (role === 'assistant') ? 'assistant' : 'user',
+    content: String(content || '').trim(),
+  };
+
+  if (!msg.content) return;
+
+  s.history.push(msg);
+  if (s.history.length > HISTORY_MAX_MESSAGES) {
+    s.history = s.history.slice(-HISTORY_MAX_MESSAGES);
+  }
+  s.expiresAt = Date.now() + SESSION_TTL_MS;
+};
+
+const _getHistoryMessages = (userId) => {
+  const s = _getChatSession(userId);
+  if (!s || !Array.isArray(s.history) || !s.history.length) return [];
+  return s.history.slice(-HISTORY_MAX_MESSAGES);
 };
 
 module.exports = function createAiRouter(deps) {
@@ -511,6 +542,17 @@ module.exports = function createAiRouter(deps) {
       if (!q) return res.status(400).json({ message: 'Empty message' });
 
       const qLower = q.toLowerCase();
+
+      // Cyrillic-safe diagnostics detector (JS  doesn't work with кириллица)
+      const _isDiagnosticsQuery = (s) => {
+        const t = String(s || '').toLowerCase();
+        if (!t) return false;
+        // covers: "диагностика", common typos like "иагностика", and English
+        if (t.includes('диагност') || t.includes('агност') || t.includes('diagnostic')) return true;
+        // short command: diag
+        return /(^|[^a-z])diag([^a-z]|$)/i.test(t);
+      };
+
       const explicitLimit = _parseExplicitLimitFromQuery(qLower);
 
       const aiContext = (req.body && req.body.aiContext) ? req.body.aiContext : null;
@@ -520,10 +562,241 @@ module.exports = function createAiRouter(deps) {
       // UI SNAPSHOT MODE (NO MONGO)
       // =========================
       const uiSnapshot = (req.body && req.body.uiSnapshot) ? req.body.uiSnapshot : null;
-      const snapWidgets = Array.isArray(uiSnapshot?.widgets) ? uiSnapshot.widgets : null;
+      const snapWidgets = Array.isArray(uiSnapshot?.widgets) ? uiSnapshot.widgets : [];
 
       const snapTodayTitleStr = String(uiSnapshot?.meta?.todayStr || _fmtDateKZ(_endOfToday()));
       const snapFutureTitleStr = String(uiSnapshot?.meta?.futureUntilStr || snapTodayTitleStr);
+
+      function _renderDiagnosticsFromSnapshot(uiSnapshotArg) {
+        const s = uiSnapshotArg || null;
+        if (!s) return 'Диагностика: uiSnapshot не получен. Открой главный экран с виджетами и повтори.';
+
+        const widgets = Array.isArray(s.widgets) ? s.widgets : [];
+        const widgetKeys = widgets.map(w => w?.key).filter(Boolean);
+
+        const getRows = (w) => {
+          if (!w) return [];
+          if (Array.isArray(w.rows)) return w.rows;
+          if (Array.isArray(w.items)) return w.items;
+          if (Array.isArray(w.list)) return w.list;
+          if (Array.isArray(w.data)) return w.data;
+          if (Array.isArray(w.values)) return w.values;
+          if (Array.isArray(w.names)) return w.names.map((name) => ({ name }));
+          if (Array.isArray(w.titles)) return w.titles.map((title) => ({ name: title }));
+          if (w.rows && typeof w.rows === 'object' && Array.isArray(w.rows.rows)) return w.rows.rows;
+          return [];
+        };
+
+        const findWidget = (keyOrKeys) => {
+          const keys = Array.isArray(keyOrKeys) ? keyOrKeys : [keyOrKeys];
+          for (const k of keys) {
+            const w = widgets.find(x => x && x.key === k);
+            if (w) return w;
+          }
+          return null;
+        };
+
+        const hasWidget = (keyOrKeys) => Boolean(findWidget(keyOrKeys));
+        const countRows = (keyOrKeys) => {
+          const w = findWidget(keyOrKeys);
+          const r = getRows(w);
+          return Array.isArray(r) ? r.length : 0;
+        };
+
+        const fmtDateKZ = (d) => {
+          try {
+            const KZ_OFFSET_MS_LOCAL = 5 * 60 * 60 * 1000;
+            const x = new Date(new Date(d).getTime() + KZ_OFFSET_MS_LOCAL);
+            const dd = String(x.getUTCDate()).padStart(2, '0');
+            const mm = String(x.getUTCMonth() + 1).padStart(2, '0');
+            const yyyy = String(x.getUTCFullYear());
+            return `${dd}.${mm}.${yyyy}`;
+          } catch (_) {
+            return String(d);
+          }
+        };
+
+        const parseAnyDateToTs = (any) => {
+          const v = (any == null) ? '' : String(any).trim();
+          if (!v) return null;
+
+          let m = v.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})/);
+          if (m) {
+            const y = Number(m[1]);
+            const mo = Number(m[2]) - 1;
+            const dd = Number(m[3]);
+            const dt = new Date(Date.UTC(y, mo, dd, 0, 0, 0, 0) - (5 * 60 * 60 * 1000));
+            return Number.isNaN(dt.getTime()) ? null : dt.getTime();
+          }
+
+          m = v.match(/^([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{2,4})$/);
+          if (m) {
+            const dd = Number(m[1]);
+            const mm = Number(m[2]);
+            let yy = Number(m[3]);
+            if (yy < 100) yy = 2000 + yy;
+            const dt = new Date(Date.UTC(yy, mm - 1, dd, 0, 0, 0, 0) - (5 * 60 * 60 * 1000));
+            return Number.isNaN(dt.getTime()) ? null : dt.getTime();
+          }
+
+          m = v.toLowerCase().match(/\b([0-9]{1,2})\s*(янв|фев|мар|апр|май|мая|июн|июл|авг|сен|сент|окт|ноя|дек)\w*\.?\s*(20\d{2})\b/);
+          if (m) {
+            const dd = Number(m[1]);
+            const yy = Number(m[3]);
+            const map = { янв:0, фев:1, мар:2, апр:3, май:4, мая:4, июн:5, июл:6, авг:7, сен:8, сент:8, окт:9, ноя:10, дек:11 };
+            const mi = map[m[2]] ?? 0;
+            const dt = new Date(Date.UTC(yy, mi, dd, 0, 0, 0, 0) - (5 * 60 * 60 * 1000));
+            return Number.isNaN(dt.getTime()) ? null : dt.getTime();
+          }
+
+          const dt2 = new Date(v);
+          if (!Number.isNaN(dt2.getTime())) return dt2.getTime();
+          return null;
+        };
+
+        const guessKind = (widgetKey, row) => {
+          const t = String(row?.type || row?.kind || '').toLowerCase();
+          if (t === 'transfer' || row?.isTransfer) return 'transfer';
+          if (t === 'withdrawal' || row?.isWithdrawal) return 'withdrawal';
+          if (t === 'income') return 'income';
+          if (t === 'expense') return 'expense';
+          const wk = String(widgetKey || '').toLowerCase();
+          if (/transfer|перевод/.test(wk)) return 'transfer';
+          if (/withdraw|вывод|снят/.test(wk)) return 'withdrawal';
+          if (/income|доход/.test(wk)) return 'income';
+          if (/expense|расход/.test(wk)) return 'expense';
+          return null;
+        };
+
+        const pickDateTs = (row) => {
+          const v = row?.date ?? row?.dateIso ?? row?.dateYmd ?? row?.dateStr ?? row?.when ?? row?.whenStr ?? row?.dueDate ?? row?.dueDateStr ?? row?.plannedDate ?? row?.plannedDateStr ?? row?.payDate ?? row?.payDateStr ?? row?.createdAt;
+          return parseAnyDateToTs(v);
+        };
+
+        const metaToday = s?.meta?.today || s?.meta?.todayIso || s?.meta?.todayYmd || s?.meta?.todayStr;
+        const metaFuture = s?.meta?.futureUntil || s?.meta?.futureUntilIso || s?.meta?.futureUntilStr;
+        const todayStr = (metaToday && String(metaToday).trim()) ? String(metaToday).trim() : fmtDateKZ(new Date());
+        const futureStr = (metaFuture && String(metaFuture).trim()) ? String(metaFuture).trim() : todayStr;
+
+        // Presence + counts
+        const seen = {
+          accounts: hasWidget('accounts'),
+          incomes: hasWidget(['incomeListCurrent', 'incomeList', 'income', 'incomeSummary']),
+          expenses: hasWidget(['expenseListCurrent', 'expenseList', 'expense', 'expenseSummary']),
+          transfers: hasWidget(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture']),
+          withdrawals: hasWidget(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture']),
+          taxes: hasWidget(['taxes', 'tax', 'taxList', 'taxesList']),
+          credits: hasWidget(['credits', 'credit', 'creditList']),
+          prepayments: hasWidget(['prepayments', 'prepaymentList', 'liabilities']),
+          projects: hasWidget(['projects', 'projectList']),
+          contractors: hasWidget(['contractors', 'contractorList', 'counterparties']),
+          individuals: hasWidget(['individuals', 'individualList', 'persons', 'people']),
+          categories: hasWidget(['categories', 'categoryList']),
+          companies: hasWidget(['companies', 'companyList']),
+        };
+
+        let accountsTotal = 0;
+        let accountsHidden = 0;
+        if (seen.accounts) {
+          const w = findWidget('accounts');
+          const r = getRows(w);
+          accountsTotal = Array.isArray(r) ? r.length : 0;
+          accountsHidden = Array.isArray(r) ? r.filter(x => Boolean(x?.isExcluded)).length : 0;
+        }
+
+        // Collect operations
+        const ops = [];
+        const opKeys = [
+          'incomeListCurrent','expenseListCurrent','withdrawalListCurrent','transfersCurrent',
+          'incomeListFuture','expenseListFuture','withdrawalListFuture','transfersFuture',
+          'incomeList','income','expenseList','expense','withdrawalList','withdrawals','withdrawalsList','transfers','transferList'
+        ];
+
+        for (const k of opKeys) {
+          const w = findWidget(k);
+          if (!w) continue;
+          const wk = w?.key || k;
+          const rows = getRows(w);
+          for (const r of (rows || [])) {
+            const ts = pickDateTs(r);
+            if (!ts) continue;
+            const kind = guessKind(wk, r);
+            if (!kind) continue;
+            ops.push({ ts, kind });
+          }
+        }
+
+        try {
+          const byDay = s?.storeTimeline?.opsByDay;
+          if (byDay && typeof byDay === 'object') {
+            for (const dayKey of Object.keys(byDay)) {
+              const arr = byDay[dayKey];
+              if (!Array.isArray(arr)) continue;
+              for (const r of arr) {
+                const ts = pickDateTs(r) || parseAnyDateToTs(dayKey);
+                if (!ts) continue;
+                const kind = guessKind('storeTimeline', r);
+                if (!kind) continue;
+                ops.push({ ts, kind });
+              }
+            }
+          }
+        } catch (_) {}
+
+        const cnt = { income: 0, expense: 0, transfer: 0, withdrawal: 0 };
+        let minTs = null;
+        let maxTs = null;
+        for (const x of ops) {
+          if (Object.prototype.hasOwnProperty.call(cnt, x.kind)) cnt[x.kind] += 1;
+          if (minTs === null || x.ts < minTs) minTs = x.ts;
+          if (maxTs === null || x.ts > maxTs) maxTs = x.ts;
+        }
+
+        const opsTotal = cnt.income + cnt.expense + cnt.transfer + cnt.withdrawal;
+        const minDate = (minTs != null) ? fmtDateKZ(new Date(minTs)) : '—';
+        const maxDate = (maxTs != null) ? fmtDateKZ(new Date(maxTs)) : '—';
+
+        const lines = [];
+        lines.push('Диагностика:');
+        lines.push(`Факт: до ${todayStr}`);
+        lines.push(`Прогноз: до ${futureStr}`);
+        lines.push(`Виджетов: ${widgetKeys.length}`);
+        lines.push('Вижу:');
+        lines.push(`Счета: ${seen.accounts ? 'да' : 'нет'} (${accountsTotal}${accountsHidden ? `, скрытых ${accountsHidden}` : ''})`);
+        lines.push(`Доходы: ${seen.incomes ? 'да' : 'нет'} (строк ${countRows(['incomeListCurrent','incomeList','income'])})`);
+        lines.push(`Расходы: ${seen.expenses ? 'да' : 'нет'} (строк ${countRows(['expenseListCurrent','expenseList','expense'])})`);
+        lines.push(`Переводы: ${seen.transfers ? 'да' : 'нет'} (строк ${countRows(['transfersCurrent','transfers','transferList','transfersFuture'])})`);
+        lines.push(`Выводы: ${seen.withdrawals ? 'да' : 'нет'} (строк ${countRows(['withdrawalListCurrent','withdrawalList','withdrawals','withdrawalsList','withdrawalListFuture'])})`);
+        lines.push(`Налоги: ${seen.taxes ? 'да' : 'нет'} (строк ${countRows(['taxes','tax','taxList','taxesList'])})`);
+        lines.push(`Кредиты: ${seen.credits ? 'да' : 'нет'} (строк ${countRows(['credits','credit','creditList'])})`);
+        lines.push(`Предоплаты/обязательства: ${seen.prepayments ? 'да' : 'нет'} (строк ${countRows(['prepayments','prepaymentList','liabilities'])})`);
+        lines.push(`Проекты: ${seen.projects ? 'да' : 'нет'} (${countRows(['projects','projectList'])})`);
+        lines.push(`Контрагенты: ${seen.contractors ? 'да' : 'нет'} (${countRows(['contractors','contractorList','counterparties'])})`);
+        lines.push(`Физлица: ${seen.individuals ? 'да' : 'нет'} (${countRows(['individuals','individualList','persons','people'])})`);
+        lines.push(`Категории: ${seen.categories ? 'да' : 'нет'} (${countRows(['categories','categoryList'])})`);
+        lines.push(`Компании: ${seen.companies ? 'да' : 'нет'} (${countRows(['companies','companyList'])})`);
+        lines.push('Операции:');
+        lines.push(`Диапазон: ${minDate} — ${maxDate}`);
+        lines.push(`Всего: ${opsTotal}`);
+        lines.push(`Доходы: ${cnt.income}`);
+        lines.push(`Расходы: ${cnt.expense}`);
+        lines.push(`Переводы: ${cnt.transfer}`);
+        lines.push(`Выводы: ${cnt.withdrawal}`);
+
+        if (widgetKeys.length) {
+          const keysShown = widgetKeys.slice(0, 60);
+          lines.push('Ключи виджетов:');
+          lines.push(keysShown.join(', '));
+          if (widgetKeys.length > keysShown.length) lines.push(`…и ещё ${widgetKeys.length - keysShown.length}`);
+        }
+
+        return lines.join('\n');
+      }
+
+      // HARD ROUTING: diagnostics must be deterministic (never OpenAI)
+      if (_isDiagnosticsQuery(qLower)) {
+        return res.json({ text: _renderDiagnosticsFromSnapshot(uiSnapshot) });
+      }
 
       // For lists like "Мои проекты" we want strict DD.MM.YYYY dates.
       const _fmtDateDDMMYYYY = (any) => {
@@ -902,22 +1175,184 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
       };
 
       const _openAiChatFromSnapshot = async (qText) => {
-        const snapBrief = uiSnapshot ? JSON.stringify(uiSnapshot).slice(0, 12000) : '';
+        // Diagnostics must be deterministic even in CHAT path
+        const qn = _normQ(qText);
+        if (_isDiagnosticsQuery(qn)) {
+          return _renderDiagnosticsFromSnapshot(uiSnapshot);
+        }
+        // --- Build compact DATA packet (single source of truth)
+        const _safeJson = (obj, maxLen = 15000) => {
+          try {
+            const s = JSON.stringify(obj);
+            if (s.length <= maxLen) return s;
+            return s.slice(0, maxLen) + '…';
+          } catch (_) {
+            return '{}';
+          }
+        };
+
+        const _stripEmoji = (s) => {
+          try {
+            return String(s || '')
+              // extended pictographic (emoji) + misc symbols blocks
+              .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
+              .replace(/[\u{2600}-\u{27BF}]/gu, '')
+              .replace(/[\u{FE0F}]/gu, '');
+          } catch (_) {
+            return String(s || '');
+          }
+        };
+
+        const _sanitizeAiText = (s) => {
+          let out = String(s || '').replace(/\u00A0/g, ' ');
+          out = _stripEmoji(out);
+          out = out.replace(/[\t\r]+/g, '');
+          out = out.trim();
+
+          // hard limits to avoid "простыню"
+          const maxChars = Number(process.env.AI_MAX_CHARS || 3000);
+          const maxLines = Number(process.env.AI_MAX_LINES || 35);
+          let lines = out.split('\n').map(x => x.trim()).filter(Boolean);
+          if (lines.length > maxLines) lines = lines.slice(0, maxLines);
+          out = lines.join('\n');
+          if (out.length > maxChars) out = out.slice(0, maxChars).trim();
+
+          return out;
+        };
+
+        const _buildDataPacket = () => {
+          const listKeys = (snapWidgets || []).map(w => w?.key).filter(Boolean);
+
+          const pickTotals = () => {
+            const inc = _getSummaryPair(['incomeList', 'income', 'incomeSummary']);
+            const exp = _getSummaryPair(['expenseList', 'expense', 'expenseSummary']);
+            const trn = _getSummaryPair(['transfers', 'transferList', 'transfersCurrent', 'transfersFuture']);
+            const wdr = _getSummaryPair(['withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListCurrent', 'withdrawalListFuture']);
+
+            // Taxes: IMPORTANT — may contain multiple rows (per company). Do NOT take only row[0].
+            const taxW = _findSnapWidget(['taxes', 'tax', 'taxList', 'taxesList']);
+            let taxDetail = null;
+            if (taxW) {
+              const rows = _getRows(taxW);
+              const items = (rows || []).map((r) => {
+                const name = String(r?.name || r?.companyName || r?.title || r?.label || '—');
+                const pf = _pickFactFuture(r);
+                return {
+                  name,
+                  fact: _moneyToNumber(pf?.fact ?? 0),
+                  forecast: _moneyToNumber(pf?.fut ?? 0),
+                };
+              });
+              const fact = items.reduce((s, x) => s + Number(x.fact || 0), 0);
+              const forecast = items.reduce((s, x) => s + Number(x.forecast || 0), 0);
+              taxDetail = { fact, forecast, items };
+            }
+
+            return {
+              income: inc ? { fact: _moneyToNumber(inc.fact), forecast: _moneyToNumber(inc.fut) } : null,
+              expense: exp ? { fact: _moneyToNumber(exp.fact), forecast: _moneyToNumber(exp.fut) } : null,
+              transfers: trn ? { fact: _moneyToNumber(trn.fact), forecast: _moneyToNumber(trn.fut) } : null,
+              withdrawals: wdr ? { fact: _moneyToNumber(wdr.fact), forecast: _moneyToNumber(wdr.fut) } : null,
+              taxes: taxDetail,
+            };
+          };
+
+          const pickAccounts = () => {
+            const w = _findSnapWidget('accounts');
+            if (!w) return [];
+            const rows = _getRows(w);
+            return (rows || []).map(r => ({
+              name: String(r?.name || '—'),
+              hidden: Boolean(r?.isExcluded),
+              excluded: Boolean(r?.isExcluded),
+              factBalance: Number(r?.balance ?? r?.currentBalance ?? r?.factBalance ?? 0) || 0,
+              forecastBalance: Number(r?.futureBalance ?? r?.planBalance ?? 0) || 0,
+            }));
+          };
+
+          const pickCatalog = (keys) => {
+            const w = _findSnapWidget(keys);
+            if (!w) return [];
+            const rows = _getRows(w);
+            return (rows || []).map(r => String(r?.name || r?.title || r?.label || '—'));
+          };
+
+          const pickOps = () => {
+            const out = [];
+            const baseTs = _kzStartOfDay(new Date()).getTime();
+            const all = _opsCollectRows();
+            (all || []).forEach(x => {
+              const r = x.__row;
+              const ts = _guessDateTs(r, baseTs);
+              if (!ts) return;
+              const kind = _opsGuessKind(x.__wk, r);
+              if (!kind) return;
+              const amount = _guessAmount(r);
+              const date = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(ts));
+              out.push({
+                kind,
+                date,
+                ts,
+                amount: Number(amount || 0),
+                project: _guessProject(r),
+                contractor: _guessContractor(r),
+                category: _guessCategory(r),
+                name: _guessName(r),
+                source: String(x.__wk || ''),
+              });
+            });
+            // cap to avoid huge payload
+            out.sort((a, b) => b.ts - a.ts);
+            return out.slice(0, 400);
+          };
+
+          return {
+            meta: {
+              today: snapTodayDDMMYYYY,
+              forecastUntil: snapFutureDDMMYYYY,
+              widgets: listKeys,
+            },
+            totals: pickTotals(),
+            accounts: pickAccounts(),
+            catalogs: {
+              projects: pickCatalog(['projects', 'projectList']),
+              contractors: pickCatalog(['contractors', 'contractorList', 'counterparties']),
+              categories: pickCatalog(['categories', 'categoryList']),
+              individuals: pickCatalog(['individuals', 'individualList', 'persons', 'people']),
+              companies: pickCatalog(['companies', 'companyList']),
+            },
+            operations: pickOps(),
+          };
+        };
+
+        const dataPacket = _buildDataPacket();
+
         const system = [
           'Ты финансовый ассистент INDEX12.',
-          'Отвечай строго по данным uiSnapshot (с экрана). Запросы в БД запрещены.',
-          'Если данных на экране не хватает — задай ОДИН короткий уточняющий вопрос или скажи, какой экран открыть.',
-          'Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ. Пиши коротко.'
+          'Режим CHAT. Запрещено выдумывать: используй ТОЛЬКО факты и цифры из DATA.',
+          'Если факта нет в DATA — так и скажи и укажи, каких данных/какой экран не хватает.',
+          'Эмодзи запрещены.',
+          'Отвечай коротко и понятно. Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ.',
+          'ВАЖНО: если есть DATA.totals.taxes.items — это налоги по компаниям. Перечисли ВСЕ строки и используй сумму из DATA.totals.taxes.fact/forecast.',
+          'Если вопрос про финансовое состояние/состояние системы — дай свод: доходы, расходы, налоги (с разбивкой по компаниям), остатки по счетам.'
         ].join('\n');
 
+        const history = _getHistoryMessages(userIdStr);
         const messages = [
           { role: 'system', content: system },
-          ...(snapBrief ? [{ role: 'system', content: `uiSnapshot(JSON, truncated): ${snapBrief}` }] : []),
-          { role: 'user', content: String(qText || '') }
+          { role: 'system', content: `DATA(JSON): ${_safeJson(dataPacket, 15000)}` },
+          ...history,
+          { role: 'user', content: String(qText || '').trim() }
         ];
 
-        const text = await _openAiChat(messages, { temperature: 0.35, maxTokens: 360 });
-        return String(text || '').replace(/\u00A0/g, ' ').trim();
+        const raw = await _openAiChat(messages, { temperature: 0.2, maxTokens: 420 });
+        const clean = _sanitizeAiText(raw);
+
+        // Persist CHAT history (server-side)
+        _pushHistory(userIdStr, 'user', String(qText || '').trim());
+        _pushHistory(userIdStr, 'assistant', clean);
+
+        return clean;
       };
 
       const _warnForecastOff = (w) => {
@@ -1504,7 +1939,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         if (kindHint === 'expense') amt = -Math.abs(Number(amt || 0));
         if (kindHint === 'income') amt = Math.abs(Number(amt || 0));
 
-        return `📌 ${dLabel} – ${contractor} – ${category} – ${_formatTenge(amt)}`;
+        return `- ${dLabel} – ${contractor} – ${category} – ${_formatTenge(amt)}`;
       };
 
       const _detectScopeFromText = (qLower) => {
@@ -1626,7 +2061,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         // Compact: only date + amount
         const lineStyle = String(opts?.lineStyle || '').toLowerCase();
         if (lineStyle === 'date_amount') {
-          return `📌 ${dLabel} – ${_formatTenge(amt)}`;
+          return `- ${dLabel} – ${_formatTenge(amt)}`;
         }
 
         const rawName = _guessName(r);
@@ -1648,7 +2083,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         const project = _guessProject(r);
         const projPart = (showProject && project && project !== '—') ? ` – ${project}` : '';
 
-        return `📌 ${dLabel} – ${contractor} – ${category}${projPart} – ${_formatTenge(amt)}`;
+        return `- ${dLabel} – ${contractor} – ${category}${projPart} – ${_formatTenge(amt)}`;
       };
 
       const _renderOpsList = (kind, scope, opts = {}) => {
@@ -1695,7 +2130,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         shown.forEach((x, i) => lines.push(`${i + 1}) ${_opsFmtLineUnified(x, k, { showProject, lineStyle })}`));
 
         lines.push(`Найдено: ${rows.length}. Показал: ${shown.length}.`);
-        if (rows.length > shown.length) {
+        if (!opts.noHints && rows.length > shown.length) {
           lines.push('Скажи: "покажи все" или "топ 50" или "подробно".');
         }
 
@@ -1897,8 +2332,173 @@ const _renderOpsByDay = (wantKind) => {
 };
 
 
+      // =========================
+      // QUICK DIAGNOSTICS (snapshot-only)
+      // =========================
+      const _fmtYYYYFromTs = (ts) => {
+        try {
+          const d = new Date(Number(ts));
+          if (Number.isNaN(d.getTime())) return '—';
+          const x = new Date(d.getTime() + KZ_OFFSET_MS);
+          const dd = String(x.getUTCDate()).padStart(2, '0');
+          const mm = String(x.getUTCMonth() + 1).padStart(2, '0');
+          const yyyy = String(x.getUTCFullYear());
+          return `${dd}.${mm}.${yyyy}`;
+        } catch (_) {
+          return '—';
+        }
+      };
+
+      const _countRowsByKeys = (keys) => {
+        const w = _findSnapWidget(keys);
+        if (!w) return 0;
+        const rows = _getRows(w);
+        return Array.isArray(rows) ? rows.length : 0;
+      };
+
+      const _hasWidgetByKeys = (keys) => Boolean(_findSnapWidget(keys));
+
+      const _sumCurrentFromOps = (kind) => {
+        const endTs = _endOfToday().getTime();
+        const all = _opsCollectRows();
+        let total = 0;
+        all.forEach((x) => {
+          const k = _opsGuessKind(x.__wk, x.__row);
+          if (k !== kind) return;
+          if (Number(x.__ts) > endTs) return;
+          let amt = _guessAmount(x.__row);
+          if (kind === 'expense') amt = -Math.abs(Number(amt || 0));
+          if (kind === 'income') amt = Math.abs(Number(amt || 0));
+          total += Number(amt || 0);
+        });
+        return total;
+      };
+
       // If we have a UI snapshot, answer STRICTLY from it and return early.
       if (snapWidgets) {
+        // QUICK: diagnostics (deterministic)
+        if (_isDiagnosticsQuery(qLower)) {
+          return res.json({ text: _renderDiagnosticsFromSnapshot(uiSnapshot) });
+        }
+
+        // QUICK: current totals must never be 0 if operations exist in lists/timeline
+        if (/(?:\bтекущ\w*\b.*\bрасход\w*\b|\bрасход\w*\b.*\bтекущ\w*\b)/i.test(qLower)) {
+          const total = _sumCurrentFromOps('expense');
+          return res.json({ text: `Текущие расходы. До ${snapTodayDDMMYYYY}\n${_formatTenge(total)}` });
+        }
+        if (/(?:\bтекущ\w*\b.*\bдоход\w*\b|\bдоход\w*\b.*\bтекущ\w*\b)/i.test(qLower)) {
+          const total = _sumCurrentFromOps('income');
+          return res.json({ text: `Текущие доходы. До ${snapTodayDDMMYYYY}\n${_formatTenge(total)}` });
+        }
+        // =========================
+        // HARD ROUTING: QUICK vs CHAT
+        // QUICK -> only deterministic handlers
+        // CHAT  -> only OpenAI (DATA + history)
+        // =========================
+        const isQuickFlag = (req?.body?.isQuickRequest === true) || (String(req?.body?.isQuickRequest || '').toLowerCase() === 'true');
+        const qNorm2 = _normQ(qLower);
+        const quickKey2 = (req?.body?.quickKey != null) ? String(req.body.quickKey) : '';
+
+        const _resolveQuickIntent = (quickKey, qNorm) => {
+          const k = String(quickKey || '').toLowerCase().trim();
+          if (k) return k;
+
+          // Back-compat: old clients send plain text
+          if (qNorm === 'счета' || qNorm === 'счёт' || qNorm === 'покажи счета' || qNorm === 'покажи счёта') return 'accounts';
+          if (qNorm === 'доходы' || qNorm === 'покажи доходы') return 'income';
+          if (qNorm === 'расходы' || qNorm === 'покажи расходы') return 'expense';
+          if (qNorm === 'переводы' || qNorm === 'покажи переводы') return 'transfer';
+          if (qNorm === 'выводы' || qNorm === 'покажи выводы') return 'withdrawal';
+          if (qNorm === 'налоги' || qNorm === 'покажи налоги') return 'taxes';
+          if (qNorm === 'проекты' || qNorm === 'покажи проекты') return 'projects';
+          if (qNorm === 'контрагенты' || qNorm === 'покажи контрагентов') return 'contractors';
+          if (qNorm === 'категории' || qNorm === 'покажи категории') return 'categories';
+          if (qNorm === 'физлица' || qNorm === 'покажи физлица') return 'individuals';
+          if (qNorm === 'компании' || qNorm === 'покажи компании') return 'companies';
+
+          return '';
+        };
+
+        const quickIntent2 = _resolveQuickIntent(quickKey2, qNorm2);
+        const isQuickRequest2 = Boolean(isQuickFlag || quickIntent2);
+
+        // CHAT: always OpenAI, no manual intent handlers
+        if (!isQuickRequest2) {
+          const text = await _openAiChatFromSnapshot(q);
+          return res.json({ text });
+        }
+
+        // QUICK: regulated answer only (no clarifications, no emoji)
+        if (quickIntent2) {
+          const limitQ = explicitLimit || 10;
+
+          if (quickIntent2 === 'accounts') {
+            const w = _findSnapWidget('accounts');
+            const rows = _getRows(w);
+            return res.json({ text: _renderAccountsBlock(w, rows) });
+          }
+
+          if (quickIntent2 === 'income') {
+            return res.json({ text: _renderOpsList('income', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+          }
+          if (quickIntent2 === 'expense') {
+            return res.json({ text: _renderOpsList('expense', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+          }
+          if (quickIntent2 === 'transfer') {
+            return res.json({ text: _renderOpsList('transfer', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+          }
+          if (quickIntent2 === 'withdrawal') {
+            return res.json({ text: _renderOpsList('withdrawal', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+          }
+
+          if (quickIntent2 === 'taxes') {
+            // If the taxes widget contains per-company rows, render them.
+            // Otherwise fallback to a single total (summary).
+            const wTax = _findSnapWidget(['taxes', 'tax', 'taxList', 'taxesList']);
+            if (wTax) {
+              const rowsTax = _getRows(wTax);
+              const hasNamedRows = Array.isArray(rowsTax)
+                ? rowsTax.some(r => r && (r.companyName || r.company || r.companyTitle || r.name || r.title || r.label))
+                : false;
+
+              if (Array.isArray(rowsTax) && (rowsTax.length > 1 || hasNamedRows)) {
+                const body = [];
+                _maybeSlice(rowsTax, explicitLimit).forEach((r) => {
+                  const name = r?.companyName || r?.company || r?.companyTitle || r?.name || r?.title || r?.label || '—';
+                  const { fact, fut } = _pickFactFuture(r);
+                  body.push(`${name} ₸ ${fact} > ${fut}`);
+                });
+                return res.json({ text: _wrapBlock('Налоги', wTax, body) });
+              }
+            }
+
+            const blk = _summaryDual(['taxes', 'tax', 'taxList', 'taxesList'], 'Налоги');
+            return res.json({ text: blk || 'Налоги: на этом экране не вижу виджет налогов.' });
+          }
+
+          if (quickIntent2 === 'projects') {
+            const w = _findSnapWidget(['projects', 'projectList']);
+            return res.json({ text: _renderCatalogFromRows('Мои проекты', _getRows(w)) });
+          }
+          if (quickIntent2 === 'contractors') {
+            const w = _findSnapWidget(['contractors', 'contractorList', 'counterparties']);
+            return res.json({ text: _renderCatalogFromRows('Мои контрагенты', _getRows(w)) });
+          }
+          if (quickIntent2 === 'categories') {
+            const w = _findSnapWidget(['categories', 'categoryList']);
+            return res.json({ text: _renderCatalogFromRows('Категории', _getRows(w)) });
+          }
+          if (quickIntent2 === 'individuals') {
+            const w = _findSnapWidget(['individuals', 'individualList', 'persons', 'people']);
+            return res.json({ text: _renderCatalogFromRows('Физлица', _getRows(w)) });
+          }
+          if (quickIntent2 === 'companies') {
+            const w = _findSnapWidget(['companies', 'companyList']);
+            return res.json({ text: _renderCatalogFromRows('Компании', _getRows(w)) });
+          }
+
+          return res.json({ text: 'QUICK: команда не поддерживается.' });
+        }
         // ---- Debug: list visible snapshot widgets
         if (/(что\s*видишь|какие\s*виджеты|виджеты\s*$|snapshot\s*$|debug\s*$)/i.test(qLower)) {
           const list = (snapWidgets || []).map(w => ({ key: w?.key || null, title: w?.title || w?.name || null }));
@@ -2678,3 +3278,106 @@ const _renderOpsByDay = (wantKind) => {
 
   return router;
 };
+
+      function _renderDiagnosticsFromSnapshot() {
+        // Deterministic snapshot-only diagnostics (no OpenAI)
+        const hasWidget = (keys) => Boolean(_findSnapWidget(keys));
+        const rowsCount = (keys) => {
+          const w = _findSnapWidget(keys);
+          if (!w) return 0;
+          const r = _getRows(w);
+          return Array.isArray(r) ? r.length : 0;
+        };
+
+        // Presence flags
+        const seen = {
+          accounts: hasWidget('accounts'),
+          incomes: hasWidget(['incomeListCurrent', 'incomeList', 'income', 'incomeSummary']),
+          expenses: hasWidget(['expenseListCurrent', 'expenseList', 'expense', 'expenseSummary']),
+          transfers: hasWidget(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture']),
+          withdrawals: hasWidget(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture']),
+          taxes: hasWidget(['taxes', 'tax', 'taxList', 'taxesList']),
+          credits: hasWidget(['credits', 'credit', 'creditList']),
+          prepayments: hasWidget(['prepayments', 'prepaymentList', 'liabilities']),
+          projects: hasWidget(['projects', 'projectList']),
+          contractors: hasWidget(['contractors', 'contractorList', 'counterparties']),
+          individuals: hasWidget(['individuals', 'individualList', 'persons', 'people']),
+          categories: hasWidget(['categories', 'categoryList']),
+          companies: hasWidget(['companies', 'companyList']),
+        };
+
+        // Accounts counts (incl hidden)
+        let accountsTotal = 0;
+        let accountsHidden = 0;
+        if (seen.accounts) {
+          const w = _findSnapWidget('accounts');
+          const r = _getRows(w);
+          accountsTotal = Array.isArray(r) ? r.length : 0;
+          accountsHidden = Array.isArray(r) ? r.filter(x => Boolean(x?.isExcluded)).length : 0;
+        }
+
+        // Collect ops from widgets + storeTimeline
+        const all = _opsCollectRows();
+        const baseTs = _kzStartOfDay(new Date()).getTime();
+
+        const cnt = { income: 0, expense: 0, transfer: 0, withdrawal: 0 };
+        let minTs = null;
+        let maxTs = null;
+
+        (all || []).forEach((x) => {
+          const ts = Number(x.__ts);
+          if (!Number.isFinite(ts)) return;
+          if (minTs === null || ts < minTs) minTs = ts;
+          if (maxTs === null || ts > maxTs) maxTs = ts;
+
+          const kind = _opsGuessKind(x.__wk, x.__row);
+          if (kind && Object.prototype.hasOwnProperty.call(cnt, kind)) cnt[kind] += 1;
+        });
+
+        const opsTotal = cnt.income + cnt.expense + cnt.transfer + cnt.withdrawal;
+        const minDate = (minTs != null) ? (_fmtDateDDMMYYYY(_fmtDateKZ(new Date(minTs))) || _fmtDateKZ(new Date(minTs))) : snapTodayDDMMYYYY;
+        const maxDate = (maxTs != null) ? (_fmtDateDDMMYYYY(_fmtDateKZ(new Date(maxTs))) || _fmtDateKZ(new Date(maxTs))) : snapTodayDDMMYYYY;
+
+        const widgetsList = (snapWidgets || []).map(w => w?.key).filter(Boolean);
+
+        // Compact summary lines
+        const lines = [];
+        lines.push('Диагностика:');
+        lines.push(`Факт: до ${snapTodayDDMMYYYY}`);
+        lines.push(`Прогноз: до ${snapFutureDDMMYYYY}`);
+        lines.push(`Виджетов: ${widgetsList.length}`);
+
+        lines.push('Вижу:');
+        lines.push(`Счета: ${seen.accounts ? 'да' : 'нет'} (${accountsTotal}${accountsHidden ? `, скрытых ${accountsHidden}` : ''})`);
+        lines.push(`Доходы: ${seen.incomes ? 'да' : 'нет'} (строк ${rowsCount(['incomeListCurrent', 'incomeList', 'income'])})`);
+        lines.push(`Расходы: ${seen.expenses ? 'да' : 'нет'} (строк ${rowsCount(['expenseListCurrent', 'expenseList', 'expense'])})`);
+        lines.push(`Переводы: ${seen.transfers ? 'да' : 'нет'} (строк ${rowsCount(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture'])})`);
+        lines.push(`Выводы: ${seen.withdrawals ? 'да' : 'нет'} (строк ${rowsCount(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture'])})`);
+        lines.push(`Налоги: ${seen.taxes ? 'да' : 'нет'} (строк ${rowsCount(['taxes', 'tax', 'taxList', 'taxesList'])})`);
+        lines.push(`Кредиты: ${seen.credits ? 'да' : 'нет'} (строк ${rowsCount(['credits', 'credit', 'creditList'])})`);
+        lines.push(`Предоплаты/обязательства: ${seen.prepayments ? 'да' : 'нет'} (строк ${rowsCount(['prepayments', 'prepaymentList', 'liabilities'])})`);
+
+        lines.push(`Проекты: ${seen.projects ? 'да' : 'нет'} (${rowsCount(['projects', 'projectList'])})`);
+        lines.push(`Контрагенты: ${seen.contractors ? 'да' : 'нет'} (${rowsCount(['contractors', 'contractorList', 'counterparties'])})`);
+        lines.push(`Физлица: ${seen.individuals ? 'да' : 'нет'} (${rowsCount(['individuals', 'individualList', 'persons', 'people'])})`);
+        lines.push(`Категории: ${seen.categories ? 'да' : 'нет'} (${rowsCount(['categories', 'categoryList'])})`);
+        lines.push(`Компании: ${seen.companies ? 'да' : 'нет'} (${rowsCount(['companies', 'companyList'])})`);
+
+        lines.push('Операции:');
+        lines.push(`Диапазон: ${minDate} — ${maxDate}`);
+        lines.push(`Всего: ${opsTotal}`);
+        lines.push(`Доходы: ${cnt.income}`);
+        lines.push(`Расходы: ${cnt.expense}`);
+        lines.push(`Переводы: ${cnt.transfer}`);
+        lines.push(`Выводы: ${cnt.withdrawal}`);
+
+        // Show widget keys (trim)
+        const keysShown = widgetsList.slice(0, 40);
+        if (keysShown.length) {
+          lines.push('Ключи виджетов:');
+          lines.push(keysShown.join(', '));
+          if (widgetsList.length > keysShown.length) lines.push(`…и ещё ${widgetsList.length - keysShown.length}`);
+        }
+
+        return lines.join('\n');
+      }
