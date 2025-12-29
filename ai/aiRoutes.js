@@ -1228,32 +1228,14 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
             const exp = _getSummaryPair(['expenseList', 'expense', 'expenseSummary']);
             const trn = _getSummaryPair(['transfers', 'transferList', 'transfersCurrent', 'transfersFuture']);
             const wdr = _getSummaryPair(['withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListCurrent', 'withdrawalListFuture']);
-
-            // Taxes: IMPORTANT — may contain multiple rows (per company). Do NOT take only row[0].
-            const taxW = _findSnapWidget(['taxes', 'tax', 'taxList', 'taxesList']);
-            let taxDetail = null;
-            if (taxW) {
-              const rows = _getRows(taxW);
-              const items = (rows || []).map((r) => {
-                const name = String(r?.name || r?.companyName || r?.title || r?.label || '—');
-                const pf = _pickFactFuture(r);
-                return {
-                  name,
-                  fact: _moneyToNumber(pf?.fact ?? 0),
-                  forecast: _moneyToNumber(pf?.fut ?? 0),
-                };
-              });
-              const fact = items.reduce((s, x) => s + Number(x.fact || 0), 0);
-              const forecast = items.reduce((s, x) => s + Number(x.forecast || 0), 0);
-              taxDetail = { fact, forecast, items };
-            }
+            const tax = _getSummaryPair(['taxes', 'tax', 'taxList', 'taxesList']);
 
             return {
               income: inc ? { fact: _moneyToNumber(inc.fact), forecast: _moneyToNumber(inc.fut) } : null,
               expense: exp ? { fact: _moneyToNumber(exp.fact), forecast: _moneyToNumber(exp.fut) } : null,
               transfers: trn ? { fact: _moneyToNumber(trn.fact), forecast: _moneyToNumber(trn.fut) } : null,
               withdrawals: wdr ? { fact: _moneyToNumber(wdr.fact), forecast: _moneyToNumber(wdr.fut) } : null,
-              taxes: taxDetail,
+              taxes: tax ? { fact: _moneyToNumber(tax.fact), forecast: _moneyToNumber(tax.fut) } : null,
             };
           };
 
@@ -1265,8 +1247,20 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
               name: String(r?.name || '—'),
               hidden: Boolean(r?.isExcluded),
               excluded: Boolean(r?.isExcluded),
-              factBalance: Number(r?.balance ?? r?.currentBalance ?? r?.factBalance ?? 0) || 0,
-              forecastBalance: Number(r?.futureBalance ?? r?.planBalance ?? 0) || 0,
+              factBalance: _moneyToNumber(_pickFactFuture({
+                ...r,
+                currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
+                futureText: r?.futureText ?? r?.planText,
+                currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
+                futureBalance: r?.futureBalance ?? r?.planBalance,
+              }).fact),
+              forecastBalance: _moneyToNumber(_pickFactFuture({
+                ...r,
+                currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
+                futureText: r?.futureText ?? r?.planText,
+                currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
+                futureBalance: r?.futureBalance ?? r?.planBalance,
+              }).fut),
             }));
           };
 
@@ -1332,9 +1326,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           'Режим CHAT. Запрещено выдумывать: используй ТОЛЬКО факты и цифры из DATA.',
           'Если факта нет в DATA — так и скажи и укажи, каких данных/какой экран не хватает.',
           'Эмодзи запрещены.',
-          'Отвечай коротко и понятно. Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ.',
-          'ВАЖНО: если есть DATA.totals.taxes.items — это налоги по компаниям. Перечисли ВСЕ строки и используй сумму из DATA.totals.taxes.fact/forecast.',
-          'Если вопрос про финансовое состояние/состояние системы — дай свод: доходы, расходы, налоги (с разбивкой по компаниям), остатки по счетам.'
+          'Отвечай коротко и понятно. Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ.'
         ].join('\n');
 
         const history = _getHistoryMessages(userIdStr);
@@ -1583,9 +1575,9 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           body.push(`${name}${hidden} ₸ ${fact} > ${fut}`);
 
           if (!includeExcludedInTotal && r?.isExcluded) return;
-          factTotal += (Number(r?.balance ?? r?.currentBalance ?? r?.factBalance) || 0);
-          futTotal += (Number(r?.futureBalance ?? r?.planBalance) || 0);
-        });
+          factTotal += _moneyToNumber(fact);
+          futTotal += _moneyToNumber(fut);
+});
 
         body.push(`Итого ₸ ${_fmtMoneyInline(factTotal)} > ${_fmtMoneyInline(futTotal)}`);
 
@@ -1654,14 +1646,28 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         const factTotal = Array.isArray(rows)
           ? rows.reduce((s, r) => {
             if (!includeExcludedInTotal && r?.isExcluded) return s;
-            return s + (Number(r?.balance ?? r?.currentBalance ?? r?.factBalance) || 0);
+            const pf = _pickFactFuture({
+              ...r,
+              currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
+              futureText: r?.futureText ?? r?.planText,
+              currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
+              futureBalance: r?.futureBalance ?? r?.planBalance,
+            });
+            return s + _moneyToNumber(pf.fact);
           }, 0)
           : 0;
 
         const futTotal = Array.isArray(rows)
           ? rows.reduce((s, r) => {
             if (!includeExcludedInTotal && r?.isExcluded) return s;
-            return s + (Number(r?.futureBalance ?? r?.planBalance) || 0);
+            const pf = _pickFactFuture({
+              ...r,
+              currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
+              futureText: r?.futureText ?? r?.planText,
+              currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
+              futureBalance: r?.futureBalance ?? r?.planBalance,
+            });
+            return s + _moneyToNumber(pf.fut);
           }, 0)
           : 0;
 
