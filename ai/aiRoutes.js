@@ -13,8 +13,55 @@
 const express = require('express');
 
 // Visible build marker to confirm which aiRoutes.js is running
-const AIROUTES_VERSION = 'snapshot-ui-v3.4';
+const AIROUTES_VERSION = 'snapshot-ui-v3.5';
+
 const https = require('https');
+
+// =========================
+// Chat session state (in-memory, TTL)
+// Keeps short context for live chat (NOT persisted)
+// =========================
+const SESSION_TTL_MS = 30 * 60 * 1000;
+const _chatSessions = new Map();
+
+const _getChatSession = (userId) => {
+  const key = String(userId || '');
+  if (!key) return null;
+
+  const now = Date.now();
+  const cur = _chatSessions.get(key);
+  if (cur && cur.expiresAt && cur.expiresAt > now) {
+    cur.expiresAt = now + SESSION_TTL_MS;
+    return cur;
+  }
+
+  const fresh = {
+    expiresAt: now + SESSION_TTL_MS,
+    prefs: {
+      incomeScope: null, // 'current' | 'future' | 'all'
+      expenseScope: null,
+      format: 'short',   // 'short' | 'detailed'
+      limit: 10,
+    },
+    pending: null,
+  };
+  _chatSessions.set(key, fresh);
+  return fresh;
+};
+
+const _setPending = (userId, pending) => {
+  const s = _getChatSession(userId);
+  if (!s) return;
+  s.pending = pending || null;
+  s.expiresAt = Date.now() + SESSION_TTL_MS;
+};
+
+const _clearPending = (userId) => {
+  const s = _getChatSession(userId);
+  if (!s) return;
+  s.pending = null;
+  s.expiresAt = Date.now() + SESSION_TTL_MS;
+};
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -561,6 +608,318 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         return lines.join('\n');
       };
 
+      // -------------------------
+      // CHAT MODE helpers (snapshot-only)
+      // -------------------------
+      const _normQ = (s) => String(s || '').toLowerCase().replace(/[\s\t\n\r]+/g, ' ').trim();
+
+      const _moneyToNumber = (v) => {
+        if (v == null) return 0;
+        if (typeof v === 'number' && Number.isFinite(v)) return v;
+        const s = String(v).replace(/\u00A0/g, ' ').trim();
+        if (!s) return 0;
+        const neg = /^-/.test(s) || /\(\s*-/.test(s) || /-\s*\d/.test(s);
+        const digits = s.replace(/[^0-9]/g, '');
+        if (!digits) return 0;
+        const n = Number(digits);
+        if (!Number.isFinite(n)) return 0;
+        return neg ? -n : n;
+      };
+
+      const _parseAnyDateToTs = (any, fallbackBase = null) => {
+        const s = String(any || '').trim();
+        if (!s) return null;
+
+        // ISO
+        let m = s.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})/);
+        if (m) {
+          const d = _kzDateFromYMD(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+          return Number.isNaN(d.getTime()) ? null : d.getTime();
+        }
+
+        // DD.MM.YYYY
+        m = s.match(/^([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{2,4})$/);
+        if (m) {
+          const dd = Number(m[1]);
+          const mm = Number(m[2]);
+          let yy = Number(m[3]);
+          if (yy < 100) yy = 2000 + yy;
+          const d = _kzDateFromYMD(yy, mm - 1, dd);
+          return Number.isNaN(d.getTime()) ? null : d.getTime();
+        }
+
+        // "28 дек. 2025"
+        m = s.toLowerCase().match(/\b([0-9]{1,2})\s*(янв|фев|мар|апр|май|мая|июн|июл|авг|сен|сент|окт|ноя|дек)\w*\.?\s*(20\d{2})\b/);
+        if (m) {
+          const dd = Number(m[1]);
+          const yy = Number(m[3]);
+          const map = {
+            янв: 0, фев: 1, мар: 2, апр: 3,
+            май: 4, мая: 4, июн: 5, июл: 6,
+            авг: 7, сен: 8, сент: 8, окт: 9,
+            ноя: 10, дек: 11,
+          };
+          const mi = map[m[2]] ?? 0;
+          const d = _kzDateFromYMD(yy, mi, dd);
+          return Number.isNaN(d.getTime()) ? null : d.getTime();
+        }
+
+        // Try native Date
+        const d2 = new Date(s);
+        if (!Number.isNaN(d2.getTime())) return d2.getTime();
+
+        // As last resort: if only day+month words appear, use base year
+        const base = fallbackBase ? new Date(fallbackBase) : new Date();
+        const months = [
+          { re: /\bянв\w*\b/i, idx: 0 },
+          { re: /\bфев\w*\b/i, idx: 1 },
+          { re: /\bмар\w*\b/i, idx: 2 },
+          { re: /\bапр\w*\b/i, idx: 3 },
+          { re: /\bма[йя]\w*\b/i, idx: 4 },
+          { re: /\bиюн\w*\b/i, idx: 5 },
+          { re: /\bиюл\w*\b/i, idx: 6 },
+          { re: /\bавг\w*\b/i, idx: 7 },
+          { re: /\bсент?\w*\b/i, idx: 8 },
+          { re: /\bокт\w*\b/i, idx: 9 },
+          { re: /\bноя\w*\b/i, idx: 10 },
+          { re: /\bдек\w*\b/i, idx: 11 },
+        ];
+        const ddM = s.match(/\b([0-9]{1,2})\b/);
+        if (!ddM) return null;
+        for (const mo of months) {
+          if (mo.re.test(s)) {
+            const d = _kzDateFromYMD(base.getFullYear(), mo.idx, Number(ddM[1]));
+            return Number.isNaN(d.getTime()) ? null : d.getTime();
+          }
+        }
+        return null;
+      };
+
+      const _firstNonEmpty = (vals) => {
+        for (const v of (vals || [])) {
+          if (v === null || typeof v === 'undefined') continue;
+          if (typeof v === 'string' && String(v).trim() === '') continue;
+          return v;
+        }
+        return null;
+      };
+
+      const _guessName = (row) => String(_firstNonEmpty([row?.name, row?.title, row?.label, row?.projectName, row?.project, row?.contractorName, row?.contractor, row?.counterparty, row?.companyName, row?.company]) || '—');
+
+      const _guessProject = (row) => String(_firstNonEmpty([row?.projectName, row?.project, row?.projectTitle, row?.project_label, row?.projectLabel, row?.project_name, row?.project?.name, row?.project?.title]) || '—');
+
+      const _guessContractor = (row) => String(_firstNonEmpty([row?.contractorName, row?.contractor, row?.counterparty, row?.counterpartyName, row?.fromName, row?.toName, row?.partyName, row?.contractor?.name]) || '—');
+
+      const _guessCategory = (row) => String(_firstNonEmpty([
+        row?.categoryName, row?.category, row?.categoryTitle, row?.category_label, row?.categoryLabel,
+        row?.category_name, row?.category?.name, row?.category?.title,
+        row?.catName, row?.cat, row?.catTitle,
+        row?.labelCategory,
+      ]) || '—');
+
+      const _guessAmount = (row) => {
+        const v = _firstNonEmpty([
+          row?.amount, row?.sum, row?.value, row?.absAmount,
+          row?.amountText, row?.sumText, row?.valueText,
+          row?.currentAmount, row?.current, row?.fact, row?.factAmount,
+          row?.currentText, row?.factText,
+          row?.income, row?.incomeAmount, row?.incomeText,
+          row?.expense, row?.expenseAmount, row?.expenseText,
+        ]);
+        return _moneyToNumber(v);
+      };
+
+      const _guessType = (widgetKey, row) => {
+        const t = String(row?.type || row?.kind || '').toLowerCase();
+        if (t === 'income' || t === 'in' || t === 'plus') return 'income';
+        if (t === 'expense' || t === 'out' || t === 'minus') return 'expense';
+
+        const wk = String(widgetKey || '').toLowerCase();
+        if (/income|доход/.test(wk)) return 'income';
+        if (/expense|расход/.test(wk)) return 'expense';
+
+        const amt = _guessAmount(row);
+        if (amt > 0) return 'income';
+        if (amt < 0) return 'expense';
+        return null;
+      };
+
+      const _guessDateTs = (row, baseTs = null) => {
+        const v = _firstNonEmpty([
+          row?.date, row?.dateIso, row?.dateYmd, row?.dateStr,
+          row?.when, row?.whenStr, row?.dueDate, row?.dueDateStr,
+          row?.plannedDate, row?.plannedDateStr,
+          row?.payDate, row?.payDateStr,
+          row?.createdAt,
+        ]);
+        return _parseAnyDateToTs(v, baseTs);
+      };
+
+      const _extractIncomeExpense = (row) => {
+        // Try to find explicit income/expense numbers; return null if not present.
+        const fi = _firstNonEmpty([row?.factIncome, row?.incomeFact, row?.incomeCurrent, row?.currentIncome, row?.income, row?.incomeAmount, row?.incomeText]);
+        const fe = _firstNonEmpty([row?.factExpense, row?.expenseFact, row?.expenseCurrent, row?.currentExpense, row?.expense, row?.expenseAmount, row?.expenseText]);
+        const pi = _firstNonEmpty([row?.planIncome, row?.futureIncome, row?.incomeFuture, row?.incomePlan, row?.forecastIncome]);
+        const pe = _firstNonEmpty([row?.planExpense, row?.futureExpense, row?.expenseFuture, row?.expensePlan, row?.forecastExpense]);
+
+        const hasAny = (fi != null) || (fe != null) || (pi != null) || (pe != null);
+        if (!hasAny) return null;
+
+        return {
+          factIncome: _moneyToNumber(fi),
+          factExpense: Math.abs(_moneyToNumber(fe)),
+          planIncome: _moneyToNumber(pi),
+          planExpense: Math.abs(_moneyToNumber(pe)),
+        };
+      };
+
+      const _renderProfitByProjects = (projectsWidget, rows, title = 'Прибыль проектов') => {
+        const arr = Array.isArray(rows) ? rows : [];
+        if (!arr.length) {
+          return _wrapBlock(title, projectsWidget || null, ['На экране не вижу список проектов.']);
+        }
+
+        const items = arr.map((r) => {
+          const name = String(r?.name || r?.title || r?.label || '—');
+          const ie = _extractIncomeExpense(r);
+          if (ie) {
+            const profitFact = Number(ie.factIncome || 0) - Number(ie.factExpense || 0);
+            const profitPlan = Number(ie.planIncome || 0) - Number(ie.planExpense || 0);
+            return { name, fact: profitFact, fut: profitPlan, mode: 'calc' };
+          }
+          // Fallback: treat widget's displayed fact/future as "profit as shown".
+          const pf = _pickFactFuture(r);
+          return { name, fact: _moneyToNumber(pf.fact), fut: _moneyToNumber(pf.fut), mode: 'as_shown' };
+        });
+
+        // Sort by fact profit desc
+        items.sort((a, b) => (Number(b.fact || 0) - Number(a.fact || 0)));
+
+        const body = [];
+        let totalFact = 0;
+        let totalFut = 0;
+
+        _maybeSlice(items, explicitLimit).forEach((x) => {
+          totalFact += Number(x.fact || 0);
+          totalFut += Number(x.fut || 0);
+          body.push(`${x.name} ₸ ${_fmtMoneyInline(x.fact)} > ${_fmtMoneyInline(x.fut)}`);
+        });
+
+        body.push(`Итого ₸ ${_fmtMoneyInline(totalFact)} > ${_fmtMoneyInline(totalFut)}`);
+
+        // Short note only when we had to fallback
+        const usedFallback = items.some(x => x.mode === 'as_shown');
+        if (usedFallback) body.push('Деталей доход/расход по проектам на этом экране нет — беру прибыль как показано в виджете проектов.');
+
+        return _wrapBlock(title, projectsWidget || null, body);
+      };
+
+      const _collectUpcoming = (wantType, baseTs) => {
+        const out = [];
+        (snapWidgets || []).forEach((w) => {
+          const wk = w?.key || '';
+          const rows = _getRows(w);
+          (rows || []).forEach((r) => {
+            const ts = _guessDateTs(r, baseTs);
+            if (!ts) return;
+            const type = _guessType(wk, r);
+            if (!type) return;
+            if (wantType && type !== wantType) return;
+
+            // Only future-ish (today and beyond)
+            if (baseTs != null && ts < baseTs) return;
+
+            const amount = _guessAmount(r);
+            if (!amount) return;
+
+            const dateLabel = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(ts));
+            const contractor = _guessContractor(r);
+            const project = _guessProject(r);
+            const name = _guessName(r);
+
+            out.push({ ts, type, amount, dateLabel, contractor, project, name, widgetKey: wk });
+          });
+        });
+        out.sort((a, b) => (a.ts - b.ts));
+        return out;
+      };
+
+      const _getSummaryPair = (keyOrKeys) => {
+        const w = _findSnapWidget(keyOrKeys);
+        if (!w) return null;
+
+        const rows = _getRows(w);
+        const r0 = rows && rows.length ? rows[0] : null;
+
+        const factRaw =
+          (r0?.currentText ?? r0?.factText ?? w?.currentText ?? w?.factText ?? w?.summaryCurrentText ?? w?.summaryText ?? w?.valueText ?? w?.text ?? r0?.current ?? r0?.fact ?? r0?.value ?? w?.current ?? w?.fact ?? w?.value ?? 0);
+
+        const futureRaw =
+          (r0?.futureText ?? r0?.planText ?? w?.futureText ?? w?.planText ?? w?.summaryFutureText ?? w?.summaryText ?? w?.valueText ?? w?.text ?? r0?.future ?? r0?.plan ?? w?.future ?? w?.plan ?? 0);
+
+        const pair = _pickFactFuture({ currentText: factRaw, futureText: futureRaw, factText: factRaw, planText: futureRaw });
+        return { widget: w, fact: pair.fact, fut: pair.fut };
+      };
+
+      const _renderUpcoming = (title, wantType, baseTs) => {
+        const items = _collectUpcoming(wantType, baseTs);
+        if (!items.length) {
+          // Fallback: if the screen only has summary totals (no dated rows), return the summary instead of a dead-end message.
+          const sum = (wantType === 'income')
+            ? _getSummaryPair(['incomeList', 'income', 'incomeSummary'])
+            : (wantType === 'expense')
+              ? _getSummaryPair(['expenseList', 'expense', 'expenseSummary'])
+              : null;
+
+          if (sum && sum.widget) {
+            const note = (wantType === 'income')
+              ? 'На этом экране нет списка доходов с датами/контрагентами — вижу только итог.'
+              : 'На этом экране нет списка расходов с датами/контрагентами — вижу только итог.';
+
+            return _wrapBlock(`${title} (итог без списка)`, sum.widget, [
+              `₸ ${sum.fact} > ${sum.fut}`,
+              note,
+              'Чтобы показать ближайшие по датам — открой экран "Операции" / список (где есть строки с датами) и повтори запрос.'
+            ]);
+          }
+
+          return [
+            `${title}:`,
+            'На этом экране не вижу будущих операций с датами (доход/расход).',
+            'Открой экран/виджет, где есть список операций с датами, и повтори вопрос.'
+          ].join('\n');
+        }
+
+        const lines = [`${title}:`];
+        const sliced = _maybeSlice(items, explicitLimit || 10);
+        sliced.forEach((x, i) => {
+          const signAmt = (x.type === 'expense') ? -Math.abs(x.amount) : Math.abs(x.amount);
+          const who = (x.contractor && x.contractor !== '—') ? x.contractor : x.name;
+          const proj = (x.project && x.project !== '—') ? ` | ${x.project}` : '';
+          lines.push(`${i + 1}) ${x.dateLabel} | ${who}${proj} | ${_formatTenge(signAmt)}`);
+        });
+        return lines.join('\n');
+      };
+
+      const _openAiChatFromSnapshot = async (qText) => {
+        const snapBrief = uiSnapshot ? JSON.stringify(uiSnapshot).slice(0, 12000) : '';
+        const system = [
+          'Ты финансовый ассистент INDEX12.',
+          'Отвечай строго по данным uiSnapshot (с экрана). Запросы в БД запрещены.',
+          'Если данных на экране не хватает — задай ОДИН короткий уточняющий вопрос или скажи, какой экран открыть.',
+          'Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ. Пиши коротко.'
+        ].join('\n');
+
+        const messages = [
+          { role: 'system', content: system },
+          ...(snapBrief ? [{ role: 'system', content: `uiSnapshot(JSON, truncated): ${snapBrief}` }] : []),
+          { role: 'user', content: String(qText || '') }
+        ];
+
+        const text = await _openAiChat(messages, { temperature: 0.35, maxTokens: 360 });
+        return String(text || '').replace(/\u00A0/g, ' ').trim();
+      };
+
       const _warnForecastOff = (w) => {
         if (!wantsFutureSnap) return '';
         if (w?.showFutureBalance) return '';
@@ -725,9 +1084,6 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
 
         lines.push('===================');
 
-        if (widget && widget.showFutureBalance !== true) {
-          lines.push('Совет: Если хотите увидеть прогноз — включите прогноз в виджете.');
-        }
 
         return lines.join('\n');
       };
@@ -742,9 +1098,6 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           '===================',
         ];
 
-        if (widget && widget.showFutureBalance !== true) {
-          lines.push('Совет: Если хотите увидеть прогноз — включите прогноз в виджете.');
-        }
 
         return lines.join('\n');
       };
@@ -820,6 +1173,729 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         return _renderDualValueBlock(title, w, factRaw, futureRaw);
       };
 
+      // =========================
+      // REPORTS (snapshot-only)
+      // =========================
+      const _fmtRangeLines = () => {
+        return {
+          factLine: `Факт: до ${snapTodayDDMMYYYY}`,
+          futLine: `Прогноз: до ${snapFutureDDMMYYYY}`,
+        };
+      };
+
+      const _looksLikePnL = (s) => {
+        const t = String(s || '').toLowerCase();
+        return (
+          (/отч[её]т/.test(t) && (/(прибыл|убыт)/.test(t) || /p\s*&\s*l|pnl/.test(t))) ||
+          /прибыл\w*\s+и\s+убыт/i.test(t) ||
+          /p\s*&\s*l|pnl/.test(t)
+        );
+      };
+
+      const _looksLikeCashFlow = (s) => {
+        const t = String(s || '').toLowerCase();
+        return (
+          (/движ(ени|ение)\s*ден/i.test(t)) ||
+          (/ддс\b/i.test(t)) ||
+          (/cash\s*flow/i.test(t)) ||
+          (/отч[её]т/.test(t) && (/движ/i.test(t) || /cash\s*flow/i.test(t)))
+        );
+      };
+
+      const _looksLikeBalanceSheet = (s) => {
+        const t = String(s || '').toLowerCase();
+        return (
+          (/баланс\b/i.test(t) && (/отч[её]т|sheet|отчетность|отчётность/i.test(t) || /баланс\b/.test(t))) ||
+          (/balance\s*sheet/i.test(t))
+        );
+      };
+
+      const _getAccountsTotals = () => {
+        const acc = _findSnapWidget('accounts');
+        if (!acc) return null;
+        const rows = _getRows(acc);
+        const includeExcludedInTotal = Boolean(uiSnapshot?.ui?.includeExcludedInTotal);
+
+        const factTotal = Array.isArray(rows)
+          ? rows.reduce((s, r) => {
+            if (!includeExcludedInTotal && r?.isExcluded) return s;
+            return s + (Number(r?.balance ?? r?.currentBalance ?? r?.factBalance) || 0);
+          }, 0)
+          : 0;
+
+        const futTotal = Array.isArray(rows)
+          ? rows.reduce((s, r) => {
+            if (!includeExcludedInTotal && r?.isExcluded) return s;
+            return s + (Number(r?.futureBalance ?? r?.planBalance) || 0);
+          }, 0)
+          : 0;
+
+        return { widget: acc, factTotal, futTotal };
+      };
+
+      const _renderPnLReport = () => {
+        const { factLine, futLine } = _fmtRangeLines();
+
+        const inc = _getSummaryPair(['incomeList', 'income', 'incomeSummary']);
+        const exp = _getSummaryPair(['expenseList', 'expense', 'expenseSummary']);
+
+        if (!inc && !exp) {
+          return _wrapBlock('Отчёт о прибылях и убытках', null, [
+            'На этом экране не вижу итогов доходов/расходов.',
+            'Открой главный экран с виджетами "Доходы" и "Расходы" и повтори запрос.'
+          ]);
+        }
+
+        const incFact = _moneyToNumber(inc?.fact ?? 0);
+        const incFut = _moneyToNumber(inc?.fut ?? 0);
+        const expFact = _moneyToNumber(exp?.fact ?? 0); // usually negative
+        const expFut = _moneyToNumber(exp?.fut ?? 0);
+
+        const netFact = incFact + expFact;
+        const netFut = incFut + expFut;
+
+        const body = [
+          factLine,
+          futLine,
+          `Доходы ${_formatTenge(incFact)} > ${_formatTenge(incFut)}`,
+          `Расходы ${_formatTenge(expFact)} > ${_formatTenge(expFut)}`,
+          `Чистая прибыль ${_formatTenge(netFact)} > ${_formatTenge(netFut)}`,
+        ];
+
+        // Optional hint
+        body.push('Если нужен разрез — напиши: "прибыльность по проектам".');
+
+        return _wrapBlock('Отчёт о прибылях и убытках', null, body);
+      };
+
+      const _renderCashFlowReport = () => {
+        const { factLine, futLine } = _fmtRangeLines();
+
+        const inc = _getSummaryPair(['incomeList', 'income', 'incomeSummary']);
+        const exp = _getSummaryPair(['expenseList', 'expense', 'expenseSummary']);
+        const trn = _getSummaryPair(['transfers', 'transferList']);
+        const wdr = _getSummaryPair(['withdrawalList', 'withdrawals', 'withdrawalsList']);
+
+        const acc = _getAccountsTotals();
+
+        const incFact = _moneyToNumber(inc?.fact ?? 0);
+        const incFut = _moneyToNumber(inc?.fut ?? 0);
+        const expFact = _moneyToNumber(exp?.fact ?? 0);
+        const expFut = _moneyToNumber(exp?.fut ?? 0);
+        const wdrFact = _moneyToNumber(wdr?.fact ?? 0);
+        const wdrFut = _moneyToNumber(wdr?.fut ?? 0);
+        const trnFact = _moneyToNumber(trn?.fact ?? 0);
+        const trnFut = _moneyToNumber(trn?.fut ?? 0);
+
+        // Net cash flow: incomes + expenses + withdrawals (all signed)
+        const netFact = incFact + expFact + wdrFact;
+        const netFut = incFut + expFut + wdrFut;
+
+        const body = [
+          factLine,
+          futLine,
+          `Поступления (доходы) ${_formatTenge(incFact)} > ${_formatTenge(incFut)}`,
+          `Выплаты (расходы) ${_formatTenge(expFact)} > ${_formatTenge(expFut)}`,
+        ];
+
+        // Withdrawals are not always present on screen
+        if (wdr) body.push(`Выводы/снятия ${_formatTenge(wdrFact)} > ${_formatTenge(wdrFut)}`);
+
+        body.push(`Чистый денежный поток ${_formatTenge(netFact)} > ${_formatTenge(netFut)}`);
+
+        // Transfers: show volume only (does not change net)
+        if (trn) body.push(`Переводы между счетами (оборот) ${_formatTenge(trnFact)} > ${_formatTenge(trnFut)}`);
+
+        // Accounts totals if available
+        if (acc) body.push(`Остаток на счетах ${_formatTenge(acc.factTotal)} > ${_formatTenge(acc.futTotal)}`);
+
+        body.push('Если нужно "ближайшие платежи/поступления" — открой экран со списком операций и спроси: "ближайшие доходы" / "ближайшие расходы".');
+
+        return _wrapBlock('Отчёт о движении денег (ДДС)', null, body);
+      };
+
+      const _sumWidgetRowsAsNumber = (keyOrKeys) => {
+        const w = _findSnapWidget(keyOrKeys);
+        if (!w) return null;
+        const rows = _getRows(w);
+        if (!rows.length) return { widget: w, factTotal: 0, futTotal: 0 };
+
+        let factTotal = 0;
+        let futTotal = 0;
+        rows.forEach((r) => {
+          const pf = _pickFactFuture(r);
+          factTotal += _moneyToNumber(pf?.fact ?? 0);
+          futTotal += _moneyToNumber(pf?.fut ?? 0);
+        });
+
+        return { widget: w, factTotal, futTotal };
+      };
+
+      const _renderBalanceSheetReport = () => {
+        const { factLine, futLine } = _fmtRangeLines();
+
+        const acc = _getAccountsTotals();
+        const cr = _sumWidgetRowsAsNumber(['credits', 'credit', 'creditList']);
+        const tx = _sumWidgetRowsAsNumber(['taxes', 'tax', 'taxList', 'taxesList']);
+        const pp = _sumWidgetRowsAsNumber(['liabilities', 'prepayments', 'prepaymentList']);
+
+        if (!acc) {
+          return _wrapBlock('Баланс (упрощённый)', null, [
+            'На этом экране не вижу виджет счетов (accounts).',
+            'Открой главный экран со счетами и повтори запрос.'
+          ]);
+        }
+
+        const assetsFact = Number(acc.factTotal || 0);
+        const assetsFut = Number(acc.futTotal || 0);
+
+        // Liabilities: make them positive in the report
+        const creditsFact = cr ? Math.abs(Number(cr.factTotal || 0)) : 0;
+        const creditsFut = cr ? Math.abs(Number(cr.futTotal || 0)) : 0;
+        const taxesFact = tx ? Math.abs(Number(tx.factTotal || 0)) : 0;
+        const taxesFut = tx ? Math.abs(Number(tx.futTotal || 0)) : 0;
+        const prepFact = pp ? Math.abs(Number(pp.factTotal || 0)) : 0;
+        const prepFut = pp ? Math.abs(Number(pp.futTotal || 0)) : 0;
+
+        const liabFact = creditsFact + taxesFact + prepFact;
+        const liabFut = creditsFut + taxesFut + prepFut;
+
+        const eqFact = assetsFact - liabFact;
+        const eqFut = assetsFut - liabFut;
+
+        const body = [
+          factLine,
+          futLine,
+          `Активы (деньги на счетах) ${_formatTenge(assetsFact)} > ${_formatTenge(assetsFut)}`,
+        ];
+
+        if (cr) body.push(`Обязательства: кредиты ${_formatTenge(-creditsFact)} > ${_formatTenge(-creditsFut)}`);
+        if (tx) body.push(`Обязательства: налоги ${_formatTenge(-taxesFact)} > ${_formatTenge(-taxesFut)}`);
+        if (pp) body.push(`Обязательства: предоплаты ${_formatTenge(-prepFact)} > ${_formatTenge(-prepFut)}`);
+
+        body.push(`Итого обязательства ${_formatTenge(-liabFact)} > ${_formatTenge(-liabFut)}`);
+        body.push(`Собственный капитал (упрощённо) ${_formatTenge(eqFact)} > ${_formatTenge(eqFut)}`);
+
+        body.push('Это упрощённый баланс по тому, что видно на экране (без дебиторки/товара/ОС).');
+
+        return _wrapBlock('Баланс (упрощённый)', null, body);
+      };
+
+      // =========================
+      // OPERATIONS (snapshot-only)
+      // =========================
+      const _opsGuessKind = (widgetKey, row) => {
+        const t = String(row?.type || row?.kind || '').toLowerCase();
+        if (t === 'transfer' || row?.isTransfer) return 'transfer';
+        if (t === 'withdrawal' || row?.isWithdrawal) return 'withdrawal';
+        if (t === 'income') return 'income';
+        if (t === 'expense') return 'expense';
+
+        const wk = String(widgetKey || '').toLowerCase();
+        if (/transfer|перевод/.test(wk)) return 'transfer';
+        if (/withdraw|вывод|снят/.test(wk)) return 'withdrawal';
+        if (/income|доход/.test(wk)) return 'income';
+        if (/expense|расход/.test(wk)) return 'expense';
+
+        const amt = _guessAmount(row);
+        if (amt > 0) return 'income';
+        if (amt < 0) return 'expense';
+        return null;
+      };
+
+      const _opsCollectRows = () => {
+        const keys = [
+          // Mobile current lists
+          'incomeListCurrent', 'expenseListCurrent', 'withdrawalListCurrent', 'transfersCurrent',
+          // Potential future lists
+          'incomeListFuture', 'expenseListFuture', 'withdrawalListFuture', 'transfersFuture',
+          // Common legacy keys
+          'incomeList', 'income', 'incomeSummary',
+          'expenseList', 'expense', 'expenseSummary',
+          'withdrawalList', 'withdrawals', 'withdrawalsList',
+          'transfers', 'transferList'
+        ];
+
+        const out = [];
+        for (const k of keys) {
+          const w = _findSnapWidget(k);
+          if (!w) continue;
+          const wk = w?.key || k;
+          const rows = _getRows(w);
+          for (const r of (rows || [])) {
+            const ts = _guessDateTs(r, _kzStartOfDay(new Date()).getTime());
+            if (!ts) continue;
+            out.push({ __wk: wk, __ts: ts, __row: r });
+          }
+        }
+        // Desktop timeline (storeTimeline.opsByDay) — include ops even if widgets list doesn't contain dated rows
+        try {
+          const byDay = uiSnapshot?.storeTimeline?.opsByDay;
+          if (byDay && typeof byDay === 'object') {
+            const baseTs = _kzStartOfDay(new Date()).getTime();
+            for (const dateKey of Object.keys(byDay)) {
+              const arr = byDay[dateKey];
+              if (!Array.isArray(arr)) continue;
+              for (const op of arr) {
+                const ts = _guessDateTs(op, baseTs);
+                if (!ts) continue;
+                out.push({ __wk: 'storeTimeline', __ts: ts, __row: op });
+              }
+            }
+          }
+        } catch (_) {}
+        return out;
+      };
+
+      const _opsExtractUntilTs = (qLower) => {
+        // If user explicitly says "до <date>", use that date.
+        const m = String(qLower || '').match(/\b(?:до|по)\b\s*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})/i);
+        if (m && m[1]) {
+          const d = _parseRuDateFromText(m[1], new Date());
+          if (d) return _kzEndOfDay(d).getTime();
+        }
+
+        // "до сегодня" / "на сегодня" => use snapshot fact date.
+        if (/сегодня|текущ|на\s*сегодня|сего\s*дня/i.test(String(qLower || ''))) {
+          const d = _parseRuDateFromText(snapTodayDDMMYYYY, new Date());
+          if (d) return _kzEndOfDay(d).getTime();
+        }
+
+        // Default: end of today.
+        return _endOfToday().getTime();
+      };
+
+      const _looksLikeOpsUntil = (qLower, kind) => {
+        const t = String(qLower || '').toLowerCase();
+        const hasUntil = /\bдо\b/.test(t) && (
+          /сегодня|текущ|на\s*сегодня|сего\s*дня/.test(t) ||
+          /\bдо\b\s*([0-9]{1,2}[./-][0-9]{1,2}[./-][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})/.test(t)
+        );
+        if (!hasUntil) return false;
+
+        if (kind === 'expense') return /(расход|тра(т|чу)|потрат|списан)/.test(t);
+        if (kind === 'income') return /(доход|выруч|поступл|поступ)/.test(t);
+        if (kind === 'transfer') return /(перевод|трансфер)/.test(t);
+        if (kind === 'withdrawal') return /(вывод|сняти|снять|withdraw)/.test(t);
+        return false;
+      };
+
+      const _opsFmtLine = (x, kindHint = null) => {
+        const r = x.__row;
+        const dLabel = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(x.__ts));
+
+        const rawName = _guessName(r);
+        let contractor = _guessContractor(r);
+        let category = _guessCategory(r);
+
+        // Handle composite "Категория - Контрагент" coming from mobile rows (e.g. "Маркетинг - Давид")
+        if ((contractor === '—' || category === '—') && rawName && rawName !== '—') {
+          const parts = String(rawName).split(/\s*-\s*/).map(s => String(s).trim()).filter(Boolean);
+          if (parts.length === 2) {
+            if (category === '—') category = parts[0];
+            if (contractor === '—') contractor = parts[1];
+          }
+        }
+
+        // If contractor is still unknown, show rawName as contractor placeholder
+        if (!contractor || contractor === '—') contractor = (rawName && rawName !== '—') ? rawName : '—';
+
+        let amt = _guessAmount(r);
+        if (kindHint === 'expense') amt = -Math.abs(Number(amt || 0));
+        if (kindHint === 'income') amt = Math.abs(Number(amt || 0));
+
+        return `📌 ${dLabel} – ${contractor} – ${category} – ${_formatTenge(amt)}`;
+      };
+
+      const _detectScopeFromText = (qLower) => {
+        const t = String(qLower || '').toLowerCase();
+        if (/(\bвсе\b|\bоба\b|полностью|полный|весь|вместе|all)/i.test(t)) return 'all';
+        if (/(будущ|прогноз|план|ожидаем|следующ|после\s*сегодня|future)/i.test(t)) return 'future';
+        if (/(текущ|сегодня|на\s*сегодня|факт|истор|до\s*сегодня|по\s*сегодня|current)/i.test(t)) return 'current';
+        return null;
+      };
+
+      const _detectFormatFromText = (qLower) => {
+        const t = String(qLower || '').toLowerCase();
+
+        // Detailed / expanded list
+        if (/(подроб|детал|разверн|полный\s*список)/i.test(t)) return 'detailed';
+
+        // Compact list: only date + amount
+        // Covers:
+        // - "только дата и сумма" / "только дата и только сумма"
+        // - "включая дату и сумму"
+        // - "дата сумма" / "дата, сумма" / "дата + сумма"
+        // - inflected forms: "дату", "сумму"
+        // - exclusions: "без контрагента", "без категории"
+        if (
+          /(?:только\s*)?дат[ауеы]?\s*(?:и\s*(?:только\s*)?)?сумм\w*/i.test(t) ||
+          /включа\w*\s*дат[ауеы]?\s*(?:и\s*)?сумм\w*/i.test(t) ||
+          /\b(дата|дату|даты)\b[\s,;:/\-+]*\b(сумма|сумму|суммы)\b/i.test(t) ||
+          /\bdate\b[\s,;:/\-+]*\b(amount|sum)\b/i.test(t) ||
+          /(без\s*(контраг|контраген|категор))/i.test(t)
+        ) {
+          return 'date_amount';
+        }
+
+        return 'short';
+      };
+
+      const _opsGetRowsForKindScope = (kind, scope) => {
+        const k = String(kind || '').toLowerCase();
+        const sc = String(scope || 'current').toLowerCase();
+
+        const collect = (keys) => {
+          const out = [];
+          (keys || []).forEach((key) => {
+            const w = _findSnapWidget(key);
+            if (!w) return;
+            const rows = _getRows(w);
+            (rows || []).forEach((r) => out.push({ __wk: w?.key || key, __row: r }));
+          });
+          return out;
+        };
+
+        const map = {
+          income: {
+            current: ['incomeListCurrent', 'incomeList'],
+            future: ['incomeListFuture'],
+          },
+          expense: {
+            current: ['expenseListCurrent', 'expenseList'],
+            future: ['expenseListFuture'],
+          },
+          transfer: {
+            current: ['transfersCurrent', 'transfers', 'transferList'],
+            future: ['transfersFuture'],
+          },
+          withdrawal: {
+            current: ['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList'],
+            future: ['withdrawalListFuture'],
+          },
+        };
+
+        const cur = collect(map[k]?.current || []);
+        const fut = collect(map[k]?.future || []);
+
+        // Desktop timeline (storeTimeline.opsByDay): normalize into the same rows format as widgets
+        const timeline = [];
+        try {
+          const byDay = uiSnapshot?.storeTimeline?.opsByDay;
+          if (byDay && typeof byDay === 'object') {
+            const baseTs = _kzStartOfDay(new Date()).getTime();
+            const endTodayTs = _endOfToday().getTime();
+            for (const dateKey of Object.keys(byDay)) {
+              const arr = byDay[dateKey];
+              if (!Array.isArray(arr)) continue;
+              for (const op of arr) {
+                const ts = _guessDateTs(op, baseTs);
+                if (!ts) continue;
+                const kk = _opsGuessKind('storeTimeline', op);
+                if (kk !== k) continue;
+
+                if (sc === 'current' && ts > endTodayTs) continue;
+                if (sc === 'future' && ts <= endTodayTs) continue;
+
+                timeline.push({ __wk: 'storeTimeline', __row: op });
+              }
+            }
+          }
+        } catch (_) {}
+
+        if (sc === 'future') return fut.concat(timeline);
+        if (sc === 'all') return cur.concat(fut).concat(timeline);
+        return cur.concat(timeline);
+      };
+
+      const _opsCollectScopedCounts = (kind) => {
+        const cur = _opsGetRowsForKindScope(kind, 'current');
+        const fut = _opsGetRowsForKindScope(kind, 'future');
+        return { curCount: cur.length, futCount: fut.length };
+      };
+
+      const _opsFmtLineUnified = (x, kindHint, opts = {}) => {
+        const r = x.__row;
+        const ts = x.__ts;
+        const dLabel = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(ts));
+
+        let amt = _guessAmount(r);
+        if (kindHint === 'expense') amt = -Math.abs(Number(amt || 0));
+        if (kindHint === 'income') amt = Math.abs(Number(amt || 0));
+
+        // Compact: only date + amount
+        const lineStyle = String(opts?.lineStyle || '').toLowerCase();
+        if (lineStyle === 'date_amount') {
+          return `📌 ${dLabel} – ${_formatTenge(amt)}`;
+        }
+
+        const rawName = _guessName(r);
+        let contractor = _guessContractor(r);
+        let category = _guessCategory(r);
+
+        // Handle composite "Категория - Контрагент" (e.g. "Маркетинг - Давид")
+        if ((contractor === '—' || category === '—') && rawName && rawName !== '—') {
+          const parts = String(rawName).split(/\s*-\s*/).map(s => String(s).trim()).filter(Boolean);
+          if (parts.length === 2) {
+            if (category === '—') category = parts[0];
+            if (contractor === '—') contractor = parts[1];
+          }
+        }
+
+        if (!contractor || contractor === '—') contractor = (rawName && rawName !== '—') ? rawName : '—';
+
+        const showProject = Boolean(opts.showProject);
+        const project = _guessProject(r);
+        const projPart = (showProject && project && project !== '—') ? ` – ${project}` : '';
+
+        return `📌 ${dLabel} – ${contractor} – ${category}${projPart} – ${_formatTenge(amt)}`;
+      };
+
+      const _renderOpsList = (kind, scope, opts = {}) => {
+        const k = String(kind || '').toLowerCase();
+        const sc = String(scope || 'current').toLowerCase();
+        const format = String(opts.format || 'short').toLowerCase();
+        const showProject = (format === 'detailed');
+
+        const raw = _opsGetRowsForKindScope(k, sc);
+        const baseTs = _kzStartOfDay(new Date()).getTime();
+
+        const rows = raw
+          .map((x) => ({
+            ...x,
+            __ts: _guessDateTs(x.__row, baseTs),
+            __kind: _opsGuessKind(x.__wk, x.__row)
+          }))
+          .filter((x) => x.__kind === k)
+          .filter((x) => Number.isFinite(x.__ts));
+
+        if (!rows.length) {
+          const title = (k === 'income') ? 'Доходы' : (k === 'expense') ? 'Расходы' : 'Операции';
+          return [
+            `${title}:`,
+            'На этом экране не вижу списка операций с датами.',
+            'Открой экран/виджет со списком операций (где есть строки с датами) и повтори запрос.'
+          ].join('\n');
+        }
+
+        // Sort: current -> newest first, future -> ближайшие first, all -> newest first
+        rows.sort((a, b) => {
+          if (sc === 'future') return a.__ts - b.__ts;
+          return b.__ts - a.__ts;
+        });
+
+        const safeLimit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(200, Math.floor(opts.limit))) : 10;
+        const shown = rows.slice(0, safeLimit);
+
+        const title = (k === 'income') ? 'Доходы' : (k === 'expense') ? 'Расходы' : 'Операции';
+        const scopeTitle = (sc === 'future') ? ' (будущие)' : (sc === 'all') ? ' (все)' : ' (текущие)';
+
+        const lines = [`${title}${scopeTitle}:`];
+        const lineStyle = (format === 'date_amount') ? 'date_amount' : '';
+        shown.forEach((x, i) => lines.push(`${i + 1}) ${_opsFmtLineUnified(x, k, { showProject, lineStyle })}`));
+
+        lines.push(`Найдено: ${rows.length}. Показал: ${shown.length}.`);
+        if (rows.length > shown.length) {
+          lines.push('Скажи: "покажи все" или "топ 50" или "подробно".');
+        }
+
+        return lines.join('\n');
+      };
+
+      const _renderScopeQuestion = (kind, counts) => {
+        const title = (kind === 'income') ? 'Доходы' : 'Расходы';
+        return `${title}: вижу текущие ${counts.curCount} и будущие ${counts.futCount}. Что показать: текущие / будущие / все?`;
+      };
+
+      const _looksLikeOpsByProject = (qLower, kind) => {
+        const t = String(qLower || '').toLowerCase();
+        const wants = /(по\s*проектам|по\s*проекту|разрез\s*проект)/.test(t);
+        if (!wants) return false;
+
+        if (kind === 'expense') return /(расход|тра(т|чу)|потрат|списан|платеж|платёж|оплат)/.test(t);
+        if (kind === 'income') return /(доход|выруч|поступл|поступ)/.test(t);
+        if (kind === 'transfer') return /(перевод|трансфер)/.test(t);
+        if (kind === 'withdrawal') return /(вывод|сняти|снять|withdraw)/.test(t);
+        return false;
+      };
+
+      const _renderOpsByProject = (wantKind) => {
+        const kind = String(wantKind || '').toLowerCase();
+        const scope = _detectScopeFromText(qLower) || 'current';
+
+        const raw = _opsGetRowsForKindScope(kind, scope);
+        const baseTs = _kzStartOfDay(new Date()).getTime();
+
+        const rows = raw
+          .map((x) => ({
+            ...x,
+            __ts: _guessDateTs(x.__row, baseTs),
+            __kind: _opsGuessKind(x.__wk, x.__row)
+          }))
+          .filter((x) => x.__kind === kind)
+          .filter((x) => Number.isFinite(x.__ts));
+
+        if (!rows.length) {
+          const title = (kind === 'income') ? 'Доходы по проектам' : 'Расходы по проектам';
+          return [
+            `${title}:`,
+            'На этом экране не вижу списка операций с датами/проектами.',
+            'Открой экран/виджет со списком операций (где в строках есть проект) и повтори запрос.'
+          ].join('\n');
+        }
+
+        const map = new Map();
+        rows.forEach((x) => {
+          const p = _guessProject(x.__row);
+          const project = (p && p !== '—') ? p : 'Без проекта';
+
+          let amt = _guessAmount(x.__row);
+          if (kind === 'expense') amt = -Math.abs(Number(amt || 0));
+          if (kind === 'income') amt = Math.abs(Number(amt || 0));
+
+          if (!map.has(project)) map.set(project, { project, count: 0, total: 0 });
+          const cur = map.get(project);
+          cur.count += 1;
+          cur.total += Number(amt || 0);
+        });
+
+        const arr = Array.from(map.values()).sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
+
+        const title = (kind === 'income') ? 'Доходы по проектам' : 'Расходы по проектам';
+        const limit = explicitLimit || 30;
+        const shown = arr.slice(0, limit);
+
+        const lines = [`${title}:`];
+        shown.forEach((r, i) => {
+          lines.push(`${i + 1}) ${r.project} — ${_formatTenge(r.total)} (${r.count})`);
+        });
+
+        if (arr.length > shown.length) lines.push(`…и ещё ${arr.length - shown.length}`);
+
+        return lines.join('\n');
+      };
+
+      const _renderOpsUntil = (wantKind) => {
+        const untilTs = _opsExtractUntilTs(qLower);
+        const all = _opsCollectRows();
+
+        const filtered = all
+          .map(x => ({ ...x, __kind: _opsGuessKind(x.__wk, x.__row) }))
+          .filter(x => x.__kind === wantKind)
+          .filter(x => x.__ts <= untilTs)
+          .sort((a, b) => b.__ts - a.__ts);
+
+        if (!filtered.length) {
+          const title = (wantKind === 'expense') ? 'Расходы до сегодня'
+            : (wantKind === 'income') ? 'Доходы до сегодня'
+              : (wantKind === 'transfer') ? 'Переводы до сегодня'
+                : 'Выводы до сегодня';
+
+          return _wrapBlock(title, null, [
+            'На этом экране не вижу списка операций с датами за прошлые периоды.',
+            'Нужно, чтобы мобильная отправляла current-операции (списком с датами).'
+          ]);
+        }
+
+        const limit = explicitLimit || 35;
+        const shown = filtered.slice(0, limit);
+        const total = filtered.reduce((s, x) => {
+          let amt = _guessAmount(x.__row);
+          if (wantKind === 'expense') amt = -Math.abs(Number(amt || 0));
+          if (wantKind === 'income') amt = Math.abs(Number(amt || 0));
+          return s + Number(amt || 0);
+        }, 0);
+
+        const title = (wantKind === 'expense') ? 'Расходы до сегодня'
+          : (wantKind === 'income') ? 'Доходы до сегодня'
+            : (wantKind === 'transfer') ? 'Переводы до сегодня'
+              : 'Выводы до сегодня';
+
+        const body = [];
+        body.push(`До: ${snapTodayDDMMYYYY}`);
+        body.push(`Найдено: ${filtered.length}`);
+        body.push(`Итого: ${_formatTenge(total)}`);
+        body.push('');
+        shown.forEach(x => body.push(_opsFmtLine(x, wantKind)));
+        if (filtered.length > shown.length) body.push(`…и ещё ${filtered.length - shown.length}`);
+
+        return _wrapBlock(title, null, body);
+      };
+
+const _looksLikeOpsByDay = (qLower, kind) => {
+  const t = String(qLower || '').toLowerCase();
+  const wantsByDay = /(по\s*дням|по\s*датам|за\s*дни|по\s*дня|по\s*дате)/.test(t);
+  if (!wantsByDay) return false;
+
+  if (kind === 'expense') return /(расход|тра(т|чу)|потрат|списан|платеж|платёж|оплат)/.test(t);
+  if (kind === 'income') return /(доход|выруч|поступл|поступ)/.test(t);
+  if (kind === 'transfer') return /(перевод|трансфер)/.test(t);
+  if (kind === 'withdrawal') return /(вывод|сняти|снять|withdraw)/.test(t);
+  return false;
+};
+
+const _renderOpsByDay = (wantKind) => {
+  const untilTs = _endOfToday().getTime();
+  const all = _opsCollectRows();
+
+  const filtered = all
+    .map(x => ({ ...x, __kind: _opsGuessKind(x.__wk, x.__row) }))
+    .filter(x => x.__kind === wantKind)
+    .filter(x => x.__ts <= untilTs);
+
+  if (!filtered.length) {
+    const title = (wantKind === 'expense') ? 'Расходы по дням'
+      : (wantKind === 'income') ? 'Доходы по дням'
+        : (wantKind === 'transfer') ? 'Переводы по дням'
+          : 'Выводы по дням';
+
+    return _wrapBlock(title, null, [
+      'На этом экране не вижу списка операций с датами за прошлые периоды.',
+      'Нужно, чтобы мобильная отправляла current-операции (списком с датами).'
+    ]);
+  }
+
+  // Group by day label (DD.MM.YYYY)
+  const map = new Map();
+  filtered.forEach((x) => {
+    const r = x.__row;
+    const dLabel = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(x.__ts));
+    let amt = _guessAmount(r);
+    if (wantKind === 'expense') amt = -Math.abs(Number(amt || 0));
+    if (wantKind === 'income') amt = Math.abs(Number(amt || 0));
+    if (!map.has(dLabel)) map.set(dLabel, { date: dLabel, count: 0, total: 0 });
+    const cur = map.get(dLabel);
+    cur.count += 1;
+    cur.total += Number(amt || 0);
+  });
+
+  // Sort by date descending (use parser)
+  const rows = Array.from(map.values()).map((x) => {
+    const ts = _parseAnyDateToTs(x.date) || 0;
+    return { ...x, ts };
+  }).sort((a, b) => b.ts - a.ts);
+
+  const title = (wantKind === 'expense') ? 'Расходы по дням'
+    : (wantKind === 'income') ? 'Доходы по дням'
+      : (wantKind === 'transfer') ? 'Переводы по дням'
+        : 'Выводы по дням';
+
+  const limit = explicitLimit || 40;
+  const shown = rows.slice(0, limit);
+
+  const body = [];
+  body.push(`До: ${snapTodayDDMMYYYY}`);
+  body.push(`Дней: ${rows.length}`);
+  body.push('');
+
+  shown.forEach((r) => {
+    body.push(`${r.date} — ${_formatTenge(r.total)} (${r.count})`);
+  });
+  if (rows.length > shown.length) body.push(`…и ещё ${rows.length - shown.length}`);
+
+  return _wrapBlock(title, null, body);
+};
+
 
       // If we have a UI snapshot, answer STRICTLY from it and return early.
       if (snapWidgets) {
@@ -829,6 +1905,177 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           const lines = [`Вижу виджеты на экране: ${list.length}`];
           list.forEach((x, i) => lines.push(`${i + 1}) ${x.key || '—'}${x.title ? ` — ${x.title}` : ''}`));
           return res.json({ text: lines.join('\n') });
+        }
+
+        // ---- Reports: P&L / Cash Flow / Balance Sheet (must be checked BEFORE profitability-by-projects)
+        if (_looksLikePnL(qLower)) {
+          return res.json({ text: _renderPnLReport() });
+        }
+        if (_looksLikeCashFlow(qLower)) {
+          return res.json({ text: _renderCashFlowReport() });
+        }
+        if (_looksLikeBalanceSheet(qLower)) {
+          return res.json({ text: _renderBalanceSheetReport() });
+        }
+
+        // ---- Operations list (FACT): "до сегодня" / "до <дата>" (works in both quick + chat)
+        if (_looksLikeOpsUntil(qLower, 'expense')) return res.json({ text: _renderOpsUntil('expense') });
+        if (_looksLikeOpsUntil(qLower, 'income')) return res.json({ text: _renderOpsUntil('income') });
+        if (_looksLikeOpsUntil(qLower, 'transfer')) return res.json({ text: _renderOpsUntil('transfer') });
+        if (_looksLikeOpsUntil(qLower, 'withdrawal')) return res.json({ text: _renderOpsUntil('withdrawal') });
+
+        // ---- Operations by day (FACT): "по дням" / "по датам"
+        if (_looksLikeOpsByDay(qLower, 'expense')) return res.json({ text: _renderOpsByDay('expense') });
+        if (_looksLikeOpsByDay(qLower, 'income')) return res.json({ text: _renderOpsByDay('income') });
+        if (_looksLikeOpsByDay(qLower, 'transfer')) return res.json({ text: _renderOpsByDay('transfer') });
+        if (_looksLikeOpsByDay(qLower, 'withdrawal')) return res.json({ text: _renderOpsByDay('withdrawal') });
+
+        // ---- Operations by project (FACT): "по проектам"
+        if (_looksLikeOpsByProject(qLower, 'expense')) return res.json({ text: _renderOpsByProject('expense') });
+        if (_looksLikeOpsByProject(qLower, 'income')) return res.json({ text: _renderOpsByProject('income') });
+        if (_looksLikeOpsByProject(qLower, 'transfer')) return res.json({ text: _renderOpsByProject('transfer') });
+        if (_looksLikeOpsByProject(qLower, 'withdrawal')) return res.json({ text: _renderOpsByProject('withdrawal') });
+
+        // ---- Profitability guard (works in BOTH quick + chat modes)
+        // If user asks about profitability of projects, but the screen already has the Projects widget,
+        // we answer from that widget instead of asking for income/expense details.
+        const wantsProfitAny = /(прибыл|марж|рентаб|profit|margin|net)/i.test(qLower);
+        if (wantsProfitAny && qLower.includes('проект')) {
+          const wProj = _findSnapWidget(['projects', 'projectList']);
+          if (wProj) {
+            return res.json({
+              text: _renderProfitByProjects(wProj, _getRows(wProj), 'Прибыль проектов (как в виджете "Мои проекты")')
+            });
+          }
+        }
+
+        // ---- HYBRID MODE: quick buttons vs live chat
+        const reqSourceRaw = req?.body?.source ?? req?.body?.mode ?? '';
+        const reqSource = String(reqSourceRaw || '').toLowerCase();
+        const quickKey = (req?.body?.quickKey != null) ? String(req.body.quickKey) : '';
+
+        const isExplicitQuick = (reqSource === 'quick_button' || reqSource === 'quick' || reqSource === 'button' || reqSource === 'btn' || req?.body?.mode === 'quick' || Boolean(quickKey));
+        const isExplicitChat = (reqSource === 'chat' || reqSource === 'voice' || reqSource === 'mic' || req?.body?.mode === 'chat');
+
+        // Back-compat for old clients: treat ONLY very short/standard phrases as quick.
+        const qNorm = _normQ(qLower);
+        const looksLikeQuickText = (
+          qNorm === 'счета' || qNorm === 'счёт' || qNorm === 'покажи счета' || qNorm === 'покажи счёта' ||
+          qNorm === 'доходы' || qNorm === 'покажи доходы' ||
+          qNorm === 'расходы' || qNorm === 'покажи расходы' ||
+          qNorm === 'переводы' || qNorm === 'покажи переводы' ||
+          qNorm === 'выводы' || qNorm === 'покажи выводы' ||
+          qNorm === 'налоги' || qNorm === 'покажи налоги' ||
+          qNorm === 'проекты' || qNorm === 'покажи проекты' ||
+          qNorm === 'контрагенты' || qNorm === 'покажи контрагентов' ||
+          qNorm === 'категории' || qNorm === 'покажи категории' ||
+          qNorm === 'физлица' || qNorm === 'покажи физлица'
+        );
+
+        const isQuickRequest = isExplicitQuick || (!isExplicitChat && looksLikeQuickText);
+
+        // CHAT MODE branch (variative answers) — ONLY from snapshot
+        if (!isQuickRequest) {
+          const baseTs = _kzStartOfDay(new Date()).getTime();
+
+          // ---- Session-aware clarification (one short question)
+          const sess = _getChatSession(userIdStr);
+          if (sess && sess.pending && sess.pending.type === 'pick_scope') {
+            const kind = sess.pending.kind;
+            const scopePicked = _detectScopeFromText(qLower);
+            if (!scopePicked) {
+              return res.json({ text: _renderScopeQuestion(kind, sess.pending.counts) });
+            }
+            // Save preference and continue with the original pending action
+            if (kind === 'income') sess.prefs.incomeScope = scopePicked;
+            if (kind === 'expense') sess.prefs.expenseScope = scopePicked;
+            _clearPending(userIdStr);
+
+            const formatPicked = _detectFormatFromText(qLower);
+            sess.prefs.format = formatPicked;
+
+            const limitPicked = _parseExplicitLimitFromQuery(qLower) || sess.prefs.limit || 10;
+            sess.prefs.limit = limitPicked;
+
+            return res.json({
+              text: _renderOpsList(kind, scopePicked, { format: sess.prefs.format, limit: sess.prefs.limit })
+            });
+          }
+
+          // ---- Lists: "список доходов/расходов" (short by default)
+          const wantsListWord = /(список|перечень|list)/i.test(qLower);
+          const wantsIncome = /(доход|выруч|поступл|поступ)/i.test(qLower);
+          const wantsExpense = /(расход|тра(т|чу)|потрат|списан|платеж|платёж|оплат)/i.test(qLower);
+
+          if (wantsListWord && (wantsIncome || wantsExpense)) {
+            const kind = wantsIncome ? 'income' : 'expense';
+            const scopeExplicit = _detectScopeFromText(qLower);
+            const format = _detectFormatFromText(qLower);
+
+            if (sess) sess.prefs.format = format;
+
+            const counts = _opsCollectScopedCounts(kind);
+            const hasCur = counts.curCount > 0;
+            const hasFut = counts.futCount > 0;
+
+            // If both exist and user didn't specify, ask once
+            if (!scopeExplicit && hasCur && hasFut) {
+              _setPending(userIdStr, { type: 'pick_scope', kind, counts });
+              return res.json({ text: _renderScopeQuestion(kind, counts) });
+            }
+
+            // Pick scope: explicit -> saved pref -> available
+            const pref = sess ? (kind === 'income' ? sess.prefs.incomeScope : sess.prefs.expenseScope) : null;
+            const scope = scopeExplicit || pref || (hasCur ? 'current' : 'future');
+
+            if (sess) {
+              if (kind === 'income') sess.prefs.incomeScope = scope;
+              if (kind === 'expense') sess.prefs.expenseScope = scope;
+            }
+
+            const limit = _parseExplicitLimitFromQuery(qLower) || (sess ? sess.prefs.limit : 10) || 10;
+            if (sess) sess.prefs.limit = limit;
+
+            return res.json({ text: _renderOpsList(kind, scope, { format, limit }) });
+          }
+
+          // Profit by projects
+          // IMPORTANT: do NOT use a word-boundary here — "прибыльность" must match.
+          const wantsProfit = /(прибыл\w*|марж\w*|рентаб\w*|profit|margin|net)/i.test(qLower);
+          const mentionsProjects = /(\bпроект\w*\b|по\s+проектам)/i.test(qLower);
+          const projectsWidgetForProfit = _findSnapWidget(['projects', 'projectList']);
+
+          if (wantsProfit && (mentionsProjects || Boolean(projectsWidgetForProfit))) {
+            if (!projectsWidgetForProfit) {
+              return res.json({
+                text: [
+                  'Прибыль проектов:',
+                  'Не вижу на экране виджет "Мои проекты".',
+                  'Открой главный экран с виджетом проектов и повтори вопрос.'
+                ].join('\n')
+              });
+            }
+            const rows = _getRows(projectsWidgetForProfit);
+            return res.json({ text: _renderProfitByProjects(projectsWidgetForProfit, rows) });
+          }
+
+          // Upcoming incomes / expenses
+          if (/(ближайш|скоро|когда|по\s*дат|дата\s*каких|что\s*придет|что\s*придёт)/i.test(qLower) && /(доход|поступл|выруч)/i.test(qLower)) {
+            return res.json({ text: _renderUpcoming('Ближайшие доходы', 'income', baseTs) });
+          }
+          if (/(ближайш|скоро|когда|по\s*дат|дата\s*каких|что\s*спишет|что\s*уйдет|что\s*уйдёт)/i.test(qLower) && /(расход|платеж|платёж|оплат)/i.test(qLower)) {
+            return res.json({ text: _renderUpcoming('Ближайшие расходы', 'expense', baseTs) });
+          }
+
+          // If user asks "что улучшить" / analysis — let LLM reason from snapshot.
+          if (/(улучш|оптимиз|что\s*делать|совет|рекомендац|анализ|проанализ)/i.test(qLower)) {
+            const out = await _openAiChatFromSnapshot(q);
+            return res.json({ text: out });
+          }
+
+          // Default: free-form chat answer from snapshot (LLM).
+          const out = await _openAiChatFromSnapshot(q);
+          return res.json({ text: out });
         }
 
         // ---- Catalog-only queries (numbered lists, no sums)
