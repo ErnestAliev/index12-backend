@@ -462,7 +462,7 @@ module.exports = function createAiRouter(deps) {
       payloadObj.temperature = temperature;
     }
     const payload = JSON.stringify(payloadObj);
-    const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || 20000);
+    const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || 60000); // 60 seconds for complex queries
 
     return new Promise((resolve, reject) => {
       const req2 = https.request(
