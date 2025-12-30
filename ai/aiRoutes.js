@@ -493,6 +493,14 @@ module.exports = function createAiRouter(deps) {
               }
               const json = JSON.parse(data);
               const text = json?.choices?.[0]?.message?.content || '';
+
+              // Debug logging
+              console.log('📝 OpenAI response length:', text.length, 'chars');
+              if (text.length < 50) {
+                console.log('⚠️ Short response:', text);
+                console.log('📦 Full response:', JSON.stringify(json, null, 2).slice(0, 500));
+              }
+
               resolve(String(text || '').trim());
             } catch (e) {
               reject(new Error(`OpenAI parse error: ${e.message}`));
