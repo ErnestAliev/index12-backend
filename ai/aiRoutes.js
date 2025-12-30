@@ -1426,6 +1426,7 @@ module.exports = function createAiRouter(deps) {
             meta: {
               today: snapTodayDDMMYYYY,
               forecastUntil: snapFutureDDMMYYYY,
+              todayTimestamp: _kzStartOfDay(new Date()).getTime(), // Add timestamp for filtering
               widgets: listKeys,
             },
             totals: pickTotals(),
@@ -1459,7 +1460,28 @@ module.exports = function createAiRouter(deps) {
           'Если речь о прибыльности/эффективности - выводи только ИТОГ и АНАЛИЗ, НЕ списки операций.',
           'Списки операций показывай ТОЛЬКО если пользователь явно попросил "покажи список" или "покажи расходы".',
           'По умолчанию показывай только текущие операции (до сегодня). Прогнозы добавляй только если пользователь явно попросил.',
-          'При расчетах ВСЕГДА показывай два варианта: 1) С учетом открытых счетов 2) С учетом скрытых счетов.',
+          '',
+          'ЛОГИКА СКРЫТЫХ СЧЕТОВ:',
+          '- В DATA.accounts каждый счет имеет поле hidden (true/false)',
+          '- Открытые счета: hidden = false',
+          '- Скрытые счета: hidden = true',
+          '- При расчетах проверь, есть ли скрытые счета с ненулевыми балансами',
+          '- Если ВСЕ скрытые счета имеют баланс = 0, НЕ показывай два варианта',
+          '- Если есть скрытые счета с балансом ≠ 0, покажи:',
+          '  1) Сумма по открытым счетам (hidden = false)',
+          '  2) Сумма по всем счетам (открытые + скрытые)',
+          '- НЕ дублируй одинаковые суммы - если разницы нет, покажи только один вариант',
+          '',
+          'КРИТИЧНО - РАЗНИЦА МЕЖДУ ТЕКУЩИМИ И БУДУЩИМИ ОПЕРАЦИЯМИ:',
+          '- ТЕКУЩИЕ операции = дата ≤ сегодня (DATA.meta.today)',
+          '- БУДУЩИЕ операции (прогнозы) = дата > сегодня',
+          '- В DATA.operations каждая операция имеет поле ts (timestamp)',
+          '- Для фильтрации используй: op.ts <= DATA.meta.todayTimestamp (текущие) или op.ts > DATA.meta.todayTimestamp (будущие)',
+          '- Когда пользователь просит "текущие доходы" - фильтруй DATA.operations где kind="income" И ts <= todayTimestamp',
+          '- Когда пользователь просит "прогнозы" или "будущие доходы" - фильтруй где kind="income" И ts > todayTimestamp',
+          '- Когда пользователь просит "ближайший доход" - ищи ПЕРВУЮ операцию где kind="income" И ts > todayTimestamp, отсортируй по ts',
+          '- Когда пользователь просит доход за конкретную дату - проверь эту дату в DATA.timeline',
+          '- DATA.totals содержит fact (текущие) и forecast (будущие) - используй правильное поле',
           '',
           'ФОРМАТ ОТВЕТА ПРИ ПОКАЗЕ ОПЕРАЦИЙ ПО ДНЯМ:',
           'Используй КОМПАКТНЫЙ формат с разделителями между днями:',
@@ -2551,6 +2573,22 @@ module.exports = function createAiRouter(deps) {
         return total;
       };
 
+      const _sumFutureFromOps = (kind) => {
+        const endTs = _endOfToday().getTime();
+        const all = _opsCollectRows();
+        let total = 0;
+        all.forEach((x) => {
+          const k = _opsGuessKind(x.__wk, x.__row);
+          if (k !== kind) return;
+          if (Number(x.__ts) <= endTs) return; // Only future operations
+          let amt = _guessAmount(x.__row);
+          if (kind === 'expense') amt = -Math.abs(Number(amt || 0));
+          if (kind === 'income') amt = Math.abs(Number(amt || 0));
+          total += Number(amt || 0);
+        });
+        return total;
+      };
+
       // If we have a UI snapshot, answer STRICTLY from it and return early.
       if (snapWidgets) {
         // QUICK: diagnostics (deterministic)
@@ -2558,14 +2596,23 @@ module.exports = function createAiRouter(deps) {
           return res.json({ text: _renderDiagnosticsFromSnapshot(uiSnapshot, snapTodayDDMMYYYY, snapFutureDDMMYYYY) });
         }
 
-        // QUICK: current totals must never be 0 if operations exist in lists/timeline
-        if (/(?:\bтекущ\w*\b.*\bрасход\w*\b|\bрасход\w*\b.*\bтекущ\w*\b)/i.test(qLower)) {
+        // QUICK: Handle explicit current/future operation sum requests
+        // Only trigger for very specific patterns to avoid intercepting general queries
+        if (/^(текущие расходы|расходы текущие)$/i.test(qLower.trim())) {
           const total = _sumCurrentFromOps('expense');
           return res.json({ text: `Текущие расходы. До ${snapTodayDDMMYYYY}\n${_formatTenge(total)}` });
         }
-        if (/(?:\bтекущ\w*\b.*\bдоход\w*\b|\bдоход\w*\b.*\bтекущ\w*\b)/i.test(qLower)) {
+        if (/^(текущие доходы|доходы текущие)$/i.test(qLower.trim())) {
           const total = _sumCurrentFromOps('income');
           return res.json({ text: `Текущие доходы. До ${snapTodayDDMMYYYY}\n${_formatTenge(total)}` });
+        }
+        if (/^(будущие расходы|расходы будущие|прогноз расходов|расходы прогноз)$/i.test(qLower.trim())) {
+          const total = _sumFutureFromOps('expense');
+          return res.json({ text: `Будущие расходы (прогноз). После ${snapTodayDDMMYYYY}\n${_formatTenge(total)}` });
+        }
+        if (/^(будущие доходы|доходы будущие|прогноз доходов|доходы прогноз)$/i.test(qLower.trim())) {
+          const total = _sumFutureFromOps('income');
+          return res.json({ text: `Будущие доходы (прогноз). После ${snapTodayDDMMYYYY}\n${_formatTenge(total)}` });
         }
         // =========================
         // HARD ROUTING: QUICK vs CHAT
@@ -2579,6 +2626,18 @@ module.exports = function createAiRouter(deps) {
         const _resolveQuickIntent = (quickKey, qNorm) => {
           const k = String(quickKey || '').toLowerCase().trim();
           if (k) return k;
+
+          // Skip QUICK mode for temporal queries (user wants current vs future filtering)
+          const hasTemporalKeywords =
+            qNorm.includes('будущ') ||
+            qNorm.includes('текущ') ||
+            qNorm.includes('прогноз') ||
+            qNorm.includes('ближайш');
+
+          if (hasTemporalKeywords) {
+            // Let OpenAI handle temporal filtering
+            return '';
+          }
 
           // Skip QUICK mode for analytical questions (user wants calculations, not lists)
           const isAnalyticalQuestion =
