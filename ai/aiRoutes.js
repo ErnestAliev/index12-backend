@@ -1473,6 +1473,21 @@ module.exports = function createAiRouter(deps) {
 
         const dataPacket = _buildDataPacket();
 
+        // DEBUG: Log what we're sending to AI
+        const todayTs = _kzStartOfDay(new Date()).getTime();
+        const futureOps = (dataPacket?.operations || []).filter(op => op.ts > todayTs);
+        const pastOps = (dataPacket?.operations || []).filter(op => op.ts <= todayTs);
+        console.log('🔍 AI DATA DEBUG:');
+        console.log('  - Today:', snapTodayDDMMYYYY);
+        console.log('  - Future until:', snapFutureDDMMYYYY);
+        console.log('  - Total operations:', (dataPacket?.operations || []).length);
+        console.log('  - Past/current ops:', pastOps.length);
+        console.log('  - Future ops:', futureOps.length);
+        if (futureOps.length > 0) {
+          console.log('  - Sample future op:', JSON.stringify(futureOps[0]));
+        }
+        console.log('  - Timeline keys:', Object.keys(dataPacket?.timeline || {}).slice(0, 10));
+
         const system = [
           'Ты финансовый ассистент INDEX12.',
           'Режим CHAT. Запрещено выдумывать: используй ТОЛЬКО факты и цифры из DATA.',
