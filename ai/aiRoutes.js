@@ -1327,6 +1327,29 @@ module.exports = function createAiRouter(deps) {
             }));
           };
 
+          const pickTaxes = () => {
+            const w = _findSnapWidget('taxes') || _findSnapWidget('tax') || _findSnapWidget('taxList');
+            if (!w) return [];
+            const rows = _getRows(w);
+            return (rows || []).map(r => ({
+              company: String(r?.name || r?.company || r?.companyName || '—'),
+              fact: _moneyToNumber(_pickFactFuture({
+                ...r,
+                currentText: r?.factText ?? r?.currentText,
+                futureText: r?.futureText ?? r?.planText,
+                currentBalance: r?.fact ?? r?.factBalance,
+                futureBalance: r?.fut ?? r?.futureBalance,
+              }).fact),
+              forecast: _moneyToNumber(_pickFactFuture({
+                ...r,
+                currentText: r?.factText ?? r?.currentText,
+                futureText: r?.futureText ?? r?.planText,
+                currentBalance: r?.fact ?? r?.factBalance,
+                futureBalance: r?.fut ?? r?.futureBalance,
+              }).fut),
+            }));
+          };
+
           const pickCatalog = (keys) => {
             const w = _findSnapWidget(keys);
             if (!w) return [];
@@ -1407,6 +1430,7 @@ module.exports = function createAiRouter(deps) {
             },
             totals: pickTotals(),
             accounts: pickAccounts(),
+            taxes: pickTaxes(), // Add detailed tax breakdown by company
             catalogs: {
               projects: pickCatalog(['projects', 'projectList']),
               contractors: pickCatalog(['contractors', 'contractorList', 'counterparties']),
@@ -1465,6 +1489,13 @@ module.exports = function createAiRouter(deps) {
           '- Порядок: Сумма < Счет < Контрагент < Проект < Категория',
           '- Если поле отсутствует - используй "—"',
           '- В конце укажи дни без операций одной строкой',
+          '',
+          'КРИТИЧНО ПРИ РАСЧЕТАХ:',
+          '- Когда считаешь сумму (налоги, доходы, расходы и т.д.) - суммируй ВСЕ элементы из DATA',
+          '- НЕ показывай только первый элемент или часть данных',
+          '- Проверь DATA.totals, DATA.catalogs и другие разделы для полной информации',
+          '- Если в DATA есть несколько компаний/проектов - учитывай их ВСЕ',
+          '- DATA.taxes содержит массив налогов по компаниям [{company, fact, forecast}] - суммируй их ВСЕ',
           '',
           'Отвечай коротко и понятно. Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ.'
         ].join('\n');
@@ -2549,26 +2580,53 @@ module.exports = function createAiRouter(deps) {
           const k = String(quickKey || '').toLowerCase().trim();
           if (k) return k;
 
-          // Back-compat: old clients send plain text
-          if (qNorm === 'счета' || qNorm === 'счёт' || qNorm === 'покажи счета' || qNorm === 'покажи счёта') return 'accounts';
-          if (qNorm === 'доходы' || qNorm === 'покажи доходы') return 'income';
-          if (qNorm === 'расходы' || qNorm === 'покажи расходы') return 'expense';
-          if (qNorm === 'переводы' || qNorm === 'покажи переводы') return 'transfer';
-          if (qNorm === 'выводы' || qNorm === 'покажи выводы') return 'withdrawal';
-          if (qNorm === 'налоги' || qNorm === 'покажи налоги') return 'taxes';
-          if (qNorm === 'проекты' || qNorm === 'покажи проекты') return 'projects';
-          if (qNorm === 'контрагенты' || qNorm === 'покажи контрагентов') return 'contractors';
-          if (qNorm === 'категории' || qNorm === 'покажи категории') return 'categories';
-          if (qNorm === 'физлица' || qNorm === 'покажи физлица') return 'individuals';
-          if (qNorm === 'компании' || qNorm === 'покажи компании') return 'companies';
+          // Skip QUICK mode for analytical questions (user wants calculations, not lists)
+          const isAnalyticalQuestion =
+            qNorm.includes('сколько') ||
+            qNorm.includes('сумма') ||
+            qNorm.includes('итого') ||
+            qNorm.includes('всего') ||
+            qNorm.includes('расчет') ||
+            qNorm.includes('посчита') ||
+            qNorm.includes('вычисл');
+
+          if (isAnalyticalQuestion) {
+            // Let OpenAI handle analytical questions
+            return '';
+          }
+
+          // Flexible keyword-based matching for LIST requests
+          // Only trigger QUICK mode for explicit list requests
+          if (qNorm.includes('покажи') || qNorm.includes('список') || qNorm.includes('выведи') || qNorm.includes('отобрази')) {
+            if (qNorm.includes('счета') || qNorm.includes('счёт')) return 'accounts';
+            if (qNorm.includes('доход')) return 'income';
+            if (qNorm.includes('расход')) return 'expense';
+            if (qNorm.includes('перевод')) return 'transfer';
+            if (qNorm.includes('вывод')) return 'withdrawal';
+            if (qNorm.includes('налог')) return 'taxes';
+            if (qNorm.includes('проект')) return 'projects';
+            if (qNorm.includes('контрагент')) return 'contractors';
+            if (qNorm.includes('категори')) return 'categories';
+            if (qNorm.includes('физлиц') || qNorm.includes('физ лиц')) return 'individuals';
+            if (qNorm.includes('компани')) return 'companies';
+            if (qNorm.includes('кредит')) return 'credits';
+            if (qNorm.includes('предоплат')) return 'prepayments';
+          }
 
           return '';
         };
 
         const quickIntent2 = _resolveQuickIntent(quickKey2, qNorm2);
+        // Use QUICK mode if intent is recognized OR if explicit quick flag is set
         const isQuickRequest2 = Boolean(isQuickFlag || quickIntent2);
 
-        // CHAT: always OpenAI, no manual intent handlers
+        // If we recognized a quick intent (like "покажи налоги"), use QUICK mode for consistent data
+        if (quickIntent2 && !isQuickRequest2) {
+          // This shouldn't happen with the logic above, but just in case
+          isQuickRequest2 = true;
+        }
+
+        // CHAT: always OpenAI, no manual intent handlers (unless quick intent was recognized)
         if (!isQuickRequest2) {
           const text = await _openAiChatFromSnapshot(q);
           return res.json({ text });
