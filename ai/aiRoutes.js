@@ -1471,12 +1471,53 @@ module.exports = function createAiRouter(deps) {
           };
         };
 
-        const dataPacket = _buildDataPacket();
+        let dataPacket = _buildDataPacket();
 
         // DEBUG: Log what we're sending to AI
         const todayTs = _kzStartOfDay(new Date()).getTime();
-        const futureOps = (dataPacket?.operations || []).filter(op => op.ts > todayTs);
+        let futureOps = (dataPacket?.operations || []).filter(op => op.ts > todayTs);
         const pastOps = (dataPacket?.operations || []).filter(op => op.ts <= todayTs);
+
+        // ✅ FALLBACK: If no future operations in snapshot, query from database directly
+        if (futureOps.length === 0 && userId) {
+          try {
+            const now = new Date();
+            const threeMonthsLater = new Date(now);
+            threeMonthsLater.setMonth(threeMonthsLater.getMonth() + 3);
+
+            const dbFutureOps = await Event.find({
+              userId: userId,
+              date: { $gt: now, $lte: threeMonthsLater }
+            })
+              .populate('accountId companyId contractorId projectId categoryId')
+              .sort({ date: 1 })
+              .limit(200)
+              .lean();
+
+            if (dbFutureOps.length > 0) {
+              console.log('📥 Fetched', dbFutureOps.length, 'future ops from DB');
+
+              const dbOpsFormatted = dbFutureOps.map(op => ({
+                kind: op.type === 'income' ? 'income' : (op.type === 'expense' ? 'expense' : op.type),
+                date: _fmtDateDDMMYYYY(op.date),
+                ts: new Date(op.date).getTime(),
+                amount: op.amount || 0,
+                project: op.projectId?.name || '—',
+                contractor: op.contractorId?.name || '—',
+                category: op.categoryId?.name || '—',
+                name: op.description || '—',
+                source: 'database'
+              }));
+
+              // Merge with existing operations
+              dataPacket.operations = [...(dataPacket.operations || []), ...dbOpsFormatted];
+              futureOps = dbOpsFormatted;
+            }
+          } catch (dbErr) {
+            console.error('DB fallback error:', dbErr.message);
+          }
+        }
+
         console.log('🔍 AI DATA DEBUG:');
         console.log('  - Today:', snapTodayDDMMYYYY);
         console.log('  - Future until:', snapFutureDDMMYYYY);
