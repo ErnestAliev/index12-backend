@@ -877,12 +877,20 @@ module.exports = function createAiRouter(deps) {
         || _fmtDateDDMMYYYY(snapTodayTitleStr)
         || _fmtTodayDDMMYYYY();
 
+      // Default future date: 6 months ahead if not provided
+      const _defaultFutureDDMMYYYY = () => {
+        const d = new Date();
+        d.setMonth(d.getMonth() + 6);
+        return _fmtTodayDDMMYYYY(d);
+      };
+
       const snapFutureDDMMYYYY =
         _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntil)
         || _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilIso)
         || _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilStr)
+        || _fmtDateDDMMYYYY(uiSnapshot?.projection?.rangeEndDate)
         || _fmtDateDDMMYYYY(snapFutureTitleStr)
-        || snapTodayDDMMYYYY;
+        || _defaultFutureDDMMYYYY();
 
       // Keep original snapshot strings for existing outputs ("До 28 дек. 2025 г.")
       const snapTodayStr = snapTodayTitleStr;
