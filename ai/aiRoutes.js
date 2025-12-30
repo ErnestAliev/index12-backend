@@ -451,8 +451,8 @@ module.exports = function createAiRouter(deps) {
 
     const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-    // o1/o3 models don't support temperature parameter
-    const isReasoningModel = /^o[13]/.test(model);
+    // o1/o3/gpt-5 models don't support temperature parameter
+    const isReasoningModel = /^o[13]|gpt-5/.test(model);
     const payloadObj = {
       model,
       messages,
