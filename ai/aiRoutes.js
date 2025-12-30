@@ -450,7 +450,18 @@ module.exports = function createAiRouter(deps) {
     }
 
     const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-    const payload = JSON.stringify({ model, messages, temperature, max_completion_tokens: maxTokens });
+
+    // o1/o3 models don't support temperature parameter
+    const isReasoningModel = /^o[13]/.test(model);
+    const payloadObj = {
+      model,
+      messages,
+      max_completion_tokens: maxTokens,
+    };
+    if (!isReasoningModel) {
+      payloadObj.temperature = temperature;
+    }
+    const payload = JSON.stringify(payloadObj);
     const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS || 20000);
 
     return new Promise((resolve, reject) => {
