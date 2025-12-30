@@ -41,7 +41,7 @@ const _getChatSession = (userId) => {
       incomeScope: null, // 'current' | 'future' | 'all'
       expenseScope: null,
       format: 'short',   // 'short' | 'detailed'
-      limit: 10,
+      limit: 50,
     },
     pending: null,
     history: [],
@@ -2326,7 +2326,7 @@ module.exports = function createAiRouter(deps) {
           return b.__ts - a.__ts;
         });
 
-        const safeLimit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(200, Math.floor(opts.limit))) : 10;
+        const safeLimit = Number.isFinite(opts.limit) ? Math.max(1, Math.min(200, Math.floor(opts.limit))) : 50;
         const shown = rows.slice(0, safeLimit);
 
         const title = (k === 'income') ? 'Доходы' : (k === 'expense') ? 'Расходы' : 'Операции';
@@ -2715,7 +2715,7 @@ module.exports = function createAiRouter(deps) {
 
         // QUICK: regulated answer only (no clarifications, no emoji)
         if (quickIntent2) {
-          const limitQ = explicitLimit || 10;
+          const limitQ = explicitLimit || 50;
 
           if (quickIntent2 === 'accounts') {
             const w = _findSnapWidget('accounts');
@@ -2879,7 +2879,7 @@ module.exports = function createAiRouter(deps) {
             const formatPicked = _detectFormatFromText(qLower);
             sess.prefs.format = formatPicked;
 
-            const limitPicked = _parseExplicitLimitFromQuery(qLower) || sess.prefs.limit || 10;
+            const limitPicked = _parseExplicitLimitFromQuery(qLower) || sess.prefs.limit || 50;
             sess.prefs.limit = limitPicked;
 
             return res.json({
@@ -2918,7 +2918,7 @@ module.exports = function createAiRouter(deps) {
               if (kind === 'expense') sess.prefs.expenseScope = scope;
             }
 
-            const limit = _parseExplicitLimitFromQuery(qLower) || (sess ? sess.prefs.limit : 10) || 10;
+            const limit = _parseExplicitLimitFromQuery(qLower) || (sess ? sess.prefs.limit : 50) || 50;
             if (sess) sess.prefs.limit = limit;
 
             return res.json({ text: _renderOpsList(kind, scope, { format, limit }) });
