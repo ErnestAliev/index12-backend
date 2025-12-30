@@ -45,6 +45,7 @@ const _getChatSession = (userId) => {
     },
     pending: null,
     history: [],
+    lastList: null, // Store last displayed list for numbered references
   };
   _chatSessions.set(key, fresh);
   return fresh;
@@ -474,7 +475,7 @@ module.exports = function createAiRouter(deps) {
                 try {
                   const parsed = JSON.parse(data);
                   msg = parsed?.error?.message || msg;
-                } catch (_) {}
+                } catch (_) { }
                 const err = new Error(`OpenAI HTTP ${resp.statusCode}: ${msg}`);
                 err.httpStatus = resp.statusCode;
                 return reject(err);
@@ -488,7 +489,7 @@ module.exports = function createAiRouter(deps) {
           });
         }
       );
-      req2.setTimeout(timeoutMs, () => { try { req2.destroy(new Error(`OpenAI timeout after ${timeoutMs}ms`)); } catch (_) {} });
+      req2.setTimeout(timeoutMs, () => { try { req2.destroy(new Error(`OpenAI timeout after ${timeoutMs}ms`)); } catch (_) { } });
       req2.on('error', reject);
       req2.write(payload);
       req2.end();
@@ -567,7 +568,7 @@ module.exports = function createAiRouter(deps) {
       const snapTodayTitleStr = String(uiSnapshot?.meta?.todayStr || _fmtDateKZ(_endOfToday()));
       const snapFutureTitleStr = String(uiSnapshot?.meta?.futureUntilStr || snapTodayTitleStr);
 
-      function _renderDiagnosticsFromSnapshot(uiSnapshotArg) {
+      function _renderDiagnosticsFromSnapshot(uiSnapshotArg, todayDateStr, futureDateStr) {
         const s = uiSnapshotArg || null;
         if (!s) return 'Диагностика: uiSnapshot не получен. Открой главный экран с виджетами и повтори.';
 
@@ -609,8 +610,8 @@ module.exports = function createAiRouter(deps) {
             const x = new Date(new Date(d).getTime() + KZ_OFFSET_MS_LOCAL);
             const dd = String(x.getUTCDate()).padStart(2, '0');
             const mm = String(x.getUTCMonth() + 1).padStart(2, '0');
-            const yyyy = String(x.getUTCFullYear());
-            return `${dd}.${mm}.${yyyy}`;
+            const yy = String(x.getUTCFullYear() % 100).padStart(2, '0');
+            return `${dd}.${mm}.${yy}`;
           } catch (_) {
             return String(d);
           }
@@ -643,7 +644,7 @@ module.exports = function createAiRouter(deps) {
           if (m) {
             const dd = Number(m[1]);
             const yy = Number(m[3]);
-            const map = { янв:0, фев:1, мар:2, апр:3, май:4, мая:4, июн:5, июл:6, авг:7, сен:8, сент:8, окт:9, ноя:10, дек:11 };
+            const map = { янв: 0, фев: 1, мар: 2, апр: 3, май: 4, мая: 4, июн: 5, июл: 6, авг: 7, сен: 8, сент: 8, окт: 9, ноя: 10, дек: 11 };
             const mi = map[m[2]] ?? 0;
             const dt = new Date(Date.UTC(yy, mi, dd, 0, 0, 0, 0) - (5 * 60 * 60 * 1000));
             return Number.isNaN(dt.getTime()) ? null : dt.getTime();
@@ -673,10 +674,22 @@ module.exports = function createAiRouter(deps) {
           return parseAnyDateToTs(v);
         };
 
+
         const metaToday = s?.meta?.today || s?.meta?.todayIso || s?.meta?.todayYmd || s?.meta?.todayStr;
         const metaFuture = s?.meta?.futureUntil || s?.meta?.futureUntilIso || s?.meta?.futureUntilStr;
-        const todayStr = (metaToday && String(metaToday).trim()) ? String(metaToday).trim() : fmtDateKZ(new Date());
-        const futureStr = (metaFuture && String(metaFuture).trim()) ? String(metaFuture).trim() : todayStr;
+
+        // Always format dates using fmtDateKZ to ensure DD.MM.YY format
+        const parsedToday = metaToday ? new Date(metaToday) : new Date();
+        const todayStr = !isNaN(parsedToday.getTime()) ? fmtDateKZ(parsedToday) : fmtDateKZ(new Date());
+
+        let futureStr = todayStr;
+        if (metaFuture) {
+          const parsedFuture = new Date(metaFuture);
+          if (!isNaN(parsedFuture.getTime())) {
+            futureStr = fmtDateKZ(parsedFuture);
+          }
+        }
+
 
         // Presence + counts
         const seen = {
@@ -707,9 +720,9 @@ module.exports = function createAiRouter(deps) {
         // Collect operations
         const ops = [];
         const opKeys = [
-          'incomeListCurrent','expenseListCurrent','withdrawalListCurrent','transfersCurrent',
-          'incomeListFuture','expenseListFuture','withdrawalListFuture','transfersFuture',
-          'incomeList','income','expenseList','expense','withdrawalList','withdrawals','withdrawalsList','transfers','transferList'
+          'incomeListCurrent', 'expenseListCurrent', 'withdrawalListCurrent', 'transfersCurrent',
+          'incomeListFuture', 'expenseListFuture', 'withdrawalListFuture', 'transfersFuture',
+          'incomeList', 'income', 'expenseList', 'expense', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'transfers', 'transferList'
         ];
 
         for (const k of opKeys) {
@@ -741,7 +754,7 @@ module.exports = function createAiRouter(deps) {
               }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
 
         const cnt = { income: 0, expense: 0, transfer: 0, withdrawal: 0 };
         let minTs = null;
@@ -758,23 +771,23 @@ module.exports = function createAiRouter(deps) {
 
         const lines = [];
         lines.push('Диагностика:');
-        lines.push(`Факт: до ${todayStr}`);
-        lines.push(`Прогноз: до ${futureStr}`);
+        lines.push(`Факт: до ${todayDateStr}`);
+        lines.push(`Прогноз: до ${futureDateStr}`);
         lines.push(`Виджетов: ${widgetKeys.length}`);
         lines.push('Вижу:');
         lines.push(`Счета: ${seen.accounts ? 'да' : 'нет'} (${accountsTotal}${accountsHidden ? `, скрытых ${accountsHidden}` : ''})`);
-        lines.push(`Доходы: ${seen.incomes ? 'да' : 'нет'} (строк ${countRows(['incomeListCurrent','incomeList','income'])})`);
-        lines.push(`Расходы: ${seen.expenses ? 'да' : 'нет'} (строк ${countRows(['expenseListCurrent','expenseList','expense'])})`);
-        lines.push(`Переводы: ${seen.transfers ? 'да' : 'нет'} (строк ${countRows(['transfersCurrent','transfers','transferList','transfersFuture'])})`);
-        lines.push(`Выводы: ${seen.withdrawals ? 'да' : 'нет'} (строк ${countRows(['withdrawalListCurrent','withdrawalList','withdrawals','withdrawalsList','withdrawalListFuture'])})`);
-        lines.push(`Налоги: ${seen.taxes ? 'да' : 'нет'} (строк ${countRows(['taxes','tax','taxList','taxesList'])})`);
-        lines.push(`Кредиты: ${seen.credits ? 'да' : 'нет'} (строк ${countRows(['credits','credit','creditList'])})`);
-        lines.push(`Предоплаты/обязательства: ${seen.prepayments ? 'да' : 'нет'} (строк ${countRows(['prepayments','prepaymentList','liabilities'])})`);
-        lines.push(`Проекты: ${seen.projects ? 'да' : 'нет'} (${countRows(['projects','projectList'])})`);
-        lines.push(`Контрагенты: ${seen.contractors ? 'да' : 'нет'} (${countRows(['contractors','contractorList','counterparties'])})`);
-        lines.push(`Физлица: ${seen.individuals ? 'да' : 'нет'} (${countRows(['individuals','individualList','persons','people'])})`);
-        lines.push(`Категории: ${seen.categories ? 'да' : 'нет'} (${countRows(['categories','categoryList'])})`);
-        lines.push(`Компании: ${seen.companies ? 'да' : 'нет'} (${countRows(['companies','companyList'])})`);
+        lines.push(`Доходы: ${seen.incomes ? 'да' : 'нет'} (строк ${countRows(['incomeListCurrent', 'incomeList', 'income'])})`);
+        lines.push(`Расходы: ${seen.expenses ? 'да' : 'нет'} (строк ${countRows(['expenseListCurrent', 'expenseList', 'expense'])})`);
+        lines.push(`Переводы: ${seen.transfers ? 'да' : 'нет'} (строк ${countRows(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture'])})`);
+        lines.push(`Выводы: ${seen.withdrawals ? 'да' : 'нет'} (строк ${countRows(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture'])})`);
+        lines.push(`Налоги: ${seen.taxes ? 'да' : 'нет'} (строк ${countRows(['taxes', 'tax', 'taxList', 'taxesList'])})`);
+        lines.push(`Кредиты: ${seen.credits ? 'да' : 'нет'} (строк ${countRows(['credits', 'credit', 'creditList'])})`);
+        lines.push(`Предоплаты/обязательства: ${seen.prepayments ? 'да' : 'нет'} (строк ${countRows(['prepayments', 'prepaymentList', 'liabilities'])})`);
+        lines.push(`Проекты: ${seen.projects ? 'да' : 'нет'} (${countRows(['projects', 'projectList'])})`);
+        lines.push(`Контрагенты: ${seen.contractors ? 'да' : 'нет'} (${countRows(['contractors', 'contractorList', 'counterparties'])})`);
+        lines.push(`Физлица: ${seen.individuals ? 'да' : 'нет'} (${countRows(['individuals', 'individualList', 'persons', 'people'])})`);
+        lines.push(`Категории: ${seen.categories ? 'да' : 'нет'} (${countRows(['categories', 'categoryList'])})`);
+        lines.push(`Компании: ${seen.companies ? 'да' : 'нет'} (${countRows(['companies', 'companyList'])})`);
         lines.push('Операции:');
         lines.push(`Диапазон: ${minDate} — ${maxDate}`);
         lines.push(`Всего: ${opsTotal}`);
@@ -783,20 +796,13 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Переводы: ${cnt.transfer}`);
         lines.push(`Выводы: ${cnt.withdrawal}`);
 
-        if (widgetKeys.length) {
-          const keysShown = widgetKeys.slice(0, 60);
-          lines.push('Ключи виджетов:');
-          lines.push(keysShown.join(', '));
-          if (widgetKeys.length > keysShown.length) lines.push(`…и ещё ${widgetKeys.length - keysShown.length}`);
-        }
+        // Widget keys removed per user request
 
         return lines.join('\n');
       }
 
       // HARD ROUTING: diagnostics must be deterministic (never OpenAI)
-      if (_isDiagnosticsQuery(qLower)) {
-        return res.json({ text: _renderDiagnosticsFromSnapshot(uiSnapshot) });
-      }
+      // Moved below to use snapTodayDDMMYYYY and snapFutureDDMMYYYY
 
       // For lists like "Мои проекты" we want strict DD.MM.YYYY dates.
       const _fmtDateDDMMYYYY = (any) => {
@@ -862,7 +868,8 @@ module.exports = function createAiRouter(deps) {
       // Keep original snapshot strings for existing outputs ("До 28 дек. 2025 г.")
       const snapTodayStr = snapTodayTitleStr;
       const snapFutureStr = snapFutureTitleStr;
-const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем|план|следующ|вперед|вперёд|после\s*сегодня/i.test(qLower);
+      // Default to current operations only - forecasts only when explicitly requested
+      const wantsFutureSnap = /\b(прогноз|будущ|план|следующ|вперед|вперёд|после\s*сегодня)\b/i.test(qLower) && !/\b(текущ|сегодня|факт|до\s*сегодня)\b/i.test(qLower);
 
       const _snapTitleTo = (title, toStr) => `${title}. До ${toStr}`;
       const _findSnapWidget = (keyOrKeys) => {
@@ -876,7 +883,15 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         const lines = [`${title}: ${arr.length}`];
         _maybeSlice(arr, explicitLimit).forEach((x, i) => {
           const name = x?.name || x?.title || 'Без имени';
-          lines.push(`${i + 1}) ${name}`);
+          // Add amounts to catalog lists
+          const pf = _pickFactFuture(x);
+          const factNum = _moneyToNumber(pf.fact);
+          const futNum = _moneyToNumber(pf.fut);
+          if (factNum !== 0 || futNum !== 0) {
+            lines.push(`${i + 1}) ${name} ₸ ${pf.fact} > ${pf.fut}`);
+          } else {
+            lines.push(`${i + 1}) ${name}`);
+          }
         });
         return lines.join('\n');
       };
@@ -885,6 +900,48 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
       // CHAT MODE helpers (snapshot-only)
       // -------------------------
       const _normQ = (s) => String(s || '').toLowerCase().replace(/[\s\t\n\r]+/g, ' ').trim();
+
+      // Parse numbered references like "проект 1", "№1", "номер 1"
+      const _parseNumberedRef = (qLower) => {
+        const patterns = [
+          /(?:проект|категор|контрагент|физлиц|компан)\s*(?:номер|№|#)?\s*(\d+)/i,
+          /(?:номер|№|#)\s*(\d+)/i,
+          /\b(\d+)\b/
+        ];
+
+        for (const pattern of patterns) {
+          const m = String(qLower || '').match(pattern);
+          if (m && m[1]) {
+            const num = Number(m[1]);
+            if (Number.isFinite(num) && num > 0 && num <= 1000) {
+              return num;
+            }
+          }
+        }
+        return null;
+      };
+
+      // Calculate totals with and without hidden accounts
+      const _calcDualAccountTotals = (accounts) => {
+        const arr = Array.isArray(accounts) ? accounts : [];
+        let openTotal = 0;
+        let hiddenTotal = 0;
+
+        arr.forEach(acc => {
+          const balance = _moneyToNumber(acc?.balance || acc?.currentBalance || acc?.factBalance || 0);
+          if (acc?.isExcluded || acc?.hidden) {
+            hiddenTotal += balance;
+          } else {
+            openTotal += balance;
+          }
+        });
+
+        return {
+          openTotal,
+          allTotal: openTotal + hiddenTotal,
+          hiddenTotal
+        };
+      };
 
       const _moneyToNumber = (v) => {
         if (v == null) return 0;
@@ -1046,7 +1103,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         };
       };
 
-      const _renderProfitByProjects = (projectsWidget, rows, title = 'Прибыль проектов') => {
+      const _renderProfitByProjects = (projectsWidget, rows, title = 'Прибыль проектов', showList = false) => {
         const arr = Array.isArray(rows) ? rows : [];
         if (!arr.length) {
           return _wrapBlock(title, projectsWidget || null, ['На экране не вижу список проектов.']);
@@ -1072,17 +1129,23 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         let totalFact = 0;
         let totalFut = 0;
 
-        _maybeSlice(items, explicitLimit).forEach((x) => {
-          totalFact += Number(x.fact || 0);
-          totalFut += Number(x.fut || 0);
-          body.push(`${x.name} ₸ ${_fmtMoneyInline(x.fact)} > ${_fmtMoneyInline(x.fut)}`);
-        });
+        // Only show list if explicitly requested
+        if (showList) {
+          _maybeSlice(items, explicitLimit).forEach((x) => {
+            totalFact += Number(x.fact || 0);
+            totalFut += Number(x.fut || 0);
+            body.push(`${x.name} ₸ ${_fmtMoneyInline(x.fact)} > ${_fmtMoneyInline(x.fut)}`);
+          });
+        } else {
+          // Just calculate totals without showing list
+          items.forEach((x) => {
+            totalFact += Number(x.fact || 0);
+            totalFut += Number(x.fut || 0);
+          });
+        }
 
-        body.push(`Итого ₸ ${_fmtMoneyInline(totalFact)} > ${_fmtMoneyInline(totalFut)}`);
-
-        // Short note only when we had to fallback
-        const usedFallback = items.some(x => x.mode === 'as_shown');
-        if (usedFallback) body.push('Деталей доход/расход по проектам на этом экране нет — беру прибыль как показано в виджете проектов.');
+        body.push(`Итого прибыль ₸ ${_fmtMoneyInline(totalFact)} > ${_fmtMoneyInline(totalFut)}`);
+        body.push(`Проектов: ${items.length}`);
 
         return _wrapBlock(title, projectsWidget || null, body);
       };
@@ -1209,9 +1272,9 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           out = out.replace(/[\t\r]+/g, '');
           out = out.trim();
 
-          // hard limits to avoid "простыню"
-          const maxChars = Number(process.env.AI_MAX_CHARS || 3000);
-          const maxLines = Number(process.env.AI_MAX_LINES || 35);
+          // Character limits removed per user request - allow full responses
+          const maxChars = Number(process.env.AI_MAX_CHARS || 10000);
+          const maxLines = Number(process.env.AI_MAX_LINES || 150);
           let lines = out.split('\n').map(x => x.trim()).filter(Boolean);
           if (lines.length > maxLines) lines = lines.slice(0, maxLines);
           out = lines.join('\n');
@@ -1295,9 +1358,45 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
                 source: String(x.__wk || ''),
               });
             });
-            // cap to avoid huge payload
+            // Increased limit to ensure all recent operations are included
             out.sort((a, b) => b.ts - a.ts);
-            return out.slice(0, 400);
+            return out.slice(0, 1000);
+          };
+
+          const pickTimeline = () => {
+            // Group operations by date for better AI understanding
+            const byDay = uiSnapshot?.storeTimeline?.opsByDay;
+            if (!byDay || typeof byDay !== 'object') return null;
+
+            const timeline = {};
+            for (const dateKey of Object.keys(byDay)) {
+              const arr = byDay[dateKey];
+              if (!Array.isArray(arr)) continue;
+
+              const dayOps = [];
+              for (const op of arr) {
+                const baseTs = _kzStartOfDay(new Date()).getTime();
+                const ts = _guessDateTs(op, baseTs);
+                if (!ts) continue;
+                const kind = _opsGuessKind('storeTimeline', op);
+                if (!kind) continue;
+
+                dayOps.push({
+                  kind,
+                  amount: _guessAmount(op),
+                  project: _guessProject(op),
+                  contractor: _guessContractor(op),
+                  category: _guessCategory(op),
+                  name: _guessName(op),
+                });
+              }
+
+              if (dayOps.length > 0) {
+                timeline[dateKey] = dayOps;
+              }
+            }
+
+            return Object.keys(timeline).length > 0 ? timeline : null;
           };
 
           return {
@@ -1316,6 +1415,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
               companies: pickCatalog(['companies', 'companyList']),
             },
             operations: pickOps(),
+            timeline: pickTimeline(), // Add timeline structure
           };
         };
 
@@ -1326,6 +1426,46 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           'Режим CHAT. Запрещено выдумывать: используй ТОЛЬКО факты и цифры из DATA.',
           'Если факта нет в DATA — так и скажи и укажи, каких данных/какой экран не хватает.',
           'Эмодзи запрещены.',
+          'КРИТИЧНО: НИКОГДА не выдумывай операции! Используй ТОЛЬКО операции из DATA.operations и DATA.timeline.',
+          'DATA.timeline содержит операции, сгруппированные по датам (ключи - даты в формате YYYY-MM-DD или DD.MM.YYYY).',
+          'Если пользователь просит показать операции за период - используй DATA.timeline для точного ответа.',
+          'Для каждой даты в DATA.timeline показаны ВСЕ операции этого дня с их суммами, проектами, контрагентами и категориями.',
+          'НЕ придумывай суммы, даты, контрагентов или проекты - используй ТОЛЬКО то, что есть в DATA.timeline и DATA.operations.',
+          'ВАЖНО: Пользователь хочет видеть РЕЗУЛЬТАТЫ и РАСЧЕТЫ, а не длинные списки операций.',
+          'Если речь о прибыльности/эффективности - выводи только ИТОГ и АНАЛИЗ, НЕ списки операций.',
+          'Списки операций показывай ТОЛЬКО если пользователь явно попросил "покажи список" или "покажи расходы".',
+          'По умолчанию показывай только текущие операции (до сегодня). Прогнозы добавляй только если пользователь явно попросил.',
+          'При расчетах ВСЕГДА показывай два варианта: 1) С учетом открытых счетов 2) С учетом скрытых счетов.',
+          '',
+          'ФОРМАТ ОТВЕТА ПРИ ПОКАЗЕ ОПЕРАЦИЙ ПО ДНЯМ:',
+          'Используй КОМПАКТНЫЙ формат с разделителями между днями:',
+          '',
+          '----------------',
+          'пт, 25 дек. 2025 г.',
+          '+50 000 т < Счет < TOO UU < INDEX12 < Маркетинг',
+          '----------------',
+          'сб, 26 дек. 2025 г.',
+          '+500 000 т < Счет < TOO UU < INDEX12 < Маркетинг',
+          '+150 000 т < Счет < TOO UU < INDEX12 < Маркетинг',
+          '-250 000 т > Счет > Давид > INDEX12 > Маркетинг',
+          '----------------',
+          'пн, 28 дек. 2025 г.',
+          '+100 000 т < Счет < — < — < Перевод',
+          '----------------',
+          'Операции 27 и 29 декабря отсутствуют. 30 декабря также нет операций.',
+          '',
+          'ПРАВИЛА ФОРМАТИРОВАНИЯ:',
+          '- Разделитель между днями: ровно 16 дефисов "----------------"',
+          '- Дата: "пт, 26 дек. 2025 г." (день недели сокращенно, день, месяц сокращенно, год)',
+          '- НЕ показывай баланс, итоги по типам, группировки ДОХОДЫ/РАСХОДЫ',
+          '- Просто список операций под датой',
+          '- Для доходов: знак < (стрелка влево)',
+          '- Для расходов: знак > (стрелка вправо)',
+          '- Формат суммы: "+500 000 т" или "-250 000 т" (пробелы в тысячах, "т" вместо "₸")',
+          '- Порядок: Сумма < Счет < Контрагент < Проект < Категория',
+          '- Если поле отсутствует - используй "—"',
+          '- В конце укажи дни без операций одной строкой',
+          '',
           'Отвечай коротко и понятно. Формат денег: разделение тысяч + "₸". Даты: ДД.ММ.ГГГГ.'
         ].join('\n');
 
@@ -1337,7 +1477,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           { role: 'user', content: String(qText || '').trim() }
         ];
 
-        const raw = await _openAiChat(messages, { temperature: 0.2, maxTokens: 420 });
+        const raw = await _openAiChat(messages, { temperature: 0.2, maxTokens: 1500 });
         const clean = _sanitizeAiText(raw);
 
         // Persist CHAT history (server-side)
@@ -1577,7 +1717,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
           if (!includeExcludedInTotal && r?.isExcluded) return;
           factTotal += _moneyToNumber(fact);
           futTotal += _moneyToNumber(fut);
-});
+        });
 
         body.push(`Итого ₸ ${_fmtMoneyInline(factTotal)} > ${_fmtMoneyInline(futTotal)}`);
 
@@ -1884,7 +2024,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
               }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
         return out;
       };
 
@@ -2042,7 +2182,7 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
               }
             }
           }
-        } catch (_) {}
+        } catch (_) { }
 
         if (sc === 'future') return fut.concat(timeline);
         if (sc === 'all') return cur.concat(fut).concat(timeline);
@@ -2263,79 +2403,79 @@ const wantsFutureSnap = /прогноз|будущ|ближайш|ожидаем
         return _wrapBlock(title, null, body);
       };
 
-const _looksLikeOpsByDay = (qLower, kind) => {
-  const t = String(qLower || '').toLowerCase();
-  const wantsByDay = /(по\s*дням|по\s*датам|за\s*дни|по\s*дня|по\s*дате)/.test(t);
-  if (!wantsByDay) return false;
+      const _looksLikeOpsByDay = (qLower, kind) => {
+        const t = String(qLower || '').toLowerCase();
+        const wantsByDay = /(по\s*дням|по\s*датам|за\s*дни|по\s*дня|по\s*дате)/.test(t);
+        if (!wantsByDay) return false;
 
-  if (kind === 'expense') return /(расход|тра(т|чу)|потрат|списан|платеж|платёж|оплат)/.test(t);
-  if (kind === 'income') return /(доход|выруч|поступл|поступ)/.test(t);
-  if (kind === 'transfer') return /(перевод|трансфер)/.test(t);
-  if (kind === 'withdrawal') return /(вывод|сняти|снять|withdraw)/.test(t);
-  return false;
-};
+        if (kind === 'expense') return /(расход|тра(т|чу)|потрат|списан|платеж|платёж|оплат)/.test(t);
+        if (kind === 'income') return /(доход|выруч|поступл|поступ)/.test(t);
+        if (kind === 'transfer') return /(перевод|трансфер)/.test(t);
+        if (kind === 'withdrawal') return /(вывод|сняти|снять|withdraw)/.test(t);
+        return false;
+      };
 
-const _renderOpsByDay = (wantKind) => {
-  const untilTs = _endOfToday().getTime();
-  const all = _opsCollectRows();
+      const _renderOpsByDay = (wantKind) => {
+        const untilTs = _endOfToday().getTime();
+        const all = _opsCollectRows();
 
-  const filtered = all
-    .map(x => ({ ...x, __kind: _opsGuessKind(x.__wk, x.__row) }))
-    .filter(x => x.__kind === wantKind)
-    .filter(x => x.__ts <= untilTs);
+        const filtered = all
+          .map(x => ({ ...x, __kind: _opsGuessKind(x.__wk, x.__row) }))
+          .filter(x => x.__kind === wantKind)
+          .filter(x => x.__ts <= untilTs);
 
-  if (!filtered.length) {
-    const title = (wantKind === 'expense') ? 'Расходы по дням'
-      : (wantKind === 'income') ? 'Доходы по дням'
-        : (wantKind === 'transfer') ? 'Переводы по дням'
-          : 'Выводы по дням';
+        if (!filtered.length) {
+          const title = (wantKind === 'expense') ? 'Расходы по дням'
+            : (wantKind === 'income') ? 'Доходы по дням'
+              : (wantKind === 'transfer') ? 'Переводы по дням'
+                : 'Выводы по дням';
 
-    return _wrapBlock(title, null, [
-      'На этом экране не вижу списка операций с датами за прошлые периоды.',
-      'Нужно, чтобы мобильная отправляла current-операции (списком с датами).'
-    ]);
-  }
+          return _wrapBlock(title, null, [
+            'На этом экране не вижу списка операций с датами за прошлые периоды.',
+            'Нужно, чтобы мобильная отправляла current-операции (списком с датами).'
+          ]);
+        }
 
-  // Group by day label (DD.MM.YYYY)
-  const map = new Map();
-  filtered.forEach((x) => {
-    const r = x.__row;
-    const dLabel = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(x.__ts));
-    let amt = _guessAmount(r);
-    if (wantKind === 'expense') amt = -Math.abs(Number(amt || 0));
-    if (wantKind === 'income') amt = Math.abs(Number(amt || 0));
-    if (!map.has(dLabel)) map.set(dLabel, { date: dLabel, count: 0, total: 0 });
-    const cur = map.get(dLabel);
-    cur.count += 1;
-    cur.total += Number(amt || 0);
-  });
+        // Group by day label (DD.MM.YYYY)
+        const map = new Map();
+        filtered.forEach((x) => {
+          const r = x.__row;
+          const dLabel = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(x.__ts));
+          let amt = _guessAmount(r);
+          if (wantKind === 'expense') amt = -Math.abs(Number(amt || 0));
+          if (wantKind === 'income') amt = Math.abs(Number(amt || 0));
+          if (!map.has(dLabel)) map.set(dLabel, { date: dLabel, count: 0, total: 0 });
+          const cur = map.get(dLabel);
+          cur.count += 1;
+          cur.total += Number(amt || 0);
+        });
 
-  // Sort by date descending (use parser)
-  const rows = Array.from(map.values()).map((x) => {
-    const ts = _parseAnyDateToTs(x.date) || 0;
-    return { ...x, ts };
-  }).sort((a, b) => b.ts - a.ts);
+        // Sort by date descending (use parser)
+        const rows = Array.from(map.values()).map((x) => {
+          const ts = _parseAnyDateToTs(x.date) || 0;
+          return { ...x, ts };
+        }).sort((a, b) => b.ts - a.ts);
 
-  const title = (wantKind === 'expense') ? 'Расходы по дням'
-    : (wantKind === 'income') ? 'Доходы по дням'
-      : (wantKind === 'transfer') ? 'Переводы по дням'
-        : 'Выводы по дням';
+        const title = (wantKind === 'expense') ? 'Расходы по дням'
+          : (wantKind === 'income') ? 'Доходы по дням'
+            : (wantKind === 'transfer') ? 'Переводы по дням'
+              : 'Выводы по дням';
 
-  const limit = explicitLimit || 40;
-  const shown = rows.slice(0, limit);
+        const limit = explicitLimit || 40;
+        const shown = rows.slice(0, limit);
 
-  const body = [];
-  body.push(`До: ${snapTodayDDMMYYYY}`);
-  body.push(`Дней: ${rows.length}`);
-  body.push('');
+        const body = [];
+        body.push(`До: ${snapTodayDDMMYYYY}`);
+        body.push(`Дней: ${rows.length}`);
+        body.push('');
 
-  shown.forEach((r) => {
-    body.push(`${r.date} — ${_formatTenge(r.total)} (${r.count})`);
-  });
-  if (rows.length > shown.length) body.push(`…и ещё ${rows.length - shown.length}`);
+        shown.forEach((r) => {
+          body.push(`${r.date} — ${_formatTenge(r.total)} (${r.count})`);
+        });
+        if (rows.length > shown.length) body.push(`…и ещё ${rows.length - shown.length}`);
 
-  return _wrapBlock(title, null, body);
-};
+        return _wrapBlock(title, null, body);
+      };
 
 
       // =========================
@@ -2384,7 +2524,7 @@ const _renderOpsByDay = (wantKind) => {
       if (snapWidgets) {
         // QUICK: diagnostics (deterministic)
         if (_isDiagnosticsQuery(qLower)) {
-          return res.json({ text: _renderDiagnosticsFromSnapshot(uiSnapshot) });
+          return res.json({ text: _renderDiagnosticsFromSnapshot(uiSnapshot, snapTodayDDMMYYYY, snapFutureDDMMYYYY) });
         }
 
         // QUICK: current totals must never be 0 if operations exist in lists/timeline
@@ -3285,105 +3425,105 @@ const _renderOpsByDay = (wantKind) => {
   return router;
 };
 
-      function _renderDiagnosticsFromSnapshot() {
-        // Deterministic snapshot-only diagnostics (no OpenAI)
-        const hasWidget = (keys) => Boolean(_findSnapWidget(keys));
-        const rowsCount = (keys) => {
-          const w = _findSnapWidget(keys);
-          if (!w) return 0;
-          const r = _getRows(w);
-          return Array.isArray(r) ? r.length : 0;
-        };
+function _renderDiagnosticsFromSnapshot() {
+  // Deterministic snapshot-only diagnostics (no OpenAI)
+  const hasWidget = (keys) => Boolean(_findSnapWidget(keys));
+  const rowsCount = (keys) => {
+    const w = _findSnapWidget(keys);
+    if (!w) return 0;
+    const r = _getRows(w);
+    return Array.isArray(r) ? r.length : 0;
+  };
 
-        // Presence flags
-        const seen = {
-          accounts: hasWidget('accounts'),
-          incomes: hasWidget(['incomeListCurrent', 'incomeList', 'income', 'incomeSummary']),
-          expenses: hasWidget(['expenseListCurrent', 'expenseList', 'expense', 'expenseSummary']),
-          transfers: hasWidget(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture']),
-          withdrawals: hasWidget(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture']),
-          taxes: hasWidget(['taxes', 'tax', 'taxList', 'taxesList']),
-          credits: hasWidget(['credits', 'credit', 'creditList']),
-          prepayments: hasWidget(['prepayments', 'prepaymentList', 'liabilities']),
-          projects: hasWidget(['projects', 'projectList']),
-          contractors: hasWidget(['contractors', 'contractorList', 'counterparties']),
-          individuals: hasWidget(['individuals', 'individualList', 'persons', 'people']),
-          categories: hasWidget(['categories', 'categoryList']),
-          companies: hasWidget(['companies', 'companyList']),
-        };
+  // Presence flags
+  const seen = {
+    accounts: hasWidget('accounts'),
+    incomes: hasWidget(['incomeListCurrent', 'incomeList', 'income', 'incomeSummary']),
+    expenses: hasWidget(['expenseListCurrent', 'expenseList', 'expense', 'expenseSummary']),
+    transfers: hasWidget(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture']),
+    withdrawals: hasWidget(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture']),
+    taxes: hasWidget(['taxes', 'tax', 'taxList', 'taxesList']),
+    credits: hasWidget(['credits', 'credit', 'creditList']),
+    prepayments: hasWidget(['prepayments', 'prepaymentList', 'liabilities']),
+    projects: hasWidget(['projects', 'projectList']),
+    contractors: hasWidget(['contractors', 'contractorList', 'counterparties']),
+    individuals: hasWidget(['individuals', 'individualList', 'persons', 'people']),
+    categories: hasWidget(['categories', 'categoryList']),
+    companies: hasWidget(['companies', 'companyList']),
+  };
 
-        // Accounts counts (incl hidden)
-        let accountsTotal = 0;
-        let accountsHidden = 0;
-        if (seen.accounts) {
-          const w = _findSnapWidget('accounts');
-          const r = _getRows(w);
-          accountsTotal = Array.isArray(r) ? r.length : 0;
-          accountsHidden = Array.isArray(r) ? r.filter(x => Boolean(x?.isExcluded)).length : 0;
-        }
+  // Accounts counts (incl hidden)
+  let accountsTotal = 0;
+  let accountsHidden = 0;
+  if (seen.accounts) {
+    const w = _findSnapWidget('accounts');
+    const r = _getRows(w);
+    accountsTotal = Array.isArray(r) ? r.length : 0;
+    accountsHidden = Array.isArray(r) ? r.filter(x => Boolean(x?.isExcluded)).length : 0;
+  }
 
-        // Collect ops from widgets + storeTimeline
-        const all = _opsCollectRows();
-        const baseTs = _kzStartOfDay(new Date()).getTime();
+  // Collect ops from widgets + storeTimeline
+  const all = _opsCollectRows();
+  const baseTs = _kzStartOfDay(new Date()).getTime();
 
-        const cnt = { income: 0, expense: 0, transfer: 0, withdrawal: 0 };
-        let minTs = null;
-        let maxTs = null;
+  const cnt = { income: 0, expense: 0, transfer: 0, withdrawal: 0 };
+  let minTs = null;
+  let maxTs = null;
 
-        (all || []).forEach((x) => {
-          const ts = Number(x.__ts);
-          if (!Number.isFinite(ts)) return;
-          if (minTs === null || ts < minTs) minTs = ts;
-          if (maxTs === null || ts > maxTs) maxTs = ts;
+  (all || []).forEach((x) => {
+    const ts = Number(x.__ts);
+    if (!Number.isFinite(ts)) return;
+    if (minTs === null || ts < minTs) minTs = ts;
+    if (maxTs === null || ts > maxTs) maxTs = ts;
 
-          const kind = _opsGuessKind(x.__wk, x.__row);
-          if (kind && Object.prototype.hasOwnProperty.call(cnt, kind)) cnt[kind] += 1;
-        });
+    const kind = _opsGuessKind(x.__wk, x.__row);
+    if (kind && Object.prototype.hasOwnProperty.call(cnt, kind)) cnt[kind] += 1;
+  });
 
-        const opsTotal = cnt.income + cnt.expense + cnt.transfer + cnt.withdrawal;
-        const minDate = (minTs != null) ? (_fmtDateDDMMYYYY(_fmtDateKZ(new Date(minTs))) || _fmtDateKZ(new Date(minTs))) : snapTodayDDMMYYYY;
-        const maxDate = (maxTs != null) ? (_fmtDateDDMMYYYY(_fmtDateKZ(new Date(maxTs))) || _fmtDateKZ(new Date(maxTs))) : snapTodayDDMMYYYY;
+  const opsTotal = cnt.income + cnt.expense + cnt.transfer + cnt.withdrawal;
+  const minDate = (minTs != null) ? (_fmtDateDDMMYYYY(_fmtDateKZ(new Date(minTs))) || _fmtDateKZ(new Date(minTs))) : snapTodayDDMMYYYY;
+  const maxDate = (maxTs != null) ? (_fmtDateDDMMYYYY(_fmtDateKZ(new Date(maxTs))) || _fmtDateKZ(new Date(maxTs))) : snapTodayDDMMYYYY;
 
-        const widgetsList = (snapWidgets || []).map(w => w?.key).filter(Boolean);
+  const widgetsList = (snapWidgets || []).map(w => w?.key).filter(Boolean);
 
-        // Compact summary lines
-        const lines = [];
-        lines.push('Диагностика:');
-        lines.push(`Факт: до ${snapTodayDDMMYYYY}`);
-        lines.push(`Прогноз: до ${snapFutureDDMMYYYY}`);
-        lines.push(`Виджетов: ${widgetsList.length}`);
+  // Compact summary lines
+  const lines = [];
+  lines.push('Диагностика:');
+  lines.push(`Факт: до ${snapTodayDDMMYYYY}`);
+  lines.push(`Прогноз: до ${snapFutureDDMMYYYY}`);
+  lines.push(`Виджетов: ${widgetsList.length}`);
 
-        lines.push('Вижу:');
-        lines.push(`Счета: ${seen.accounts ? 'да' : 'нет'} (${accountsTotal}${accountsHidden ? `, скрытых ${accountsHidden}` : ''})`);
-        lines.push(`Доходы: ${seen.incomes ? 'да' : 'нет'} (строк ${rowsCount(['incomeListCurrent', 'incomeList', 'income'])})`);
-        lines.push(`Расходы: ${seen.expenses ? 'да' : 'нет'} (строк ${rowsCount(['expenseListCurrent', 'expenseList', 'expense'])})`);
-        lines.push(`Переводы: ${seen.transfers ? 'да' : 'нет'} (строк ${rowsCount(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture'])})`);
-        lines.push(`Выводы: ${seen.withdrawals ? 'да' : 'нет'} (строк ${rowsCount(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture'])})`);
-        lines.push(`Налоги: ${seen.taxes ? 'да' : 'нет'} (строк ${rowsCount(['taxes', 'tax', 'taxList', 'taxesList'])})`);
-        lines.push(`Кредиты: ${seen.credits ? 'да' : 'нет'} (строк ${rowsCount(['credits', 'credit', 'creditList'])})`);
-        lines.push(`Предоплаты/обязательства: ${seen.prepayments ? 'да' : 'нет'} (строк ${rowsCount(['prepayments', 'prepaymentList', 'liabilities'])})`);
+  lines.push('Вижу:');
+  lines.push(`Счета: ${seen.accounts ? 'да' : 'нет'} (${accountsTotal}${accountsHidden ? `, скрытых ${accountsHidden}` : ''})`);
+  lines.push(`Доходы: ${seen.incomes ? 'да' : 'нет'} (строк ${rowsCount(['incomeListCurrent', 'incomeList', 'income'])})`);
+  lines.push(`Расходы: ${seen.expenses ? 'да' : 'нет'} (строк ${rowsCount(['expenseListCurrent', 'expenseList', 'expense'])})`);
+  lines.push(`Переводы: ${seen.transfers ? 'да' : 'нет'} (строк ${rowsCount(['transfersCurrent', 'transfers', 'transferList', 'transfersFuture'])})`);
+  lines.push(`Выводы: ${seen.withdrawals ? 'да' : 'нет'} (строк ${rowsCount(['withdrawalListCurrent', 'withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListFuture'])})`);
+  lines.push(`Налоги: ${seen.taxes ? 'да' : 'нет'} (строк ${rowsCount(['taxes', 'tax', 'taxList', 'taxesList'])})`);
+  lines.push(`Кредиты: ${seen.credits ? 'да' : 'нет'} (строк ${rowsCount(['credits', 'credit', 'creditList'])})`);
+  lines.push(`Предоплаты/обязательства: ${seen.prepayments ? 'да' : 'нет'} (строк ${rowsCount(['prepayments', 'prepaymentList', 'liabilities'])})`);
 
-        lines.push(`Проекты: ${seen.projects ? 'да' : 'нет'} (${rowsCount(['projects', 'projectList'])})`);
-        lines.push(`Контрагенты: ${seen.contractors ? 'да' : 'нет'} (${rowsCount(['contractors', 'contractorList', 'counterparties'])})`);
-        lines.push(`Физлица: ${seen.individuals ? 'да' : 'нет'} (${rowsCount(['individuals', 'individualList', 'persons', 'people'])})`);
-        lines.push(`Категории: ${seen.categories ? 'да' : 'нет'} (${rowsCount(['categories', 'categoryList'])})`);
-        lines.push(`Компании: ${seen.companies ? 'да' : 'нет'} (${rowsCount(['companies', 'companyList'])})`);
+  lines.push(`Проекты: ${seen.projects ? 'да' : 'нет'} (${rowsCount(['projects', 'projectList'])})`);
+  lines.push(`Контрагенты: ${seen.contractors ? 'да' : 'нет'} (${rowsCount(['contractors', 'contractorList', 'counterparties'])})`);
+  lines.push(`Физлица: ${seen.individuals ? 'да' : 'нет'} (${rowsCount(['individuals', 'individualList', 'persons', 'people'])})`);
+  lines.push(`Категории: ${seen.categories ? 'да' : 'нет'} (${rowsCount(['categories', 'categoryList'])})`);
+  lines.push(`Компании: ${seen.companies ? 'да' : 'нет'} (${rowsCount(['companies', 'companyList'])})`);
 
-        lines.push('Операции:');
-        lines.push(`Диапазон: ${minDate} — ${maxDate}`);
-        lines.push(`Всего: ${opsTotal}`);
-        lines.push(`Доходы: ${cnt.income}`);
-        lines.push(`Расходы: ${cnt.expense}`);
-        lines.push(`Переводы: ${cnt.transfer}`);
-        lines.push(`Выводы: ${cnt.withdrawal}`);
+  lines.push('Операции:');
+  lines.push(`Диапазон: ${minDate} — ${maxDate}`);
+  lines.push(`Всего: ${opsTotal}`);
+  lines.push(`Доходы: ${cnt.income}`);
+  lines.push(`Расходы: ${cnt.expense}`);
+  lines.push(`Переводы: ${cnt.transfer}`);
+  lines.push(`Выводы: ${cnt.withdrawal}`);
 
-        // Show widget keys (trim)
-        const keysShown = widgetsList.slice(0, 40);
-        if (keysShown.length) {
-          lines.push('Ключи виджетов:');
-          lines.push(keysShown.join(', '));
-          if (widgetsList.length > keysShown.length) lines.push(`…и ещё ${widgetsList.length - keysShown.length}`);
-        }
+  // Show widget keys (trim)
+  const keysShown = widgetsList.slice(0, 40);
+  if (keysShown.length) {
+    lines.push('Ключи виджетов:');
+    lines.push(keysShown.join(', '));
+    if (widgetsList.length > keysShown.length) lines.push(`…и ещё ${widgetsList.length - keysShown.length}`);
+  }
 
-        return lines.join('\n');
-      }
+  return lines.join('\n');
+}

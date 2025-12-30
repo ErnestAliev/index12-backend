@@ -1,0 +1,15 @@
+{
+    "watch": [
+        "*.js",
+        "ai/*.js",
+        "routes/*.js",
+        "models/*.js",
+        "middleware/*.js"
+    ],
+    "ignore": [
+        "node_modules",
+        "*.test.js"
+    ],
+    "ext": "js,json",
+    "delay": "1000"
+}
