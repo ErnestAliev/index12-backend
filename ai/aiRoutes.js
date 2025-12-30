@@ -1472,6 +1472,14 @@ module.exports = function createAiRouter(deps) {
           '  2) Сумма по всем счетам (открытые + скрытые)',
           '- НЕ дублируй одинаковые суммы - если разницы нет, покажи только один вариант',
           '',
+          'ФИЛЬТРАЦИЯ И ГРУППИРОВКА ОПЕРАЦИЙ:',
+          '- Когда пользователь просит "расходы по категории X" - фильтруй DATA.operations где kind="expense" И category="X"',
+          '- Когда пользователь просит "доходы по проекту Y" - фильтруй DATA.operations где kind="income" И project="Y"',
+          '- Когда пользователь просит "сгруппировать по категориям" - группируй операции по полю category и суммируй',
+          '- При группировке показывай: Категория → Сумма (например: "Ремонт: -88 320₸")',
+          '- Если пользователь просит "показать все" или "не сокращённый список" - покажи ВСЕ операции, не ограничивай 10 штуками',
+          '- Если нашёл 26 операций - покажи все 26, а не только первые 10',
+          '',
           'КРИТИЧНО - РАЗНИЦА МЕЖДУ ТЕКУЩИМИ И БУДУЩИМИ ОПЕРАЦИЯМИ:',
           '- ТЕКУЩИЕ операции = дата ≤ сегодня (DATA.meta.today)',
           '- БУДУЩИЕ операции (прогнозы) = дата > сегодня',
@@ -2636,6 +2644,20 @@ module.exports = function createAiRouter(deps) {
 
           if (hasTemporalKeywords) {
             // Let OpenAI handle temporal filtering
+            return '';
+          }
+
+          // Skip QUICK mode for filtered queries (user wants filtering by category/project/contractor)
+          const hasFilterKeywords =
+            qNorm.includes('по категори') ||
+            qNorm.includes('по проект') ||
+            qNorm.includes('по контрагент') ||
+            (qNorm.includes('категория') && (qNorm.includes('расход') || qNorm.includes('доход'))) ||
+            qNorm.includes('сгруппир') ||
+            qNorm.includes('группир');
+
+          if (hasFilterKeywords) {
+            // Let OpenAI handle filtering and grouping
             return '';
           }
 
