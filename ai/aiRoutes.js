@@ -1803,6 +1803,15 @@ module.exports = function createAiRouter(deps) {
 
       const _renderDualValueBlock = (title, widget, factRaw, futureRaw) => {
         const { fact, fut } = _pickFactFuture({ currentText: factRaw, futureText: futureRaw, factText: factRaw, planText: futureRaw });
+
+        // Special handling for prepayments - show two lines
+        if (title === 'Предоплаты') {
+          return _wrapBlock(title, widget, [
+            `Должны отработать: ₸ ${fact} > ${fut}`,
+            `Должны получить: ₸ ${fact} > ${fut}`
+          ]);
+        }
+
         return _wrapBlock(title, widget, [`₸ ${fact} > ${fut}`]);
       };
 
@@ -2126,7 +2135,9 @@ module.exports = function createAiRouter(deps) {
           'incomeList', 'income', 'incomeSummary',
           'expenseList', 'expense', 'expenseSummary',
           'withdrawalList', 'withdrawals', 'withdrawalsList',
-          'transfers', 'transferList'
+          'transfers', 'transferList',
+          // Prepayments
+          'prepayments', 'prepaymentList', 'liabilities'
         ];
 
         const out = [];
@@ -2851,6 +2862,16 @@ module.exports = function createAiRouter(deps) {
           if (quickIntent2 === 'companies') {
             const w = _findSnapWidget(['companies', 'companyList']);
             return res.json({ text: _renderCatalogFromRows('Компании', _getRows(w)) });
+          }
+
+          if (quickIntent2 === 'prepayments') {
+            const blk = _summaryDual(['prepayments', 'prepaymentList', 'liabilities'], 'Предоплаты');
+            return res.json({ text: blk || 'Предоплаты: на этом экране не вижу виджет предоплат.' });
+          }
+
+          if (quickIntent2 === 'credits') {
+            const blk = _summaryDual(['credits', 'credit', 'creditList'], 'Кредиты');
+            return res.json({ text: blk || 'Кредиты: на этом экране не вижу виджет кредитов.' });
           }
 
           return res.json({ text: 'QUICK: команда не поддерживается.' });
