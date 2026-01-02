@@ -109,17 +109,27 @@ const emitToAll = (req, userId, event, data) => {
 
 // --- СХЕМЫ (ВОССТАНОВЛЕНЫ ВСЕ) ---
 const userSchema = new mongoose.Schema({
-    googleId: { type: String, required: true, unique: true },
-    email: { type: String, required: true, unique: true },
+    googleId: { type: String, unique: true, sparse: true },
+    email: { type: String, required: true },
     name: String,
     avatarUrl: String,
-    dashboardLayout: { type: [String], default: [] },
-    // 🟢 NEW: Role-based access control
-    role: { type: String, enum: ['admin', 'full_access', 'timeline_only'], default: 'admin' },
+    dashboardLayout: { type: Object, default: {} },
+    role: { type: String, default: 'admin' },
     ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    currentWorkspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', default: null }, // 🟢 NEW
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
+
+// 🟢 NEW: Workspace Schema (multi-project dashboard system)
+const workspaceSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    name: { type: String, required: true },
+    thumbnail: { type: String, default: null }, // base64 screenshot
+    isDefault: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+});
+const Workspace = mongoose.model('Workspace', workspaceSchema);
 
 // 🟢 NEW: Invitation Schema
 const invitationSchema = new mongoose.Schema({
@@ -141,7 +151,8 @@ const accountSchema = new mongoose.Schema({
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
 
@@ -150,7 +161,8 @@ const companySchema = new mongoose.Schema({
     order: { type: Number, default: 0 },
     taxRegime: { type: String, default: 'simplified' },
     taxPercent: { type: Number, default: 3 },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Company = mongoose.model('Company', companySchema);
 
@@ -161,13 +173,15 @@ const individualSchema = new mongoose.Schema({
     defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }],
     defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Individual = mongoose.model('Individual', individualSchema);
 
 const prepaymentSchema = new mongoose.Schema({
     name: String,
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
 
@@ -178,14 +192,16 @@ const contractorSchema = new mongoose.Schema({
     defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }],
     defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Contractor = mongoose.model('Contractor', contractorSchema);
 
 const projectSchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Project = mongoose.model('Project', projectSchema);
 
@@ -193,6 +209,7 @@ const categorySchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
     type: { type: String, enum: ['income', 'expense'] },
     color: String,
     icon: String
@@ -211,6 +228,7 @@ const creditSchema = new mongoose.Schema({
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
     rate: Number,
     term: Number,
     paymentType: { type: String, default: 'annuity' },
@@ -247,6 +265,9 @@ const eventSchema = new mongoose.Schema({
 
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
+
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }, // 🟢 NEW
 
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
@@ -450,6 +471,37 @@ function getEffectiveUserId(req) {
     return req.user.id;
 }
 
+// 🟢 NEW: Composite User ID for Workspace Isolation
+// SMART APPROACH: Default workspace = original userId (existing data preserved!)
+//                 New workspaces = composite ID (isolated data)
+async function getCompositeUserId(req) {
+    const realUserId = getEffectiveUserId(req);
+    if (!realUserId) return null;
+
+    const currentWorkspaceId = req.user?.currentWorkspaceId;
+
+    // If no workspace selected, use real userId
+    if (!currentWorkspaceId) return realUserId;
+
+    // 🟢 KEY LOGIC: Check if this is the default workspace
+    // We need to check the database to see if this workspace is default
+    try {
+        const workspace = await Workspace.findById(currentWorkspaceId).lean();
+
+        // If this is the default workspace, use ORIGINAL userId
+        // This means all existing data stays in the default workspace!
+        if (workspace?.isDefault) {
+            return realUserId; // ✅ Original data preserved
+        }
+
+        // For new workspaces, use composite ID for complete isolation
+        return `${realUserId}_ws_${currentWorkspaceId}`;
+    } catch (err) {
+        console.error('Error in getCompositeUserId:', err);
+        return realUserId; // Fallback to real userId on error
+    }
+}
+
 // --- ROUTES ---
 app.get('/auth/dev-login', async (req, res) => {
     if (!FRONTEND_URL.includes('localhost')) { return res.status(403).send('Dev login is allowed only on localhost environment'); }
@@ -488,8 +540,30 @@ app.get('/api/auth/me', async (req, res) => {
         const effectiveUserId = getEffectiveUserId(req); // 🟢 NEW
         const userObjId = new mongoose.Types.ObjectId(effectiveUserId);
 
+        // 🟢 NEW: Auto-migration - create default workspace on first login
+        if (!req.user.currentWorkspaceId) {
+            console.log('🔄 Creating default workspace for user:', userId);
+
+            const defaultWorkspace = await Workspace.create({
+                userId: userId,
+                name: "Основной проект",
+                isDefault: true
+            });
+
+            // Update user with current workspace
+            await User.updateOne(
+                { _id: userId },
+                { $set: { currentWorkspaceId: defaultWorkspace._id } }
+            );
+
+            // Update req.user for this request
+            req.user.currentWorkspaceId = defaultWorkspace._id;
+
+            console.log('✅ Default workspace created:', defaultWorkspace._id);
+        }
+
         // Earliest operation date for this user (used by frontend to cap “all-time” loads)
-        const firstEvent = await Event.findOne({ userId: userId })
+        const firstEvent = await Event.findOne({ userId: effectiveUserId })
             .sort({ date: 1 })
             .select('date')
             .lean();
@@ -685,52 +759,177 @@ app.delete('/api/team/members/:userId', isAuthenticated, async (req, res) => {
 });
 
 // =================================================================
+// 🟢 WORKSPACE (MULTI-PROJECT) ROUTES
+// =================================================================
+
+// GET /api/workspaces - Get all workspaces for user
+app.get('/api/workspaces', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const workspaces = await Workspace.find({ userId }).sort({ createdAt: 1 }).lean();
+        res.json(workspaces);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// POST /api/workspaces - Create new workspace
+app.post('/api/workspaces', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { name } = req.body;
+
+        if (!name || name.trim() === '') {
+            return res.status(400).json({ message: 'Workspace name is required' });
+        }
+
+        const workspace = new Workspace({
+            userId,
+            name: name.trim(),
+            isDefault: false
+        });
+
+        await workspace.save();
+        res.status(201).json(workspace);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// PUT /api/workspaces/:id - Rename workspace
+app.put('/api/workspaces/:id', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+        const { name } = req.body;
+
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        workspace.name = name.trim();
+        await workspace.save();
+
+        res.json(workspace);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// DELETE /api/workspaces/:id - Delete workspace
+app.delete('/api/workspaces/:id', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        if (workspace.isDefault) {
+            return res.status(400).json({ message: 'Cannot delete default workspace' });
+        }
+
+        await Workspace.deleteOne({ _id: id });
+        res.json({ success: true, message: 'Workspace deleted' });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// POST /api/workspaces/:id/switch - Switch to workspace
+app.post('/api/workspaces/:id/switch', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        await User.updateOne({ _id: userId }, { $set: { currentWorkspaceId: id } });
+        res.json({ success: true, workspace });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// POST /api/workspaces/:id/thumbnail - Save workspace thumbnail
+app.post('/api/workspaces/:id/thumbnail', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+        const { thumbnail } = req.body;
+
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        workspace.thumbnail = thumbnail;
+        await workspace.save();
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// =================================================================
 // 🟢 REFERENCE DATA ENDPOINTS (with employee support)
 // =================================================================
 app.get('/api/accounts', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
-        const data = await Account.find({ userId }).sort({ order: 1 }).lean();
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
+        const query = { userId };
+        const data = await Account.find(query).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.get('/api/companies', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
-        const data = await Company.find({ userId }).sort({ order: 1 }).lean();
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED (async)
+        const query = { userId };
+        const data = await Company.find(query).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.get('/api/contractors', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
-        const data = await Contractor.find({ userId }).sort({ order: 1 }).lean();
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED (async)
+        const query = { userId };
+        const data = await Contractor.find(query).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.get('/api/projects', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
-        const data = await Project.find({ userId }).sort({ order: 1 }).lean();
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED (async)
+        const query = { userId };
+        const data = await Project.find(query).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.get('/api/individuals', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
-        const data = await Individual.find({ userId }).sort({ order: 1 }).lean();
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED (async)
+        const query = { userId };
+        const data = await Individual.find(query).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
 app.get('/api/categories', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
-        const data = await Category.find({ userId }).sort({ order: 1 }).lean();
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED (async)
+        const query = { userId };
+        const data = await Category.find(query).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -954,7 +1153,8 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day, startDate, endDate } = req.query;
-        const userId = getEffectiveUserId(req); // 🟢 UPDATED
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
+
         let query = { userId: userId };
 
         if (dateKey) {
@@ -983,7 +1183,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 app.post('/api/events', isAuthenticated, async (req, res) => {
     try {
         const data = req.body;
-        const userId = getEffectiveUserId(req); // 🟢 UPDATED: Use effective user ID
+        const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
         let date, dateKey, dayOfYear;
 
         // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
@@ -1018,7 +1218,14 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing date info' });
         }
 
-        const newEvent = new Event({ ...data, date, dateKey, dayOfYear, userId });
+        const newEvent = new Event({
+            ...data,
+            date,
+            dateKey,
+            dayOfYear,
+            userId,
+            workspaceId: req.user.currentWorkspaceId // 🟢 NEW
+        });
         await newEvent.save();
 
         if (newEvent.type === 'income' && newEvent.categoryId) {
