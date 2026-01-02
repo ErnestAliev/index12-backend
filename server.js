@@ -765,7 +765,7 @@ app.delete('/api/team/members/:userId', isAuthenticated, async (req, res) => {
 // GET /api/workspaces - Get all workspaces for user
 app.get('/api/workspaces', isAuthenticated, async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = req.user.id; // 🟢 Use real userId, not composite
         const workspaces = await Workspace.find({ userId }).sort({ createdAt: 1 }).lean();
         res.json(workspaces);
     } catch (err) {
