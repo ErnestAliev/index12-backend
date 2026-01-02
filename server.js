@@ -499,8 +499,10 @@ function getEffectiveUserId(req) {
 }
 
 // 🟢 NEW: Composite User ID for Workspace Isolation
-// SMART APPROACH: Default workspace = original userId (existing data preserved!)
-//                 New workspaces = composite ID (isolated data)
+// SMART APPROACH: 
+// - Default workspace = original userId (existing data preserved!)
+// - Shared workspace = owner's userId (see owner's data)
+// - New owned workspaces = composite ID (isolated data)
 async function getCompositeUserId(req) {
     const realUserId = getEffectiveUserId(req);
     if (!realUserId) return null;
@@ -510,18 +512,25 @@ async function getCompositeUserId(req) {
     // If no workspace selected, use real userId
     if (!currentWorkspaceId) return realUserId;
 
-    // 🟢 KEY LOGIC: Check if this is the default workspace
-    // We need to check the database to see if this workspace is default
+    // Check workspace info
     try {
         const workspace = await Workspace.findById(currentWorkspaceId).lean();
 
+        if (!workspace) return realUserId;
+
         // If this is the default workspace, use ORIGINAL userId
-        // This means all existing data stays in the default workspace!
-        if (workspace?.isDefault) {
+        if (workspace.isDefault) {
             return realUserId; // ✅ Original data preserved
         }
 
-        // For new workspaces, use composite ID for complete isolation
+        // 🟢 KEY FIX: If this is a SHARED workspace (user is not owner), use OWNER's userId
+        // This allows managers/analysts to see the owner's data
+        if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
+            // This is a shared workspace - use owner's ID so we see their data
+            return String(workspace.userId);
+        }
+
+        // For new owned workspaces (not default, not shared), use composite ID for isolation
         return `${realUserId}_ws_${currentWorkspaceId}`;
     } catch (err) {
         console.error('Error in getCompositeUserId:', err);
@@ -1289,6 +1298,12 @@ app.post('/api/workspace-invite/:token/accept', isAuthenticated, async (req, res
         invite.status = 'accepted';
         await invite.save();
 
+        // 🟢 Set accepted workspace as current workspace
+        await User.updateOne(
+            { _id: userId },
+            { $set: { currentWorkspaceId: workspace._id } }
+        );
+
         res.json({
             success: true,
             workspace
@@ -1320,6 +1335,39 @@ app.delete('/api/workspaces/:workspaceId/share/:userId', isAuthenticated, async 
         res.json({ success: true });
     } catch (err) {
         console.error('Revoke access error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: PATCH /api/workspaces/:workspaceId/members/:userId/role - Update member role
+app.patch('/api/workspaces/:workspaceId/members/:userId/role', isAuthenticated, async (req, res) => {
+    try {
+        const ownerId = req.user.id;
+        const { workspaceId, userId } = req.params;
+        const { role } = req.body;
+
+        // Validate role
+        if (!['analyst', 'manager', 'admin'].includes(role)) {
+            return res.status(400).json({ message: 'Invalid role' });
+        }
+
+        const workspace = await Workspace.findOne({ _id: workspaceId, userId: ownerId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found or you are not the owner' });
+        }
+
+        // Find and update the user's role
+        const share = workspace.sharedWith.find(s => s.userId === userId);
+        if (!share) {
+            return res.status(404).json({ message: 'User not found in workspace' });
+        }
+
+        share.role = role;
+        await workspace.save();
+
+        res.json({ success: true, share });
+    } catch (err) {
+        console.error('Update role error:', err);
         res.status(500).json({ message: err.message });
     }
 });
