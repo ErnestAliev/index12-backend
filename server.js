@@ -10,6 +10,7 @@ const MongoStore = require('connect-mongo');
 const http = require('http'); // 🟢 Native Node.js HTTP module
 const socketIo = require('socket.io'); // 🟢 Socket.io
 const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
+const crypto = require('crypto'); // 🟢 For invitation tokens
 
 // 🟢 Загрузка .env
 const envPath = path.resolve(__dirname, '.env');
@@ -112,9 +113,25 @@ const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
     name: String,
     avatarUrl: String,
-    dashboardLayout: { type: [String], default: [] }
+    dashboardLayout: { type: [String], default: [] },
+    // 🟢 NEW: Role-based access control
+    role: { type: String, enum: ['admin', 'full_access', 'timeline_only'], default: 'admin' },
+    ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', userSchema);
+
+// 🟢 NEW: Invitation Schema
+const invitationSchema = new mongoose.Schema({
+    email: { type: String, required: true },
+    token: { type: String, required: true, unique: true },
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    role: { type: String, enum: ['full_access', 'timeline_only'], required: true },
+    status: { type: String, enum: ['pending', 'accepted', 'expired'], default: 'pending' },
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, required: true }
+});
+const Invitation = mongoose.model('Invitation', invitationSchema);
 
 const accountSchema = new mongoose.Schema({
     name: String,
@@ -296,20 +313,47 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
         clientID: process.env.GOOGLE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
         callbackURL: process.env.GOOGLE_CALLBACK_URL || '/auth/google/callback',
-        scope: ['profile', 'email']
+        scope: ['profile', 'email'],
+        passReqToCallback: true  // 🟢 NEW: Pass request to callback
     },
-        async (accessToken, refreshToken, profile, done) => {
+        async (req, accessToken, refreshToken, profile, done) => {
             try {
                 let user = await User.findOne({ googleId: profile.id });
                 if (user) { return done(null, user); }
                 else {
+                    // 🟢 NEW: Check for invite token in session
+                    const inviteToken = req.session?.inviteToken;
+                    let role = 'admin';
+                    let ownerId = null;
+
+                    if (inviteToken) {
+                        const invitation = await Invitation.findOne({ token: inviteToken, status: 'pending' });
+                        if (invitation && new Date() <= invitation.expiresAt) {
+                            role = invitation.role;
+                            ownerId = invitation.invitedBy;
+                        }
+                    }
+
                     const newUser = new User({
                         googleId: profile.id,
                         name: profile.displayName,
                         email: profile.emails[0].value,
-                        avatarUrl: profile.photos[0] ? profile.photos[0].value : null
+                        avatarUrl: profile.photos[0] ? profile.photos[0].value : null,
+                        role: role,
+                        ownerId: ownerId
                     });
                     await newUser.save();
+
+                    // 🟢 Mark invitation as accepted
+                    if (inviteToken) {
+                        const invitation = await Invitation.findOne({ token: inviteToken, status: 'pending' });
+                        if (invitation) {
+                            invitation.status = 'accepted';
+                            await invitation.save();
+                        }
+                        delete req.session.inviteToken;
+                    }
+
                     return done(null, newUser);
                 }
             } catch (err) { return done(err, null); }
@@ -382,6 +426,30 @@ const findCategoryByName = async (name, userId) => {
 
 function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
+// 🟢 NEW: Role-based permission middleware
+function canDelete(req, res, next) {
+    if (!req.isAuthenticated()) return res.status(401).json({ message: 'Unauthorized' });
+    const userRole = req.user.role || 'admin';
+    if (userRole === 'admin' || userRole === 'full_access') return next();
+    res.status(403).json({ message: 'У вас нет прав на удаление операций' });
+}
+
+function canEdit(req, res, next) {
+    if (!req.isAuthenticated()) return res.status(401).json({ message: 'Unauthorized' });
+    const userRole = req.user.role || 'admin';
+    if (userRole === 'admin' || userRole === 'full_access') return next();
+    res.status(403).json({ message: 'У вас нет прав на редактирование операций' });
+}
+
+// 🟢 NEW: Get effective userId (for employees, use ownerId to access admin's data)
+function getEffectiveUserId(req) {
+    if (!req.user) return null;
+    // If user is employee (has ownerId), use admin's ID for data access
+    if (req.user.ownerId) return req.user.ownerId;
+    // Otherwise use own ID (admin)
+    return req.user.id;
+}
+
 // --- ROUTES ---
 app.get('/auth/dev-login', async (req, res) => {
     if (!FRONTEND_URL.includes('localhost')) { return res.status(403).send('Dev login is allowed only on localhost environment'); }
@@ -401,7 +469,14 @@ app.get('/auth/dev-login', async (req, res) => {
     } catch (e) { res.status(500).send(e.message); }
 });
 
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+// 🟢 UPDATED: Save invite token to session before OAuth
+app.get('/auth/google', (req, res, next) => {
+    if (req.query.inviteToken) {
+        req.session.inviteToken = req.query.inviteToken;
+    }
+    passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
+});
+
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }), (req, res) => { res.redirect(FRONTEND_URL); });
 app.get('/api/auth/me', async (req, res) => {
     try {
@@ -410,7 +485,8 @@ app.get('/api/auth/me', async (req, res) => {
         }
 
         const userId = req.user.id;
-        const userObjId = new mongoose.Types.ObjectId(userId);
+        const effectiveUserId = getEffectiveUserId(req); // 🟢 NEW
+        const userObjId = new mongoose.Types.ObjectId(effectiveUserId);
 
         // Earliest operation date for this user (used by frontend to cap “all-time” loads)
         const firstEvent = await Event.findOne({ userId: userId })
@@ -422,6 +498,7 @@ app.get('/api/auth/me', async (req, res) => {
 
         res.json({
             ...baseUser,
+            effectiveUserId: effectiveUserId, // 🟢 NEW: For employees to access admin's data
             minEventDate: firstEvent ? firstEvent.date : null
         });
     } catch (err) {
@@ -440,6 +517,262 @@ app.post('/api/auth/logout', (req, res, next) => {
     });
 });
 
+// =================================================================
+// 🟢 INVITATION SYSTEM ROUTES
+// =================================================================
+
+// POST /api/invitations/create - Create invitation
+app.post('/api/invitations/create', isAuthenticated, async (req, res) => {
+    try {
+        const { email, role } = req.body;
+        const userId = req.user.id;
+
+        console.log('📧 Invitation request:', { email, role, userId, userRole: req.user.role });
+
+        const user = await User.findById(userId);
+        if (user.role !== 'admin') {
+            console.log('❌ Not admin:', user.role);
+            return res.status(403).json({ message: 'Only admin can invite employees' });
+        }
+
+        const existing = await User.findOne({ email });
+        if (existing) {
+            console.log('❌ User exists:', email);
+            return res.status(400).json({ message: 'User with this email already exists' });
+        }
+
+        const pending = await Invitation.findOne({ email, status: 'pending' });
+        if (pending) {
+            console.log('❌ Pending invitation exists:', email);
+            return res.status(400).json({ message: 'Invitation already sent to this email' });
+        }
+
+        const token = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+        const invitation = new Invitation({ email, token, invitedBy: userId, role, expiresAt });
+        await invitation.save();
+
+        const inviteUrl = `${FRONTEND_URL}/invite/${token}`;
+        console.log('✅ Invitation created:', inviteUrl);
+        res.json({ success: true, invitation, inviteUrl });
+    } catch (err) {
+        console.error('❌ Invitation error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// GET /api/invitations/verify/:token
+app.get('/api/invitations/verify/:token', async (req, res) => {
+    try {
+        const invitation = await Invitation.findOne({ token: req.params.token, status: 'pending' })
+            .populate('invitedBy', 'name email');
+
+        if (!invitation) {
+            return res.status(404).json({ message: 'Invalid or already used invitation' });
+        }
+
+        if (new Date() > invitation.expiresAt) {
+            invitation.status = 'expired';
+            await invitation.save();
+            return res.status(400).json({ message: 'Invitation has expired' });
+        }
+
+        res.json({ valid: true, email: invitation.email, role: invitation.role, invitedBy: invitation.invitedBy });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// POST /api/invitations/accept
+app.post('/api/invitations/accept', isAuthenticated, async (req, res) => {
+    try {
+        const invitation = await Invitation.findOne({ token: req.body.token, status: 'pending' });
+        if (!invitation) {
+            return res.status(404).json({ message: 'Invalid or expired invitation' });
+        }
+
+        const user = await User.findById(req.user.id);
+        user.role = invitation.role;
+        user.ownerId = invitation.invitedBy;
+        await user.save();
+
+        invitation.status = 'accepted';
+        await invitation.save();
+
+        res.json({ success: true, user });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// GET /api/team/members - List team members (admin only)
+app.get('/api/team/members', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        const user = await User.findById(userId);
+        if (user.role !== 'admin') {
+            return res.status(403).json({ message: 'Only admin can view team members' });
+        }
+
+        // Find all employees
+        const members = await User.find({ ownerId: userId })
+            .select('name email role createdAt')
+            .sort({ createdAt: -1 });
+
+        res.json(members);
+    } catch (err) {
+        console.error('Error fetching team members:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: PUT /api/team/members/:userId - Update member role
+app.put('/api/team/members/:userId', isAuthenticated, async (req, res) => {
+    try {
+        const adminId = req.user.id;
+        const { userId } = req.params;
+        const { role } = req.body;
+
+        const admin = await User.findById(adminId);
+        if (admin.role !== 'admin') {
+            return res.status(403).json({ message: 'Only admin can update roles' });
+        }
+
+        // Verify member belongs to this admin
+        const member = await User.findOne({ _id: userId, ownerId: adminId });
+        if (!member) {
+            return res.status(404).json({ message: 'Member not found' });
+        }
+
+        // Update role
+        member.role = role;
+        await member.save();
+
+        res.json({ success: true, member });
+    } catch (err) {
+        console.error('Error updating member role:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: DELETE /api/team/members/:userId - Remove member
+app.delete('/api/team/members/:userId', isAuthenticated, async (req, res) => {
+    try {
+        const adminId = req.user.id;
+        const { userId } = req.params;
+
+        const admin = await User.findById(adminId);
+        if (admin.role !== 'admin') {
+            return res.status(403).json({ message: 'Only admin can remove members' });
+        }
+
+        // Verify member belongs to this admin
+        const member = await User.findOne({ _id: userId, ownerId: adminId });
+        if (!member) {
+            return res.status(404).json({ message: 'Member not found' });
+        }
+
+        // Delete user
+        await User.deleteOne({ _id: userId });
+
+        res.json({ success: true, message: 'Member removed' });
+    } catch (err) {
+        console.error('Error removing member:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// =================================================================
+// 🟢 REFERENCE DATA ENDPOINTS (with employee support)
+// =================================================================
+app.get('/api/accounts', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Account.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/companies', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Company.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/contractors', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Contractor.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/projects', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Project.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/individuals', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Individual.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/categories', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Category.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/prepayments', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Prepayment.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/credits', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await Credit.find({ userId }).sort({ order: 1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/taxes', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const data = await TaxPayment.find({ userId }).sort({ date: -1 }).lean();
+        res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.get('/api/deals/all', isAuthenticated, async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const deals = await Event.find({
+            userId,
+            type: 'income',
+            $or: [{ totalDealAmount: { $gt: 0 } }, { isDealTranche: true }]
+        }).sort({ date: -1 }).lean();
+        res.json(deals);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+// =================================================================
+// END INVITATION ROUTES
 // =================================================================
 // 🟣 AI ASSISTANT (READ-ONLY) — routes extracted to backend/ai/aiRoutes.js
 // Mounted here to keep endpoints the same:
@@ -485,7 +818,7 @@ app.put('/api/user/layout', isAuthenticated, async (req, res) => {
 // --- SNAPSHOT (FIXED: CLIENT TIMEZONE AWARE) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = getEffectiveUserId(req); // 🟢 UPDATED: Use effective user ID
         let now;
         if (req.query.date) {
             now = new Date(req.query.date);
@@ -590,7 +923,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
 // --- EVENTS ROUTES ---
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = getEffectiveUserId(req); // 🟢 UPDATED
         // 🟢 PERFORMANCE: .lean() used
         const events = await Event.find({ userId: userId })
             .lean()
@@ -621,7 +954,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
         const { dateKey, day, startDate, endDate } = req.query;
-        const userId = req.user.id;
+        const userId = getEffectiveUserId(req); // 🟢 UPDATED
         let query = { userId: userId };
 
         if (dateKey) {
@@ -649,7 +982,8 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 
 app.post('/api/events', isAuthenticated, async (req, res) => {
     try {
-        const data = req.body; const userId = req.user.id;
+        const data = req.body;
+        const userId = getEffectiveUserId(req); // 🟢 UPDATED: Use effective user ID
         let date, dateKey, dayOfYear;
 
         // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
@@ -724,9 +1058,12 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-app.put('/api/events/:id', isAuthenticated, async (req, res) => {
+// 🟢 UPDATED: Use canEdit middleware
+app.put('/api/events/:id', canEdit, async (req, res) => {
     try {
-        const { id } = req.params; const userId = req.user.id; const updatedData = { ...req.body };
+        const { id } = req.params;
+        const userId = getEffectiveUserId(req); // 🟢 UPDATED
+        const updatedData = { ...req.body };
 
         if (updatedData.date) {
             updatedData.date = new Date(updatedData.date);
@@ -755,10 +1092,11 @@ app.put('/api/events/:id', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-// 🟢 DELETE WITH CASCADE CLEANUP + EMIT
-app.delete('/api/events/:id', isAuthenticated, async (req, res) => {
+// 🟢 UPDATED: Use canDelete middleware
+app.delete('/api/events/:id', canDelete, async (req, res) => {
     try {
-        const { id } = req.params; const userId = req.user.id;
+        const { id } = req.params;
+        const userId = getEffectiveUserId(req); // 🟢 UPDATED
         const eventToDelete = await Event.findOne({ _id: id, userId });
 
         if (!eventToDelete) {
@@ -870,7 +1208,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         expenseContractorId, incomeContractorId
     } = req.body;
 
-    const userId = req.user.id;
+    const userId = getEffectiveUserId(req); // 🟢 UPDATED
 
     const safeId = (val) => (val && val !== 'null' && val !== 'undefined' && val !== '') ? val : null;
 
