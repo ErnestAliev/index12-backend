@@ -510,28 +510,45 @@ async function getCompositeUserId(req) {
     const currentWorkspaceId = req.user?.currentWorkspaceId;
 
     // If no workspace selected, use real userId
-    if (!currentWorkspaceId) return realUserId;
+    if (!currentWorkspaceId) {
+        console.log('🆔 getCompositeUserId: No workspace, returning realUserId:', realUserId);
+        return realUserId;
+    }
 
     // Check workspace info
     try {
         const workspace = await Workspace.findById(currentWorkspaceId).lean();
 
-        if (!workspace) return realUserId;
+        if (!workspace) {
+            console.log('🆔 getCompositeUserId: Workspace not found, returning realUserId:', realUserId);
+            return realUserId;
+        }
+
+        console.log('🆔 getCompositeUserId: workspace found:', {
+            _id: workspace._id,
+            isDefault: workspace.isDefault,
+            ownerId: workspace.userId,
+            realUserId: realUserId
+        });
 
         // If this is the default workspace, use ORIGINAL userId
         if (workspace.isDefault) {
+            console.log('🆔 getCompositeUserId: Default workspace, returning realUserId:', realUserId);
             return realUserId; // ✅ Original data preserved
         }
 
         // 🟢 KEY FIX: If this is a SHARED workspace (user is not owner), use OWNER's userId
         // This allows managers/analysts to see the owner's data
         if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
+            console.log('🆔 getCompositeUserId: SHARED workspace, returning owner userId:', workspace.userId);
             // This is a shared workspace - use owner's ID so we see their data
             return String(workspace.userId);
         }
 
         // For new owned workspaces (not default, not shared), use composite ID for isolation
-        return `${realUserId}_ws_${currentWorkspaceId}`;
+        const compositeId = `${realUserId}_ws_${currentWorkspaceId}`;
+        console.log('🆔 getCompositeUserId: Owned non-default workspace, returning composite:', compositeId);
+        return compositeId;
     } catch (err) {
         console.error('Error in getCompositeUserId:', err);
         return realUserId; // Fallback to real userId on error
@@ -919,13 +936,20 @@ app.get('/api/workspaces', isAuthenticated, async (req, res) => {
                 console.log('⚠️ Current workspace not found, will create default');
                 needsDefaultWorkspace = true;
             } else {
-                // Check if workspace belongs to this user (convert both to string for comparison)
+                // Check if workspace belongs to this user OR is shared with them
                 const workspaceUserId = String(currentWorkspace.userId);
                 const currentUserId = String(userId);
+                const isOwner = workspaceUserId === currentUserId;
+                const isSharedWith = currentWorkspace.sharedWith?.some(s => String(s.userId) === currentUserId);
+
                 console.log('🔍 Workspace userId:', workspaceUserId);
                 console.log('🔍 Current userId:', currentUserId);
-                if (workspaceUserId !== currentUserId) {
-                    console.log('⚠️ Workspace belongs to different user, will create new default');
+                console.log('🔍 Is owner:', isOwner);
+                console.log('🔍 Is shared with user:', isSharedWith);
+
+                // Only create default if user doesn't own AND is not shared with them
+                if (!isOwner && !isSharedWith) {
+                    console.log('⚠️ Workspace not accessible, will create default');
                     needsDefaultWorkspace = true;
                 }
             }
@@ -936,11 +960,22 @@ app.get('/api/workspaces', isAuthenticated, async (req, res) => {
         if (needsDefaultWorkspace) {
             console.log('🔄 Creating default workspace for user:', userId);
 
-            const defaultWorkspace = await Workspace.create({
+            // Check if user already has a default workspace (prevent duplicates!)
+            let defaultWorkspace = await Workspace.findOne({
                 userId: userId,
-                name: "Основной проект",
                 isDefault: true
             });
+
+            if (!defaultWorkspace) {
+                defaultWorkspace = await Workspace.create({
+                    userId: userId,
+                    name: \"Основной проект\",
+                    isDefault: true
+                });
+                console.log('✅ Default workspace created:', defaultWorkspace._id);
+            } else {
+                console.log('✅ Default workspace already exists:', defaultWorkspace._id);
+            }
 
             await User.updateOne(
                 { _id: userId },
@@ -948,8 +983,6 @@ app.get('/api/workspaces', isAuthenticated, async (req, res) => {
             );
 
             req.user.currentWorkspaceId = defaultWorkspace._id;
-
-            console.log('✅ Default workspace created:', defaultWorkspace._id);
         }
 
         // Get workspaces owned by user
@@ -1896,6 +1929,10 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         const { dateKey, day, startDate, endDate } = req.query;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
 
+        console.log('📅 GET /api/events - realUserId:', req.user.id);
+        console.log('📅 GET /api/events - currentWorkspaceId:', req.user.currentWorkspaceId);
+        console.log('📅 GET /api/events - compositeUserId:', userId);
+
         let query = { userId: userId };
 
         if (dateKey) {
@@ -1916,6 +1953,8 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             .lean()
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
+
+        console.log('📅 GET /api/events - found', events.length, 'events');
 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
