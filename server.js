@@ -133,7 +133,7 @@ const workspaceSchema = new mongoose.Schema({
     sharedWith: [{
         userId: { type: String, required: true },
         email: String,
-        role: { type: String, enum: ['viewer', 'editor', 'admin'], default: 'viewer' },
+        role: { type: String, enum: ['analyst', 'manager', 'admin'], default: 'analyst' },
         sharedAt: { type: Date, default: Date.now }
     }],
     isShared: { type: Boolean, default: false }
@@ -144,13 +144,17 @@ const Workspace = mongoose.model('Workspace', workspaceSchema);
 const workspaceInviteSchema = new mongoose.Schema({
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', required: true },
     invitedBy: { type: String, required: true }, // Owner userId
-    invitedEmail: { type: String, required: true },
-    role: { type: String, enum: ['viewer', 'editor', 'admin'], default: 'viewer' },
+    invitedEmail: { type: String }, // Optional: null for link-based invites, email for targeted invites
+    role: { type: String, enum: ['analyst', 'manager', 'admin'], default: 'analyst' },
     token: { type: String, required: true, unique: true, index: true },
     status: { type: String, enum: ['pending', 'accepted', 'declined', 'expired'], default: 'pending' },
     expiresAt: { type: Date, required: true },
     createdAt: { type: Date, default: Date.now }
 });
+// Clear any existing model to ensure schema changes are applied
+if (mongoose.models.WorkspaceInvite) {
+    delete mongoose.models.WorkspaceInvite;
+}
 const WorkspaceInvite = mongoose.model('WorkspaceInvite', workspaceInviteSchema);
 
 // 🟢 NEW: Invitation Schema
@@ -269,7 +273,8 @@ const taxPaymentSchema = new mongoose.Schema({
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     taxType: String,
-    period: String
+    period: String,
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true } // 🟢 NEW
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
 
@@ -563,7 +568,20 @@ app.get('/api/auth/me', async (req, res) => {
         const userObjId = new mongoose.Types.ObjectId(effectiveUserId);
 
         // 🟢 NEW: Auto-migration - create default workspace on first login
+        let needsDefaultWorkspace = false;
+
         if (!req.user.currentWorkspaceId) {
+            needsDefaultWorkspace = true;
+        } else {
+            // Check if current workspace actually exists
+            const currentWorkspace = await Workspace.findById(req.user.currentWorkspaceId);
+            if (!currentWorkspace) {
+                console.log('⚠️ Current workspace not found, will create default');
+                needsDefaultWorkspace = true;
+            }
+        }
+
+        if (needsDefaultWorkspace) {
             console.log('🔄 Creating default workspace for user:', userId);
 
             const defaultWorkspace = await Workspace.create({
@@ -592,10 +610,25 @@ app.get('/api/auth/me', async (req, res) => {
 
         const baseUser = (req.user && typeof req.user.toJSON === 'function') ? req.user.toJSON() : req.user;
 
+        // 🟢 Determine workspace role
+        let workspaceRole = 'analyst';
+        if (req.user.currentWorkspaceId) {
+            const ws = await Workspace.findById(req.user.currentWorkspaceId);
+            if (ws) {
+                if (String(ws.userId) === String(userId)) {
+                    workspaceRole = 'admin';
+                } else {
+                    const share = ws.sharedWith?.find(s => String(s.userId) === String(userId));
+                    if (share) workspaceRole = share.role;
+                }
+            }
+        }
+
         res.json({
             ...baseUser,
             effectiveUserId: effectiveUserId, // 🟢 NEW: For employees to access admin's data
-            minEventDate: firstEvent ? firstEvent.date : null
+            minEventDate: firstEvent ? firstEvent.date : null,
+            workspaceRole // 🟢 NEW: Role in current workspace
         });
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -784,34 +817,161 @@ app.delete('/api/team/members/:userId', isAuthenticated, async (req, res) => {
 // 🟢 WORKSPACE (MULTI-PROJECT) ROUTES
 // =================================================================
 
+// 🟢 Helper to get workspaceId
+async function getWorkspaceId(req) {
+    if (req.user && req.user.currentWorkspaceId) return req.user.currentWorkspaceId;
+
+    // Fallback: finding first workspace
+    const ws = await Workspace.findOne({ userId: req.user.id });
+    if (ws) return ws._id.toString();
+
+    return null;
+}
+
+// 🟢 Middleware for Workspace Permissions
+const checkWorkspacePermission = (allowedRoles) => {
+    return async (req, res, next) => {
+        try {
+            if (!req.user) {
+                return res.status(401).json({ message: 'Unauthorized' });
+            }
+
+            const workspaceId = await getWorkspaceId(req);
+            if (!workspaceId) {
+                return res.status(404).json({ message: 'Workspace not found' });
+            }
+
+            const workspace = await Workspace.findById(workspaceId);
+            if (!workspace) {
+                return res.status(404).json({ message: 'Workspace not found' });
+            }
+
+            // Owner always has full access (effectively 'admin')
+            // Using strict string comparison and ensuring both are strings
+            if (String(workspace.userId) === String(req.user.id)) {
+                req.workspaceRole = 'admin'; // Owner is admin
+                return next();
+            }
+
+            // Check if user is in sharedWith
+            const sharedUser = workspace.sharedWith?.find(s => String(s.userId) === String(req.user.id));
+            if (!sharedUser) {
+                return res.status(403).json({ message: 'Access denied: not shared with you' });
+            }
+
+            if (!allowedRoles.includes(sharedUser.role)) {
+                return res.status(403).json({ message: `Access denied: role '${sharedUser.role}' required one of [${allowedRoles.join(', ')}]` });
+            }
+
+            req.workspaceRole = sharedUser.role;
+            next();
+        } catch (err) {
+            console.error('Permission check error:', err);
+            res.status(500).json({ message: 'Internal Server Error' });
+        }
+    };
+};
+
 // GET /api/workspaces - Get all workspaces for user (owned + shared)
 app.get('/api/workspaces', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
 
+        console.log('📂 GET /api/workspaces - userId:', userId);
+        console.log('📂 req.user.currentWorkspaceId:', req.user.currentWorkspaceId);
+
+        // 🟢 Ensure default workspace exists
+        let needsDefaultWorkspace = false;
+
+        if (!req.user.currentWorkspaceId) {
+            console.log('⚠️ No currentWorkspaceId, will create default');
+            needsDefaultWorkspace = true;
+        } else {
+            console.log('🔍 Checking if workspace exists:', req.user.currentWorkspaceId);
+            const currentWorkspace = await Workspace.findById(req.user.currentWorkspaceId);
+            console.log('🔍 Workspace found:', currentWorkspace ? 'YES' : 'NO');
+
+            if (!currentWorkspace) {
+                console.log('⚠️ Current workspace not found, will create default');
+                needsDefaultWorkspace = true;
+            } else {
+                // Check if workspace belongs to this user (convert both to string for comparison)
+                const workspaceUserId = String(currentWorkspace.userId);
+                const currentUserId = String(userId);
+                console.log('🔍 Workspace userId:', workspaceUserId);
+                console.log('🔍 Current userId:', currentUserId);
+                if (workspaceUserId !== currentUserId) {
+                    console.log('⚠️ Workspace belongs to different user, will create new default');
+                    needsDefaultWorkspace = true;
+                }
+            }
+        }
+
+        console.log('🔍 needsDefaultWorkspace:', needsDefaultWorkspace);
+
+        if (needsDefaultWorkspace) {
+            console.log('🔄 Creating default workspace for user:', userId);
+
+            const defaultWorkspace = await Workspace.create({
+                userId: userId,
+                name: "Основной проект",
+                isDefault: true
+            });
+
+            await User.updateOne(
+                { _id: userId },
+                { $set: { currentWorkspaceId: defaultWorkspace._id } }
+            );
+
+            req.user.currentWorkspaceId = defaultWorkspace._id;
+
+            console.log('✅ Default workspace created:', defaultWorkspace._id);
+        }
+
         // Get workspaces owned by user
+        console.log('🔍 Querying workspaces with userId:', userId, 'type:', typeof userId);
         const owned = await Workspace.find({ userId }).sort({ createdAt: 1 }).lean();
+        console.log('📂 Owned workspaces:', owned.length, owned.map(w => ({ id: w._id, name: w.name, userId: w.userId })));
+
+        // Debug: try to find the specific workspace we know exists
+        const debugWorkspace = await Workspace.findById(req.user.currentWorkspaceId).lean();
+        if (debugWorkspace) {
+            console.log('🔍 DEBUG - Found workspace by ID:', {
+                _id: debugWorkspace._id,
+                name: debugWorkspace.name,
+                userId: debugWorkspace.userId,
+                userIdType: typeof debugWorkspace.userId
+            });
+        }
 
         // Get workspaces shared with user
         const shared = await Workspace.find({
             'sharedWith.userId': userId
         }).sort({ createdAt: 1 }).lean();
+        console.log('📂 Shared workspaces:', shared.length);
 
-        // Add role info to shared workspaces
-        const sharedWithRole = shared.map(ws => {
+        // Format: add isShared flag and role info
+        const ownedFormatted = owned.map(ws => ({
+            ...ws,
+            isShared: false
+        }));
+
+        const sharedFormatted = shared.map(ws => {
             const userShare = ws.sharedWith?.find(s => s.userId === userId);
             return {
                 ...ws,
-                userRole: userShare?.role || 'viewer',
-                isSharedWithMe: true
+                isShared: true,
+                role: userShare?.role || 'analyst'
             };
         });
 
-        res.json({
-            owned,
-            shared: sharedWithRole
-        });
+        const result = [...ownedFormatted, ...sharedFormatted];
+        console.log('📂 Total workspaces returned:', result.length);
+
+        // Return flat array (owned + shared)
+        res.json(result);
     } catch (err) {
+        console.error('❌ Error in GET /api/workspaces:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -840,7 +1000,7 @@ app.post('/api/workspaces', isAuthenticated, async (req, res) => {
 });
 
 // PUT /api/workspaces/:id - Rename workspace
-app.put('/api/workspaces/:id', isAuthenticated, async (req, res) => {
+app.put('/api/workspaces/:id', isAuthenticated, checkWorkspacePermission(['admin']), async (req, res) => {
     try {
         const userId = req.user.id;
         const { id } = req.params;
@@ -888,14 +1048,299 @@ app.post('/api/workspaces/:id/switch', isAuthenticated, async (req, res) => {
         const userId = req.user.id;
         const { id } = req.params;
 
-        const workspace = await Workspace.findOne({ _id: id, userId });
+        // Check if user owns workspace OR has access via sharing
+        const workspace = await Workspace.findOne({
+            $or: [
+                { _id: id, userId },
+                { _id: id, 'sharedWith.userId': userId }
+            ]
+        });
+
         if (!workspace) {
-            return res.status(404).json({ message: 'Workspace not found' });
+            return res.status(404).json({ message: 'Workspace not found or access denied' });
         }
 
         await User.updateOne({ _id: userId }, { $set: { currentWorkspaceId: id } });
         res.json({ success: true, workspace });
     } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: POST /api/workspaces/:id/share - Share workspace with another user
+app.post('/api/workspaces/:id/share', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+        const { email, role } = req.body;
+
+        // Validate input
+        if (!email || !role) {
+            return res.status(400).json({ message: 'Email and role are required' });
+        }
+
+        if (!['analyst', 'manager', 'admin'].includes(role)) {
+            return res.status(400).json({ message: 'Invalid role' });
+        }
+
+        // Check if user owns this workspace
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found or you do not have permission' });
+        }
+
+        // Find user by email
+        const targetUser = await User.findOne({ email });
+
+        if (!targetUser) {
+            // Create workspace invite for non-existing user
+            const token = crypto.randomBytes(32).toString('hex');
+            const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+            const invite = new WorkspaceInvite({
+                workspaceId: id,
+                invitedBy: userId,
+                invitedEmail: email,
+                role,
+                token,
+                expiresAt
+            });
+
+            await invite.save();
+
+            return res.json({
+                success: true,
+                message: 'Invitation sent',
+                inviteUrl: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/workspace-invite/${token}`
+            });
+        }
+
+        // Check if already shared
+        const alreadyShared = workspace.sharedWith?.some(s => s.userId === targetUser.id);
+        if (alreadyShared) {
+            return res.status(409).json({ message: 'Workspace already shared with this user' });
+        }
+
+        // Add to sharedWith array
+        workspace.sharedWith = workspace.sharedWith || [];
+        workspace.sharedWith.push({
+            userId: targetUser.id,
+            email: targetUser.email,
+            role,
+            sharedAt: new Date()
+        });
+        workspace.isShared = true;
+
+        await workspace.save();
+
+        res.json({
+            success: true,
+            message: `Workspace shared with ${email}`,
+            workspace
+        });
+    } catch (err) {
+        console.error('Share workspace error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: POST /api/workspaces/:id/generate-invite - Generate invite link
+app.post('/api/workspaces/:id/generate-invite', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+        const { role } = req.body;
+
+        // Verify ownership
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        // Validate role
+        if (!['analyst', 'manager', 'admin'].includes(role)) {
+            return res.status(400).json({ message: 'Invalid role' });
+        }
+
+        // Create invite
+        const token = crypto.randomBytes(32).toString('hex');
+        const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+        const invite = new WorkspaceInvite({
+            workspaceId: id,
+            invitedBy: userId,
+            invitedEmail: null, // Link-based, no specific email
+            role,
+            token,
+            expiresAt,
+            status: 'pending'
+        });
+
+        await invite.save();
+
+        const inviteUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/workspace-invite/${token}`;
+
+        res.json({
+            success: true,
+            inviteUrl,
+            invite
+        });
+    } catch (err) {
+        console.error('Generate invite error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: GET /api/workspaces/:id/invites - Get active invites for workspace
+app.get('/api/workspaces/:id/invites', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id } = req.params;
+
+        const workspace = await Workspace.findOne({ _id: id, userId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        const invites = await WorkspaceInvite.find({
+            workspaceId: id,
+            status: 'pending'
+        }).sort({ createdAt: -1 });
+
+        res.json(invites);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: GET /api/workspace-invite/:token - Get invite details
+app.get('/api/workspace-invite/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+
+        const invite = await WorkspaceInvite.findOne({
+            token,
+            status: 'pending'
+        }).populate('workspaceId');
+
+        if (!invite) {
+            return res.status(404).json({ message: 'Invalid or expired invite' });
+        }
+
+        if (new Date() > invite.expiresAt) {
+            invite.status = 'expired';
+            await invite.save();
+            return res.status(400).json({ message: 'Invite has expired' });
+        }
+
+        res.json({
+            valid: true,
+            workspace: invite.workspaceId,
+            role: invite.role
+        });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: POST /api/workspace-invite/:token/accept - Accept invite
+app.post('/api/workspace-invite/:token/accept', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { token } = req.params;
+
+        const invite = await WorkspaceInvite.findOne({
+            token,
+            status: 'pending'
+        });
+
+        if (!invite) {
+            return res.status(404).json({ message: 'Invalid invite' });
+        }
+
+        if (new Date() > invite.expiresAt) {
+            invite.status = 'expired';
+            await invite.save();
+            return res.status(400).json({ message: 'Invite has expired' });
+        }
+
+        // Add user to workspace.sharedWith
+        const workspace = await Workspace.findById(invite.workspaceId);
+
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        // Check if already shared
+        const alreadyShared = workspace.sharedWith?.some(s => s.userId === userId);
+        if (!alreadyShared) {
+            workspace.sharedWith = workspace.sharedWith || [];
+            workspace.sharedWith.push({
+                userId,
+                email: req.user.email,
+                role: invite.role,
+                sharedAt: new Date()
+            });
+            workspace.isShared = true;
+            await workspace.save();
+        }
+
+        // Mark invite as accepted
+        invite.status = 'accepted';
+        await invite.save();
+
+        res.json({
+            success: true,
+            workspace
+        });
+    } catch (err) {
+        console.error('Accept invite error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: DELETE /api/workspaces/:workspaceId/share/:userId - Revoke access
+app.delete('/api/workspaces/:workspaceId/share/:userId', isAuthenticated, async (req, res) => {
+    try {
+        const ownerId = req.user.id;
+        const { workspaceId, userId } = req.params;
+
+        const workspace = await Workspace.findOne({ _id: workspaceId, userId: ownerId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        workspace.sharedWith = workspace.sharedWith.filter(s => s.userId !== userId);
+        if (workspace.sharedWith.length === 0) {
+            workspace.isShared = false;
+        }
+
+        await workspace.save();
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Revoke access error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 🟢 NEW: DELETE /api/workspace-invites/:inviteId - Revoke invite link
+app.delete('/api/workspace-invites/:inviteId', isAuthenticated, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { inviteId } = req.params;
+
+        const invite = await WorkspaceInvite.findOne({ _id: inviteId, invitedBy: userId });
+        if (!invite) {
+            return res.status(404).json({ message: 'Invite not found' });
+        }
+
+        invite.status = 'revoked';
+        await invite.save();
+
+        res.json({ success: true });
+    } catch (err) {
+        console.error('Revoke invite error:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -959,6 +1404,178 @@ app.get('/api/projects', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+// 🟢 NEW: POST /api/projects - Create new project
+app.post('/api/projects', isAuthenticated, async (req, res) => {
+    try {
+        const { name, description, color, order } = req.body;
+        const userId = await getCompositeUserId(req);
+
+        // Validation
+        if (!name || name.trim() === '') {
+            return res.status(400).json({ error: 'Project name is required' });
+        }
+
+        // Check for duplicate name
+        const existing = await Project.findOne({
+            userId,
+            name: name.trim()
+        });
+
+        if (existing) {
+            return res.status(409).json({ error: 'Project with this name already exists' });
+        }
+
+        // Determine order (auto-increment if not provided)
+        let projectOrder = order;
+        if (projectOrder === undefined || projectOrder === null) {
+            const maxOrder = await Project.findOne({ userId })
+                .sort({ order: -1 })
+                .select('order');
+            projectOrder = (maxOrder?.order || 0) + 1;
+        }
+
+        const newProject = new Project({
+            userId,
+            name: name.trim(),
+            description: description?.trim() || '',
+            color: color || null,
+            order: projectOrder
+        });
+
+        await newProject.save();
+
+        // Emit socket event to other clients
+        emitToUser(req, userId, 'entity:added', {
+            type: 'project',
+            data: newProject
+        });
+
+        res.status(201).json(newProject);
+    } catch (error) {
+        console.error('Create project error:', error);
+        res.status(500).json({ error: 'Failed to create project' });
+    }
+});
+
+// 🟢 NEW: PUT /api/projects/:id - Update project
+app.put('/api/projects/:id', isAuthenticated, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, description, color, order } = req.body;
+        const userId = await getCompositeUserId(req);
+
+        const project = await Project.findOne({ _id: id, userId });
+
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        // Validate name uniqueness (if changing name)
+        if (name && name !== project.name) {
+            const duplicate = await Project.findOne({
+                userId,
+                name: name.trim(),
+                _id: { $ne: id }
+            });
+
+            if (duplicate) {
+                return res.status(409).json({ error: 'Project with this name already exists' });
+            }
+
+            project.name = name.trim();
+        }
+
+        if (description !== undefined) project.description = description.trim();
+        if (color !== undefined) project.color = color;
+        if (order !== undefined) project.order = order;
+
+        await project.save();
+
+        // Emit socket event to other clients
+        emitToUser(req, userId, 'entity:updated', {
+            type: 'project',
+            data: project
+        });
+
+        res.json(project);
+    } catch (error) {
+        console.error('Update project error:', error);
+        res.status(500).json({ error: 'Failed to update project' });
+    }
+});
+
+// 🟢 NEW: DELETE /api/projects/:id - Delete project
+app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const userId = await getCompositeUserId(req);
+
+        const project = await Project.findOne({ _id: id, userId });
+
+        if (!project) {
+            return res.status(404).json({ error: 'Project not found' });
+        }
+
+        // Check if project is used in operations
+        const operationCount = await Event.countDocuments({
+            userId,
+            projectId: id,
+            isDeleted: { $ne: true }
+        });
+
+        if (operationCount > 0) {
+            return res.status(409).json({
+                error: 'Cannot delete project with existing operations',
+                operationCount
+            });
+        }
+
+        await Project.deleteOne({ _id: id, userId });
+
+        // Emit socket event to other clients
+        emitToUser(req, userId, 'entity:deleted', {
+            type: 'project',
+            id: id
+        });
+
+        res.json({ success: true, message: 'Project deleted' });
+    } catch (error) {
+        console.error('Delete project error:', error);
+        res.status(500).json({ error: 'Failed to delete project' });
+    }
+});
+
+// 🟢 NEW: POST /api/projects/reorder - Bulk update order
+app.post('/api/projects/reorder', isAuthenticated, async (req, res) => {
+    try {
+        const { projects } = req.body; // Array of { _id, order }
+        const userId = await getCompositeUserId(req);
+
+        if (!Array.isArray(projects)) {
+            return res.status(400).json({ error: 'Invalid request format' });
+        }
+
+        const bulkOps = projects.map(({ _id, order }) => ({
+            updateOne: {
+                filter: { _id, userId },
+                update: { $set: { order } }
+            }
+        }));
+
+        await Project.bulkWrite(bulkOps);
+
+        // Emit socket event to other clients
+        emitToUser(req, userId, 'entity:list_updated', {
+            type: 'project'
+        });
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Reorder projects error:', error);
+        res.status(500).json({ error: 'Failed to reorder projects' });
+    }
+});
+
 app.get('/api/individuals', isAuthenticated, async (req, res) => {
     try {
         const userId = await getCompositeUserId(req); // 🟢 UPDATED (async)
@@ -990,6 +1607,24 @@ app.get('/api/credits', isAuthenticated, async (req, res) => {
         const userId = getEffectiveUserId(req);
         const data = await Credit.find({ userId }).sort({ order: 1 }).lean();
         res.json(data);
+    } catch (err) { res.status(500).json({ message: err.message }); }
+});
+
+app.post('/api/taxes', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
+    try {
+        const userId = getEffectiveUserId(req);
+        const workspaceId = await getWorkspaceId(req);
+        const data = req.body;
+
+        const newTax = new TaxPayment({
+            ...data,
+            userId,
+            workspaceId,
+            date: data.date ? new Date(data.date) : new Date()
+        });
+
+        await newTax.save();
+        res.status(201).json(newTax);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -1223,7 +1858,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-app.post('/api/events', isAuthenticated, async (req, res) => {
+app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
     try {
         const data = req.body;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
@@ -1309,7 +1944,7 @@ app.post('/api/events', isAuthenticated, async (req, res) => {
 });
 
 // 🟢 UPDATED: Use canEdit middleware
-app.put('/api/events/:id', canEdit, async (req, res) => {
+app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = getEffectiveUserId(req); // 🟢 UPDATED
@@ -1343,7 +1978,7 @@ app.put('/api/events/:id', canEdit, async (req, res) => {
 });
 
 // 🟢 UPDATED: Use canDelete middleware
-app.delete('/api/events/:id', canDelete, async (req, res) => {
+app.delete('/api/events/:id', checkWorkspacePermission(['admin']), canDelete, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = getEffectiveUserId(req); // 🟢 UPDATED
