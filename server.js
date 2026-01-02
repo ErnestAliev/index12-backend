@@ -582,10 +582,16 @@ app.get('/api/auth/me', async (req, res) => {
         if (!req.user.currentWorkspaceId) {
             needsDefaultWorkspace = true;
         } else {
-            // Check if current workspace actually exists
-            const currentWorkspace = await Workspace.findById(req.user.currentWorkspaceId);
+            // Check if current workspace exists AND user has access to it
+            const currentWorkspace = await Workspace.findOne({
+                _id: req.user.currentWorkspaceId,
+                $or: [
+                    { userId: userId },
+                    { 'sharedWith.userId': userId }
+                ]
+            });
             if (!currentWorkspace) {
-                console.log('⚠️ Current workspace not found, will create default');
+                console.log('⚠️ Current workspace not found or no access, will create default');
                 needsDefaultWorkspace = true;
             }
         }
@@ -593,11 +599,22 @@ app.get('/api/auth/me', async (req, res) => {
         if (needsDefaultWorkspace) {
             console.log('🔄 Creating default workspace for user:', userId);
 
-            const defaultWorkspace = await Workspace.create({
+            // Check if user already has a default workspace
+            let defaultWorkspace = await Workspace.findOne({
                 userId: userId,
-                name: "Основной проект",
                 isDefault: true
             });
+
+            if (!defaultWorkspace) {
+                defaultWorkspace = await Workspace.create({
+                    userId: userId,
+                    name: "Основной проект",
+                    isDefault: true
+                });
+                console.log('✅ Default workspace created:', defaultWorkspace._id);
+            } else {
+                console.log('✅ Default workspace already exists:', defaultWorkspace._id);
+            }
 
             // Update user with current workspace
             await User.updateOne(
@@ -607,8 +624,6 @@ app.get('/api/auth/me', async (req, res) => {
 
             // Update req.user for this request
             req.user.currentWorkspaceId = defaultWorkspace._id;
-
-            console.log('✅ Default workspace created:', defaultWorkspace._id);
         }
 
         // Earliest operation date for this user (used by frontend to cap “all-time” loads)
