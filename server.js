@@ -509,49 +509,28 @@ async function getCompositeUserId(req) {
 
     const currentWorkspaceId = req.user?.currentWorkspaceId;
 
-    // If no workspace selected, use real userId
-    if (!currentWorkspaceId) {
-        console.log('🆔 getCompositeUserId: No workspace, returning realUserId:', realUserId);
-        return realUserId;
-    }
+    if (!currentWorkspaceId) return realUserId;
 
-    // Check workspace info
     try {
         const workspace = await Workspace.findById(currentWorkspaceId).lean();
+        if (!workspace) return realUserId;
 
-        if (!workspace) {
-            console.log('🆔 getCompositeUserId: Workspace not found, returning realUserId:', realUserId);
-            return realUserId;
-        }
-
-        console.log('🆔 getCompositeUserId: workspace found:', {
-            _id: workspace._id,
-            isDefault: workspace.isDefault,
-            ownerId: workspace.userId,
-            realUserId: realUserId
-        });
-
-        // If this is the default workspace, use ORIGINAL userId
-        if (workspace.isDefault) {
-            console.log('🆔 getCompositeUserId: Default workspace, returning realUserId:', realUserId);
-            return realUserId; // ✅ Original data preserved
-        }
-
-        // 🟢 KEY FIX: If this is a SHARED workspace (user is not owner), use OWNER's userId
-        // This allows managers/analysts to see the owner's data
+        // 🔥 Check SHARED workspace FIRST (before isDefault)
+        // Critical: shared workspace might also be marked as default
         if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
-            console.log('🆔 getCompositeUserId: SHARED workspace, returning owner userId:', workspace.userId);
-            // This is a shared workspace - use owner's ID so we see their data
-            return String(workspace.userId);
+            return String(workspace.userId); // Return owner's ID for shared workspace
         }
 
-        // For new owned workspaces (not default, not shared), use composite ID for isolation
-        const compositeId = `${realUserId}_ws_${currentWorkspaceId}`;
-        console.log('🆔 getCompositeUserId: Owned non-default workspace, returning composite:', compositeId);
-        return compositeId;
+        // User's own default workspace
+        if (workspace.isDefault) {
+            return realUserId; // Original data preserved
+        }
+
+        // New owned non-default workspace - use composite ID for isolation
+        return `${realUserId}_ws_${currentWorkspaceId}`;
     } catch (err) {
         console.error('Error in getCompositeUserId:', err);
-        return realUserId; // Fallback to real userId on error
+        return realUserId;
     }
 }
 
@@ -918,49 +897,29 @@ app.get('/api/workspaces', isAuthenticated, async (req, res) => {
     try {
         const userId = req.user.id;
 
-        console.log('📂 GET /api/workspaces - userId:', userId);
-        console.log('📂 req.user.currentWorkspaceId:', req.user.currentWorkspaceId);
-
-        // 🟢 Ensure default workspace exists
+        // Check if current workspace exists AND user has access to it
         let needsDefaultWorkspace = false;
 
         if (!req.user.currentWorkspaceId) {
-            console.log('⚠️ No currentWorkspaceId, will create default');
             needsDefaultWorkspace = true;
         } else {
-            console.log('🔍 Checking if workspace exists:', req.user.currentWorkspaceId);
             const currentWorkspace = await Workspace.findById(req.user.currentWorkspaceId);
-            console.log('🔍 Workspace found:', currentWorkspace ? 'YES' : 'NO');
 
             if (!currentWorkspace) {
-                console.log('⚠️ Current workspace not found, will create default');
                 needsDefaultWorkspace = true;
             } else {
-                // Check if workspace belongs to this user OR is shared with them
                 const workspaceUserId = String(currentWorkspace.userId);
                 const currentUserId = String(userId);
                 const isOwner = workspaceUserId === currentUserId;
                 const isSharedWith = currentWorkspace.sharedWith?.some(s => String(s.userId) === currentUserId);
 
-                console.log('🔍 Workspace userId:', workspaceUserId);
-                console.log('🔍 Current userId:', currentUserId);
-                console.log('🔍 Is owner:', isOwner);
-                console.log('🔍 Is shared with user:', isSharedWith);
-
-                // Only create default if user doesn't own AND is not shared with them
                 if (!isOwner && !isSharedWith) {
-                    console.log('⚠️ Workspace not accessible, will create default');
                     needsDefaultWorkspace = true;
                 }
             }
         }
 
-        console.log('🔍 needsDefaultWorkspace:', needsDefaultWorkspace);
-
         if (needsDefaultWorkspace) {
-            console.log('🔄 Creating default workspace for user:', userId);
-
-            // Check if user already has a default workspace (prevent duplicates!)
             let defaultWorkspace = await Workspace.findOne({
                 userId: userId,
                 isDefault: true
@@ -969,12 +928,9 @@ app.get('/api/workspaces', isAuthenticated, async (req, res) => {
             if (!defaultWorkspace) {
                 defaultWorkspace = await Workspace.create({
                     userId: userId,
-                    name: \"Основной проект\",
+                    name: "Основной проект",
                     isDefault: true
                 });
-                console.log('✅ Default workspace created:', defaultWorkspace._id);
-            } else {
-                console.log('✅ Default workspace already exists:', defaultWorkspace._id);
             }
 
             await User.updateOne(
@@ -986,26 +942,12 @@ app.get('/api/workspaces', isAuthenticated, async (req, res) => {
         }
 
         // Get workspaces owned by user
-        console.log('🔍 Querying workspaces with userId:', userId, 'type:', typeof userId);
         const owned = await Workspace.find({ userId }).sort({ createdAt: 1 }).lean();
-        console.log('📂 Owned workspaces:', owned.length, owned.map(w => ({ id: w._id, name: w.name, userId: w.userId })));
-
-        // Debug: try to find the specific workspace we know exists
-        const debugWorkspace = await Workspace.findById(req.user.currentWorkspaceId).lean();
-        if (debugWorkspace) {
-            console.log('🔍 DEBUG - Found workspace by ID:', {
-                _id: debugWorkspace._id,
-                name: debugWorkspace.name,
-                userId: debugWorkspace.userId,
-                userIdType: typeof debugWorkspace.userId
-            });
-        }
 
         // Get workspaces shared with user
         const shared = await Workspace.find({
             'sharedWith.userId': userId
         }).sort({ createdAt: 1 }).lean();
-        console.log('📂 Shared workspaces:', shared.length);
 
         // Format: add isShared flag and role info
         const ownedFormatted = owned.map(ws => ({
@@ -1929,10 +1871,6 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         const { dateKey, day, startDate, endDate } = req.query;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
 
-        console.log('📅 GET /api/events - realUserId:', req.user.id);
-        console.log('📅 GET /api/events - currentWorkspaceId:', req.user.currentWorkspaceId);
-        console.log('📅 GET /api/events - compositeUserId:', userId);
-
         let query = { userId: userId };
 
         if (dateKey) {
@@ -2049,7 +1987,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, async (req, res) => {
     try {
         const { id } = req.params;
-        const userId = getEffectiveUserId(req); // 🟢 UPDATED
+        const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
         const updatedData = { ...req.body };
 
         if (updatedData.date) {
@@ -2083,7 +2021,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
 app.delete('/api/events/:id', checkWorkspacePermission(['admin']), canDelete, async (req, res) => {
     try {
         const { id } = req.params;
-        const userId = getEffectiveUserId(req); // 🟢 UPDATED
+        const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
         const eventToDelete = await Event.findOne({ _id: id, userId });
 
         if (!eventToDelete) {
@@ -2092,8 +2030,9 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin']), canDelete, as
 
         const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
         if (taxPayment) {
-            await TaxPayment.deleteOne({ _id: taxPayment._id });
-            emitToUser(req, userId, 'tax_payment_deleted', taxPayment._id);
+            return res.status(400).json({
+                message: 'Нельзя удалить операцию, так как по ней есть налоговый платёж. Сначала удалите налоговый платёж.'
+            });
         }
 
         if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
