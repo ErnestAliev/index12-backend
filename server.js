@@ -121,15 +121,37 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// 🟢 NEW: Workspace Schema (multi-project dashboard system)
+// 🟢 NEW: Workspace Schema (multi-project dashboard system with sharing)
 const workspaceSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: String, required: true, index: true }, // Owner ID
     name: { type: String, required: true },
     thumbnail: { type: String, default: null }, // base64 screenshot
     isDefault: { type: Boolean, default: false },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+
+    // 🟢 NEW: Sharing fields
+    sharedWith: [{
+        userId: { type: String, required: true },
+        email: String,
+        role: { type: String, enum: ['viewer', 'editor', 'admin'], default: 'viewer' },
+        sharedAt: { type: Date, default: Date.now }
+    }],
+    isShared: { type: Boolean, default: false }
 });
 const Workspace = mongoose.model('Workspace', workspaceSchema);
+
+// 🟢 NEW: WorkspaceInvite Schema (for pending workspace shares)
+const workspaceInviteSchema = new mongoose.Schema({
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', required: true },
+    invitedBy: { type: String, required: true }, // Owner userId
+    invitedEmail: { type: String, required: true },
+    role: { type: String, enum: ['viewer', 'editor', 'admin'], default: 'viewer' },
+    token: { type: String, required: true, unique: true, index: true },
+    status: { type: String, enum: ['pending', 'accepted', 'declined', 'expired'], default: 'pending' },
+    expiresAt: { type: Date, required: true },
+    createdAt: { type: Date, default: Date.now }
+});
+const WorkspaceInvite = mongoose.model('WorkspaceInvite', workspaceInviteSchema);
 
 // 🟢 NEW: Invitation Schema
 const invitationSchema = new mongoose.Schema({
@@ -762,12 +784,33 @@ app.delete('/api/team/members/:userId', isAuthenticated, async (req, res) => {
 // 🟢 WORKSPACE (MULTI-PROJECT) ROUTES
 // =================================================================
 
-// GET /api/workspaces - Get all workspaces for user
+// GET /api/workspaces - Get all workspaces for user (owned + shared)
 app.get('/api/workspaces', isAuthenticated, async (req, res) => {
     try {
-        const userId = req.user.id; // 🟢 Use real userId, not composite
-        const workspaces = await Workspace.find({ userId }).sort({ createdAt: 1 }).lean();
-        res.json(workspaces);
+        const userId = req.user.id;
+
+        // Get workspaces owned by user
+        const owned = await Workspace.find({ userId }).sort({ createdAt: 1 }).lean();
+
+        // Get workspaces shared with user
+        const shared = await Workspace.find({
+            'sharedWith.userId': userId
+        }).sort({ createdAt: 1 }).lean();
+
+        // Add role info to shared workspaces
+        const sharedWithRole = shared.map(ws => {
+            const userShare = ws.sharedWith?.find(s => s.userId === userId);
+            return {
+                ...ws,
+                userRole: userShare?.role || 'viewer',
+                isSharedWithMe: true
+            };
+        });
+
+        res.json({
+            owned,
+            shared: sharedWithRole
+        });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
