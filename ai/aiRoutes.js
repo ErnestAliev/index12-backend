@@ -870,12 +870,17 @@ module.exports = function createAiRouter(deps) {
         return `${dd}.${mm}.${yyyy}`;
       };
 
-      const snapTodayDDMMYYYY =
-        _fmtDateDDMMYYYY(uiSnapshot?.meta?.today)
-        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.todayIso)
-        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.todayYmd)
-        || _fmtDateDDMMYYYY(snapTodayTitleStr)
-        || _fmtTodayDDMMYYYY();
+      // 🟢 FIX: Use projection.rangeEndDate for "Факт: до..." display
+      // This ensures AI shows correct date range based on view mode (12d, 1m, etc)
+      const snapRangeEndDDMMYYYY =
+        _fmtDateDDMMYYYY(uiSnapshot?.projection?.rangeEndDate) ||
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.today) ||
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.todayIso) ||
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.todayYmd) ||
+        _fmtDateDDMMYYYY(snapTodayTitleStr) ||
+        _fmtTodayDDMMYYYY();
+
+      const snapTodayDDMMYYYY = snapRangeEndDDMMYYYY; // Use range end for fact display
 
       // Default future date: 6 months ahead if not provided
       const _defaultFutureDDMMYYYY = () => {
@@ -885,12 +890,12 @@ module.exports = function createAiRouter(deps) {
       };
 
       const snapFutureDDMMYYYY =
-        _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntil)
-        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilIso)
-        || _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilStr)
-        || _fmtDateDDMMYYYY(uiSnapshot?.projection?.rangeEndDate)
-        || _fmtDateDDMMYYYY(snapFutureTitleStr)
-        || _defaultFutureDDMMYYYY();
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntil) ||
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilIso) ||
+        _fmtDateDDMMYYYY(uiSnapshot?.meta?.futureUntilStr) ||
+        _fmtDateDDMMYYYY(uiSnapshot?.projection?.rangeEndDate) ||
+        _fmtDateDDMMYYYY(snapFutureTitleStr) ||
+        _defaultFutureDDMMYYYY();
 
       // Keep original snapshot strings for existing outputs ("До 28 дек. 2025 г.")
       const snapTodayStr = snapTodayTitleStr;
