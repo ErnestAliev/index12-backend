@@ -1859,6 +1859,16 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         const { dateKey, day, startDate, endDate } = req.query;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
 
+        console.log('🔍 GET /api/events DEBUG:', {
+            userId,
+            dateKey,
+            day,
+            startDate,
+            endDate,
+            userIdFromReq: req.user?.id,
+            currentWorkspace: req.user?.currentWorkspaceId
+        });
+
         let query = { userId: userId };
 
         if (dateKey) {
@@ -1874,13 +1884,15 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameter: dateKey, day, or startDate/endDate' });
         }
 
+        console.log('🔍 Query:', JSON.stringify(query));
+
         // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
         const events = await Event.find(query)
             .lean()
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
 
-        console.log('📅 GET /api/events - found', events.length, 'events');
+        console.log('📅 GET /api/events - found', events.length, 'events for userId:', userId);
 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
