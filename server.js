@@ -503,19 +503,31 @@ async function getCompositeUserId(req) {
         const workspace = await Workspace.findById(currentWorkspaceId).lean();
         if (!workspace) return realUserId;
 
+        console.log('🔍 getCompositeUserId:', {
+            realUserId,
+            workspaceId: currentWorkspaceId,
+            workspaceUserId: workspace.userId,
+            isDefault: workspace.isDefault,
+            isSharedWorkspace: workspace.userId && String(workspace.userId) !== String(realUserId)
+        });
+
         // 🔥 Check SHARED workspace FIRST (before isDefault)
         // Critical: shared workspace might also be marked as default
         if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
+            console.log('→ Returning workspace owner ID:', String(workspace.userId));
             return String(workspace.userId); // Return owner's ID for shared workspace
         }
 
         // User's own default workspace
         if (workspace.isDefault) {
+            console.log('→ Returning realUserId for default workspace:', realUserId);
             return realUserId; // Original data preserved
         }
 
         // New owned non-default workspace - use composite ID for isolation
-        return `${realUserId}_ws_${currentWorkspaceId}`;
+        const compositeId = `${realUserId}_ws_${currentWorkspaceId}`;
+        console.log('→ Returning composite ID for non-default workspace:', compositeId);
+        return compositeId;
     } catch (err) {
         console.error('Error in getCompositeUserId:', err);
         return realUserId;
