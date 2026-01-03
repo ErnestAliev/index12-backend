@@ -611,7 +611,7 @@ app.get('/api/auth/me', async (req, res) => {
         }
 
         // Earliest operation date for this user (used by frontend to cap “all-time” loads)
-        const firstEvent = await Event.findOne({ userId: userId })
+        const firstEvent = await Event.findOne({ userId: effectiveUserId })
             .sort({ date: 1 })
             .select('date')
             .lean();
