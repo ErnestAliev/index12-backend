@@ -503,31 +503,19 @@ async function getCompositeUserId(req) {
         const workspace = await Workspace.findById(currentWorkspaceId).lean();
         if (!workspace) return realUserId;
 
-        console.log('🔍 getCompositeUserId:', {
-            realUserId,
-            workspaceId: currentWorkspaceId,
-            workspaceUserId: workspace.userId,
-            isDefault: workspace.isDefault,
-            isSharedWorkspace: workspace.userId && String(workspace.userId) !== String(realUserId)
-        });
-
         // 🔥 Check SHARED workspace FIRST (before isDefault)
         // Critical: shared workspace might also be marked as default
         if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
-            console.log('→ Returning workspace owner ID:', String(workspace.userId));
             return String(workspace.userId); // Return owner's ID for shared workspace
         }
 
         // User's own default workspace
         if (workspace.isDefault) {
-            console.log('→ Returning realUserId for default workspace:', realUserId);
             return realUserId; // Original data preserved
         }
 
         // New owned non-default workspace - use composite ID for isolation
-        const compositeId = `${realUserId}_ws_${currentWorkspaceId}`;
-        console.log('→ Returning composite ID for non-default workspace:', compositeId);
-        return compositeId;
+        return `${realUserId}_ws_${currentWorkspaceId}`;
     } catch (err) {
         console.error('Error in getCompositeUserId:', err);
         return realUserId;
@@ -634,6 +622,15 @@ app.get('/api/auth/me', async (req, res) => {
         let workspaceRole = 'analyst';
         if (req.user.currentWorkspaceId) {
             const ws = await Workspace.findById(req.user.currentWorkspaceId);
+            console.log('🔍 /api/auth/me workspaceRole debug:', {
+                currentWorkspaceId: req.user.currentWorkspaceId,
+                wsFound: !!ws,
+                wsUserId: ws?.userId,
+                userId,
+                isOwner: ws && String(ws.userId) === String(userId),
+                sharedWithCount: ws?.sharedWith?.length || 0
+            });
+
             if (ws) {
                 if (String(ws.userId) === String(userId)) {
                     workspaceRole = 'admin';
@@ -1871,16 +1868,6 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         const { dateKey, day, startDate, endDate } = req.query;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
 
-        console.log('🔍 GET /api/events DEBUG:', {
-            userId,
-            dateKey,
-            day,
-            startDate,
-            endDate,
-            userIdFromReq: req.user?.id,
-            currentWorkspace: req.user?.currentWorkspaceId
-        });
-
         // 🔥 CRITICAL: Support both ObjectId and String for userId (legacy data)
         let userIdQuery;
         try {
@@ -1909,15 +1896,11 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameter: dateKey, day, or startDate/endDate' });
         }
 
-        console.log('🔍 Query:', JSON.stringify(query));
-
         // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
         const events = await Event.find(query)
             .lean()
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
-
-        console.log('📅 GET /api/events - found', events.length, 'events for userId:', userId);
 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
