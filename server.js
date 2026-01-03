@@ -1999,8 +1999,20 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
         const updatedData = { ...req.body };
 
+        // 🔥 CRITICAL: Support both ObjectId and String for userId (same as GET endpoint)
+        let userIdQuery;
+        try {
+            if (typeof userId === 'string' && /^[0-9a-fA-F]{24}$/.test(userId)) {
+                userIdQuery = { $in: [userId, new mongoose.Types.ObjectId(userId)] };
+            } else {
+                userIdQuery = userId;
+            }
+        } catch {
+            userIdQuery = userId;
+        }
+
         // Fetch the event to check ownership
-        const existingEvent = await Event.findOne({ _id: id, userId });
+        const existingEvent = await Event.findOne({ _id: id, userId: userIdQuery });
         if (!existingEvent) {
             return res.status(404).json({ message: 'Event not found' });
         }
@@ -2010,10 +2022,12 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (req.workspaceRole === 'manager') {
             // Manager can only edit their own operations
             if (existingEvent.createdBy && existingEvent.createdBy !== req.user.id) {
+                console.log('❌ Manager blocked from editing:', { managerId: req.user.id, createdBy: existingEvent.createdBy });
                 return res.status(403).json({ message: 'Managers can only edit their own operations' });
             }
         }
         // Admin can edit ANY operation (no ownership check)
+        console.log('✅ PUT /api/events:', { id, role: req.workspaceRole, fields: Object.keys(updatedData) });
 
         if (updatedData.date) {
             updatedData.date = new Date(updatedData.date);
@@ -2032,7 +2046,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             updatedData.dayOfYear = _getDayOfYear(updatedData.date);
         }
 
-        const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userId }, updatedData, { new: true });
+        const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userIdQuery }, updatedData, { new: true });
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
         await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
@@ -2047,7 +2061,20 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
     try {
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
-        const eventToDelete = await Event.findOne({ _id: id, userId });
+
+        // 🔥 CRITICAL: Support both ObjectId and String for userId
+        let userIdQuery;
+        try {
+            if (typeof userId === 'string' && /^[0-9a-fA-F]{24}$/.test(userId)) {
+                userIdQuery = { $in: [userId, new mongoose.Types.ObjectId(userId)] };
+            } else {
+                userIdQuery = userId;
+            }
+        } catch {
+            userIdQuery = userId;
+        }
+
+        const eventToDelete = await Event.findOne({ _id: id, userId: userIdQuery });
 
         if (!eventToDelete) {
             return res.status(200).json({ message: 'Already deleted or not found' });
