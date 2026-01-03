@@ -279,7 +279,7 @@ const taxPaymentSchema = new mongoose.Schema({
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
 
 const eventSchema = new mongoose.Schema({
-    userId: { type: String, required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and String
     createdBy: { type: String, required: false }, // Track who created this operation
     date: { type: Date, required: true },
     dateKey: { type: String, required: true, index: true },
@@ -1881,7 +1881,20 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             currentWorkspace: req.user?.currentWorkspaceId
         });
 
-        let query = { userId: userId };
+        // 🔥 CRITICAL: Support both ObjectId and String for userId (legacy data)
+        let userIdQuery;
+        try {
+            // Try to convert to ObjectId if it's a valid ObjectId string
+            if (typeof userId === 'string' && /^[0-9a-fA-F]{24}$/.test(userId)) {
+                userIdQuery = { $in: [userId, new mongoose.Types.ObjectId(userId)] };
+            } else {
+                userIdQuery = userId;
+            }
+        } catch {
+            userIdQuery = userId;
+        }
+
+        let query = { userId: userIdQuery };
 
         if (dateKey) {
             query.dateKey = dateKey;
