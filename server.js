@@ -1637,7 +1637,7 @@ app.get('/api/categories', isAuthenticated, async (req, res) => {
 
 app.get('/api/prepayments', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
+        const userId = await getCompositeUserId(req); // 🔥 FIX
         const data = await Prepayment.find({ userId }).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -1645,7 +1645,7 @@ app.get('/api/prepayments', isAuthenticated, async (req, res) => {
 
 app.get('/api/credits', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
+        const userId = await getCompositeUserId(req); // 🔥 FIX
         const data = await Credit.find({ userId }).sort({ order: 1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -1653,7 +1653,7 @@ app.get('/api/credits', isAuthenticated, async (req, res) => {
 
 app.post('/api/taxes', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
+        const userId = await getCompositeUserId(req); // 🔥 FIX
         const workspaceId = await getWorkspaceId(req);
         const data = req.body;
 
@@ -1671,7 +1671,7 @@ app.post('/api/taxes', isAuthenticated, checkWorkspacePermission(['admin', 'mana
 
 app.get('/api/taxes', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
+        const userId = await getCompositeUserId(req); // 🔥 FIX
         const data = await TaxPayment.find({ userId }).sort({ date: -1 }).lean();
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -1679,7 +1679,7 @@ app.get('/api/taxes', isAuthenticated, async (req, res) => {
 
 app.get('/api/deals/all', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req);
+        const userId = await getCompositeUserId(req); // 🔥 FIX
         const deals = await Event.find({
             userId,
             type: 'income',
@@ -1736,7 +1736,7 @@ app.put('/api/user/layout', isAuthenticated, async (req, res) => {
 // --- SNAPSHOT (FIXED: CLIENT TIMEZONE AWARE) ---
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req); // 🟢 UPDATED: Use effective user ID
+        const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID so admin sees owner's data
         let now;
         if (req.query.date) {
             now = new Date(req.query.date);
@@ -1841,7 +1841,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
 // --- EVENTS ROUTES ---
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
-        const userId = getEffectiveUserId(req); // 🟢 UPDATED
+        const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID
         // 🟢 PERFORMANCE: .lean() used
         const events = await Event.find({ userId: userId })
             .lean()
@@ -2201,7 +2201,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         expenseContractorId, incomeContractorId
     } = req.body;
 
-    const userId = getEffectiveUserId(req); // 🟢 UPDATED
+    const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID
 
     const safeId = (val) => (val && val !== 'null' && val !== 'undefined' && val !== '') ? val : null;
 
