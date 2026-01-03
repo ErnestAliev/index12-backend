@@ -1985,9 +1985,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             return res.status(404).json({ message: 'Event not found' });
         }
 
-        // Check ownership for manager role
-        const userRole = await getUserWorkspaceRole(req);
-        if (userRole === 'manager') {
+        // Check ownership for manager role (req.workspaceRole set by checkWorkspacePermission middleware)
+        if (req.workspaceRole === 'manager') {
             // Manager can only edit their own operations
             if (existingEvent.createdBy && existingEvent.createdBy !== req.user.id) {
                 return res.status(403).json({ message: 'Managers can only edit their own operations' });
@@ -2032,9 +2031,8 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
             return res.status(200).json({ message: 'Already deleted or not found' });
         }
 
-        // Check ownership for manager role
-        const userRole = await getUserWorkspaceRole(req);
-        if (userRole === 'manager') {
+        // Check ownership for manager role (req.workspaceRole set by checkWorkspacePermission middleware)
+        if (req.workspaceRole === 'manager') {
             // Manager can only delete their own operations
             if (eventToDelete.createdBy && eventToDelete.createdBy !== req.user.id) {
                 return res.status(403).json({ message: 'Managers can only delete their own operations' });
