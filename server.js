@@ -279,6 +279,10 @@ const taxPaymentSchema = new mongoose.Schema({
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
 
 const eventSchema = new mongoose.Schema({
+    userId: { type: String, required: true, index: true },
+    createdBy: { type: String, required: false }, // Track who created this operation
+    date: { type: Date, required: true },
+    dateKey: { type: String, required: true, index: true },
     dayOfYear: Number,
     cellIndex: Number,
     type: String,
@@ -292,42 +296,26 @@ const eventSchema = new mongoose.Schema({
 
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
-
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }, // 🟢 NEW
-
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
-
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-
     isTransfer: { type: Boolean, default: false },
     isWithdrawal: { type: Boolean, default: false },
-
     isClosed: { type: Boolean, default: false },
     totalDealAmount: { type: Number, default: 0 },
     parentProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-
     isDealTranche: { type: Boolean, default: false },
     isWorkAct: { type: Boolean, default: false },
     isPrepayment: { type: Boolean },
-
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
-
     destination: String,
     transferGroupId: String,
-
     fromAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     toAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     toCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
     fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
-
-    date: { type: Date },
-    dateKey: { type: String, index: true },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-
     excludeFromTotals: { type: Boolean, default: false },
     isSalary: { type: Boolean, default: false },
     relatedCreditId: String,
@@ -1942,6 +1930,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             dateKey,
             dayOfYear,
             userId,
+            createdBy: req.user.id, // Track real user who created this operation
             workspaceId: req.user.currentWorkspaceId // 🟢 NEW
         });
         await newEvent.save();
@@ -1990,6 +1979,21 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
         const updatedData = { ...req.body };
 
+        // Fetch the event to check ownership
+        const existingEvent = await Event.findOne({ _id: id, userId });
+        if (!existingEvent) {
+            return res.status(404).json({ message: 'Event not found' });
+        }
+
+        // Check ownership for manager role
+        const userRole = await getUserWorkspaceRole(req);
+        if (userRole === 'manager') {
+            // Manager can only edit their own operations
+            if (existingEvent.createdBy && existingEvent.createdBy !== req.user.id) {
+                return res.status(403).json({ message: 'Managers can only edit their own operations' });
+            }
+        }
+
         if (updatedData.date) {
             updatedData.date = new Date(updatedData.date);
             if (updatedData.dateKey) {
@@ -2017,8 +2021,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
     } catch (err) { res.status(400).json({ message: err.message }); }
 });
 
-// 🟢 UPDATED: Use canDelete middleware
-app.delete('/api/events/:id', checkWorkspacePermission(['admin']), canDelete, async (req, res) => {
+// 🟢 UPDATED: Allow managers to delete their own operations
+app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canDelete, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
@@ -2026,6 +2030,15 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin']), canDelete, as
 
         if (!eventToDelete) {
             return res.status(200).json({ message: 'Already deleted or not found' });
+        }
+
+        // Check ownership for manager role
+        const userRole = await getUserWorkspaceRole(req);
+        if (userRole === 'manager') {
+            // Manager can only delete their own operations
+            if (eventToDelete.createdBy && eventToDelete.createdBy !== req.user.id) {
+                return res.status(403).json({ message: 'Managers can only delete their own operations' });
+            }
         }
 
         const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
