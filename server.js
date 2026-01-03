@@ -611,7 +611,7 @@ app.get('/api/auth/me', async (req, res) => {
         }
 
         // Earliest operation date for this user (used by frontend to cap “all-time” loads)
-        const firstEvent = await Event.findOne({ userId: effectiveUserId })
+        const firstEvent = await Event.findOne({ userId: userId })
             .sort({ date: 1 })
             .select('date')
             .lean();
@@ -646,7 +646,7 @@ app.get('/api/auth/me', async (req, res) => {
             effectiveUserId: effectiveUserId,
             minEventDate: firstEvent ? firstEvent.date : null,
             workspaceRole, // Role in current workspace
-            isWorkspaceOwner: isOwner // Flag to indicate if user owns the workspace
+            isWorkspaceOwner: req.user.currentWorkspaceId ? (await Workspace.findById(req.user.currentWorkspaceId).lean().then(ws => ws && String(ws.userId) === String(userId))) : true
         });
     } catch (err) {
         res.status(500).json({ message: err.message });
