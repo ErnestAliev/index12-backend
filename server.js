@@ -618,18 +618,10 @@ app.get('/api/auth/me', async (req, res) => {
 
         const baseUser = (req.user && typeof req.user.toJSON === 'function') ? req.user.toJSON() : req.user;
 
-        // 🟢 Determine workspace role
+        // Determine workspace role
         let workspaceRole = 'analyst';
         if (req.user.currentWorkspaceId) {
             const ws = await Workspace.findById(req.user.currentWorkspaceId);
-            console.log('🔍 /api/auth/me workspaceRole debug:', {
-                currentWorkspaceId: req.user.currentWorkspaceId,
-                wsFound: !!ws,
-                wsUserId: ws?.userId,
-                userId,
-                isOwner: ws && String(ws.userId) === String(userId),
-                sharedWithCount: ws?.sharedWith?.length || 0
-            });
 
             if (ws) {
                 if (String(ws.userId) === String(userId)) {
