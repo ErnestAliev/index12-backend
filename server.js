@@ -1408,6 +1408,12 @@ app.get('/api/accounts', isAuthenticated, async (req, res) => {
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
         const query = { userId };
         const data = await Account.find(query).sort({ order: 1 }).lean();
+        console.log('🔍 GET /api/accounts:', {
+            realUserId: req.user.id,
+            computedUserId: userId,
+            accountsFound: data.length,
+            workspaceId: req.user.currentWorkspaceId
+        });
         res.json(data);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
