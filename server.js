@@ -2023,12 +2023,14 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         }
 
         // Check ownership for manager role (req.workspaceRole set by checkWorkspacePermission middleware)
+        // Admin has full access, manager only own operations
         if (req.workspaceRole === 'manager') {
             // Manager can only edit their own operations
             if (existingEvent.createdBy && existingEvent.createdBy !== req.user.id) {
                 return res.status(403).json({ message: 'Managers can only edit their own operations' });
             }
         }
+        // Admin can edit ANY operation (no ownership check)
 
         if (updatedData.date) {
             updatedData.date = new Date(updatedData.date);
@@ -2069,12 +2071,14 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
         }
 
         // Check ownership for manager role (req.workspaceRole set by checkWorkspacePermission middleware)
+        // Admin has full access, manager only own operations
         if (req.workspaceRole === 'manager') {
             // Manager can only delete their own operations
             if (eventToDelete.createdBy && eventToDelete.createdBy !== req.user.id) {
                 return res.status(403).json({ message: 'Managers can only delete their own operations' });
             }
         }
+        // Admin can delete ANY operation (no ownership check)
 
         const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
         if (taxPayment) {
