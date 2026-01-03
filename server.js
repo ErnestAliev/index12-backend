@@ -643,9 +643,10 @@ app.get('/api/auth/me', async (req, res) => {
 
         res.json({
             ...baseUser,
-            effectiveUserId: effectiveUserId, // 🟢 NEW: For employees to access admin's data
+            effectiveUserId: effectiveUserId,
             minEventDate: firstEvent ? firstEvent.date : null,
-            workspaceRole // 🟢 NEW: Role in current workspace
+            workspaceRole, // Role in current workspace
+            isWorkspaceOwner: isOwner // Flag to indicate if user owns the workspace
         });
     } catch (err) {
         res.status(500).json({ message: err.message });
