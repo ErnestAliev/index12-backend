@@ -618,13 +618,18 @@ app.get('/api/auth/me', async (req, res) => {
 
         const baseUser = (req.user && typeof req.user.toJSON === 'function') ? req.user.toJSON() : req.user;
 
-        // Determine workspace role
+        // Determine workspace role and ownership
         let workspaceRole = 'analyst';
+        let isWorkspaceOwner = true; // Default: no workspace = owner
+
         if (req.user.currentWorkspaceId) {
-            const ws = await Workspace.findById(req.user.currentWorkspaceId);
+            const ws = await Workspace.findById(req.user.currentWorkspaceId).lean();
 
             if (ws) {
-                if (String(ws.userId) === String(userId)) {
+                const isOwner = String(ws.userId) === String(userId);
+                isWorkspaceOwner = isOwner;
+
+                if (isOwner) {
                     workspaceRole = 'admin';
                 } else {
                     const share = ws.sharedWith?.find(s => String(s.userId) === String(userId));
@@ -637,8 +642,8 @@ app.get('/api/auth/me', async (req, res) => {
             ...baseUser,
             effectiveUserId: effectiveUserId,
             minEventDate: firstEvent ? firstEvent.date : null,
-            workspaceRole, // Role in current workspace
-            isWorkspaceOwner: req.user.currentWorkspaceId ? (await Workspace.findById(req.user.currentWorkspaceId).lean().then(ws => ws && String(ws.userId) === String(userId))) : true
+            workspaceRole,
+            isWorkspaceOwner
         });
     } catch (err) {
         res.status(500).json({ message: err.message });
