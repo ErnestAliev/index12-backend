@@ -557,7 +557,7 @@ app.get('/api/auth/me', async (req, res) => {
         }
 
         const userId = req.user.id;
-        const effectiveUserId = getEffectiveUserId(req); // 🟢 NEW
+        const effectiveUserId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID so admin sees owner's data
         const userObjId = new mongoose.Types.ObjectId(effectiveUserId);
 
         // 🟢 NEW: Auto-migration - create default workspace on first login
