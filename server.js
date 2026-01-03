@@ -2022,12 +2022,11 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (req.workspaceRole === 'manager') {
             // Manager can only edit their own operations
             if (existingEvent.createdBy && existingEvent.createdBy !== req.user.id) {
-                console.log('❌ Manager blocked from editing:', { managerId: req.user.id, createdBy: existingEvent.createdBy });
                 return res.status(403).json({ message: 'Managers can only edit their own operations' });
             }
         }
         // Admin can edit ANY operation (no ownership check)
-        console.log('✅ PUT /api/events:', { id, role: req.workspaceRole, fields: Object.keys(updatedData) });
+
 
         if (updatedData.date) {
             updatedData.date = new Date(updatedData.date);
