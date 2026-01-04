@@ -1816,6 +1816,15 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             }
         ]);
 
+        // 🔍 DEBUG: Log aggregation results
+        const eventCount = await Event.countDocuments({ userId: new mongoose.Types.ObjectId(userId), date: { $lte: now } });
+        console.log('🔍 [snapshot] Aggregation results:', {
+            userId,
+            eventCount,
+            accountsFound: aggregationResult[0]?.accounts?.length || 0,
+            accountsData: aggregationResult[0]?.accounts
+        });
+
         const results = aggregationResult[0];
         const accountBalances = {}; const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {};
 
@@ -1825,6 +1834,8 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         results.contractors.forEach(item => contractorBalances[item._id.toString()] = item.total);
         results.projects.forEach(item => projectBalances[item._id.toString()] = item.total);
         results.categories.forEach(item => { categoryTotals[item._id.toString()] = { income: item.income, expense: item.expense, total: item.total }; });
+
+        console.log('🔍 [snapshot] Final accountBalances:', accountBalances);
 
         res.json({ timestamp: now, totalBalance: 0, accountBalances, companyBalances, individualBalances, contractorBalances, projectBalances, categoryTotals });
     } catch (err) { res.status(500).json({ message: err.message }); }
