@@ -76,51 +76,76 @@ async function migrateUserData(userId) {
 
     const workspaceId = defaultWorkspace._id;
 
-    // 2. Update all operations
+    // 2. Normalize userId format in all operations (convert ObjectId to string)
+    const userIdString = userId.toString();
+    const eventsWithObjectId = await Event.find({
+        userId: { $type: 'objectId' },
+        $or: [
+            { userId: userId },
+            { userId: new mongoose.Types.ObjectId(userId) }
+        ]
+    });
+
+    if (eventsWithObjectId.length > 0) {
+        console.log(`  🔧 Found ${eventsWithObjectId.length} operations with ObjectId userId, converting to string...`);
+        await Event.updateMany(
+            {
+                userId: { $type: 'objectId' },
+                $or: [
+                    { userId: userId },
+                    { userId: new mongoose.Types.ObjectId(userId) }
+                ]
+            },
+            { $set: { userId: userIdString } }
+        );
+        console.log(`  ✅ Converted userId to string format`);
+    }
+
+    // 3. Update all operations with workspaceId
     const eventsResult = await Event.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
-    console.log(`  📝 Updated ${eventsResult.modifiedCount} operations`);
+    console.log(`  📝 Updated ${eventsResult.modifiedCount} operations with workspaceId`);
 
-    // 3. Update all entities
+    // 4. Update all entities with string userId
     const accountsResult = await Account.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
     console.log(`  💰 Updated ${accountsResult.modifiedCount} accounts`);
 
     const companiesResult = await Company.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
     console.log(`  🏢 Updated ${companiesResult.modifiedCount} companies`);
 
     const individualsResult = await Individual.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
     console.log(`  👤 Updated ${individualsResult.modifiedCount} individuals`);
 
     const contractorsResult = await Contractor.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
     console.log(`  🤝 Updated ${contractorsResult.modifiedCount} contractors`);
 
     const categoriesResult = await Category.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
     console.log(`  📁 Updated ${categoriesResult.modifiedCount} categories`);
 
     const projectsResult = await Project.updateMany(
-        { userId, workspaceId: { $exists: false } },
+        { userId: userIdString, workspaceId: { $exists: false } },
         { $set: { workspaceId } }
     );
     console.log(`  📊 Updated ${projectsResult.modifiedCount} projects`);
 
-    // 4. Set currentWorkspaceId for user
+    // 5. Set currentWorkspaceId for user
     await User.updateOne(
         { _id: userId },
         { $set: { currentWorkspaceId: workspaceId } }
