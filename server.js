@@ -1729,7 +1729,6 @@ app.put('/api/user/layout', isAuthenticated, async (req, res) => {
 app.get('/api/snapshot', isAuthenticated, async (req, res) => {
     try {
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID so admin sees owner's data
-        console.log('🔍 [GET /api/snapshot] Called with userId:', userId, 'realUserId:', req.user?.id);
         let now;
         if (req.query.date) {
             now = new Date(req.query.date);
@@ -1743,11 +1742,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         const retailInd = await Individual.findOne({ userId, name: { $regex: /^(розничные клиенты|розница)$/i } });
         const retailIdObj = retailInd ? retailInd._id : null;
 
-        // 🔍 DEBUG: Check if events exist at all
-        const directCheck = await Event.find({ userId }).limit(5).lean();
-        console.log('🔍 [GET /api/snapshot] Direct query - found events:', directCheck.length, 'sample:', directCheck.map(e => ({ _id: e._id, userId: e.userId, date: e.date })));
-
-        console.log('🔍 [GET /api/snapshot] Aggregation query - userId:', userId, 'date <= ', now);
         const aggregationResult = await Event.aggregate([
             { $match: { userId: userId, date: { $lte: now } } }, // 🔥 FIX: Use string userId, not ObjectId
             {
@@ -1822,15 +1816,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             }
         ]);
 
-        // 🔍 DEBUG: Log aggregation results
-        const eventCount = await Event.countDocuments({ userId: new mongoose.Types.ObjectId(userId), date: { $lte: now } });
-        console.log('🔍 [snapshot] Aggregation results:', {
-            userId,
-            eventCount,
-            accountsFound: aggregationResult[0]?.accounts?.length || 0,
-            accountsData: aggregationResult[0]?.accounts
-        });
-
         const results = aggregationResult[0];
         const accountBalances = {}; const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {};
 
@@ -1840,8 +1825,6 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         results.contractors.forEach(item => contractorBalances[item._id.toString()] = item.total);
         results.projects.forEach(item => projectBalances[item._id.toString()] = item.total);
         results.categories.forEach(item => { categoryTotals[item._id.toString()] = { income: item.income, expense: item.expense, total: item.total }; });
-
-        console.log('🔍 [snapshot] Final accountBalances:', accountBalances);
 
         res.json({ timestamp: now, totalBalance: 0, accountBalances, companyBalances, individualBalances, contractorBalances, projectBalances, categoryTotals });
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -1925,7 +1908,6 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
     try {
         const data = req.body;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
-        console.log('🔍 [POST /api/events] Creating operation with userId:', userId, 'realUserId:', req.user?.id);
         let date, dateKey, dayOfYear;
 
         // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
@@ -1970,17 +1952,6 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             workspaceId: req.user.currentWorkspaceId // 🟢 NEW
         });
         await newEvent.save();
-        console.log('🔍 [POST /api/events] Saved operation:', {
-            _id: newEvent._id,
-            userId: newEvent.userId,
-            date: newEvent.date,
-            dateKey: newEvent.dateKey,
-            type: newEvent.type,
-            amount: newEvent.amount,
-            accountId: newEvent.accountId,
-            categoryId: newEvent.categoryId,
-            isWorkAct: newEvent.isWorkAct
-        });
 
         if (newEvent.type === 'income' && newEvent.categoryId) {
             const category = await Category.findOne({ _id: newEvent.categoryId, userId });
