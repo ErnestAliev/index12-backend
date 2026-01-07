@@ -2374,10 +2374,34 @@ const generateCRUD = (model, path, emitEventName = null) => {
 
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
-            const userId = req.user.id; let createData = { ...req.body, userId };
-            if (model.schema.paths.order) { const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 }); createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0; }
-            if (path === 'accounts') { createData.initialBalance = req.body.initialBalance || 0; createData.companyId = req.body.companyId || null; createData.individualId = req.body.individualId || null; }
-            if (path === 'contractors' || path === 'individuals') { createData.defaultProjectId = req.body.defaultProjectId || null; createData.defaultCategoryId = req.body.defaultCategoryId || null; }
+            const userId = req.user.id;
+            const workspaceId = req.user.currentWorkspaceId; // 🟢 Get current workspace
+
+            let createData = { ...req.body, userId };
+
+            // 🟢 Add workspaceId if schema supports it
+            if (model.schema.paths.workspaceId && workspaceId) {
+                createData.workspaceId = workspaceId;
+            }
+
+            if (model.schema.paths.order) {
+                const maxOrderDoc = await model.findOne({ userId: userId }).sort({ order: -1 });
+                createData.order = maxOrderDoc ? maxOrderDoc.order + 1 : 0;
+            }
+
+            // 🟢 Account-specific fields (including companyId/individualId for linking)
+            if (path === 'accounts') {
+                createData.initialBalance = req.body.initialBalance || 0;
+                createData.companyId = req.body.companyId || null;
+                createData.individualId = req.body.individualId || null;
+                createData.isExcluded = req.body.isExcluded || false; // 🟢 Added isExcluded
+            }
+
+            if (path === 'contractors' || path === 'individuals') {
+                createData.defaultProjectId = req.body.defaultProjectId || null;
+                createData.defaultCategoryId = req.body.defaultCategoryId || null;
+            }
+
             const newItem = new model(createData);
             const savedItem = await newItem.save();
 
