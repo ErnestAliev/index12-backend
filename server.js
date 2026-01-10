@@ -218,6 +218,10 @@ const contractorSchema = new mongoose.Schema({
     defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }],
     defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
+    // 🟢 NEW: Legal data fields for document generation
+    identificationNumber: { type: String, default: null },  // БИН/ИИН
+    contractNumber: { type: String, default: null },        // Номер договора
+    contractDate: { type: Date, default: null },            // Дата договора
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
