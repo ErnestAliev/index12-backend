@@ -147,7 +147,7 @@ const workspaceInviteSchema = new mongoose.Schema({
     invitedEmail: { type: String }, // Optional: null for link-based invites, email for targeted invites
     role: { type: String, enum: ['analyst', 'manager', 'admin'], default: 'analyst' },
     token: { type: String, required: true, unique: true, index: true },
-    status: { type: String, enum: ['pending', 'accepted', 'declined', 'expired'], default: 'pending' },
+    status: { type: String, enum: ['pending', 'accepted', 'declined', 'expired', 'revoked'], default: 'pending' },
     expiresAt: { type: Date, required: true },
     createdAt: { type: Date, default: Date.now }
 });
@@ -1363,9 +1363,16 @@ app.delete('/api/workspace-invites/:inviteId', isAuthenticated, async (req, res)
         const userId = req.user.id;
         const { inviteId } = req.params;
 
-        const invite = await WorkspaceInvite.findOne({ _id: inviteId, invitedBy: userId });
+        // Find the invite first
+        const invite = await WorkspaceInvite.findById(inviteId);
         if (!invite) {
             return res.status(404).json({ message: 'Invite not found' });
+        }
+
+        // Verify that the user owns the workspace that this invite is for
+        const workspace = await Workspace.findOne({ _id: invite.workspaceId, userId });
+        if (!workspace) {
+            return res.status(403).json({ message: 'You do not have permission to revoke this invite' });
         }
 
         invite.status = 'revoked';
