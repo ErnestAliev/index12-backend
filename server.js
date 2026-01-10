@@ -187,6 +187,7 @@ const companySchema = new mongoose.Schema({
     order: { type: Number, default: 0 },
     taxRegime: { type: String, default: 'simplified' },
     taxPercent: { type: Number, default: 3 },
+    identificationNumber: { type: String, default: null },  // ИИН/БИН
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
