@@ -330,6 +330,8 @@ const eventSchema = new mongoose.Schema({
 
 // 🟢 PERFORMANCE: Индекс для ускорения range-запросов ($gte, $lte)
 eventSchema.index({ userId: 1, date: 1 });
+// 🚀 PERFORMANCE: Compound index for dateKey queries (critical for /api/events?dateKey=...)
+eventSchema.index({ userId: 1, dateKey: 1 });
 
 const Event = mongoose.model('Event', eventSchema);
 
@@ -405,6 +407,20 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
 passport.serializeUser((user, done) => { done(null, user.id); });
 passport.deserializeUser(async (id, done) => {
     try { const user = await User.findById(id); done(null, user); } catch (err) { done(err, null); }
+});
+
+// 🚀 PERFORMANCE: Request-level workspace cache middleware
+// This eliminates N+1 workspace queries - each endpoint was calling Workspace.findById!
+app.use(async (req, res, next) => {
+    if (req.isAuthenticated() && req.user?.currentWorkspaceId) {
+        try {
+            req.cachedWorkspace = await Workspace.findById(req.user.currentWorkspaceId).lean();
+            // console.log('[PERF] Workspace cached for request:', req.user.currentWorkspaceId);
+        } catch (err) {
+            console.error('[PERF] Workspace cache error:', err);
+        }
+    }
+    next();
 });
 
 // --- HELPERS (ВОССТАНОВЛЕНЫ) ---
@@ -505,7 +521,8 @@ async function getCompositeUserId(req) {
     if (!currentWorkspaceId) return realUserId;
 
     try {
-        const workspace = await Workspace.findById(currentWorkspaceId).lean();
+        // 🚀 PERFORMANCE: Use cached workspace from middleware (eliminates DB query!)
+        const workspace = req.cachedWorkspace;
         if (!workspace) return realUserId;
 
         // 🔥 Check SHARED workspace FIRST (before isDefault)
