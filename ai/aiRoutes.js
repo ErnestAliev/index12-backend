@@ -1478,6 +1478,91 @@ module.exports = function createAiRouter(deps) {
 
         let dataPacket = _buildDataPacket();
 
+        // 🔥 SMART FILTER: Extract date range from user query and filter operations
+        const _extractDateRangeFromQuery = (query) => {
+          const q = String(query || '').toLowerCase();
+
+          // Parse month names
+          const months = {
+            'январ': 0, 'феврал': 1, 'март': 2, 'апрел': 3, 'ма': 4, 'май': 4,
+            'июн': 5, 'июл': 6, 'август': 7, 'сентябр': 8, 'октябр': 9, 'ноябр': 10, 'декабр': 11
+          };
+
+          // Check for month queries: "за декабрь 2025", "в декабре 25 года"
+          for (const [monthName, monthIdx] of Object.entries(months)) {
+            if (q.includes(monthName)) {
+              // Extract year
+              let year = new Date().getFullYear();
+              const yearMatch = q.match(/\b(20\d{2}|\d{2})\b/);
+              if (yearMatch) {
+                year = Number(yearMatch[1]);
+                if (year < 100) year = 2000 + year;
+              }
+
+              // Return full month range
+              const start = _kzDateFromYMD(year, monthIdx, 1);
+              const end = _kzDateFromYMD(year, monthIdx + 1, 0); // Last day of month
+              return {
+                start: _startOfDay(start),
+                end: _endOfDay(end),
+                description: `${monthName} ${year}`
+              };
+            }
+          }
+
+          // Check for "с ... по ..." ranges
+          const rangeMatch = q.match(/\bс\s+(.+?)\s+по\s+(.+?)\b/i);
+          if (rangeMatch) {
+            const fromD = _parseRuDateFromText(rangeMatch[1]);
+            const toD = _parseRuDateFromText(rangeMatch[2]);
+            if (fromD && toD) {
+              return {
+                start: _startOfDay(fromD),
+                end: _endOfDay(toD),
+                description: `${_fmtDateKZ(fromD)} - ${_fmtDateKZ(toD)}`
+              };
+            }
+          }
+
+          return null; // No specific range detected
+        };
+
+        const dateRange = _extractDateRangeFromQuery(q);
+
+        if (dateRange) {
+          console.log('📅 SMART FILTER ACTIVATED:');
+          console.log('  - Detected range:', dateRange.description);
+          console.log('  - From:', dateRange.start.toISOString());
+          console.log('  - To:', dateRange.end.toISOString());
+          console.log('  - Operations before filter:', (dataPacket.operations || []).length);
+
+          // Filter operations
+          const startTs = dateRange.start.getTime();
+          const endTs = dateRange.end.getTime();
+
+          if (dataPacket.operations) {
+            dataPacket.operations = dataPacket.operations.filter(op => {
+              return op.ts >= startTs && op.ts <= endTs;
+            });
+          }
+
+          // Filter timeline
+          if (dataPacket.timeline) {
+            const filteredTimeline = {};
+            for (const [dateKey, ops] of Object.entries(dataPacket.timeline)) {
+              const dayTs = _parseAnyDateToTs(dateKey);
+              if (dayTs && dayTs >= startTs && dayTs <= endTs) {
+                filteredTimeline[dateKey] = ops;
+              }
+            }
+            dataPacket.timeline = filteredTimeline;
+          }
+
+          console.log('  - Operations after filter:', (dataPacket.operations || []).length);
+          console.log('  - Timeline days after filter:', Object.keys(dataPacket.timeline || {}).length);
+        }
+
+
         // DEBUG: Log what we're sending to AI
         const todayTs = _kzStartOfDay(new Date()).getTime();
         const futureOps = (dataPacket?.operations || []).filter(op => op.ts > todayTs);
@@ -1495,6 +1580,15 @@ module.exports = function createAiRouter(deps) {
         console.log('  - Timeline keys:', Object.keys(dataPacket?.timeline || {}).slice(0, 10));
 
         const system = [
+          '!!! КРИТИЧНО - ЧИТАЙ ПЕРВЫМ !!!',
+          'ФИЛЬТРАЦИЯ ПО МЕСЯЦАМ - АБСОЛЮТНЫЙ ПРИОРИТЕТ:',
+          '- Если пользователь просит "за декабрь 2025" - показывай ТОЛЬКО операции с датами 01.12.2025-31.12.2025!',
+          '- Если пользователь просит "за январь 2026" - показывай ТОЛЬКО операции с датами 01.01.2026-31.01.2026!',
+          '- СТРОГО ПРОВЕРЯЙ ДАТУ КАЖДОЙ ОПЕРАЦИИ:',
+          '  * 14.01.26 = ЯНВАРЬ 2026, НЕ ДЕКАБРЬ!',
+          '  * 31.12.25 = ДЕКАБРЬ 2025, НЕ ЯНВАРЬ!',
+          '- Если операция НЕ входит в запрошенный период - НЕ ПОКАЗЫВАЙ её!',
+          '',
           'Ты профессиональный финансовый аналитик INDEX12.',
           'Твоя задача - давать ТОЧНЫЕ, КОНКРЕТНЫЕ ответы на основе ФАКТИЧЕСКИХ данных.',
           '',
@@ -1505,6 +1599,12 @@ module.exports = function createAiRouter(deps) {
           '- ВМЕСТО "значительно выросли" → "выросли на 245 000₸ (+18%)"',
           '- ВМЕСТО "примерно 500 тысяч" → "487 320₸"',
           '- ВМЕСТО "большая часть расходов" → "68% расходов (340 000₸ из 500 000₸)"',
+          '',
+          'КРИТИЧНО - ИТОГОВЫЕ СУММЫ:',
+          '- При показе списка доходов/расходов ВСЕГДА добавляй строку "Итого: СУММА ₸" в конце!',
+          '- Посчитай сумму всех показанных операций и выведи в конце списка.',
+          '- Формат: "Итого: 500 000 ₸" (с пробелами в тысячах)',
+          '- Это обязательно для ВСЕХ списков операций (доходы, расходы, переводы и т.д.)',
           '',
           'ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА АНАЛИЗА:',
           '1. ВСЕГДА указывай ТОЧНЫЕ суммы из DATA (не округляй до "примерно")',
@@ -1558,16 +1658,33 @@ module.exports = function createAiRouter(deps) {
           '- DATA.totals содержит fact (текущие) и forecast (будущие) - используй правильное поле',
           '',
           'КРИТИЧНО - ФИЛЬТРАЦИЯ ПО ДИАПАЗОНУ ДАТ:',
-          '- Когда пользователь указывает конкретный период ("с 1 по 10 января 2026", "за январь", "с 01.01.2026 по 10.01.2026").',
-          '- Парсируй даты из запроса пользователя и конвертируй в формат YYYY-MM-DD.',
-          '- Фильтруй DATA.operations по полю date: операция входит в период, если date >= начало_периода И date <= конец_периода.',
-          '- Или используй DATA.timeline: ключи - это даты, отбирай только те ключи, которые попадают в указанный период.',
-          '- ПРИМЕРЫ:',
-          '  * "расходы с 1 по 10 января 2026" → фильтруй где kind="expense" И date >= "2026-01-01" И date <= "2026-01-10"',
-          '  * "доходы за январь 2026" → kind="income" И date >= "2026-01-01" И date <= "2026-01-31"',
-          '  * "операции с 15.12.2025 по 25.12.2025" → date >= "2025-12-15" И date <= "2025-12-25"',
-          '- Если в указанном периоде нет операций - так и скажи: "В период с X по Y нет операций типа Z".',
-          '- НЕ показывай операции из других периодов, показывай ТОЛЬКО те, что попадают в указанный диапазон!',
+          '- Когда пользователь указывает конкретный период - ты ОБЯЗАН фильтровать строго по этому периоду!',
+          '- Парсируй даты из запроса и конвертируй в формат YYYY-MM-DD для сравнения.',
+          '- Фильтруй DATA.operations по полю date: включай операцию ТОЛЬКО если date >= начало И date <= конец.',
+          '',
+          'КРИТИЧНО - ФИЛЬТРАЦИЯ ПО МЕСЯЦАМ (САМОЕ ВАЖНОЕ):',
+          '- "за декабрь 2025" или "в декабре 25 года" = СТРОГО с 2025-12-01 по 2025-12-31 включительно!',
+          '- "за январь 2026" = СТРОГО с 2026-01-01 по 2026-01-31 включительно!',
+          '- ЗАПРЕЩЕНО включать операции из других месяцев! Проверяй КАЖДУЮ дату!',
+          '- Если дата операции 14.01.26 или 01.01.26 - это ЯНВАРЬ, НЕ декабрь!',
+          '- Если дата операции 30.12.25 или 15.12.25 - это ДЕКАБРЬ, НЕ январь!',
+          '',
+          '- ПРИМЕРЫ ПРАВИЛЬНОЙ ФИЛЬТРАЦИИ:',
+          '  * Запрос: "доходы за декабрь 2025"',
+          '    Фильтр: kind="income" И date >= "2025-12-01" И date <= "2025-12-31"',
+          '    МОЖНО показать: 01.12.25, 15.12.25, 31.12.25',
+          '    НЕЛЬЗЯ показать: 14.01.26, 01.01.26 (это ЯНВАРЬ!)',
+          '',
+          '  * Запрос: "расходы за январь 2026"',
+          '    Фильтр: kind="expense" И date >= "2026-01-01" И date <= "2026-01-31"',
+          '    МОЖНО показать: 01.01.26, 15.01.26, 31.01.26',
+          '    НЕЛЬЗЯ показать: 30.12.25, 25.12.25 (это ДЕКАБРЬ!)',
+          '',
+          '  * Запрос: "расходы с 1 по 10 января 2026"',
+          '    Фильтр: kind="expense" И date >= "2026-01-01" И date <= "2026-01-10"',
+          '',
+          '- Если в указанном периоде нет операций - скажи: "В период с X по Y нет операций типа Z".',
+          '- НЕ показывай операции из других периодов!!!',
           '',
           'ФОРМАТ ОТВЕТА ПРИ ПОКАЗЕ ОПЕРАЦИЙ ПО ДНЯМ:',
           'Используй КОМПАКТНЫЙ формат с разделителями между днями:',
@@ -2446,7 +2563,7 @@ module.exports = function createAiRouter(deps) {
         const raw = _opsGetRowsForKindScope(k, sc);
         const baseTs = _kzStartOfDay(new Date()).getTime();
 
-        const rows = raw
+        let rows = raw
           .map((x) => ({
             ...x,
             __ts: _guessDateTs(x.__row, baseTs),
@@ -2454,6 +2571,49 @@ module.exports = function createAiRouter(deps) {
           }))
           .filter((x) => x.__kind === k)
           .filter((x) => Number.isFinite(x.__ts));
+
+        // 🔥 SMART FILTER: Extract date range from global query (q variable from parent scope)
+        const _extractMonthFromQuery = (query) => {
+          const qLower = String(query || '').toLowerCase();
+          const months = {
+            'январ': 0, 'феврал': 1, 'март': 2, 'апрел': 3, 'ма': 4, 'май': 4,
+            'июн': 5, 'июл': 6, 'август': 7, 'сентябр': 8, 'октябр': 9, 'ноябр': 10, 'декабр': 11
+          };
+
+          for (const [monthName, monthIdx] of Object.entries(months)) {
+            if (qLower.includes(monthName)) {
+              let year = new Date().getFullYear();
+              const yearMatch = qLower.match(/\b(20\d{2}|\d{2})\b/);
+              if (yearMatch) {
+                year = Number(yearMatch[1]);
+                if (year < 100) year = 2000 + year;
+              }
+
+              const start = _kzDateFromYMD(year, monthIdx, 1);
+              const end = _kzDateFromYMD(year, monthIdx + 1, 0);
+              return {
+                start: _startOfDay(start).getTime(),
+                end: _endOfDay(end).getTime(),
+                label: `${monthName} ${year}`
+              };
+            }
+          }
+          return null;
+        };
+
+        // Apply filter if month detected in query
+        try {
+          const queryToUse = String(opts.query || '').toLowerCase();
+          const dateRange = _extractMonthFromQuery(queryToUse);
+          if (dateRange) {
+            console.log('📅 SNAPSHOT FILTER:', dateRange.label, '- Before:', rows.length);
+            rows = rows.filter(row => row.__ts >= dateRange.start && row.__ts <= dateRange.end);
+            console.log('   After:', rows.length);
+          }
+        } catch (e) {
+          console.error('Filter error:', e);
+        }
+
 
         if (!rows.length) {
           const title = (k === 'income') ? 'Доходы' : (k === 'expense') ? 'Расходы' : 'Операции';
@@ -2479,6 +2639,13 @@ module.exports = function createAiRouter(deps) {
         const lines = [`${title}${scopeTitle}:`];
         const lineStyle = (format === 'date_amount') ? 'date_amount' : '';
         shown.forEach((x, i) => lines.push(`${i + 1}) ${_opsFmtLineUnified(x, k, { showProject, lineStyle })}`));
+
+        // Calculate and show total
+        const total = shown.reduce((sum, x) => {
+          const amount = _guessAmount(x.__row);
+          return sum + Math.abs(amount);
+        }, 0);
+        lines.push(`Итого: ${_formatTenge(total)}`);
 
         lines.push(`Найдено: ${rows.length}. Показал: ${shown.length}.`);
         if (!opts.noHints && rows.length > shown.length) {
@@ -2868,16 +3035,16 @@ module.exports = function createAiRouter(deps) {
           }
 
           if (quickIntent2 === 'income') {
-            return res.json({ text: _renderOpsList('income', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+            return res.json({ text: _renderOpsList('income', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'expense') {
-            return res.json({ text: _renderOpsList('expense', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+            return res.json({ text: _renderOpsList('expense', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'transfer') {
-            return res.json({ text: _renderOpsList('transfer', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+            return res.json({ text: _renderOpsList('transfer', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'withdrawal') {
-            return res.json({ text: _renderOpsList('withdrawal', 'current', { format: 'short', limit: limitQ, noHints: true }) });
+            return res.json({ text: _renderOpsList('withdrawal', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
 
           if (quickIntent2 === 'taxes') {
@@ -3702,8 +3869,14 @@ module.exports = function createAiRouter(deps) {
       const messages = [
         { role: 'system', content: system },
         ...(contextBrief ? [{ role: 'system', content: `aiContext(JSON, truncated): ${contextBrief}` }] : []),
-        { role: 'user', content: q }
       ];
+      messages.push({ role: 'user', content: q });
+
+      console.log('🤖 SENDING TO OPENAI:');
+      console.log('  - User query:', q);
+      console.log('  - Total operations in DATA:', (dataPacket?.operations || []).length);
+      console.log('  - Sample operations dates:', (dataPacket?.operations || []).slice(0, 5).map(op => op.date));
+      console.log('  - System prompt length:', system.length, 'chars');
 
       const text = await _openAiChat(messages, { temperature: 0.2, maxTokens: 260 });
 
