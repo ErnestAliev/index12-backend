@@ -2575,6 +2575,22 @@ module.exports = function createAiRouter(deps) {
         // 🔥 SMART FILTER: Extract date range from global query (q variable from parent scope)
         const _extractMonthFromQuery = (query) => {
           const qLower = String(query || '').toLowerCase();
+
+          // Check for "с ... по ..." ranges first
+          const rangeMatch = qLower.match(/\bс\s+(.+?)\s+по\s+(.+?)\b/i);
+          if (rangeMatch) {
+            const fromD = _parseRuDateFromText(rangeMatch[1]);
+            const toD = _parseRuDateFromText(rangeMatch[2]);
+            if (fromD && toD) {
+              return {
+                start: _startOfDay(fromD).getTime(),
+                end: _endOfDay(toD).getTime(),
+                label: `${_fmtDateKZ(fromD)} - ${_fmtDateKZ(toD)}`
+              };
+            }
+          }
+
+          // Parse month names
           const months = {
             'январ': 0, 'феврал': 1, 'март': 2, 'апрел': 3, 'ма': 4, 'май': 4,
             'июн': 5, 'июл': 6, 'август': 7, 'сентябр': 8, 'октябр': 9, 'ноябр': 10, 'декабр': 11
