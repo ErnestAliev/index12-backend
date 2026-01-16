@@ -259,10 +259,17 @@ module.exports = function createAiRouter(deps) {
           y = Number(yM[1]);
           if (y < 100) y = 2000 + y;
         }
-        if (/\bдо\s*конц\w*\b/i.test(s) || /\bконец\b/i.test(s)) {
-          return _kzDateFromYMD(y, mo.idx + 1, 0);
+
+        // Try to extract day number before month name (e.g., "16 января")
+        const dayMatch = s.match(new RegExp(`\\b(\\d{1,2})\\s+${s.match(mo.re)[0]}`, 'i'));
+        let day = 1; // default to first day
+        if (dayMatch) {
+          day = Number(dayMatch[1]);
+        } else if (/\bдо\s*конц\w*\b/i.test(s) || /\bконец\b/i.test(s)) {
+          return _kzDateFromYMD(y, mo.idx + 1, 0); // last day of month
         }
-        return _kzDateFromYMD(y, mo.idx, 1);
+
+        return _kzDateFromYMD(y, mo.idx, day);
       }
     }
 
@@ -560,6 +567,15 @@ module.exports = function createAiRouter(deps) {
       const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
       const q = qRaw.trim();
       if (!q) return res.status(400).json({ message: 'Empty message' });
+
+
+      // 🔘 QUICK BUTTON MARKER: Detect [QB] marker for quick buttons
+      // Frontend adds [QB] to quick button messages, we remove it and set flag
+      let isQuickButtonMarked = false;
+      if (q.includes('[QB]')) {
+        isQuickButtonMarked = true;
+        q = q.replace(/\[QB\]/g, '').trim(); // Remove marker
+      }
 
       const qLower = q.toLowerCase();
 
@@ -1278,9 +1294,33 @@ module.exports = function createAiRouter(deps) {
         // --- Build compact DATA packet (single source of truth)
         const _safeJson = (obj, maxLen = 15000) => {
           try {
-            const s = JSON.stringify(obj);
+            let copy = JSON.parse(JSON.stringify(obj)); // Deep clone
+            let s = JSON.stringify(copy);
+
             if (s.length <= maxLen) return s;
-            return s.slice(0, maxLen) + '…';
+
+            // Smart trimming: remove less important fields first
+            if (copy.timeline && Object.keys(copy.timeline).length > 10) {
+              // Keep only recent timeline days
+              const keys = Object.keys(copy.timeline).sort().reverse();
+              copy.timeline = {};
+              keys.slice(0, 10).forEach(k => copy.timeline[k] = obj.timeline[k]);
+              s = JSON.stringify(copy);
+              if (s.length <= maxLen) return s;
+            }
+
+            // If still too large, keep only essential data
+            if (s.length > maxLen) {
+              const essential = {
+                meta: copy.meta,
+                totals: copy.totals,
+                accounts: (copy.accounts || []).slice(0, 20),
+                operations: (copy.operations || []).slice(0, 50), // Keep recent 50
+              };
+              s = JSON.stringify(essential);
+            }
+
+            return s;
           } catch (_) {
             return '{}';
           }
@@ -1491,12 +1531,18 @@ module.exports = function createAiRouter(deps) {
           // Check for month queries: "за декабрь 2025", "в декабре 25 года"
           for (const [monthName, monthIdx] of Object.entries(months)) {
             if (q.includes(monthName)) {
-              // Extract year
+              // Extract year carefully - avoid matching day numbers like "15", "31"
               let year = new Date().getFullYear();
-              const yearMatch = q.match(/\b(20\d{2}|\d{2})\b/);
-              if (yearMatch) {
-                year = Number(yearMatch[1]);
-                if (year < 100) year = 2000 + year;
+              // First try 4-digit year
+              const year4Match = q.match(/\b(20\d{2})\b/);
+              if (year4Match) {
+                year = Number(year4Match[1]);
+              } else {
+                // Only match 2-digit if near "год" keyword to avoid matching days
+                const year2Match = q.match(/\b(\d{2})\s*год/);
+                if (year2Match) {
+                  year = 2000 + Number(year2Match[1]);
+                }
               }
 
               // Return full month range
@@ -2589,7 +2635,7 @@ module.exports = function createAiRouter(deps) {
           const qLower = String(query || '').toLowerCase();
 
           // Check for "с ... по ..." ranges first
-          const rangeMatch = qLower.match(/\bс\s+([\d\sа-яё]+?)\s+по\s+([\d\sа-яё]+?)(?:\s+года)?$/i);
+          const rangeMatch = qLower.match(/\bс\s+([\dа-яё\s]+?)\s+по\s+([\dа-яё\s]+?)(?:\s+года|\s+2\d{3}|\s|$)/i);
           console.log('🔎 Regex result:', rangeMatch ? 'MATCHED' : 'NULL', rangeMatch);
           if (rangeMatch) {
             // Extract year from FULL query to avoid matching day numbers
@@ -2605,8 +2651,29 @@ module.exports = function createAiRouter(deps) {
             }
 
             // Parse dates with correct year context
-            const fromD = _parseRuDateFromText(rangeMatch[1] + ' ' + yearForRange);
-            const toD = _parseRuDateFromText(rangeMatch[2] + ' ' + yearForRange);
+            // First, convert ordinal numbers to digits (десятого → 10, двадцатого → 20)
+            const ordinals = {
+              'первого': '1', 'второго': '2', 'третьего': '3', 'четвертого': '4', 'четвёртого': '4',
+              'пятого': '5', 'шестого': '6', 'седьмого': '7', 'восьмого': '8', 'девятого': '9',
+              'десятого': '10', 'одиннадцатого': '11', 'двенадцатого': '12', 'тринадцатого': '13',
+              'четырнадцатого': '14', 'пятнадцатого': '15', 'шестнадцатого': '16', 'семнадцатого': '17',
+              'восемнадцатого': '18', 'девятнадцатого': '19', 'двадцатого': '20', 'двадцать первого': '21',
+              'двадцать второго': '22', 'двадцать третьего': '23', 'двадцать четвертого': '24',
+              'двадцать пятого': '25', 'двадцать шестого': '26', 'двадцать седьмого': '27',
+              'двадцать восьмого': '28', 'двадцать девятого': '29', 'тридцатого': '30', 'тридцать первого': '31'
+            };
+
+            let fromText = rangeMatch[1];
+            let toText = rangeMatch[2];
+
+            // Replace ordinals with digits
+            for (const [ordinal, digit] of Object.entries(ordinals)) {
+              fromText = fromText.replace(new RegExp(`\\b${ordinal}\\b`, 'gi'), digit);
+              toText = toText.replace(new RegExp(`\\b${ordinal}\\b`, 'gi'), digit);
+            }
+
+            const fromD = _parseRuDateFromText(fromText + ' ' + yearForRange);
+            const toD = _parseRuDateFromText(toText + ' ' + yearForRange);
             if (fromD && toD) {
               return {
                 start: _startOfDay(fromD).getTime(),
@@ -2730,7 +2797,7 @@ module.exports = function createAiRouter(deps) {
         shown.forEach((x, i) => lines.push(`${i + 1}) ${_opsFmtLineUnified(x, k, { showProject, lineStyle })}`));
 
         // Calculate and show total
-        const total = shown.reduce((sum, x) => {
+        const total = rows.reduce((sum, x) => {
           const amount = _guessAmount(x.__row);
           return sum + Math.abs(amount);
         }, 0);
@@ -3027,13 +3094,21 @@ module.exports = function createAiRouter(deps) {
         // QUICK -> only deterministic handlers
         // CHAT  -> only OpenAI (DATA + history)
         // =========================
-        const isQuickFlag = (req?.body?.isQuickRequest === true) || (String(req?.body?.isQuickRequest || '').toLowerCase() === 'true');
+        const isQuickFlag = (req?.body?.isQuickRequest === true) || (String(req?.body?.isQuickRequest || '').toLowerCase() === 'true') || isQuickButtonMarked;
         const qNorm2 = _normQ(qLower);
         const quickKey2 = (req?.body?.quickKey != null) ? String(req.body.quickKey) : '';
 
-        const _resolveQuickIntent = (quickKey, qNorm) => {
+        const _resolveQuickIntent = (quickKey, qNorm, isQuickFlag) => {
           const k = String(quickKey || '').toLowerCase().trim();
           if (k) return k;
+
+          // ⚠️ CRITICAL: If this is NOT a quick button press (isQuickFlag = false),
+          // do NOT analyze text to determine intent. Free text ALWAYS goes to OpenAI.
+          if (!isQuickFlag) {
+            return ''; // Free text input → CHAT mode (OpenAI)
+          }
+
+          // Below logic ONLY for quick button presses without specific quickKey
 
           // Skip QUICK mode for temporal queries (user wants current vs future filtering)
           const hasTemporalKeywords =
@@ -3097,7 +3172,7 @@ module.exports = function createAiRouter(deps) {
           return '';
         };
 
-        const quickIntent2 = _resolveQuickIntent(quickKey2, qNorm2);
+        const quickIntent2 = _resolveQuickIntent(quickKey2, qNorm2, isQuickFlag);
         // Use QUICK mode if intent is recognized OR if explicit quick flag is set
         const isQuickRequest2 = Boolean(isQuickFlag || quickIntent2);
 
@@ -3124,16 +3199,29 @@ module.exports = function createAiRouter(deps) {
           }
 
           if (quickIntent2 === 'income') {
-            return res.json({ text: _renderOpsList('income', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            // Determine scope from query
+            let scope = 'current'; // default
+            if (/(будущ|прогноз|план|ожидаем|следующ|после\s*сегодня)/i.test(qLower)) scope = 'future';
+            else if (/(\bвсе\b|\bоба\b|полностью|полный|весь|вместе)/i.test(qLower)) scope = 'all';
+            return res.json({ text: _renderOpsList('income', scope, { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'expense') {
-            return res.json({ text: _renderOpsList('expense', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            let scope = 'current';
+            if (/(будущ|прогноз|план|ожидаем|следующ|после\s*сегодня)/i.test(qLower)) scope = 'future';
+            else if (/(\bвсе\b|\bоба\b|полностью|полный|весь|вместе)/i.test(qLower)) scope = 'all';
+            return res.json({ text: _renderOpsList('expense', scope, { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'transfer') {
-            return res.json({ text: _renderOpsList('transfer', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            let scope = 'current';
+            if (/(будущ|прогноз|план|ожидаем|следующ|после\s*сегодня)/i.test(qLower)) scope = 'future';
+            else if (/(\bвсе\b|\bоба\b|полностью|полный|весь|вместе)/i.test(qLower)) scope = 'all';
+            return res.json({ text: _renderOpsList('transfer', scope, { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'withdrawal') {
-            return res.json({ text: _renderOpsList('withdrawal', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            let scope = 'current';
+            if (/(будущ|прогноз|план|ожидаем|следующ|после\s*сегодня)/i.test(qLower)) scope = 'future';
+            else if (/(\bвсе\b|\bоба\b|полностью|полный|весь|вместе)/i.test(qLower)) scope = 'all';
+            return res.json({ text: _renderOpsList('withdrawal', scope, { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
 
           if (quickIntent2 === 'taxes') {
