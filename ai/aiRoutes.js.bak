@@ -3092,16 +3092,16 @@ module.exports = function createAiRouter(deps) {
           }
 
           if (quickIntent2 === 'income') {
-            return res.json({ text: _renderOpsList('income', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            return res.json({ text: _renderOpsList('income', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'expense') {
-            return res.json({ text: _renderOpsList('expense', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            return res.json({ text: _renderOpsList('expense', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'transfer') {
-            return res.json({ text: _renderOpsList('transfer', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            return res.json({ text: _renderOpsList('transfer', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
           if (quickIntent2 === 'withdrawal') {
-            return res.json({ text: _renderOpsList('withdrawal', 'all', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
+            return res.json({ text: _renderOpsList('withdrawal', 'current', { format: 'short', limit: limitQ, noHints: true, query: qLower }) });
           }
 
           if (quickIntent2 === 'taxes') {
