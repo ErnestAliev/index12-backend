@@ -1086,7 +1086,9 @@ module.exports = function createAiRouter(deps) {
 
       const _guessProject = (row) => String(_firstNonEmpty([row?.projectName, row?.project, row?.projectTitle, row?.project_label, row?.projectLabel, row?.project_name, row?.project?.name, row?.project?.title]) || '—');
 
+
       const _guessContractor = (row) => String(_firstNonEmpty([row?.contractorName, row?.contractor, row?.counterparty, row?.counterpartyName, row?.fromName, row?.toName, row?.partyName, row?.contractor?.name]) || '—');
+      const _guessIndividual = (row) => String(_firstNonEmpty([row?.individualName, row?.individual, row?.counterpartyIndividualName, row?.counterpartyIndividual, row?.personName, row?.person, row?.individual?.name, row?.counterpartyIndividual?.name]) || '—');
 
       const _guessCategory = (row) => String(_firstNonEmpty([
         row?.categoryName, row?.category, row?.categoryTitle, row?.category_label, row?.categoryLabel,
@@ -1448,6 +1450,7 @@ module.exports = function createAiRouter(deps) {
                 amount: Number(amount || 0),
                 project: _guessProject(r),
                 contractor: _guessContractor(r),
+                individual: _guessIndividual(r),
                 category: _guessCategory(r),
                 name: _guessName(r),
                 source: String(x.__wk || ''),
@@ -1481,6 +1484,7 @@ module.exports = function createAiRouter(deps) {
                   amount: _guessAmount(op),
                   project: _guessProject(op),
                   contractor: _guessContractor(op),
+                  individual: _guessIndividual(op),
                   category: _guessCategory(op),
                   name: _guessName(op),
                 });
