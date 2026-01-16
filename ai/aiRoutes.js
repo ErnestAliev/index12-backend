@@ -565,16 +565,18 @@ module.exports = function createAiRouter(deps) {
       const userIdStr = String(userId);
 
       const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
-      const q = qRaw.trim();
+      let q = qRaw.trim();
       if (!q) return res.status(400).json({ message: 'Empty message' });
 
 
-      // 🔘 QUICK BUTTON MARKER: Detect [QB] marker for quick buttons
-      // Frontend adds [QB] to quick button messages, we remove it and set flag
+      // 🔘 QUICK BUTTON MARKER: Detect ... at end for QB
       let isQuickButtonMarked = false;
-      if (q.includes('[QB]')) {
+      if (q.endsWith('...')) {
         isQuickButtonMarked = true;
-        q = q.replace(/\[QB\]/g, '').trim(); // Remove marker
+        q = q.replace(/\.\.\.$/g, '').trim(); // Remove marker
+        console.log('🔘 QB MARKER (...) DETECTED! Clean query:', q);
+      } else {
+        console.log('❌ NO QB MARKER in query:', q);
       }
 
       const qLower = q.toLowerCase();
@@ -2002,32 +2004,6 @@ module.exports = function createAiRouter(deps) {
         return { fact: _fmtMoneyInline(factRaw), fut: _fmtMoneyInline(futureRaw) };
       };
 
-      const _renderDualFactForecastList = (title, widget, rows) => {
-        const arr = Array.isArray(rows) ? rows : [];
-
-        const lines = [
-          '===================',
-          `${title}:`,
-          `Факт: до ${snapTodayDDMMYYYY}`,
-          `Прогноз: до ${snapFutureDDMMYYYY}`,
-        ];
-
-        if (!arr.length) {
-          lines.push(`${title}: 0`);
-        } else {
-          _maybeSlice(arr, explicitLimit).forEach((x) => {
-            const name = x?.name || x?.title || x?.label || 'Без имени';
-            const { fact, fut } = _pickFactFuture(x);
-            lines.push(`${name} ₸ ${fact} > ${fut}`);
-          });
-        }
-
-        lines.push('===================');
-
-
-        return lines.join('\n');
-      };
-
       const _wrapBlock = (title, widget, bodyLines) => {
         const lines = [
           '===================',
@@ -3101,6 +3077,8 @@ module.exports = function createAiRouter(deps) {
         const isQuickFlag = (req?.body?.isQuickRequest === true) || (String(req?.body?.isQuickRequest || '').toLowerCase() === 'true') || isQuickButtonMarked;
         const qNorm2 = _normQ(qLower);
         const quickKey2 = (req?.body?.quickKey != null) ? String(req.body.quickKey) : '';
+        console.log('🚦 ROUTING:', { isQuickFlag, isQuickButtonMarked, quickKey2 });
+
 
         const _resolveQuickIntent = (quickKey, qNorm, isQuickFlag) => {
           const k = String(quickKey || '').toLowerCase().trim();
