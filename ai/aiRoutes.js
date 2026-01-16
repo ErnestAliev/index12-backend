@@ -441,7 +441,7 @@ module.exports = function createAiRouter(deps) {
     return { totalTax, items };
   };
 
-  const _openAiChat = async (messages, { temperature = 0.2, maxTokens = 220 } = {}) => {
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 220 } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       const err = new Error('OPENAI_API_KEY is missing');
@@ -1800,7 +1800,7 @@ module.exports = function createAiRouter(deps) {
           { role: 'user', content: String(qText || '').trim() }
         ];
 
-        const raw = await _openAiChat(messages, { temperature: 0.2, maxTokens: 1500 });
+        const raw = await _openAiChat(messages, { temperature: 0, maxTokens: 1500 });
         const clean = _sanitizeAiText(raw);
 
         // Persist CHAT history (server-side)
@@ -2622,6 +2622,38 @@ module.exports = function createAiRouter(deps) {
             'июн': 5, 'июл': 6, 'август': 7, 'сентябр': 8, 'октябр': 9, 'ноябр': 10, 'декабр': 11
           };
 
+          // Try to parse specific date like "16 января" FIRST
+          for (const [monthName, monthIdx] of Object.entries(months)) {
+            // Match patterns like: "16 января", "на 16 января", "за 16 января 2026"
+            const specificDateMatch = qLower.match(new RegExp(`\\b(\\d{1,2})\\s+${monthName}`));
+            if (specificDateMatch) {
+              const day = Number(specificDateMatch[1]);
+              let year = new Date().getFullYear();
+
+              // Check for year in query
+              const year4Match = qLower.match(/\b(20\d{2})\b/);
+              if (year4Match) {
+                year = Number(year4Match[1]);
+              } else {
+                const year2Match = qLower.match(/\b(\d{2})\s*год/);
+                if (year2Match) {
+                  year = 2000 + Number(year2Match[1]);
+                }
+              }
+
+              const specificDate = _kzDateFromYMD(year, monthIdx, day);
+              if (specificDate && !isNaN(specificDate.getTime())) {
+                console.log(`📅 SPECIFIC DATE FILTER: ${day} ${monthName} ${year}`);
+                return {
+                  start: _startOfDay(specificDate).getTime(),
+                  end: _endOfDay(specificDate).getTime(),
+                  label: `${day} ${monthName} ${year}`
+                };
+              }
+            }
+          }
+
+          // Parse full month (only if specific date wasn't found)
           for (const [monthName, monthIdx] of Object.entries(months)) {
             if (qLower.includes(monthName)) {
               let year = new Date().getFullYear();
@@ -4023,13 +4055,7 @@ module.exports = function createAiRouter(deps) {
       ];
       messages.push({ role: 'user', content: q });
 
-      console.log('🤖 SENDING TO OPENAI:');
-      console.log('  - User query:', q);
-      console.log('  - Total operations in DATA:', (dataPacket?.operations || []).length);
-      console.log('  - Sample operations dates:', (dataPacket?.operations || []).slice(0, 5).map(op => op.date));
-      console.log('  - System prompt length:', system.length, 'chars');
-
-      const text = await _openAiChat(messages, { temperature: 0.2, maxTokens: 260 });
+      const text = await _openAiChat(messages, { temperature: 0, maxTokens: 260 });
 
       const out = String(text || '').replace(/\u00A0/g, ' ').trim();
       return res.json({ text: out });
