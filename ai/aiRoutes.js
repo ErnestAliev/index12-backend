@@ -3905,7 +3905,6 @@ module.exports = function createAiRouter(deps) {
           const feTo = _parseIsoYMDToKZEnd(aiContext?.meta?.today) || to;
           return res.json({ text: `${_titleTo('Предоплаты', feTo)} ${_formatTenge(p)}` });
         }
-
         return res.json({ text: `${_titleTo('Предоплаты', to)} ${_formatTenge(total)}` });
       }
 
