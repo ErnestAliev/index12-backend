@@ -4054,49 +4054,35 @@ module.exports = function createAiRouter(deps) {
           const taxDebt = Math.abs(Number(taxTotals.actualDebt) || 0);
 
           const lines = [];
-          lines.push('Вот краткий отчет на основе текущих данных:');
+          lines.push('Краткий отчет:');
           lines.push('');
-          lines.push('**1) Баланс на счетах:**');
-          lines.push(`- Общий баланс на открытых счетах: ${_formatTenge(openBalance)}`);
+          lines.push('1) Баланс на счетах:');
+          lines.push(`Открытые счета: ${_formatTenge(openBalance)}`);
           if (allBalance !== openBalance) {
-            lines.push(`- Общий баланс на всех счетах (включая скрытые): ${_formatTenge(allBalance)}`);
+            lines.push(`Все счета (включая скрытые): ${_formatTenge(allBalance)}`);
           }
           lines.push('');
 
           if (incomeSum > 0) {
-            lines.push('**2) Доходы:**');
-            lines.push(`- Общая сумма доходов: ${_formatTenge(incomeSum)}`);
+            lines.push('2) Доходы:');
+            lines.push(`Общая сумма: ${_formatTenge(incomeSum)}`);
             lines.push('');
           }
 
           if (expenseSum > 0) {
-            lines.push('**3) Расходы:**');
-            lines.push(`- Общая сумма расходов: ${_formatTenge(expenseSum)}`);
+            lines.push('3) Расходы:');
+            lines.push(`Общая сумма: ${_formatTenge(expenseSum)}`);
             lines.push('');
           }
 
-          if (taxAccrued > 0 || taxPaid > 0 || taxDebt > 0) {
-            lines.push('**4) Налоги:**');
-            lines.push(`- Начислено налогов: ${_formatTenge(taxAccrued)}`);
-            if (taxPaid > 0) {
-              lines.push(`- Уплачено: ${_formatTenge(taxPaid)}`);
-            }
-            if (taxDebt > 0) {
-              lines.push(`- Задолженность: ${_formatTenge(taxDebt)}`);
-            } else if (taxAccrued > 0) {
-              lines.push(`- Задолженность: 0 ₸`);
-            }
+          if (incomeSum > 0 && expenseSum > 0) {
+            const net = incomeSum - expenseSum;
+            lines.push('4) Чистая прибыль:');
+            lines.push(`${_formatTenge(net)}`);
             lines.push('');
           }
 
-          lines.push('**5) Ключевые выводы:**');
-          if (incomeSum > expenseSum) {
-            lines.push('- Доходы превышают расходы, что свидетельствует о положительном финансовом состоянии.');
-          } else if (expenseSum > incomeSum) {
-            lines.push('- Расходы превышают доходы, рекомендуется пересмотреть бюджет.');
-          }
-          lines.push('');
-          lines.push('Если вам нужна более детальная информация или анализ за другой период, пожалуйста, уточните.');
+          lines.push('Для детального анализа уточните период или задайте конкретный вопрос.');
 
           return res.json({ text: lines.join('\n') });
         } catch (e) {
