@@ -1432,6 +1432,10 @@ module.exports = function createAiRouter(deps) {
             const baseTs = _kzStartOfDay(new Date()).getTime();
             const all = _opsCollectRows();
 
+            // Get accounts for intermediary check
+            const accountsWidget = _findSnapWidget('accounts');
+            const accounts = _getRows(accountsWidget) || [];
+
             // 🔥 FIX: Filter helpers matching frontend mainStore.js:1040,1044
             const _isInterCompanyOp = (row) => {
               const from = row?.fromCompanyId || row?.fromCompany;
@@ -1443,6 +1447,18 @@ module.exports = function createAiRouter(deps) {
               return !!(row?.isRetailWriteOff || row?.retailWriteOff);
             };
 
+            // 🔥 NEW: Check if individual is intermediary (linked to account)
+            const _isIntermediaryIndividual = (row) => {
+              const opIndId = row?.individualId?._id || row?.individualId;
+              if (!opIndId) return false;
+
+              // If operation individualId matches any account individualId -> it's intermediary
+              return accounts.some(acc => {
+                const accIndId = acc?.individualId?._id || acc?.individualId;
+                return accIndId && String(accIndId) === String(opIndId);
+              });
+            };
+
             (all || []).forEach(x => {
               const r = x.__row;
               const ts = _guessDateTs(r, baseTs);
@@ -1450,9 +1466,9 @@ module.exports = function createAiRouter(deps) {
               const kind = _opsGuessKind(x.__wk, r);
               if (!kind) return;
 
-              // 🔥 FIX: Exclude inter-company ops and retail writeoffs from income/expense
+              // 🔥 FIX: Exclude inter-company ops, retail writeoffs, and intermediaries from income/expense
               if (kind === 'income' || kind === 'expense') {
-                if (_isInterCompanyOp(r) || _isRetailWriteOff(r)) {
+                if (_isInterCompanyOp(r) || _isRetailWriteOff(r) || _isIntermediaryIndividual(r)) {
                   return; // Skip - matches frontend currentIncomes/currentExpenses filter
                 }
               }
