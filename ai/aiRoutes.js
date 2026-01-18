@@ -111,8 +111,6 @@ module.exports = function createAiRouter(deps) {
     Individual,
     Project,
     Category,
-    Prepayment,
-    Credit,
   } = models;
 
   const router = express.Router();
@@ -3713,7 +3711,7 @@ module.exports = function createAiRouter(deps) {
         // ---- Fallback: short, snapshot-only answer
         const hint = [
           'Не вижу на экране данных для этого запроса.',
-          `Могу по экрану: счета, всего на счетах, доходы, расходы, переводы, выводы, налоги, предоплаты, кредиты, проекты, компании, контрагенты, категории, физлица. (версия: ${AIROUTES_VERSION})`
+          `Могу по экрану: счета, всего на счетах, доходы, расходы, переводы, проекты, компании, контрагенты, категории, физлица. (версия: ${AIROUTES_VERSION})`
         ].join('\n');
 
         return res.json({ text: hint });

@@ -205,13 +205,6 @@ const individualSchema = new mongoose.Schema({
 });
 const Individual = mongoose.model('Individual', individualSchema);
 
-const prepaymentSchema = new mongoose.Schema({
-    name: String,
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
-});
-const Prepayment = mongoose.model('Prepayment', prepaymentSchema);
-
 const contractorSchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
@@ -247,42 +240,6 @@ const categorySchema = new mongoose.Schema({
 });
 const Category = mongoose.model('Category', categorySchema);
 
-const creditSchema = new mongoose.Schema({
-    name: String,
-    totalDebt: { type: Number, default: 0 },
-    monthlyPayment: { type: Number, default: 0 },
-    paymentDay: { type: Number, default: 25 },
-    date: { type: Date, default: Date.now },
-    contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
-    individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
-    projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
-    categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
-    targetAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', default: null },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
-    rate: Number,
-    term: Number,
-    paymentType: { type: String, default: 'annuity' },
-    isRepaid: { type: Boolean, default: false }
-});
-const Credit = mongoose.model('Credit', creditSchema);
-
-const taxPaymentSchema = new mongoose.Schema({
-    companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
-    periodFrom: { type: Date },
-    periodTo: { type: Date },
-    amount: { type: Number, required: true },
-    status: { type: String, default: 'paid' },
-    date: { type: Date, default: Date.now },
-    description: String,
-    relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    taxType: String,
-    period: String,
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true } // 🟢 NEW
-});
-const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
-
 const eventSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and String
     createdBy: { type: String, required: false }, // Track who created this operation
@@ -295,7 +252,6 @@ const eventSchema = new mongoose.Schema({
     description: String,
 
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
-    prepaymentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Prepayment' },
 
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
 
@@ -305,13 +261,11 @@ const eventSchema = new mongoose.Schema({
     counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     isTransfer: { type: Boolean, default: false },
-    isWithdrawal: { type: Boolean, default: false },
     isClosed: { type: Boolean, default: false },
     totalDealAmount: { type: Number, default: 0 },
     parentProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     isDealTranche: { type: Boolean, default: false },
     isWorkAct: { type: Boolean, default: false },
-    isPrepayment: { type: Boolean },
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
     destination: String,
     transferGroupId: String,
@@ -323,8 +277,6 @@ const eventSchema = new mongoose.Schema({
     toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     excludeFromTotals: { type: Boolean, default: false },
     isSalary: { type: Boolean, default: false },
-    relatedCreditId: String,
-    relatedTaxId: String,
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -1656,47 +1608,7 @@ app.get('/api/categories', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-app.get('/api/prepayments', isAuthenticated, async (req, res) => {
-    try {
-        const userId = await getCompositeUserId(req); // 🔥 FIX
-        const data = await Prepayment.find({ userId }).sort({ order: 1 }).lean();
-        res.json(data);
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
 
-app.get('/api/credits', isAuthenticated, async (req, res) => {
-    try {
-        const userId = await getCompositeUserId(req); // 🔥 FIX
-        const data = await Credit.find({ userId }).sort({ order: 1 }).lean();
-        res.json(data);
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-app.post('/api/taxes', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
-    try {
-        const userId = await getCompositeUserId(req); // 🔥 FIX
-        const workspaceId = await getWorkspaceId(req);
-        const data = req.body;
-
-        const newTax = new TaxPayment({
-            ...data,
-            userId,
-            workspaceId,
-            date: data.date ? new Date(data.date) : new Date()
-        });
-
-        await newTax.save();
-        res.status(201).json(newTax);
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-app.get('/api/taxes', isAuthenticated, async (req, res) => {
-    try {
-        const userId = await getCompositeUserId(req); // 🔥 FIX
-        const data = await TaxPayment.find({ userId }).sort({ date: -1 }).lean();
-        res.json(data);
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
 
 app.get('/api/deals/all', isAuthenticated, async (req, res) => {
     try {
@@ -1720,7 +1632,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // =================================================================
 app.use('/api/ai', createAiRouter({
     mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category, Prepayment, Credit },
+    models: { Event, Account, Company, Contractor, Individual, Project, Category },
     FRONTEND_URL,
     isAuthenticated,
 }));
@@ -1867,7 +1779,7 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
         const events = await Event.find({ userId: userId })
             .lean()
             .sort({ date: 1 })
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -1926,7 +1838,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
         const events = await Event.find(query)
             .lean()
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId prepaymentId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
 
         res.json(events);
@@ -1982,36 +1894,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
         });
         await newEvent.save();
 
-        if (newEvent.type === 'income' && newEvent.categoryId) {
-            const category = await Category.findOne({ _id: newEvent.categoryId, userId });
-            if (category && /кредит|credit/i.test(category.name)) {
-                const contractorId = newEvent.contractorId;
-                const creditIndividualId = newEvent.counterpartyIndividualId;
-                if (contractorId || creditIndividualId) {
-                    let creditQuery = { userId };
-                    if (contractorId) creditQuery.contractorId = contractorId;
-                    else creditQuery.individualId = creditIndividualId;
-                    let credit = await Credit.findOne(creditQuery);
-
-                    if (credit) {
-                        credit.totalDebt = (credit.totalDebt || 0) + (newEvent.amount || 0);
-                        await credit.save();
-                        emitToUser(req, userId, 'credit_updated', credit);
-                    }
-                    else {
-                        let name = 'Новый кредит';
-                        if (contractorId) { const c = await Contractor.findById(contractorId); if (c) name = c.name; }
-                        else if (creditIndividualId) { const i = await Individual.findById(creditIndividualId); if (i) name = i.name; }
-                        const newCredit = new Credit({ name, totalDebt: newEvent.amount, contractorId: contractorId || null, individualId: creditIndividualId || null, userId, projectId: newEvent.projectId, categoryId: newEvent.categoryId, targetAccountId: newEvent.accountId, date: date });
-                        await newCredit.save();
-
-                        emitToUser(req, userId, 'credit_added', newCredit);
-                    }
-                }
-            }
-        }
-
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         emitToUser(req, userId, 'operation_added', newEvent);
 
@@ -2074,7 +1957,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
 
         const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userIdQuery }, updatedData, { new: true });
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
-        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'prepaymentId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         emitToUser(req, userId, 'operation_updated', updatedEvent);
 
@@ -2116,32 +1999,7 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
         }
         // Admin can delete ANY operation (no ownership check)
 
-        const taxPayment = await TaxPayment.findOne({ relatedEventId: id, userId });
-        if (taxPayment) {
-            return res.status(400).json({
-                message: 'Нельзя удалить операцию, так как по ней есть налоговый платёж. Сначала удалите налоговый платёж.'
-            });
-        }
 
-        if (eventToDelete.type === 'income' && eventToDelete.categoryId) {
-            const category = await Category.findById(eventToDelete.categoryId);
-            if (category && /кредит|credit/i.test(category.name)) {
-                const query = { userId };
-                if (eventToDelete.contractorId) {
-                    query.contractorId = eventToDelete.contractorId;
-                } else if (eventToDelete.counterpartyIndividualId) {
-                    query.individualId = eventToDelete.counterpartyIndividualId;
-                }
-                if (eventToDelete.projectId) {
-                    query.projectId = eventToDelete.projectId;
-                }
-                const credit = await Credit.findOne(query);
-                if (credit) {
-                    await Credit.deleteOne({ _id: credit._id });
-                    emitToUser(req, userId, 'credit_deleted', credit._id);
-                }
-            }
-        }
 
         if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
             const pId = eventToDelete.projectId;
@@ -2381,22 +2239,18 @@ const generateCRUD = (model, path, emitEventName = null) => {
         else if (model === Contractor) emitEventName = 'contractor';
         else if (model === Project) emitEventName = 'project';
         else if (model === Category) emitEventName = 'category';
-        else if (model === Prepayment) emitEventName = 'prepayment';
     }
 
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
-            if (path === 'prepayments') {
-                const exists = await model.findOne({ userId });
-                if (!exists) { await new model({ name: 'Предоплата', userId }).save(); }
-            }
+
             let query = model.find({ userId: userId }).sort({ _id: 1 });
             if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
             if (path === 'contractors' || path === 'individuals') {
                 query = query.populate('defaultProjectId').populate('defaultCategoryId').populate('defaultProjectIds').populate('defaultCategoryIds');
             }
-            if (path === 'credits') { query = query.populate('contractorId').populate('individualId').populate('projectId').populate('categoryId'); }
+
             res.json(await query);
         } catch (err) { res.status(500).json({ message: err.message }); }
     });
@@ -2541,10 +2395,9 @@ generateCRUD(Individual, 'individuals');
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
-generateCRUD(Prepayment, 'prepayments');
 
-generateCRUD(Credit, 'credits', 'credit');
-generateCRUD(TaxPayment, 'taxes', 'tax_payment');
+
+
 
 generateBatchUpdate(Account, 'accounts');
 generateBatchUpdate(Company, 'companies');
@@ -2552,8 +2405,7 @@ generateBatchUpdate(Individual, 'individuals');
 generateBatchUpdate(Contractor, 'contractors');
 generateBatchUpdate(Project, 'projects');
 generateBatchUpdate(Category, 'categories');
-generateBatchUpdate(Credit, 'credits', 'credit');
-generateBatchUpdate(TaxPayment, 'taxes', 'tax_payment');
+
 
 generateDeleteWithCascade(Account, 'accounts', 'accountId');
 generateDeleteWithCascade(Company, 'companies', 'companyId');
@@ -2562,59 +2414,7 @@ generateDeleteWithCascade(Contractor, 'contractors', 'contractorId');
 generateDeleteWithCascade(Project, 'projects', 'projectId');
 generateDeleteWithCascade(Category, 'categories', 'categoryId');
 
-app.put('/api/credits/:id', isAuthenticated, async (req, res) => {
-    try {
-        const updated = await Credit.findOneAndUpdate({ _id: req.params.id, userId: req.user.id }, req.body, { new: true })
-            .populate('contractorId').populate('individualId').populate('projectId').populate('categoryId');
 
-        emitToUser(req, req.user.id, 'credit_updated', updated);
-        res.json(updated);
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
-
-app.delete('/api/taxes/:id', isAuthenticated, async (req, res) => {
-    try {
-        const { id } = req.params;
-        const userId = req.user.id;
-        const taxPayment = await TaxPayment.findOneAndDelete({ _id: id, userId });
-        if (!taxPayment) return res.status(404).json({ message: 'Not found' });
-
-        if (taxPayment.relatedEventId) {
-            await Event.findOneAndDelete({ _id: taxPayment.relatedEventId, userId });
-            emitToUser(req, userId, 'operation_deleted', taxPayment.relatedEventId);
-        }
-
-        emitToUser(req, userId, 'tax_payment_deleted', id);
-
-        res.status(200).json({ message: 'Deleted', id });
-    } catch (err) {
-        res.status(500).json({ message: err.message });
-    }
-});
-
-app.delete('/api/credits/:id', isAuthenticated, async (req, res) => {
-    try {
-        const { id } = req.params; const userId = req.user.id;
-        const credit = await Credit.findOne({ _id: id, userId });
-        if (!credit) return res.status(404).json({ message: 'Credit not found' });
-        const creditCategory = await Category.findOne({ userId, name: { $regex: /кредит|credit/i } });
-        if (creditCategory) {
-            let opQuery = { userId, type: 'income', categoryId: creditCategory._id };
-            if (credit.contractorId) { opQuery.contractorId = credit.contractorId; }
-            else if (credit.individualId) { opQuery.counterpartyIndividualId = credit.individualId; }
-            const ops = await Event.find(opQuery);
-            const idsToDelete = ops.map(o => o._id);
-            await Event.deleteMany({ _id: { $in: idsToDelete } });
-
-            if (req.io) idsToDelete.forEach(opId => emitToUser(req, userId, 'operation_deleted', opId));
-        }
-        await Credit.findOneAndDelete({ _id: id, userId });
-
-        emitToUser(req, userId, 'credit_deleted', id);
-
-        res.status(200).json({ message: 'Deleted', id });
-    } catch (err) { res.status(500).json({ message: err.message }); }
-});
 
 console.log('⏳ Попытка подключения к MongoDB...');
 mongoose.connect(DB_URL, {
