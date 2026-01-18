@@ -1637,9 +1637,10 @@ module.exports = function createAiRouter(deps) {
           'ФОРМАТ ОТВЕТОВ (ОБЯЗАТЕЛЬНО СОБЛЮДАЙ):',
           '- ВСЕГДА начинай с указания периода: "За период с 01.01.26 по 31.01.26:"',
           '- Краткость: максимум 10-12 строк',
-          '- Без звездочек **, эмодзи, нумерации 1) 2) 3)',
+          '- Без звездочек **, *, эмодзи, нумерации 1) 2) 3)',
           '- Без процентов в скобках после сумм',
           '- ЗАПРЕЩЕНО: burn rate, runway, ТОП-3, ТОП-5, средний/mean, рентабельность',
+          '- НЕ ПОКАЗЫВАЙ информацию о налогах (данные о платежах находятся не в виджете)',
           '- Формат денег: 1 234 567 ₸',
           '',
           'ФИЛЬТРАЦИЯ ПО МЕСЯЦАМ - АБСОЛЮТНЫЙ ПРИОРИТЕТ:',
@@ -1873,6 +1874,10 @@ module.exports = function createAiRouter(deps) {
         // Aggressive cleanup of forbidden elements
         let cleaned = _sanitizeAiText(raw);
 
+        // Remove all asterisks and list markers
+        cleaned = cleaned.replace(/\*\*/g, '');
+        cleaned = cleaned.replace(/^\s*\*\s+/gm, '- ');
+
         // Remove numbered sections: "1)", "2)", etc
         cleaned = cleaned.replace(/^\d+\)\s+[А-ЯЁ\s]+:\s*$/gmi, '');
 
@@ -1885,6 +1890,11 @@ module.exports = function createAiRouter(deps) {
         cleaned = cleaned.replace(/Burn rate:?[^\n]*/gi, '');
         cleaned = cleaned.replace(/Runway:?[^\n]*/gi, '');
         cleaned = cleaned.replace(/Средний\s+(доход|расход)[^\n]*/gi, '');
+
+        // Remove tax sections completely
+        cleaned = cleaned.replace(/Налоги:?\s*\n([^\n]+\n)*/gi, '');
+        cleaned = cleaned.replace(/- Начислено:?[^\n]*\n?/gi, '');
+        cleaned = cleaned.replace(/- Уплачено:?[^\n]*\n?/gi, '');
 
         // Remove empty lines (max 1 consecutive blank line)
         cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
