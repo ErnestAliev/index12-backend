@@ -1586,7 +1586,19 @@ module.exports = function createAiRouter(deps) {
           console.log('  - Detected range:', dateRange.description);
           console.log('  - From:', dateRange.start.toISOString());
           console.log('  - To:', dateRange.end.toISOString());
-          console.log('  - Operations before filter:', (dataPacket.operations || []).length);
+          console.log('  - Operations BEFORE filter:', (dataPacket.operations || []).length);
+
+          // Log sample operations to see what's there
+          const sampleOps = (dataPacket.operations || []).slice(0, 3);
+          sampleOps.forEach((op, i) => {
+            console.log(`  - Sample op ${i + 1}:`, {
+              date: op.date,
+              kind: op.kind,
+              amount: op.amount,
+              project: op.project,
+              category: op.category
+            });
+          });
 
           // Filter operations
           const startTs = dateRange.start.getTime();
