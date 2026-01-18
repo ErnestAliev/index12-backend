@@ -1433,12 +1433,32 @@ module.exports = function createAiRouter(deps) {
             const out = [];
             const baseTs = _kzStartOfDay(new Date()).getTime();
             const all = _opsCollectRows();
+
+            // 🔥 FIX: Filter helpers matching frontend mainStore.js:1040,1044
+            const _isInterCompanyOp = (row) => {
+              const from = row?.fromCompanyId || row?.fromCompany;
+              const to = row?.toCompanyId || row?.toCompany;
+              return !!(from && to);
+            };
+
+            const _isRetailWriteOff = (row) => {
+              return !!(row?.isRetailWriteOff || row?.retailWriteOff);
+            };
+
             (all || []).forEach(x => {
               const r = x.__row;
               const ts = _guessDateTs(r, baseTs);
               if (!ts) return;
               const kind = _opsGuessKind(x.__wk, r);
               if (!kind) return;
+
+              // 🔥 FIX: Exclude inter-company ops and retail writeoffs from income/expense
+              if (kind === 'income' || kind === 'expense') {
+                if (_isInterCompanyOp(r) || _isRetailWriteOff(r)) {
+                  return; // Skip - matches frontend currentIncomes/currentExpenses filter
+                }
+              }
+
               const amount = _guessAmount(r);
               const date = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(ts));
               out.push({
