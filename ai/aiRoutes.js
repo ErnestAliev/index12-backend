@@ -4013,8 +4013,7 @@ module.exports = function createAiRouter(deps) {
       // -------------------------
       // QUICK REPORT: automatic detailed report
       // -------------------------
-      const isQuickReport = /\b(отч[её]т|report|сводк|краткий|summary)\b/i.test(qLower) &&
-        !/\b(за|по|с\s+\d|период|месяц|год|неделю|день)\b/i.test(qLower);
+      const isQuickReport = /\b(отч[её]т|report|сводк|краткий|summary)\b/i.test(qLower);
 
       if (isQuickReport && uiSnapshot) {
         try {
