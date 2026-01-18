@@ -1633,6 +1633,14 @@ module.exports = function createAiRouter(deps) {
 
         const system = [
           '!!! КРИТИЧНО - ЧИТАЙ ПЕРВЫМ !!!',
+          '',
+          'ФОРМАТ ОТВЕТОВ (ОБЯЗАТЕЛЬНО СОБЛЮДАЙ):',
+          '- Краткость: максимум 10-12 строк',
+          '- Без звездочек **, эмодзи, нумерации 1) 2) 3)',
+          '- Без процентов в скобках после сумм',
+          '- ЗАПРЕЩЕНО: burn rate, runway, ТОП-3, ТОП-5, средний/mean, рентабельность',
+          '- Формат денег: 1 234 567 ₸',
+          '',
           'ФИЛЬТРАЦИЯ ПО МЕСЯЦАМ - АБСОЛЮТНЫЙ ПРИОРИТЕТ:',
           '- Если пользователь просит "за декабрь 2025" - показывай ТОЛЬКО операции с датами 01.12.2025-31.12.2025!',
           '- Если пользователь просит "за январь 2026" - показывай ТОЛЬКО операции с датами 01.01.2026-31.01.2026!',
@@ -1678,6 +1686,13 @@ module.exports = function createAiRouter(deps) {
           'Если речь о прибыльности/эффективности - выводи только ИТОГ и АНАЛИЗ, НЕ списки операций.',
           'Списки операций показывай ТОЛЬКО если пользователь явно попросил "покажи список" или "покажи расходы".',
           'По умолчанию показывай только текущие операции (до сегодня). Прогнозы добавляй только если пользователь явно попросил.',
+          '',
+          'ФОРМАТ ОТВЕТОВ (ОБЯЗАТЕЛЬНО):',
+          '- Без звездочек ** и эмодзи',
+          '- Без нумерации разделов 1) 2) 3)',
+          '- Без процентов в скобках после сумм',
+          '- ЗАПРЕЩЕНО использовать: burn rate, runway, ТОП-3, ТОП-5, средний/mean',
+          '- Краткость: максимум 10 строк',
           '',
           'ЛОГИКА СКРЫТЫХ СЧЕТОВ:',
           '- В DATA.accounts каждый счет имеет поле hidden (true/false)',
@@ -1852,14 +1867,33 @@ module.exports = function createAiRouter(deps) {
           { role: 'user', content: String(qText || '').trim() }
         ];
 
-        const raw = await _openAiChat(messages, { temperature: 0, maxTokens: 1500 });
-        const clean = _sanitizeAiText(raw);
+        const raw = await _openAiChat(messages, { temperature: 0, maxTokens: 800 });
+
+        // Aggressive cleanup of forbidden elements
+        let cleaned = _sanitizeAiText(raw);
+
+        // Remove numbered sections: "1)", "2)", etc
+        cleaned = cleaned.replace(/^\d+\)\s+[А-ЯЁ\s]+:\s*$/gmi, '');
+
+        // Remove "ТОП-X" labels and percentages in parentheses
+        cleaned = cleaned.replace(/ТОП-\d+\s+/gi, '');
+        cleaned = cleaned.replace(/\s*\([^)]*%[^)]*\)/g, '');
+
+        // Remove specific forbidden metrics
+        cleaned = cleaned.replace(/Рентабельность:?\s*\d+%?/gi, '');
+        cleaned = cleaned.replace(/Burn rate:?[^\n]*/gi, '');
+        cleaned = cleaned.replace(/Runway:?[^\n]*/gi, '');
+        cleaned = cleaned.replace(/Средний\s+(доход|расход)[^\n]*/gi, '');
+
+        // Remove empty lines (max 1 consecutive blank line)
+        cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+        cleaned = cleaned.trim();
 
         // Persist CHAT history (server-side)
         _pushHistory(userIdStr, 'user', String(qText || '').trim());
-        _pushHistory(userIdStr, 'assistant', clean);
+        _pushHistory(userIdStr, 'assistant', cleaned);
 
-        return clean;
+        return cleaned;
       };
 
       const _warnForecastOff = (w) => {
@@ -3322,22 +3356,8 @@ module.exports = function createAiRouter(deps) {
         const isExplicitQuick = (reqSource === 'quick_button' || reqSource === 'quick' || reqSource === 'button' || reqSource === 'btn' || req?.body?.mode === 'quick' || Boolean(quickKey));
         const isExplicitChat = (reqSource === 'chat' || reqSource === 'voice' || reqSource === 'mic' || req?.body?.mode === 'chat');
 
-        // Back-compat for old clients: treat ONLY very short/standard phrases as quick.
-        const qNorm = _normQ(qLower);
-        const looksLikeQuickText = (
-          qNorm === 'счета' || qNorm === 'счёт' || qNorm === 'покажи счета' || qNorm === 'покажи счёта' ||
-          qNorm === 'доходы' || qNorm === 'покажи доходы' ||
-          qNorm === 'расходы' || qNorm === 'покажи расходы' ||
-          qNorm === 'переводы' || qNorm === 'покажи переводы' ||
-          qNorm === 'выводы' || qNorm === 'покажи выводы' ||
-          qNorm === 'налоги' || qNorm === 'покажи налоги' ||
-          qNorm === 'проекты' || qNorm === 'покажи проекты' ||
-          qNorm === 'контрагенты' || qNorm === 'покажи контрагентов' ||
-          qNorm === 'категории' || qNorm === 'покажи категории' ||
-          qNorm === 'физлица' || qNorm === 'покажи физлица'
-        );
-
-        const isQuickRequest = isExplicitQuick || (!isExplicitChat && looksLikeQuickText);
+        // Back-compat: removed text-based detection, only explicit QB markers
+        const isQuickRequest = isExplicitQuick;
 
         // -------------------------
         // QUICK REPORT: automatic detailed report (must be BEFORE chat mode)
