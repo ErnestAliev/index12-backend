@@ -3339,6 +3339,62 @@ module.exports = function createAiRouter(deps) {
 
         const isQuickRequest = isExplicitQuick || (!isExplicitChat && looksLikeQuickText);
 
+        // -------------------------
+        // QUICK REPORT: automatic detailed report (must be BEFORE chat mode)
+        // -------------------------
+        const isQuickReport = /\b(отч[её]т|report|сводк|краткий|summary)\b/i.test(qLower);
+
+        if (isQuickReport && uiSnapshot) {
+          try {
+            const widgets = Array.isArray(uiSnapshot.widgets) ? uiSnapshot.widgets : [];
+            const findW = (keys) => {
+              const ks = Array.isArray(keys) ? keys : [keys];
+              return widgets.find(w => w && ks.includes(w.key)) || null;
+            };
+            const getVal = (w, field) => {
+              if (!w) return 0;
+              if (w[field] !== undefined) return Number(w[field] || 0);
+              if (Array.isArray(w.rows) && w.rows[0]) return Number(w.rows[0][field] || 0);
+              return 0;
+            };
+
+            // Incomes
+            const incW = findW(['incomeList', 'income', 'incomeListCurrent']);
+            const incomeSum = getVal(incW, 'current') || getVal(incW, 'fact');
+
+            // Expenses
+            const expW = findW(['expenseList', 'expense', 'expenseListCurrent']);
+            const expenseSum = Math.abs(getVal(expW, 'current') || getVal(expW, 'fact'));
+
+            const lines = [];
+            lines.push('Краткий отчет:');
+            lines.push('');
+
+            if (incomeSum > 0) {
+              lines.push('Доходы:');
+              lines.push(`${_formatTenge(incomeSum)}`);
+              lines.push('');
+            }
+
+            if (expenseSum > 0) {
+              lines.push('Расходы:');
+              lines.push(`${_formatTenge(expenseSum)}`);
+              lines.push('');
+            }
+
+            if (incomeSum > 0 && expenseSum > 0) {
+              const net = incomeSum - expenseSum;
+              lines.push('Чистая прибыль:');
+              lines.push(`${_formatTenge(net)}`);
+            }
+
+            return res.json({ text: lines.join('\n') });
+          } catch (e) {
+            console.error('Quick report error:', e);
+            // Fallback to chat mode
+          }
+        }
+
         // CHAT MODE branch (variative answers) — ONLY from snapshot
         if (!isQuickRequest) {
           const baseTs = _kzStartOfDay(new Date()).getTime();
@@ -4009,87 +4065,6 @@ module.exports = function createAiRouter(deps) {
         }
         return res.json({ text: `${_titleTo('Предоплаты', to)} ${_formatTenge(total)}` });
       }
-
-      // -------------------------
-      // QUICK REPORT: automatic detailed report
-      // -------------------------
-      const isQuickReport = /\b(отч[её]т|report|сводк|краткий|summary)\b/i.test(qLower);
-
-      if (isQuickReport && uiSnapshot) {
-        try {
-          const widgets = Array.isArray(uiSnapshot.widgets) ? uiSnapshot.widgets : [];
-          const findW = (keys) => {
-            const ks = Array.isArray(keys) ? keys : [keys];
-            return widgets.find(w => w && ks.includes(w.key)) || null;
-          };
-          const getVal = (w, field) => {
-            if (!w) return 0;
-            if (w[field] !== undefined) return Number(w[field] || 0);
-            if (Array.isArray(w.rows) && w.rows[0]) return Number(w.rows[0][field] || 0);
-            return 0;
-          };
-
-          // Accounts
-          const accountsW = findW('accounts');
-          const accountRows = accountsW?.rows || [];
-          const openAccounts = accountRows.filter(a => !a.isExcluded);
-          const openBalance = openAccounts.reduce((s, a) => s + Number(a.fact || a.current || 0), 0);
-          const allBalance = accountRows.reduce((s, a) => s + Number(a.fact || a.current || 0), 0);
-
-          // Incomes
-          const incW = findW(['incomeList', 'income', 'incomeListCurrent']);
-          const incomeSum = getVal(incW, 'current') || getVal(incW, 'fact');
-
-          // Expenses
-          const expW = findW(['expenseList', 'expense', 'expenseListCurrent']);
-          const expenseSum = Math.abs(getVal(expW, 'current') || getVal(expW, 'fact'));
-
-
-          // Taxes - use totals from snapshot
-          const taxW = findW('taxes');
-          const taxTotals = taxW?.totals || {};
-          const taxAccrued = Math.abs(Number(taxTotals.totalCurrentDebt) || 0);
-          const taxPaid = Math.abs(Number(taxTotals.totalPaid) || 0);
-          const taxDebt = Math.abs(Number(taxTotals.actualDebt) || 0);
-
-          const lines = [];
-          lines.push('Краткий отчет:');
-          lines.push('');
-          lines.push('1) Баланс на счетах:');
-          lines.push(`Открытые счета: ${_formatTenge(openBalance)}`);
-          if (allBalance !== openBalance) {
-            lines.push(`Все счета (включая скрытые): ${_formatTenge(allBalance)}`);
-          }
-          lines.push('');
-
-          if (incomeSum > 0) {
-            lines.push('2) Доходы:');
-            lines.push(`Общая сумма: ${_formatTenge(incomeSum)}`);
-            lines.push('');
-          }
-
-          if (expenseSum > 0) {
-            lines.push('3) Расходы:');
-            lines.push(`Общая сумма: ${_formatTenge(expenseSum)}`);
-            lines.push('');
-          }
-
-          if (incomeSum > 0 && expenseSum > 0) {
-            const net = incomeSum - expenseSum;
-            lines.push('4) Чистая прибыль:');
-            lines.push(`${_formatTenge(net)}`);
-            lines.push('');
-          }
-
-          lines.push('Для детального анализа уточните период или задайте конкретный вопрос.');
-
-          return res.json({ text: lines.join('\n') });
-        } catch (e) {
-          console.error('Quick report error:', e);
-          // Fallback to OpenAI if report generation fails
-        }
-      }
-
       // -------------------------
       // Build complete operations context for AI
       // -------------------------
