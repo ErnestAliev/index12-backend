@@ -2178,7 +2178,9 @@ module.exports = function createAiRouter(deps) {
         const futureRaw =
           (r0?.futureText ?? r0?.planText ?? w?.futureText ?? w?.planText ?? w?.summaryFutureText ?? w?.summaryText ?? w?.valueText ?? w?.text ?? r0?.future ?? r0?.plan ?? w?.future ?? w?.plan ?? 0);
 
-        return _renderDualValueBlock(title, w, factRaw, futureRaw);
+        // 🔥 FIX: For QB commands (show incomes/expenses), use ONLY fact
+        // futureRaw is forecast and should not be included in historical totals
+        return _renderDualValueBlock(title, w, factRaw, 0);
       };
 
       // =========================
