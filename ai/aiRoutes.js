@@ -502,11 +502,7 @@ module.exports = function createAiRouter(deps) {
               const text = json?.choices?.[0]?.message?.content || '';
 
               // Debug logging
-              console.log('📝 OpenAI response length:', text.length, 'chars');
-              if (text.length < 50) {
-                console.log('⚠️ Short response:', text);
-                console.log('📦 Full response:', JSON.stringify(json, null, 2).slice(0, 500));
-              }
+              // Response received
 
               resolve(String(text || '').trim());
             } catch (e) {
@@ -574,9 +570,9 @@ module.exports = function createAiRouter(deps) {
       if (q.endsWith('...')) {
         isQuickButtonMarked = true;
         q = q.replace(/\.\.\.$/g, '').trim(); // Remove marker
-        console.log('🔘 QB MARKER (...) DETECTED! Clean query:', q);
+        // QB marker detected
       } else {
-        console.log('❌ NO QB MARKER in query:', q);
+        // No QB marker
       }
 
       const qLower = q.toLowerCase();
@@ -1582,23 +1578,7 @@ module.exports = function createAiRouter(deps) {
         const dateRange = _extractDateRangeFromQuery(q);
 
         if (dateRange) {
-          console.log('📅 SMART FILTER ACTIVATED:');
-          console.log('  - Detected range:', dateRange.description);
-          console.log('  - From:', dateRange.start.toISOString());
-          console.log('  - To:', dateRange.end.toISOString());
-          console.log('  - Operations BEFORE filter:', (dataPacket.operations || []).length);
-
-          // Log sample operations to see what's there
-          const sampleOps = (dataPacket.operations || []).slice(0, 3);
-          sampleOps.forEach((op, i) => {
-            console.log(`  - Sample op ${i + 1}:`, {
-              date: op.date,
-              kind: op.kind,
-              amount: op.amount,
-              project: op.project,
-              category: op.category
-            });
-          });
+          // Smart filter activated
 
           // Filter operations
           const startTs = dateRange.start.getTime();
@@ -1622,8 +1602,7 @@ module.exports = function createAiRouter(deps) {
             dataPacket.timeline = filteredTimeline;
           }
 
-          console.log('  - Operations after filter:', (dataPacket.operations || []).length);
-          console.log('  - Timeline days after filter:', Object.keys(dataPacket.timeline || {}).length);
+          // Filtering complete
         }
 
 
@@ -1632,16 +1611,7 @@ module.exports = function createAiRouter(deps) {
         const futureOps = (dataPacket?.operations || []).filter(op => op.ts > todayTs);
         const pastOps = (dataPacket?.operations || []).filter(op => op.ts <= todayTs);
 
-        console.log('🔍 AI DATA DEBUG:');
-        console.log('  - Today:', snapTodayDDMMYYYY);
-        console.log('  - Future until:', snapFutureDDMMYYYY);
-        console.log('  - Total operations:', (dataPacket?.operations || []).length);
-        console.log('  - Past/current ops:', pastOps.length);
-        console.log('  - Future ops:', futureOps.length);
-        if (futureOps.length > 0) {
-          console.log('  - Sample future op:', JSON.stringify(futureOps[0]));
-        }
-        console.log('  - Timeline keys:', Object.keys(dataPacket?.timeline || {}).slice(0, 10));
+        // Data packet prepared
 
         const system = [
           '!!! КРИТИЧНО - ЧИТАЙ ПЕРВЫМ !!!',
@@ -1792,7 +1762,7 @@ module.exports = function createAiRouter(deps) {
           'сб, 26 дек. 2025 г.',
           '+500 000 т < Счет < TOO UU < INDEX12 < Маркетинг',
           '+150 000 т < Счет < TOO UU < INDEX12 < Маркетинг',
-          '-250 000 т > Счет > Давид > INDEX12 > Маркетинг',
+          '-250 000 т > Счет > Давид > INDEX12 < Маркетинг',
           '----------------',
           'пн, 28 дек. 2025 г.',
           '+100 000 т < Счет < — < — < Перевод',
@@ -2551,8 +2521,9 @@ module.exports = function createAiRouter(deps) {
           (keys || []).forEach((key) => {
             const w = _findSnapWidget(key);
             if (!w) return;
+            const wk = w?.key || key;
             const rows = _getRows(w);
-            (rows || []).forEach((r) => out.push({ __wk: w?.key || key, __row: r }));
+            (rows || []).forEach((r) => out.push({ __wk: wk, __row: r }));
           });
           return out;
         };
@@ -2676,7 +2647,7 @@ module.exports = function createAiRouter(deps) {
 
           // Check for "с ... по ..." ranges first
           const rangeMatch = qLower.match(/\bс\s+([\dа-яё\s]+?)\s+по\s+([\dа-яё\s]+?)(?:\s+года|\s+2\d{3}|\s|$)/i);
-          console.log('🔎 Regex result:', rangeMatch ? 'MATCHED' : 'NULL', rangeMatch);
+          // Regex match check
           if (rangeMatch) {
             // Extract year from FULL query to avoid matching day numbers
             let yearForRange = new Date().getFullYear();
@@ -2750,7 +2721,7 @@ module.exports = function createAiRouter(deps) {
 
               const specificDate = _kzDateFromYMD(year, monthIdx, day);
               if (specificDate && !isNaN(specificDate.getTime())) {
-                console.log(`📅 SPECIFIC DATE FILTER: ${day} ${monthName} ${year}`);
+                // Date filter applied
                 return {
                   start: _startOfDay(specificDate).getTime(),
                   end: _endOfDay(specificDate).getTime(),
@@ -2791,20 +2762,9 @@ module.exports = function createAiRouter(deps) {
         // Apply filter if month detected in query
         try {
           const queryToUse = String(opts.query || '').toLowerCase();
-          console.log('🔍 FILTER DEBUG:');
-          console.log('  - Query:', queryToUse);
-          console.log('  - Rows before filter:', rows.length);
-
           const dateRange = _extractMonthFromQuery(queryToUse);
           if (dateRange) {
-            console.log('📅 SNAPSHOT FILTER:', dateRange.label);
-            console.log('  - Start:', new Date(dateRange.start).toISOString());
-            console.log('  - End:', new Date(dateRange.end).toISOString());
-            console.log('  - Before:', rows.length);
             rows = rows.filter(row => row.__ts >= dateRange.start && row.__ts <= dateRange.end);
-            console.log('  - After:', rows.length);
-          } else {
-            console.log('  - No date range detected');
           }
         } catch (e) {
           console.error('❌ Filter error:', e.message);
@@ -3137,7 +3097,7 @@ module.exports = function createAiRouter(deps) {
         const isQuickFlag = (req?.body?.isQuickRequest === true) || (String(req?.body?.isQuickRequest || '').toLowerCase() === 'true') || isQuickButtonMarked;
         const qNorm2 = _normQ(qLower);
         const quickKey2 = (req?.body?.quickKey != null) ? String(req.body.quickKey) : '';
-        console.log('🚦 ROUTING:', { isQuickFlag, isQuickButtonMarked, quickKey2 });
+        // Routing determined
 
 
         const _resolveQuickIntent = (quickKey, qNorm, isQuickFlag) => {
