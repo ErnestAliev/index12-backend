@@ -1617,6 +1617,20 @@ module.exports = function createAiRouter(deps) {
             income: { count: incomeOps.length, total: incomeTotal },
             expense: { count: expenseOps.length, total: expenseTotal }
           });
+
+          // Log first 5 income and expense operations to identify issues
+          console.log('📋 INCOME OPS (first 5):', incomeOps.slice(0, 5).map(op => ({
+            date: op.date,
+            amount: op.amount,
+            contractor: op.contractor,
+            category: op.category
+          })));
+          console.log('📋 EXPENSE OPS (first 5):', expenseOps.slice(0, 5).map(op => ({
+            date: op.date,
+            amount: op.amount,
+            contractor: op.contractor,
+            category: op.category
+          })));
         }
 
 
