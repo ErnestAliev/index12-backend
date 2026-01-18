@@ -1579,6 +1579,10 @@ module.exports = function createAiRouter(deps) {
 
         if (dateRange) {
           // Smart filter activated
+          console.log('🔍 AI FILTER:', {
+            period: dateRange.description,
+            opsBefore: (dataPacket.operations || []).length
+          });
 
           // Filter operations
           const startTs = dateRange.start.getTime();
@@ -1603,6 +1607,16 @@ module.exports = function createAiRouter(deps) {
           }
 
           // Filtering complete
+          const incomeOps = (dataPacket.operations || []).filter(op => op.kind === 'income');
+          const expenseOps = (dataPacket.operations || []).filter(op => op.kind === 'expense');
+          const incomeTotal = incomeOps.reduce((sum, op) => sum + (op.amount || 0), 0);
+          const expenseTotal = expenseOps.reduce((sum, op) => sum + (op.amount || 0), 0);
+
+          console.log('💰 AI TOTALS:', {
+            opsAfter: (dataPacket.operations || []).length,
+            income: { count: incomeOps.length, total: incomeTotal },
+            expense: { count: expenseOps.length, total: expenseTotal }
+          });
         }
 
 
