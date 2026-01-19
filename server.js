@@ -262,10 +262,6 @@ const eventSchema = new mongoose.Schema({
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     isTransfer: { type: Boolean, default: false },
     isClosed: { type: Boolean, default: false },
-    totalDealAmount: { type: Number, default: 0 },
-    parentProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
-    isDealTranche: { type: Boolean, default: false },
-    isWorkAct: { type: Boolean, default: false },
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
     destination: String,
     transferGroupId: String,
@@ -1786,19 +1782,6 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
 
 app.get('/api/deals/all', isAuthenticated, async (req, res) => {
     try {
-        const userId = req.user.id;
-        // 🟢 PERFORMANCE: .lean() used
-        const events = await Event.find({
-            userId: userId,
-            $or: [
-                { totalDealAmount: { $gt: 0 } },
-                { isDealTranche: true },
-                { isWorkAct: true }
-            ]
-        })
-            .lean()
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId');
-        res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -1997,69 +1980,7 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
                 return res.status(403).json({ message: 'Managers can only delete their own operations' });
             }
         }
-        // Admin can delete ANY operation (no ownership check)
-
-
-
-        if (eventToDelete.totalDealAmount > 0 && eventToDelete.type === 'income') {
-            const pId = eventToDelete.projectId;
-            const cId = eventToDelete.categoryId;
-            const contrId = eventToDelete.contractorId;
-            const indId = eventToDelete.counterpartyIndividualId;
-
-            const dealOps = await Event.find({
-                userId,
-                projectId: pId,
-                categoryId: cId,
-                contractorId: contrId,
-                counterpartyIndividualId: indId,
-                $or: [
-                    { totalDealAmount: { $gt: 0 } },
-                    { isDealTranche: true },
-                    { isWorkAct: true }
-                ]
-            });
-
-            const idsToDelete = dealOps.map(op => op._id);
-            await Event.deleteMany({ _id: { $in: idsToDelete } });
-
-            if (req.io) idsToDelete.forEach(delId => emitToUser(req, userId, 'operation_deleted', delId));
-
-            return res.status(200).json({ message: 'Deal and related transactions deleted', deletedCount: idsToDelete.length });
-        }
-
-        if (eventToDelete.isDealTranche && eventToDelete.type === 'income') {
-            await Event.deleteMany({ relatedEventId: id, userId });
-
-            const prevOp = await Event.findOne({
-                userId,
-                projectId: eventToDelete.projectId,
-                categoryId: eventToDelete.categoryId,
-                contractorId: eventToDelete.contractorId,
-                counterpartyIndividualId: eventToDelete.counterpartyIndividualId,
-                type: 'income',
-                _id: { $ne: id },
-                date: { $lte: eventToDelete.date }
-            }).sort({ date: -1, createdAt: -1 });
-
-            if (prevOp) {
-                const updatedPrev = await Event.findOneAndUpdate(
-                    { _id: prevOp._id },
-                    { isClosed: false },
-                    { new: true }
-                );
-                if (updatedPrev) emitToUser(req, userId, 'operation_updated', updatedPrev);
-            }
-        }
-
-        if (eventToDelete.isWorkAct && eventToDelete.relatedEventId) {
-            const updatedRelated = await Event.findOneAndUpdate(
-                { _id: eventToDelete.relatedEventId, userId },
-                { isClosed: false },
-                { new: true }
-            );
-            if (updatedRelated) emitToUser(req, userId, 'operation_updated', updatedRelated);
-        }
+        // Proceed with regular delete
 
         await Event.deleteOne({ _id: id });
 
