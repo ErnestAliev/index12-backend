@@ -6,14 +6,14 @@
 // - Money format: thousands + "₸".
 // - No default "last 30 days" anywhere.
 // - Accounts list must include hidden accounts by default.
-// - Source of truth is FRONTEND UI snapshot (uiSnapshot). The AI route must not query Mongo for answering.
-// - If uiSnapshot is missing, fallback is aiContext (frontend-prepared), but still NO Mongo queries.
-// - Catalog queries (projects/contractors/categories/individuals/prepayments) return numbered lists without sums.
+// - HYBRID MODE: Prefer uiSnapshot (frontend UI data) when available for immediate responses.
+// - FALLBACK: When uiSnapshot is missing, use dataProvider for direct MongoDB database queries.
+// - Catalog queries (projects/contractors/categories/individuals) return numbered lists without sums.
 
 const express = require('express');
 
 // Visible build marker to confirm which aiRoutes.js is running
-const AIROUTES_VERSION = 'snapshot-ui-v3.6-diag';
+const AIROUTES_VERSION = 'hybrid-v4.0-db';
 
 const https = require('https');
 
@@ -101,6 +101,7 @@ module.exports = function createAiRouter(deps) {
     models,
     FRONTEND_URL,
     isAuthenticated,
+    getCompositeUserId, // 🔥 NEW: For workspace-aware database queries
   } = deps;
 
   const {
@@ -112,6 +113,10 @@ module.exports = function createAiRouter(deps) {
     Project,
     Category,
   } = models;
+
+  // 🔥 NEW: Create data provider for direct database access
+  const createDataProvider = require('./dataProvider');
+  const dataProvider = createDataProvider(models);
 
   const router = express.Router();
 
@@ -555,6 +560,8 @@ module.exports = function createAiRouter(deps) {
       if (!_isAiAllowed(req)) return res.status(402).json({ message: 'AI not activated' });
 
       const userId = req.user.id;
+      // 🔥 NEW: Get composite userId for workspace isolation (database queries)
+      const compositeUserId = getCompositeUserId ? await getCompositeUserId(req) : userId;
       const userObjId = new mongoose.Types.ObjectId(userId);
       const userIdStr = String(userId);
 
@@ -1552,9 +1559,7 @@ module.exports = function createAiRouter(deps) {
           };
         };
 
-        let dataPacket = _buildDataPacket();
-
-        // 🔥 SMART FILTER: Extract date range from user query and filter operations
+        // 🔥 SMART FILTER: Extract date range from user query FIRST (before dataPacket creation)
         const _extractDateRangeFromQuery = (query) => {
           const q = String(query || '').toLowerCase();
 
@@ -1611,60 +1616,53 @@ module.exports = function createAiRouter(deps) {
 
         const dateRange = _extractDateRangeFromQuery(q);
 
-        if (dateRange) {
-          // Smart filter activated
-          console.log('🔍 AI FILTER:', {
-            period: dateRange.description,
-            opsBefore: (dataPacket.operations || []).length
+        // 🔥 NEW: Get includeHidden from request
+        const includeHidden = !!(req.body?.includeHidden);
+        const visibleAccountIds = req.body?.visibleAccountIds || null;
+
+        // ========================================================
+        // 🔥 PRIMARY DATA SOURCE: Direct Database Query
+        // This replaces the fragile uiSnapshot parsing with reliable MongoDB queries.
+        // Benefits:
+        // - No race conditions with frontend displayCache
+        // - Can query any historical date range
+        // - ~90% smaller HTTP payload from frontend
+        // ========================================================
+        let dataPacket;
+        try {
+          console.log('🔍 AI: Fetching data from database...', {
+            compositeUserId,
+            dateRange: dateRange ? dateRange.description : 'all-time',
+            includeHidden
           });
 
-          // Filter operations
-          const startTs = dateRange.start.getTime();
-          const endTs = dateRange.end.getTime();
+          dataPacket = await dataProvider.buildDataPacket(compositeUserId, {
+            dateRange: dateRange ? { start: dateRange.start, end: dateRange.end } : null,
+            includeHidden,
+            visibleAccountIds
+          });
 
-          if (dataPacket.operations) {
-            dataPacket.operations = dataPacket.operations.filter(op => {
-              return op.ts >= startTs && op.ts <= endTs;
-            });
-          }
+          console.log('✅ AI: Database query complete', {
+            accounts: dataPacket.accounts?.length || 0,
+            operations: dataPacket.operations?.length || 0,
+            source: dataPacket.meta?.source || 'unknown'
+          });
+        } catch (dbErr) {
+          console.error('❌ AI: Database query failed, falling back to uiSnapshot', dbErr.message);
+          // Fallback to old uiSnapshot parsing if database fails
+          dataPacket = _buildDataPacket();
+        }
 
-          // Filter timeline
-          if (dataPacket.timeline) {
-            const filteredTimeline = {};
-            for (const [dateKey, ops] of Object.entries(dataPacket.timeline)) {
-              const dayTs = _parseAnyDateToTs(dateKey);
-              if (dayTs && dayTs >= startTs && dayTs <= endTs) {
-                filteredTimeline[dateKey] = ops;
-              }
-            }
-            dataPacket.timeline = filteredTimeline;
-          }
-
-          // Filtering complete
+        // Log dataPacket summary (for debugging)
+        if (dateRange) {
           const incomeOps = (dataPacket.operations || []).filter(op => op.kind === 'income');
           const expenseOps = (dataPacket.operations || []).filter(op => op.kind === 'expense');
-          const incomeTotal = incomeOps.reduce((sum, op) => sum + (op.amount || 0), 0);
-          const expenseTotal = expenseOps.reduce((sum, op) => sum + (op.amount || 0), 0);
-
           console.log('💰 AI TOTALS:', {
-            opsAfter: (dataPacket.operations || []).length,
-            income: { count: incomeOps.length, total: incomeTotal },
-            expense: { count: expenseOps.length, total: expenseTotal }
+            period: dateRange.description,
+            opsTotal: (dataPacket.operations || []).length,
+            income: { count: incomeOps.length, total: incomeOps.reduce((s, o) => s + (o.amount || 0), 0) },
+            expense: { count: expenseOps.length, total: expenseOps.reduce((s, o) => s + (o.amount || 0), 0) }
           });
-
-          // Log first 5 income and expense operations to identify issues
-          console.log('📋 INCOME OPS (first 5):', incomeOps.slice(0, 5).map(op => ({
-            date: op.date,
-            amount: op.amount,
-            contractor: op.contractor,
-            category: op.category
-          })));
-          console.log('📋 EXPENSE OPS (first 5):', expenseOps.slice(0, 5).map(op => ({
-            date: op.date,
-            amount: op.amount,
-            contractor: op.contractor,
-            category: op.category
-          })));
         }
 
 
@@ -3754,10 +3752,170 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: hint });
       }
 
-      // No uiSnapshot => NO MONGO.
-      return res.status(400).json({ message: 'uiSnapshot is required (no-DB mode)' });
+      // =========================
+      // NO uiSnapshot => Use dataProvider for direct DB access
+      // =========================
 
-      // Legacy Mongo-based path below is kept for reference only. In no-DB mode it must not run.
+      // Get effective userId (handles workspace isolation)
+      let effectiveUserId = userId;
+      if (typeof getCompositeUserId === 'function') {
+        try {
+          effectiveUserId = await getCompositeUserId(req);
+        } catch (e) {
+          console.error('Failed to get composite userId:', e);
+        }
+      }
+
+      // Use dataProvider for database queries
+      const dbData = await dataProvider.buildDataPacket(effectiveUserId, {
+        includeHidden: req?.body?.includeHidden !== false,
+        visibleAccountIds: req?.body?.visibleAccountIds || null,
+      });
+
+      // Handle accounts query from database
+      if (/\b(сч[её]т|счета|касс[аы]|баланс)\b/i.test(qLower)) {
+        const lines = [];
+        const accounts = dbData.accounts || [];
+        const totals = dbData.totals || {};
+
+        lines.push(`Счета. На ${dbData.meta?.today || _fmtDateKZ(_endOfToday())}`);
+        lines.push('');
+
+        for (const acc of accounts) {
+          const balance = acc.currentBalance || 0;
+          const name = acc.name || 'Счет';
+          const marker = acc.isHidden ? ' (скрыт)' : '';
+          lines.push(`${name}${marker}: ${_formatTenge(balance)}`);
+        }
+
+        lines.push('');
+        lines.push(`Всего (без скрытых): ${_formatTenge(totals.open?.current || 0)}`);
+        if (totals.hidden?.current) {
+          lines.push(`Всего (включая скрытые): ${_formatTenge(totals.all?.current || 0)}`);
+        }
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle income query from database  
+      if (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower)) {
+        const summary = dbData.operationsSummary || {};
+        const incomeData = summary.income || {};
+
+        const lines = [];
+        lines.push(`Доходы. До ${dbData.meta?.today || _fmtDateKZ(_endOfToday())}`);
+        lines.push('');
+        lines.push(`Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0} операций)`);
+        lines.push(`Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0} операций)`);
+        lines.push('');
+        lines.push(`Итого: ${_formatTenge(incomeData.total || 0)}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle expense query from database
+      if (/\b(расход|трат|затрат)\b/i.test(qLower)) {
+        const summary = dbData.operationsSummary || {};
+        const expenseData = summary.expense || {};
+
+        const lines = [];
+        lines.push(`Расходы. До ${dbData.meta?.today || _fmtDateKZ(_endOfToday())}`);
+        lines.push('');
+        lines.push(`Факт: ${_formatTenge(expenseData.fact?.total || 0)} (${expenseData.fact?.count || 0} операций)`);
+        lines.push(`Прогноз: ${_formatTenge(expenseData.forecast?.total || 0)} (${expenseData.forecast?.count || 0} операций)`);
+        lines.push('');
+        lines.push(`Итого: ${_formatTenge(expenseData.total || 0)}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle projects catalog from database
+      if (/\b(проект|project)\b/i.test(qLower)) {
+        const projects = dbData.catalogs?.projects || [];
+        if (!projects.length) {
+          return res.json({ text: 'Проекты не найдены.' });
+        }
+
+        const lines = ['Мои проекты', ''];
+        projects.forEach((p, i) => lines.push(`${i + 1}. ${p}`));
+        lines.push('', `Всего: ${projects.length}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle contractors catalog from database
+      if (/\b(контрагент|поставщик|партнёр|партнер)\b/i.test(qLower)) {
+        const contractors = dbData.catalogs?.contractors || [];
+        if (!contractors.length) {
+          return res.json({ text: 'Контрагенты не найдены.' });
+        }
+
+        const lines = ['Мои контрагенты', ''];
+        contractors.forEach((c, i) => lines.push(`${i + 1}. ${c}`));
+        lines.push('', `Всего: ${contractors.length}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle individuals catalog from database
+      if (/\b(физ\W*лиц|физическ|индивид|person)\b/i.test(qLower)) {
+        const individuals = dbData.catalogs?.individuals || [];
+        if (!individuals.length) {
+          return res.json({ text: 'Физические лица не найдены.' });
+        }
+
+        const lines = ['Физические лица', ''];
+        individuals.forEach((ind, i) => lines.push(`${i + 1}. ${ind}`));
+        lines.push('', `Всего: ${individuals.length}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle categories catalog from database
+      if (/\b(категори|category)\b/i.test(qLower)) {
+        const categories = dbData.catalogs?.categories || [];
+        if (!categories.length) {
+          return res.json({ text: 'Категории не найдены.' });
+        }
+
+        const lines = ['Мои категории', ''];
+        categories.forEach((cat, i) => lines.push(`${i + 1}. ${cat}`));
+        lines.push('', `Всего: ${categories.length}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Handle companies catalog from database
+      if (/\b(компани|фирм|организаци|company)\b/i.test(qLower)) {
+        const companies = dbData.catalogs?.companies || [];
+        if (!companies.length) {
+          return res.json({ text: 'Компании не найдены.' });
+        }
+
+        const lines = ['Мои компании', ''];
+        companies.forEach((comp, i) => lines.push(`${i + 1}. ${comp}`));
+        lines.push('', `Всего: ${companies.length}`);
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // Fallback: return database summary
+      const fallbackLines = [
+        `Данные с ${dbData.meta?.today || 'сегодня'} (из базы данных)`,
+        '',
+        `Счета: ${dbData.accounts?.length || 0}`,
+        `Баланс: ${_formatTenge(dbData.totals?.open?.current || 0)}`,
+        '',
+        `Доходы: ${_formatTenge(dbData.operationsSummary?.income?.total || 0)}`,
+        `Расходы: ${_formatTenge(dbData.operationsSummary?.expense?.total || 0)}`,
+        '',
+        `Могу показать: счета, доходы, расходы, проекты, контрагенты, физлица, категории, компании.`,
+      ];
+
+      return res.json({ text: fallbackLines.join('\n') });
+
+      // Legacy Mongo-based path below is kept for reference only. 
+      // The code below will never execute due to returns above.
       const now = _pickFactAsOf(req, aiContext);
 
       const range = await _resolveRangeFromQuery(userId, qLower, now);

@@ -1631,6 +1631,7 @@ app.use('/api/ai', createAiRouter({
     models: { Event, Account, Company, Contractor, Individual, Project, Category },
     FRONTEND_URL,
     isAuthenticated,
+    getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation
 }));
 
 
