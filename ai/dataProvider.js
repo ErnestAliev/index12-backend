@@ -44,13 +44,13 @@ module.exports = function createDataProvider(deps) {
 
     // Helper for userId queries (matches both ObjectId and String)
     const _uQuery = (userId) => {
-        const list = [userId, String(userId)];
+        const variants = [String(userId)];
         try {
             if (mongoose.Types.ObjectId.isValid(userId)) {
-                list.push(new mongoose.Types.ObjectId(String(userId)));
+                variants.push(new mongoose.Types.ObjectId(String(userId)));
             }
         } catch (e) { }
-        return { $in: [...new Set(list.map(x => String(x) === '[object Object]' ? x : String(x)))] };
+        return { $in: variants };
     };
 
     // For models that definitely use ObjectId (Account, Project, etc.)
@@ -91,12 +91,8 @@ module.exports = function createDataProvider(deps) {
             };
         }
 
-        // Fetch accounts with populated references
-        const accounts = await Account.find(query)
-            .populate('companyId', 'name')
-            .populate('individualId', 'name')
-            .populate('contractorId', 'name')
-            .lean();
+        // Fetch accounts without populate (we'll do manual lookups if needed)
+        const accounts = await Account.find(query).lean();
 
         console.log(`[DP] Found ${accounts.length} accounts in DB for query:`, JSON.stringify(query));
         if (accounts.length > 0) {
@@ -166,9 +162,6 @@ module.exports = function createDataProvider(deps) {
                 currentBalance: Math.round(currentBalance),
                 futureBalance: Math.round(futureBalance),
                 isHidden,
-                company: acc.companyId?.name || null,
-                individual: acc.individualId?.name || null,
-                contractor: acc.contractorId?.name || null,
             };
         }));
 
@@ -231,14 +224,8 @@ module.exports = function createDataProvider(deps) {
         // Add date range to query
         // query.date = { $gte: start, $lte: end }; // This line is now redundant
 
-        // Fetch operations with populated references
+        // Fetch operations without populate (using lean for performance)
         const operations = await Event.find(query)
-            .populate('categoryId', 'name')
-            .populate('accountId', 'name individualId')
-            .populate('companyId', 'name')
-            .populate('contractorId', 'name')
-            .populate('projectId', 'name')
-            .populate('individualId', 'name')
             .sort({ date: -1 })
             .lean();
 
@@ -271,14 +258,14 @@ module.exports = function createDataProvider(deps) {
                 continue;
             }
 
-            // Determine operation kind
+
+            // Determine operation kind - ONLY income, expense, or transfer
             let kind = 'unknown';
             const type = String(op.type || '').toLowerCase();
+
             if (op.isTransfer || type === 'transfer') {
                 kind = 'transfer';
                 if (excludeTransfers) continue;
-            } else if (op.isWithdrawal || type === 'withdrawal') {
-                kind = 'withdrawal';
             } else if (type === 'income' || (op.amount && op.amount > 0 && !op.isTransfer)) {
                 kind = 'income';
             } else if (type === 'expense' || (op.amount && op.amount < 0)) {
@@ -294,16 +281,11 @@ module.exports = function createDataProvider(deps) {
                 date: _fmtDateDDMMYY(opDate),
                 dateIso: opDate.toISOString().slice(0, 10),
                 ts: opDate.getTime(),
+                type: kind, // 'income', 'expense', 'transfer', or 'unknown'
                 kind,
                 isFact,
                 amount: Math.abs(op.amount || 0),
                 rawAmount: op.amount || 0,
-                category: op.categoryId?.name || null,
-                account: op.accountId?.name || null,
-                company: op.companyId?.name || null,
-                contractor: op.contractorId?.name || null,
-                project: op.projectId?.name || null,
-                individual: op.individualId?.name || null,
                 description: op.description || null,
             });
         }
