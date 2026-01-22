@@ -3743,13 +3743,8 @@ module.exports = function createAiRouter(deps) {
         }
 
 
-        // ---- Fallback: short, snapshot-only answer
-        const hint = [
-          'Не вижу на экране данных для этого запроса.',
-          `Могу по экрану: счета, всего на счетах, доходы, расходы, переводы, проекты, компании, контрагенты, категории, физлица. (версия: ${AIROUTES_VERSION})`
-        ].join('\n');
-
-        return res.json({ text: hint });
+        // ---- Snapshot doesn't have the data we need - fall through to DB fallback below
+        // (Previously returned hint message, now continues to dataProvider.buildDataPacket)
       }
 
       // =========================
