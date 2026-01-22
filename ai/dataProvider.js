@@ -83,7 +83,7 @@ module.exports = function createDataProvider(deps) {
         // Build query
         const query = { userId: _uQuery(userId) };
 
-        if (visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length > 0) {
+        if (!includeHidden && visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length > 0) {
             query._id = {
                 $in: visibleAccountIds.map(id => {
                     try { return new mongoose.Types.ObjectId(id); } catch { return id; }

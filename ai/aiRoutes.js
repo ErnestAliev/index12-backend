@@ -184,7 +184,8 @@ module.exports = function createAiRouter(deps) {
 
     lines.push('СЧЕТА:');
     (data.accounts || []).forEach(a => {
-      lines.push(`- ${a.name}: ${_formatTenge(a.currentBalance || 0)} (Прогноз: ${_formatTenge(a.futureBalance || 0)})`);
+      const hiddenMarker = a.isHidden ? ' [СКРЫТ/ИСКЛЮЧЕН]' : '';
+      lines.push(`- ${a.name}${hiddenMarker}: ${_formatTenge(a.currentBalance || 0)} (Прогноз: ${_formatTenge(a.futureBalance || 0)})`);
     });
 
     lines.push('');
