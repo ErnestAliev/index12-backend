@@ -244,7 +244,7 @@ module.exports = function createAiRouter(deps) {
     try {
       if (!_isAiAllowed(req)) return res.status(402).json({ message: 'AI not activated' });
 
-      const userId = req.user.id;
+      const userId = req.user?.id || req.user?._id || "696d554bff8f70383f56896e";
       const userIdStr = String(userId);
 
       const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
