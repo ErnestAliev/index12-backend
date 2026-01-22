@@ -371,18 +371,44 @@ module.exports = function createDataProvider(deps) {
     /**
      * Build complete data packet for AI from database
      * @param {string} userId - User ID
-     * @param {Object} options - Options
+     * @param {Object} options - Options { dateRange, includeHidden, visibleAccountIds }
      * @returns {Promise<Object>} Data packet for AI
      */
     async function buildDataPacket(userId, options = {}) {
-        const { dateRange, includeHidden = false, visibleAccountIds = null } = options;
+        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null } = options;
 
-        console.log(`[DP] buildDataPacket: userId=${userId}`);
+        console.log(`[DP] buildDataPacket: userId=${userId}, periodFilter=`, periodFilter);
+
+        // ✅ Parse dateRange from periodFilter
+        let start = null;
+        let end = null;
+
+        if (periodFilter && periodFilter.mode === 'custom') {
+            if (periodFilter.customStart) {
+                start = new Date(periodFilter.customStart);
+                start.setHours(0, 0, 0, 0);
+            }
+            if (periodFilter.customEnd) {
+                end = new Date(periodFilter.customEnd);
+                end.setHours(23, 59, 59, 999);
+            }
+        }
+
+        // ✅ If no date range, default to current month
+        if (!start || !end) {
+            const now = new Date();
+            start = new Date(now.getFullYear(), now.getMonth(), 1);
+            start.setHours(0, 0, 0, 0);
+            end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+            end.setHours(23, 59, 59, 999);
+        }
+
+        console.log(`[DP] Date range: ${start.toISOString()} to ${end.toISOString()}`);
 
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
             await Promise.all([
                 getAccounts(userId, { includeHidden, visibleAccountIds }),
-                getOperations(userId, dateRange, {}),
+                getOperations(userId, { start, end }, {}),
                 getCompanies(userId),
                 getProjects(userId),
                 getCategories(userId),
@@ -393,9 +419,11 @@ module.exports = function createDataProvider(deps) {
         return {
             meta: {
                 today: _fmtDateDDMMYY(_kzNow()),
+                periodStart: _fmtDateDDMMYY(start),
+                periodEnd: _fmtDateDDMMYY(end),
                 forecastUntil: operationsData.meta.rangeEnd,
                 todayTimestamp: _kzNow().getTime(),
-                source: 'database' // Mark that this is from DB, not uiSnapshot
+                source: 'database'
             },
             totals: accountsData.totals,
             accounts: accountsData.accounts,

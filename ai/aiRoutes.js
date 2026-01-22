@@ -277,12 +277,14 @@ module.exports = function createAiRouter(deps) {
       console.log('🔍 effectiveUserId (final):', effectiveUserId);
       console.log('🔍 includeHidden:', req?.body?.includeHidden);
       console.log('🔍 visibleAccountIds:', req?.body?.visibleAccountIds);
+      console.log('🔍 periodFilter:', req?.body?.periodFilter);
 
       // Build data packet from database
       console.log(`🔍 [AI] Calling dataProvider.buildDataPacket for user: ${effectiveUserId}`);
       const dbData = await dataProvider.buildDataPacket(effectiveUserId, {
         includeHidden: req?.body?.includeHidden !== false,
         visibleAccountIds: req?.body?.visibleAccountIds || null,
+        dateRange: req?.body?.periodFilter || null,
       });
 
       console.log(`🔍 [AI] DB Results - Accounts: ${dbData.accounts?.length || 0}, Ops: ${dbData.operations?.length || 0}`);
@@ -333,7 +335,11 @@ module.exports = function createAiRouter(deps) {
         const accounts = dbData.accounts || [];
         const totals = dbData.totals || {};
 
-        lines.push(`Счета. На ${dbData.meta?.today || _fmtDateKZ(_endOfToday())}`);
+        const periodStart = dbData.meta?.periodStart || '';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
+        const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `на ${periodEnd}`;
+
+        lines.push(`Счета за период ${periodLabel}`);
         lines.push('');
 
         if (!accounts.length) {
@@ -366,7 +372,11 @@ module.exports = function createAiRouter(deps) {
         const incomeData = summary.income || {};
 
         const lines = [];
-        lines.push(`Доходы. До ${dbData.meta?.today || _fmtDateKZ(_endOfToday())}`);
+        const periodStart = dbData.meta?.periodStart || '';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
+        const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `до ${periodEnd}`;
+
+        lines.push(`Доходы за период ${periodLabel}`);
         lines.push('');
         lines.push(`Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0} операций)`);
         lines.push(`Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0} операций)`);
@@ -386,7 +396,11 @@ module.exports = function createAiRouter(deps) {
         const expenseData = summary.expense || {};
 
         const lines = [];
-        lines.push(`Расходы. До ${dbData.meta?.today || _fmtDateKZ(_endOfToday())}`);
+        const periodStart = dbData.meta?.periodStart || '';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
+        const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `до ${periodEnd}`;
+
+        lines.push(`Расходы за период ${periodLabel}`);
         lines.push('');
         lines.push(`Факт: ${_formatTenge(expenseData.fact?.total || 0)} (${expenseData.fact?.count || 0} операций)`);
         lines.push(`Прогноз: ${_formatTenge(expenseData.forecast?.total || 0)} (${expenseData.forecast?.count || 0} операций)`);
