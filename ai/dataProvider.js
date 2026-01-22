@@ -98,6 +98,11 @@ module.exports = function createDataProvider(deps) {
             .populate('contractorId', 'name')
             .lean();
 
+        console.log(`[DP] Found ${accounts.length} accounts in DB for query:`, JSON.stringify(query));
+        if (accounts.length > 0) {
+            console.log(`[DP] Account names: ${accounts.map(a => a.name).join(', ')}`);
+        }
+
         // Get today for fact/forecast split
         const today = _kzStartOfDay(_kzNow());
         const todayEnd = _kzEndOfDay(_kzNow());
@@ -107,7 +112,12 @@ module.exports = function createDataProvider(deps) {
             const isHidden = !!(acc.isExcluded || acc.hidden || acc.isHidden);
 
             // Skip hidden accounts if not requested
-            if (!includeHidden && isHidden) return null;
+            if (!includeHidden && isHidden) {
+                console.log(`[DP] Skipping hidden account: ${acc.name}`);
+                return null;
+            }
+
+            console.log(`[DP] Processing account: ${acc.name} (isHidden=${isHidden})`);
 
             // Get all operations for this account
             // ⚠️ Event.userId is often a String in this DB, while Account.userId is ObjectId
