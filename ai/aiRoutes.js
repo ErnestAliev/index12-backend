@@ -78,7 +78,7 @@ module.exports = function createAiRouter(deps) {
 
   // Create data provider for direct database access
   const createDataProvider = require('./dataProvider');
-  const dataProvider = createDataProvider(models);
+  const dataProvider = createDataProvider({ ...models, mongoose });
 
   const router = express.Router();
 
@@ -117,6 +117,95 @@ module.exports = function createAiRouter(deps) {
     } catch (_) {
       return sign + String(Math.round(Math.abs(num))) + ' ₸';
     }
+  };
+
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 600 } = {}) => {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      console.warn('OPENAI_API_KEY is missing');
+      return 'Ошибка: OPENAI_API_KEY не задан.';
+    }
+
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const isReasoningModel = /^o[13]|gpt-5/.test(model);
+
+    const payloadObj = {
+      model,
+      messages,
+      max_completion_tokens: maxTokens,
+    };
+    if (!isReasoningModel) {
+      payloadObj.temperature = temperature;
+    }
+    const payload = JSON.stringify(payloadObj);
+
+    return new Promise((resolve, reject) => {
+      const gptReq = https.request(
+        {
+          hostname: 'api.openai.com',
+          path: '/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'Authorization': `Bearer ${apiKey}`
+          }
+        },
+        (resp) => {
+          let data = '';
+          resp.on('data', (chunk) => { data += chunk; });
+          resp.on('end', () => {
+            try {
+              if (resp.statusCode < 200 || resp.statusCode >= 300) {
+                console.error(`OpenAI Error ${resp.statusCode}:`, data);
+                resolve(`Ошибка OpenAI (${resp.statusCode}).`);
+                return;
+              }
+              const parsed = JSON.parse(data);
+              resolve(parsed?.choices?.[0]?.message?.content || 'Нет ответа от AI.');
+            } catch (e) {
+              console.error('Parse Error:', e);
+              resolve('Ошибка обработки ответа AI.');
+            }
+          });
+        }
+      );
+      gptReq.on('error', (e) => {
+        console.error('Request Error:', e);
+        resolve('Ошибка связи с AI.');
+      });
+      gptReq.write(payload);
+      gptReq.end();
+    });
+  };
+
+  const _formatDbDataForAi = (data) => {
+    const lines = [`ТЕКУЩИЕ ДАННЫЕ (из БД на ${data.meta?.today || 'сегодня'}):`];
+
+    lines.push('СЧЕТА:');
+    (data.accounts || []).forEach(a => {
+      lines.push(`- ${a.name}: ${_formatTenge(a.currentBalance || 0)} (Прогноз: ${_formatTenge(a.futureBalance || 0)})`);
+    });
+
+    lines.push('');
+    lines.push('СВОДКА ОПЕРАЦИЙ:');
+    const s = data.operationsSummary || {};
+    lines.push(`Доходы: Факт ${_formatTenge(s.income?.fact?.total || 0)}, Прогноз ${_formatTenge(s.income?.forecast?.total || 0)}`);
+    lines.push(`Расходы: Факт ${_formatTenge(s.expense?.fact?.total || 0)}, Прогноз ${_formatTenge(s.expense?.forecast?.total || 0)}`);
+
+    lines.push('');
+    lines.push('КАТАЛОГИ:');
+    lines.push(`Проекты: ${(data.catalogs?.projects || []).join(', ')}`);
+    lines.push(`Контрагенты: ${(data.catalogs?.contractors || []).join(', ')}`);
+    lines.push(`Категории: ${(data.catalogs?.categories || []).map(c => typeof c === 'string' ? c : c.name).join(', ')}`);
+
+    lines.push('');
+    lines.push('ПОСЛЕДНИЕ ОПЕРАЦИИ:');
+    (data.operations || []).slice(0, 50).forEach(op => {
+      lines.push(`${op.date} | ${op.kind} | ${op.amount} | ${op.category || 'Без кат.'} | ${op.description || ''}`);
+    });
+
+    return lines.join('\n');
   };
 
   const _isAiAllowed = (req) => {
@@ -179,12 +268,13 @@ module.exports = function createAiRouter(deps) {
       }
 
       // Build data packet from database
+      console.log(`[AI] Querying DB for user: ${effectiveUserId}`);
       const dbData = await dataProvider.buildDataPacket(effectiveUserId, {
         includeHidden: req?.body?.includeHidden !== false,
         visibleAccountIds: req?.body?.visibleAccountIds || null,
       });
 
-      console.log(`[AI DB MODE] User: ${effectiveUserId}, Accounts: ${dbData.accounts?.length || 0}, Ops: ${dbData.operations?.length || 0}`);
+      console.log(`[AI] DB Results - Accounts: ${dbData.accounts?.length || 0}, Ops: ${dbData.operations?.length || 0}`);
 
       // Store user message in history
       _pushHistory(userIdStr, 'user', q);
@@ -396,24 +486,31 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // GENERAL SUMMARY (fallback for unrecognized queries)
+      // AI GENERATION (OpenAI)
+      // Universal fallback for all queries
       // =========================
-      const summaryLines = [
-        `Данные на ${dbData.meta?.today || 'сегодня'}`,
-        '',
-        `Счета: ${dbData.accounts?.length || 0}`,
-        `Баланс: ${_formatTenge(dbData.totals?.open?.current || 0)}`,
-        '',
-        `Доходы (факт): ${_formatTenge(dbData.operationsSummary?.income?.fact?.total || 0)}`,
-        `Расходы (факт): ${_formatTenge(dbData.operationsSummary?.expense?.fact?.total || 0)}`,
-        '',
-        `Могу показать: счета, доходы, расходы, проекты, контрагенты, физлица, категории, компании.`,
-        `Версия: ${AIROUTES_VERSION}`,
+      const systemPrompt = [
+        'Ты финансовый помощник INDEX12.',
+        'Твоя задача: отвечать на вопросы пользователя, используя предоставленные данные из базы данных.',
+        'ДАННЫЕ РЕАЛЬНЫЕ, не выдумывай их.',
+        'Если данных нет (например, 0 операций), так и скажи.',
+        'Тон: профессиональный, лаконичный.',
+        'Формат денег: 1 234 ₸.',
+        'Максимальная длина ответа: 10-15 строк.',
+        'Всегда ссылайся на даты из данных.',
+      ].join('\n');
+
+      const dataContext = _formatDbDataForAi(dbData);
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'system', content: dataContext },
+        ..._getHistoryMessages(userIdStr)
       ];
 
-      const answer = summaryLines.join('\n');
-      _pushHistory(userIdStr, 'assistant', answer);
-      return res.json({ text: answer });
+      const aiResponse = await _openAiChat(messages);
+      _pushHistory(userIdStr, 'assistant', aiResponse);
+
+      return res.json({ text: aiResponse });
 
     } catch (err) {
       console.error('[AI ERROR]', err);

@@ -8,7 +8,7 @@
  * @returns {Object} Data provider with query methods
  */
 module.exports = function createDataProvider(deps) {
-    const { Account, Company, Project, Category, Contractor, Individual, Event } = deps;
+    const { mongoose, Account, Company, Project, Category, Contractor, Individual, Event } = deps;
 
     // ========================
     // HELPER FUNCTIONS
@@ -42,6 +42,27 @@ module.exports = function createDataProvider(deps) {
         return `${dd}.${mm}.${yy}`;
     };
 
+    // Helper for userId queries (matches both ObjectId and String)
+    const _uQuery = (userId) => {
+        const list = [userId, String(userId)];
+        try {
+            if (mongoose.Types.ObjectId.isValid(userId)) {
+                list.push(new mongoose.Types.ObjectId(String(userId)));
+            }
+        } catch (e) { }
+        return { $in: [...new Set(list.map(x => String(x) === '[object Object]' ? x : String(x)))] };
+    };
+
+    // For models that definitely use ObjectId (Account, Project, etc.)
+    const _uObjId = (userId) => {
+        try {
+            if (mongoose.Types.ObjectId.isValid(userId)) {
+                return new mongoose.Types.ObjectId(String(userId));
+            }
+        } catch (e) { }
+        return userId;
+    };
+
     // ========================
     // ACCOUNT QUERIES
     // ========================
@@ -57,10 +78,12 @@ module.exports = function createDataProvider(deps) {
     async function getAccounts(userId, options = {}) {
         const { includeHidden = false, visibleAccountIds = null } = options;
 
+        console.log(`[DP] getAccounts: userId=${userId}, includeHidden=${includeHidden}`);
+
         // Build query
-        const query = { userId };
+        const query = { userId: _uQuery(userId) };
+
         if (visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length > 0) {
-            const mongoose = require('mongoose');
             query._id = {
                 $in: visibleAccountIds.map(id => {
                     try { return new mongoose.Types.ObjectId(id); } catch { return id; }
@@ -87,14 +110,17 @@ module.exports = function createDataProvider(deps) {
             if (!includeHidden && isHidden) return null;
 
             // Get all operations for this account
-            const allOps = await Event.find({
-                userId,
+            // ⚠️ Event.userId is often a String in this DB, while Account.userId is ObjectId
+            const opsQuery = {
+                userId: _uQuery(userId),
                 $or: [
                     { accountId: acc._id },
                     { fromAccountId: acc._id },
                     { toAccountId: acc._id }
                 ]
-            }).lean();
+            };
+
+            const allOps = await Event.find(opsQuery).lean();
 
             // Calculate current balance (up to today)
             const currentOps = allOps.filter(op => new Date(op.date) <= todayEnd);
@@ -186,11 +212,17 @@ module.exports = function createDataProvider(deps) {
         const start = dateRange.start || new Date('2020-01-01');
         const end = dateRange.end || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
-        // Fetch operations with populated references
-        const operations = await Event.find({
-            userId,
+        // Event.userId is Mixed, try both
+        const query = {
+            userId: _uQuery(userId),
             date: { $gte: start, $lte: end }
-        })
+        };
+
+        // Add date range to query
+        // query.date = { $gte: start, $lte: end }; // This line is now redundant
+
+        // Fetch operations with populated references
+        const operations = await Event.find(query)
             .populate('categoryId', 'name')
             .populate('accountId', 'name individualId')
             .populate('companyId', 'name')
@@ -316,27 +348,27 @@ module.exports = function createDataProvider(deps) {
     // ========================
 
     async function getCompanies(userId) {
-        const companies = await Company.find({ userId }).select('name').lean();
+        const companies = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
         return companies.map(c => c.name).filter(Boolean);
     }
 
     async function getProjects(userId) {
-        const projects = await Project.find({ userId }).select('name').lean();
+        const projects = await Project.find({ userId: _uQuery(userId) }).select('name').lean();
         return projects.map(p => p.name).filter(Boolean);
     }
 
     async function getCategories(userId) {
-        const categories = await Category.find({ userId }).select('name type').lean();
+        const categories = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
         return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
     }
 
     async function getContractors(userId) {
-        const contractors = await Contractor.find({ userId }).select('name').lean();
+        const contractors = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
         return contractors.map(c => c.name).filter(Boolean);
     }
 
     async function getIndividuals(userId) {
-        const individuals = await Individual.find({ userId }).select('name').lean();
+        const individuals = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
         return individuals.map(i => i.name).filter(Boolean);
     }
 
@@ -352,6 +384,8 @@ module.exports = function createDataProvider(deps) {
      */
     async function buildDataPacket(userId, options = {}) {
         const { dateRange, includeHidden = false, visibleAccountIds = null } = options;
+
+        console.log(`[DP] buildDataPacket: userId=${userId}`);
 
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
             await Promise.all([
