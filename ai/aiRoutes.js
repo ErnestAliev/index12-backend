@@ -95,6 +95,8 @@ const _getHistoryMessages = (userId) => {
   return s.history.slice(-HISTORY_MAX_MESSAGES);
 };
 
+const createDataProvider = require('./dataProvider');
+
 module.exports = function createAiRouter(deps) {
   const {
     mongoose,
@@ -112,6 +114,17 @@ module.exports = function createAiRouter(deps) {
     Project,
     Category,
   } = models;
+
+  // Initialize data provider for direct DB access
+  const dataProvider = createDataProvider({
+    Account,
+    Company,
+    Contractor,
+    Individual,
+    Project,
+    Category,
+    Event,
+  });
 
   const router = express.Router();
 
@@ -587,17 +600,10 @@ module.exports = function createAiRouter(deps) {
 
       const explicitLimit = _parseExplicitLimitFromQuery(qLower);
 
-      const aiContext = (req.body && req.body.aiContext) ? req.body.aiContext : null;
-
-
       // =========================
-      // UI SNAPSHOT MODE (NO MONGO)
+      // DIRECT DATABASE ACCESS MODE
       // =========================
-      const uiSnapshot = (req.body && req.body.uiSnapshot) ? req.body.uiSnapshot : null;
-      const snapWidgets = Array.isArray(uiSnapshot?.widgets) ? uiSnapshot.widgets : [];
-
-      const snapTodayTitleStr = String(uiSnapshot?.meta?.todayStr || _fmtDateKZ(_endOfToday()));
-      const snapFutureTitleStr = String(uiSnapshot?.meta?.futureUntilStr || snapTodayTitleStr);
+      // No longer using uiSnapshot - all data comes from direct DB queries
 
       function _renderDiagnosticsFromSnapshot(uiSnapshotArg, todayDateStr, futureDateStr) {
         const s = uiSnapshotArg || null;
@@ -1283,11 +1289,12 @@ module.exports = function createAiRouter(deps) {
         return lines.join('\n');
       };
 
-      const _openAiChatFromSnapshot = async (qText) => {
-        // Diagnostics must be deterministic even in CHAT path
+      const _openAiChatFromDB = async (qText) => {
+        // Diagnostics query - simplified version using DB data
         const qn = _normQ(qText);
         if (_isDiagnosticsQuery(qn)) {
-          return _renderDiagnosticsFromSnapshot(uiSnapshot);
+          // Simple diagnostics - can be enhanced later
+          return `Диагностика: Используется прямое подключение к базе данных. Все данные загружаются напрямую из MongoDB.`;
         }
         // --- Build compact DATA packet (single source of truth)
         const _safeJson = (obj, maxLen = 15000) => {
@@ -1353,208 +1360,7 @@ module.exports = function createAiRouter(deps) {
           return out;
         };
 
-        const _buildDataPacket = () => {
-          const listKeys = (snapWidgets || []).map(w => w?.key).filter(Boolean);
-
-          const pickTotals = () => {
-            const inc = _getSummaryPair(['incomeList', 'income', 'incomeSummary']);
-            const exp = _getSummaryPair(['expenseList', 'expense', 'expenseSummary']);
-            const trn = _getSummaryPair(['transfers', 'transferList', 'transfersCurrent', 'transfersFuture']);
-            const wdr = _getSummaryPair(['withdrawalList', 'withdrawals', 'withdrawalsList', 'withdrawalListCurrent', 'withdrawalListFuture']);
-            const tax = _getSummaryPair(['taxes', 'tax', 'taxList', 'taxesList']);
-
-            return {
-              income: inc ? { fact: _moneyToNumber(inc.fact), forecast: _moneyToNumber(inc.fut) } : null,
-              expense: exp ? { fact: _moneyToNumber(exp.fact), forecast: _moneyToNumber(exp.fut) } : null,
-              transfers: trn ? { fact: _moneyToNumber(trn.fact), forecast: _moneyToNumber(trn.fut) } : null,
-              withdrawals: wdr ? { fact: _moneyToNumber(wdr.fact), forecast: _moneyToNumber(wdr.fut) } : null,
-              taxes: tax ? { fact: _moneyToNumber(tax.fact), forecast: _moneyToNumber(tax.fut) } : null,
-            };
-          };
-
-          const pickAccounts = () => {
-            const w = _findSnapWidget('accounts');
-            if (!w) return [];
-            const rows = _getRows(w);
-            return (rows || []).map(r => ({
-              name: String(r?.name || '—'),
-              hidden: Boolean(r?.isExcluded),
-              excluded: Boolean(r?.isExcluded),
-              factBalance: _moneyToNumber(_pickFactFuture({
-                ...r,
-                currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
-                futureText: r?.futureText ?? r?.planText,
-                currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
-                futureBalance: r?.futureBalance ?? r?.planBalance,
-              }).fact),
-              forecastBalance: _moneyToNumber(_pickFactFuture({
-                ...r,
-                currentText: r?.balanceText ?? r?.currentText ?? r?.factText,
-                futureText: r?.futureText ?? r?.planText,
-                currentBalance: r?.balance ?? r?.currentBalance ?? r?.factBalance,
-                futureBalance: r?.futureBalance ?? r?.planBalance,
-              }).fut),
-            }));
-          };
-
-          const pickTaxes = () => {
-            const w = _findSnapWidget('taxes') || _findSnapWidget('tax') || _findSnapWidget('taxList');
-            if (!w) return [];
-            const rows = _getRows(w);
-            return (rows || []).map(r => ({
-              company: String(r?.name || r?.company || r?.companyName || '—'),
-              fact: _moneyToNumber(_pickFactFuture({
-                ...r,
-                currentText: r?.factText ?? r?.currentText,
-                futureText: r?.futureText ?? r?.planText,
-                currentBalance: r?.fact ?? r?.factBalance,
-                futureBalance: r?.fut ?? r?.futureBalance,
-              }).fact),
-              forecast: _moneyToNumber(_pickFactFuture({
-                ...r,
-                currentText: r?.factText ?? r?.currentText,
-                futureText: r?.futureText ?? r?.planText,
-                currentBalance: r?.fact ?? r?.factBalance,
-                futureBalance: r?.fut ?? r?.futureBalance,
-              }).fut),
-            }));
-          };
-
-          const pickCatalog = (keys) => {
-            const w = _findSnapWidget(keys);
-            if (!w) return [];
-            const rows = _getRows(w);
-            return (rows || []).map(r => String(r?.name || r?.title || r?.label || '—'));
-          };
-
-          const pickOps = () => {
-            const out = [];
-            const baseTs = _kzStartOfDay(new Date()).getTime();
-            const all = _opsCollectRows();
-
-            // Get accounts for intermediary check
-            const accountsWidget = _findSnapWidget('accounts');
-            const accounts = _getRows(accountsWidget) || [];
-
-            // 🔥 FIX: Filter helpers matching frontend mainStore.js:1040,1044
-            const _isInterCompanyOp = (row) => {
-              const from = row?.fromCompanyId || row?.fromCompany;
-              const to = row?.toCompanyId || row?.toCompany;
-              return !!(from && to);
-            };
-
-            const _isRetailWriteOff = (row) => {
-              return !!(row?.isRetailWriteOff || row?.retailWriteOff);
-            };
-
-            // 🔥 NEW: Check if individual is intermediary (linked to account)
-            const _isIntermediaryIndividual = (row) => {
-              const opIndId = row?.individualId?._id || row?.individualId;
-              if (!opIndId) return false;
-
-              // If operation individualId matches any account individualId -> it's intermediary
-              return accounts.some(acc => {
-                const accIndId = acc?.individualId?._id || acc?.individualId;
-                return accIndId && String(accIndId) === String(opIndId);
-              });
-            };
-
-            (all || []).forEach(x => {
-              const r = x.__row;
-              const ts = _guessDateTs(r, baseTs);
-              if (!ts) return;
-              const kind = _opsGuessKind(x.__wk, r);
-              if (!kind) return;
-
-              // 🔥 FIX: Exclude inter-company ops, retail writeoffs, and intermediaries from income/expense
-              if (kind === 'income' || kind === 'expense') {
-                if (_isInterCompanyOp(r) || _isRetailWriteOff(r) || _isIntermediaryIndividual(r)) {
-                  return; // Skip - matches frontend currentIncomes/currentExpenses filter
-                }
-              }
-
-              const amount = _guessAmount(r);
-              const date = _fmtDateDDMMYYYY(r?.date || r?.dateIso || r?.dateYmd || r?.dateStr) || _fmtDateKZ(new Date(ts));
-              out.push({
-                kind,
-                date,
-                ts,
-                amount: Number(amount || 0),
-                project: _guessProject(r),
-                contractor: _guessContractor(r),
-                individual: _guessIndividual(r),
-                category: _guessCategory(r),
-                name: _guessName(r),
-                source: String(x.__wk || ''),
-              });
-            });
-            // Increased limit to ensure all recent operations are included
-            out.sort((a, b) => b.ts - a.ts);
-            return out.slice(0, 1000);
-          };
-
-          const pickTimeline = () => {
-            // Group operations by date for better AI understanding
-            const byDay = uiSnapshot?.storeTimeline?.opsByDay;
-            if (!byDay || typeof byDay !== 'object') return null;
-
-            const timeline = {};
-            for (const dateKey of Object.keys(byDay)) {
-              const arr = byDay[dateKey];
-              if (!Array.isArray(arr)) continue;
-
-              const dayOps = [];
-              for (const op of arr) {
-                const baseTs = _kzStartOfDay(new Date()).getTime();
-                const ts = _guessDateTs(op, baseTs);
-                if (!ts) continue;
-                const kind = _opsGuessKind('storeTimeline', op);
-                if (!kind) continue;
-
-                dayOps.push({
-                  kind,
-                  amount: _guessAmount(op),
-                  project: _guessProject(op),
-                  contractor: _guessContractor(op),
-                  individual: _guessIndividual(op),
-                  category: _guessCategory(op),
-                  name: _guessName(op),
-                });
-              }
-
-              if (dayOps.length > 0) {
-                timeline[dateKey] = dayOps;
-              }
-            }
-
-            return Object.keys(timeline).length > 0 ? timeline : null;
-          };
-
-          return {
-            meta: {
-              today: snapTodayDDMMYYYY,
-              forecastUntil: snapFutureDDMMYYYY,
-              todayTimestamp: _kzStartOfDay(new Date()).getTime(), // Add timestamp for filtering
-              widgets: listKeys,
-            },
-            totals: pickTotals(),
-            accounts: pickAccounts(),
-            taxes: pickTaxes(), // Add detailed tax breakdown by company
-            catalogs: {
-              projects: pickCatalog(['projects', 'projectList']),
-              contractors: pickCatalog(['contractors', 'contractorList', 'counterparties']),
-              categories: pickCatalog(['categories', 'categoryList']),
-              individuals: pickCatalog(['individuals', 'individualList', 'persons', 'people']),
-              companies: pickCatalog(['companies', 'companyList']),
-            },
-            operations: pickOps(),
-            timeline: pickTimeline(), // Add timeline structure
-          };
-        };
-
-        let dataPacket = _buildDataPacket();
-
-        // 🔥 SMART FILTER: Extract date range from user query and filter operations
+        // 🔥 SMART FILTER: Extract date range from user query
         const _extractDateRangeFromQuery = (query) => {
           const q = String(query || '').toLowerCase();
 
@@ -1609,69 +1415,119 @@ module.exports = function createAiRouter(deps) {
           return null; // No specific range detected
         };
 
-        const dateRange = _extractDateRangeFromQuery(q);
+        // Determine date range for operations query
+        const queryDateRange = _extractDateRangeFromQuery(q) || {
+          start: new Date('2020-01-01'),
+          end: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) // +1 year from now
+        };
 
-        if (dateRange) {
-          // Smart filter activated
-          console.log('🔍 AI FILTER:', {
-            period: dateRange.description,
-            opsBefore: (dataPacket.operations || []).length
+        // Get includeHidden from request (default: true)
+        const includeHidden = (req?.body?.includeHidden === false) ? false : true;
+
+        // Build data packet using direct DB access
+        const today = _kzStartOfDay(new Date());
+        const todayEnd = _kzEndOfDay(new Date());
+        const forecastUntil = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000); // +1 year
+
+        const [accounts, operations, projects, contractors, categories, individuals, companies] = await Promise.all([
+          dataProvider.getAccounts(userId, { includeHidden, asOf: todayEnd }),
+          dataProvider.getOperations(userId, queryDateRange, {}),
+          dataProvider.getProjects(userId),
+          dataProvider.getContractors(userId),
+          dataProvider.getCategories(userId),
+          dataProvider.getIndividuals(userId),
+          dataProvider.getCompanies(userId),
+        ]);
+
+        // Calculate totals from operations
+        const todayTsForTotals = today.getTime();
+        const factOps = operations.filter(op => op.ts <= todayTsForTotals);
+        const forecastOps = operations.filter(op => op.ts > todayTsForTotals);
+
+        const allIncomeOps = operations.filter(op => op.kind === 'income');
+        const allExpenseOps = operations.filter(op => op.kind === 'expense');
+        const transferOps = operations.filter(op => op.kind === 'transfer');
+        const withdrawalOps = operations.filter(op => op.kind === 'withdrawal');
+
+        const factIncomeOps = factOps.filter(op => op.kind === 'income');
+        const factExpenseOps = factOps.filter(op => op.kind === 'expense');
+        const factTransferOps = factOps.filter(op => op.kind === 'transfer');
+        const factWithdrawalOps = factOps.filter(op => op.kind === 'withdrawal');
+
+        const forecastIncomeOps = forecastOps.filter(op => op.kind === 'income');
+        const forecastExpenseOps = forecastOps.filter(op => op.kind === 'expense');
+        const forecastTransferOps = forecastOps.filter(op => op.kind === 'transfer');
+        const forecastWithdrawalOps = forecastOps.filter(op => op.kind === 'withdrawal');
+
+        const calculateTotal = (ops) => ops.reduce((sum, op) => sum + Math.abs(Number(op.amount || 0)), 0);
+
+        const dataPacket = {
+          meta: {
+            today: _fmtDateKZ(new Date()),
+            forecastUntil: _fmtDateKZ(forecastUntil),
+            todayTimestamp: todayTsForTotals,
+            widgets: [], // No longer needed, but kept for compatibility
+          },
+          totals: {
+            income: {
+              fact: calculateTotal(factIncomeOps),
+              forecast: calculateTotal(forecastIncomeOps),
+            },
+            expense: {
+              fact: calculateTotal(factExpenseOps),
+              forecast: calculateTotal(forecastExpenseOps),
+            },
+            transfers: {
+              fact: calculateTotal(factTransferOps),
+              forecast: calculateTotal(forecastTransferOps),
+            },
+            withdrawals: {
+              fact: calculateTotal(factWithdrawalOps),
+              forecast: calculateTotal(forecastWithdrawalOps),
+            },
+            taxes: null, // Can be calculated separately if needed
+          },
+          accounts: accounts.map(acc => ({
+            name: acc.name,
+            hidden: acc.isExcluded,
+            excluded: acc.isExcluded,
+            factBalance: acc.factBalance,
+            forecastBalance: acc.forecastBalance,
+          })),
+          taxes: [], // Can be populated separately if needed
+          catalogs: {
+            projects,
+            contractors,
+            categories,
+            individuals,
+            companies,
+          },
+          operations: operations.slice(0, 1000), // Limit to reasonable size
+          timeline: null, // Can be built from operations if needed
+        };
+
+        // Log query details for debugging
+        if (queryDateRange.description) {
+          console.log('🔍 AI QUERY:', {
+            period: queryDateRange.description,
+            opsCount: operations.length
           });
-
-          // Filter operations
-          const startTs = dateRange.start.getTime();
-          const endTs = dateRange.end.getTime();
-
-          if (dataPacket.operations) {
-            dataPacket.operations = dataPacket.operations.filter(op => {
-              return op.ts >= startTs && op.ts <= endTs;
-            });
-          }
-
-          // Filter timeline
-          if (dataPacket.timeline) {
-            const filteredTimeline = {};
-            for (const [dateKey, ops] of Object.entries(dataPacket.timeline)) {
-              const dayTs = _parseAnyDateToTs(dateKey);
-              if (dayTs && dayTs >= startTs && dayTs <= endTs) {
-                filteredTimeline[dateKey] = ops;
-              }
-            }
-            dataPacket.timeline = filteredTimeline;
-          }
-
-          // Filtering complete
-          const incomeOps = (dataPacket.operations || []).filter(op => op.kind === 'income');
-          const expenseOps = (dataPacket.operations || []).filter(op => op.kind === 'expense');
-          const incomeTotal = incomeOps.reduce((sum, op) => sum + (op.amount || 0), 0);
-          const expenseTotal = expenseOps.reduce((sum, op) => sum + (op.amount || 0), 0);
-
-          console.log('💰 AI TOTALS:', {
-            opsAfter: (dataPacket.operations || []).length,
-            income: { count: incomeOps.length, total: incomeTotal },
-            expense: { count: expenseOps.length, total: expenseTotal }
-          });
-
-          // Log first 5 income and expense operations to identify issues
-          console.log('📋 INCOME OPS (first 5):', incomeOps.slice(0, 5).map(op => ({
-            date: op.date,
-            amount: op.amount,
-            contractor: op.contractor,
-            category: op.category
-          })));
-          console.log('📋 EXPENSE OPS (first 5):', expenseOps.slice(0, 5).map(op => ({
-            date: op.date,
-            amount: op.amount,
-            contractor: op.contractor,
-            category: op.category
-          })));
         }
+
+        const incomeOpsCount = (dataPacket.operations || []).filter(op => op.kind === 'income').length;
+        const expenseOpsCount = (dataPacket.operations || []).filter(op => op.kind === 'expense').length;
+
+        console.log('💰 AI TOTALS:', {
+          opsCount: (dataPacket.operations || []).length,
+          income: { count: incomeOpsCount, total: dataPacket.totals.income.fact },
+          expense: { count: expenseOpsCount, total: dataPacket.totals.expense.fact }
+        });
 
 
         // DEBUG: Log what we're sending to AI
-        const todayTs = _kzStartOfDay(new Date()).getTime();
-        const futureOps = (dataPacket?.operations || []).filter(op => op.ts > todayTs);
-        const pastOps = (dataPacket?.operations || []).filter(op => op.ts <= todayTs);
+        const debugTodayTs = _kzStartOfDay(new Date()).getTime();
+        const futureOps = (dataPacket?.operations || []).filter(op => op.ts > debugTodayTs);
+        const pastOps = (dataPacket?.operations || []).filter(op => op.ts <= debugTodayTs);
 
         console.log('🔍 AI DATA PACKET DEBUG:', {
           totalOps: (dataPacket?.operations || []).length,
@@ -3276,7 +3132,7 @@ module.exports = function createAiRouter(deps) {
 
         // CHAT: always OpenAI, no manual intent handlers (unless quick intent was recognized)
         if (!isQuickRequest2) {
-          const text = await _openAiChatFromSnapshot(q);
+          const text = await _openAiChatFromDB(q);
           return res.json({ text });
         }
 
@@ -3754,10 +3610,8 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: hint });
       }
 
-      // No uiSnapshot => NO MONGO.
-      return res.status(400).json({ message: 'uiSnapshot is required (no-DB mode)' });
-
-      // Legacy Mongo-based path below is kept for reference only. In no-DB mode it must not run.
+      // All data now comes from direct DB access via dataProvider
+      // No uiSnapshot required
       const now = _pickFactAsOf(req, aiContext);
 
       const range = await _resolveRangeFromQuery(userId, qLower, now);
