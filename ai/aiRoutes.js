@@ -208,16 +208,6 @@ module.exports = function createAiRouter(deps) {
     lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
     lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
 
-    // Last operations (short)
-    const recentOps = (data.operations || []).slice(0, 15);
-    if (recentOps.length) {
-      lines.push('Последние операции:');
-      recentOps.forEach(op => {
-        const sign = op.kind === 'expense' ? '-' : op.kind === 'income' ? '+' : '';
-        lines.push(`- ${op.date}: ${sign}${_formatTenge(op.amount || 0)} (${op.kind}) ${op.description ? '| ' + op.description : ''}`);
-      });
-    }
-
     return lines.join('\n');
   };
 
@@ -558,6 +548,7 @@ module.exports = function createAiRouter(deps) {
         'Отвечай строго по данным, ничего не придумывай.',
         'Коротко и по делу, без советов и вопросов. Если данных много — либо выведи полный список, либо сгруппируй (например, по категориям/счетам) и явно отметь, что это агрегирование. Ничего важного не обрезай.',
         'Не путай доходы и прибыль: показывай доходы и расходы отдельно, не считай разницу, если это не запросили.',
+        'Если спрашивают про доходы или расходы — выведи период, итоги факт/прогноз и при необходимости агрегаты по категориям/счетам. Не нужно перечислять несколько последних операций.',
         'Деньги: "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
         'Для счетов: перечисли открытые и скрытые отдельно, затем итоги.',
         'Если данных нет — так и напиши, без воды.',
