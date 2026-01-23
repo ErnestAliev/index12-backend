@@ -254,6 +254,10 @@ module.exports = function createAiRouter(deps) {
       if (!q) return res.status(400).json({ message: 'Empty message' });
 
       const qLower = q.toLowerCase();
+      const source = req.body?.source || 'freeform';
+      const quickKey = req.body?.quickKey || null;
+      const isQuick = source === 'quick_button' || !!quickKey;
+      const isCommand = isQuick || /(^|\s)(покажи|список|выведи|сколько)\b/i.test(qLower);
       if (process.env.AI_DEBUG === '1') {
         console.log('[AI_DEBUG] query text:', qLower);
       }
@@ -461,7 +465,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // PROJECTS CATALOG
       // =========================
-      if (qLower.includes('проек') || qLower.includes('project')) {
+      if ((qLower.includes('проек') || qLower.includes('project')) && isCommand) {
         const projects = dbData.catalogs?.projects || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] projects branch hit, count=', projects.length, 'sample=', projects.slice(0, 3));
@@ -525,7 +529,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // CONTRACTORS CATALOG
       // =========================
-      if (qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр')) {
+      if ((qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр')) && isCommand) {
         const contractors = dbData.catalogs?.contractors || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] contractors branch hit, count=', contractors.length, 'sample=', contractors.slice(0, 3));
@@ -546,7 +550,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // INDIVIDUALS CATALOG
       // =========================
-      if (qLower.includes('физ') || qLower.includes('индивид') || qLower.includes('person')) {
+      if ((qLower.includes('физ') || qLower.includes('индивид') || qLower.includes('person')) && isCommand) {
         const individuals = dbData.catalogs?.individuals || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] individuals branch hit, count=', individuals.length, 'sample=', individuals.slice(0, 3));
@@ -567,7 +571,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // CATEGORIES CATALOG
       // =========================
-      if (qLower.includes('категор') || qLower.includes('category')) {
+      if ((qLower.includes('категор') || qLower.includes('category')) && isCommand) {
         const categories = dbData.catalogs?.categories || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] categories branch hit, count=', categories.length, 'sample=', categories.slice(0, 3));
@@ -588,7 +592,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // COMPANIES CATALOG
       // =========================
-      if (qLower.includes('компан') || qLower.includes('фирм') || qLower.includes('организаци') || qLower.includes('company')) {
+      if ((qLower.includes('компан') || qLower.includes('фирм') || qLower.includes('организаци') || qLower.includes('company')) && isCommand) {
         const companies = dbData.catalogs?.companies || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] companies branch hit, count=', companies.length, 'sample=', companies.slice(0, 3));
