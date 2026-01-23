@@ -87,7 +87,12 @@ module.exports = function createDataProvider(deps) {
         // Build query
         const query = { userId: _uQuery(userId) };
         if (workspaceId) {
-            query.workspaceId = _uObjId(workspaceId);
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
         }
 
         if (!includeHidden && visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length > 0) {
@@ -227,7 +232,12 @@ module.exports = function createDataProvider(deps) {
             date: { $gte: start, $lte: end }
         };
         if (workspaceId) {
-            query.workspaceId = _uObjId(workspaceId);
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
         }
 
         // Add date range to query
@@ -248,7 +258,14 @@ module.exports = function createDataProvider(deps) {
 
         // Get accounts for intermediary check (use same userId variants)
         const accountsQuery = { userId: _uQuery(userId) };
-        if (workspaceId) accountsQuery.workspaceId = _uObjId(workspaceId);
+        if (workspaceId) {
+            const wsId = _uObjId(workspaceId);
+            accountsQuery.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
+        }
         let accounts = await Account.find(accountsQuery).lean();
         if (!accounts.length && workspaceId) {
             accounts = await Account.find({ userId: _uQuery(userId) }).lean();
@@ -363,7 +380,14 @@ module.exports = function createDataProvider(deps) {
 
     async function getCompanies(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
-        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        if (workspaceId) {
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
+        }
         let companies = await Company.find(query).select('name').lean();
         if (!companies.length && workspaceId) {
             companies = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
@@ -373,7 +397,14 @@ module.exports = function createDataProvider(deps) {
 
     async function getProjects(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
-        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        if (workspaceId) {
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
+        }
         let projects = await Project.find(query).select('name').lean();
         if (!projects.length && workspaceId) {
             projects = await Project.find({ userId: _uQuery(userId) }).select('name').lean();
@@ -383,7 +414,14 @@ module.exports = function createDataProvider(deps) {
 
     async function getCategories(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
-        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        if (workspaceId) {
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
+        }
         let categories = await Category.find(query).select('name type').lean();
         if (!categories.length && workspaceId) {
             categories = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
@@ -393,7 +431,14 @@ module.exports = function createDataProvider(deps) {
 
     async function getContractors(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
-        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        if (workspaceId) {
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
+        }
         let contractors = await Contractor.find(query).select('name').lean();
         if (!contractors.length && workspaceId) {
             contractors = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
@@ -403,7 +448,14 @@ module.exports = function createDataProvider(deps) {
 
     async function getIndividuals(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
-        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        if (workspaceId) {
+            const wsId = _uObjId(workspaceId);
+            query.$or = [
+                { workspaceId: wsId },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ];
+        }
         let individuals = await Individual.find(query).select('name').lean();
         if (!individuals.length && workspaceId) {
             individuals = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
