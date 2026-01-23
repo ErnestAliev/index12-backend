@@ -87,9 +87,11 @@ module.exports = function createDataProvider(deps) {
         // Build query
         const query = { userId: _uQuery(userId) };
         if (workspaceId) {
+            const wsStr = String(workspaceId);
             const wsId = _uObjId(workspaceId);
+            const wsVariants = [wsStr, wsId];
             query.$or = [
-                { workspaceId: wsId },
+                { workspaceId: { $in: wsVariants } },
                 { workspaceId: { $exists: false } },
                 { workspaceId: null }
             ];
@@ -128,7 +130,7 @@ module.exports = function createDataProvider(deps) {
         const accountsWithBalances = await Promise.all(accounts.map(async (acc) => {
             const isExcluded = !!(acc.isExcluded || acc.excluded || acc.excludeFromTotal || acc.excludedFromTotal);
             const isHiddenFlag = !!(acc.hidden || acc.isHidden);
-            const isHidden = isHiddenFlag; // Исключённые не считаем скрытыми, чтобы AI видел открытые счета
+            const isHidden = isHiddenFlag || isExcluded; // Исключённые считаем скрытыми, как в UI
 
             // Skip hidden accounts if not requested
             if (!includeHidden && isHidden) {
@@ -242,9 +244,11 @@ module.exports = function createDataProvider(deps) {
             date: { $gte: start, $lte: end }
         };
         if (workspaceId) {
+            const wsStr = String(workspaceId);
             const wsId = _uObjId(workspaceId);
+            const wsVariants = [wsStr, wsId];
             query.$or = [
-                { workspaceId: wsId },
+                { workspaceId: { $in: wsVariants } },
                 { workspaceId: { $exists: false } },
                 { workspaceId: null }
             ];
@@ -269,9 +273,11 @@ module.exports = function createDataProvider(deps) {
         // Get accounts for intermediary check (use same userId variants)
         const accountsQuery = { userId: _uQuery(userId) };
         if (workspaceId) {
+            const wsStr = String(workspaceId);
             const wsId = _uObjId(workspaceId);
+            const wsVariants = [wsStr, wsId];
             accountsQuery.$or = [
-                { workspaceId: wsId },
+                { workspaceId: { $in: wsVariants } },
                 { workspaceId: { $exists: false } },
                 { workspaceId: null }
             ];
