@@ -365,6 +365,7 @@ module.exports = function createDataProvider(deps) {
                 amount: absAmount,
                 rawAmount,
                 description: op.description || null,
+                projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
             });
         }
 
@@ -455,11 +456,14 @@ module.exports = function createDataProvider(deps) {
                 map.set(String(id), { _id: id, name: null });
             }
         });
-        const names = Array.from(map.values()).map(p => {
+        const items = Array.from(map.values()).map(p => {
             const name = p.name || p.title || p.label || p.projectName;
-            return (name && String(name).trim()) ? String(name).trim() : `Проект ${String(p._id).slice(-4)}`;
-        }).filter(Boolean);
-        return names;
+            return {
+                id: String(p._id),
+                name: (name && String(name).trim()) ? String(name).trim() : `Проект ${String(p._id).slice(-4)}`
+            };
+        }).filter(p => p.name);
+        return items;
     }
 
     async function getCategories(userId, workspaceId = null) {

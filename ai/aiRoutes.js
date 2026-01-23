@@ -466,17 +466,60 @@ module.exports = function createAiRouter(deps) {
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] projects branch hit, count=', projects.length, 'sample=', projects.slice(0, 3));
         }
-        const lines = ['Проекты:'];
-        if (projects.length) {
-          lines.push(...projects.map((p, i) => `${i + 1}. ${p}`));
-        } else {
-          lines.push('- нет имен');
-        }
-        lines.push(`Всего: ${projects.length}`);
+        const wantsAnalysis = qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary');
 
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
+        // Если нужен анализ — считаем по операциям
+        if (wantsAnalysis) {
+          const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
+          const projectMap = new Map();
+          projects.forEach(p => {
+            const id = typeof p === 'string' ? p : p.id;
+            const name = typeof p === 'string' ? p : (p.name || p.id);
+            if (id) projectMap.set(String(id), { name, incomeFact: 0, incomeForecast: 0, expenseFact: 0, expenseForecast: 0 });
+          });
+
+          for (const op of ops) {
+            if (!op.projectId || !projectMap.has(String(op.projectId))) continue;
+            const proj = projectMap.get(String(op.projectId));
+            if (op.kind === 'income') {
+              if (op.isFact) proj.incomeFact += op.amount || 0;
+              else proj.incomeForecast += op.amount || 0;
+            } else if (op.kind === 'expense') {
+              if (op.isFact) proj.expenseFact += op.amount || 0;
+              else proj.expenseForecast += op.amount || 0;
+            }
+          }
+
+          const lines = [`Проекты (анализ) за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
+          if (!projectMap.size) {
+            lines.push('- нет данных');
+          } else {
+            let idx = 1;
+            for (const [, p] of projectMap) {
+              lines.push(`${idx}. ${p.name}: доход факт ${_formatTenge(p.incomeFact)}, прогноз ${_formatTenge(p.incomeForecast)}; расход факт ${_formatTenge(-p.expenseFact)}, прогноз ${_formatTenge(-p.expenseForecast)}`);
+              idx += 1;
+            }
+          }
+
+          const answer = lines.join('\n');
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        } else {
+          const lines = ['Проекты:'];
+          if (projects.length) {
+            lines.push(...projects.map((p, i) => {
+              if (typeof p === 'string') return `${i + 1}. ${p}`;
+              return `${i + 1}. ${p.name || p.id || '—'}`;
+            }));
+          } else {
+            lines.push('- нет имен');
+          }
+          lines.push(`Всего: ${projects.length}`);
+
+          const answer = lines.join('\n');
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
       }
 
       // =========================
