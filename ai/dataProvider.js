@@ -94,6 +94,9 @@ module.exports = function createDataProvider(deps) {
     async function getAccounts(userId, options = {}) {
         const { includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null } = options;
         const nowRef = _resolveNow(now);
+        if (process.env.AI_DEBUG === '1') {
+            console.log('[AI_DEBUG] buildDataPacket userId=', userId, 'workspaceId=', workspaceId, 'period=', periodFilter);
+        }
 
         // Build query
         const query = { userId: _uQuery(userId) };

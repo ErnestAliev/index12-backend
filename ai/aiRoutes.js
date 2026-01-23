@@ -300,11 +300,19 @@ module.exports = function createAiRouter(deps) {
           totalAccounts: totalAccs,
           hiddenCount: hiddenAccs.length,
           hiddenNames: hiddenAccs.map(a => a.name),
+          catalogs: {
+            companies: dbData.catalogs?.companies?.length || 0,
+            projects: dbData.catalogs?.projects?.length || 0,
+            categories: dbData.catalogs?.categories?.length || 0,
+            contractors: dbData.catalogs?.contractors?.length || 0,
+            individuals: dbData.catalogs?.individuals?.length || 0,
+          }
         };
         console.log('[AI_DEBUG] accounts total:', totalAccs, 'hidden:', hiddenAccs.length);
         if (hiddenAccs.length) {
           console.log('[AI_DEBUG] hidden list:', hiddenAccs.map(a => `${a.name} (${a._id})`).join(', '));
         }
+        console.log('[AI_DEBUG] catalogs counts:', debugInfo.catalogs);
       }
 
       // Store user message in history
@@ -581,6 +589,13 @@ module.exports = function createAiRouter(deps) {
           kind: op.kind,
           isFact: op.isFact
         }));
+        debugInfo.catalogs = debugInfo.catalogs || {
+          companies: dbData.catalogs?.companies?.length || 0,
+          projects: dbData.catalogs?.projects?.length || 0,
+          categories: dbData.catalogs?.categories?.length || 0,
+          contractors: dbData.catalogs?.contractors?.length || 0,
+          individuals: dbData.catalogs?.individuals?.length || 0,
+        };
         return res.json({ text: aiResponse, debug: debugInfo });
       }
 
