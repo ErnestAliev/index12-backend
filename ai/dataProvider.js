@@ -449,14 +449,21 @@ module.exports = function createDataProvider(deps) {
         const q = { userId: _uQuery(userId) };
         const ws = _buildWsCondition(workspaceId);
         if (ws) Object.assign(q, ws);
-        let projects = await Project.find(q).select('name').lean();
+        let projects = await Project.find(q).select('name title label projectName').lean();
         if (workspaceId) {
-            const fallback = await Project.find({ userId: _uQuery(userId) }).select('name').lean();
+            const fallback = await Project.find({ userId: _uQuery(userId) }).select('name title label projectName').lean();
             const map = new Map();
             [...projects, ...fallback].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
             projects = Array.from(map.values());
         }
-        return projects.map(p => p.name).filter(Boolean);
+        return projects
+            .map(p => {
+                const name = p.name || p.title || p.label || p.projectName;
+                if (name && String(name).trim()) return String(name).trim();
+                // fallback, чтобы не терять проекты без имени
+                return `Проект ${String(p._id).slice(-4)}`;
+            })
+            .filter(Boolean);
     }
 
     async function getCategories(userId, workspaceId = null) {
