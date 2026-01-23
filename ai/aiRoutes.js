@@ -420,12 +420,11 @@ module.exports = function createAiRouter(deps) {
         const incomeData = summary.income || {};
 
         const lines = [];
-        const periodStart = dbData.meta?.periodStart || '';
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
-        const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `до ${periodEnd}`;
+        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '';
+        const periodLabel = periodStart && periodEnd ? `${periodStart} — ${periodEnd}` : (periodStart || periodEnd || 'не указан');
 
         lines.push(`Доходы за период ${periodLabel}`);
-        lines.push('');
         lines.push(`Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0} операций)`);
         lines.push(`Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0} операций)`);
 
