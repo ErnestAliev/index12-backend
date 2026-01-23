@@ -285,6 +285,7 @@ module.exports = function createAiRouter(deps) {
         includeHidden: req?.body?.includeHidden !== false,
         visibleAccountIds: req?.body?.visibleAccountIds || null,
         dateRange: req?.body?.periodFilter || null,
+        workspaceId: req.user?.currentWorkspaceId || null,
       });
 
       // Store user message in history

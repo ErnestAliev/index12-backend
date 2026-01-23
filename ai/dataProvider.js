@@ -76,10 +76,13 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Object>} Accounts data with balances
      */
     async function getAccounts(userId, options = {}) {
-        const { includeHidden = false, visibleAccountIds = null } = options;
+        const { includeHidden = false, visibleAccountIds = null, workspaceId = null } = options;
 
         // Build query
         const query = { userId: _uQuery(userId) };
+        if (workspaceId) {
+            query.workspaceId = _uObjId(workspaceId);
+        }
 
         if (!includeHidden && visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length > 0) {
             query._id = {
@@ -202,7 +205,7 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Array>} Normalized operations
      */
     async function getOperations(userId, dateRange = {}, options = {}) {
-        const { excludeTransfers = false, excludeInterCompany = true } = options;
+        const { excludeTransfers = false, excludeInterCompany = true, workspaceId = null } = options;
 
         // Default to all-time if no range specified
         const start = dateRange.start || new Date('2020-01-01');
@@ -213,6 +216,9 @@ module.exports = function createDataProvider(deps) {
             userId: _uQuery(userId),
             date: { $gte: start, $lte: end }
         };
+        if (workspaceId) {
+            query.workspaceId = _uObjId(workspaceId);
+        }
 
         // Add date range to query
         // query.date = { $gte: start, $lte: end }; // This line is now redundant
@@ -223,7 +229,9 @@ module.exports = function createDataProvider(deps) {
             .lean();
 
         // Get accounts for intermediary check (use same userId variants)
-        const accounts = await Account.find({ userId: _uQuery(userId) }).lean();
+        const accountsQuery = { userId: _uQuery(userId) };
+        if (workspaceId) accountsQuery.workspaceId = _uObjId(workspaceId);
+        const accounts = await Account.find(accountsQuery).lean();
         const accountIndividualIds = new Set(
             accounts
                 .filter(a => a.individualId)
@@ -368,7 +376,7 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Object>} Data packet for AI
      */
     async function buildDataPacket(userId, options = {}) {
-        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null } = options;
+        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null, workspaceId = null } = options;
 
         // ✅ Parse dateRange from periodFilter
         let start = null;
@@ -394,8 +402,8 @@ module.exports = function createDataProvider(deps) {
 
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
             await Promise.all([
-                getAccounts(userId, { includeHidden, visibleAccountIds }),
-                getOperations(userId, { start, end }, {}),
+                getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId }),
+                getOperations(userId, { start, end }, { workspaceId }),
                 getCompanies(userId),
                 getProjects(userId),
                 getCategories(userId),
