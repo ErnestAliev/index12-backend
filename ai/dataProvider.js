@@ -237,7 +237,7 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Array>} Normalized operations
      */
     async function getOperations(userId, dateRange = {}, options = {}) {
-        const { excludeTransfers = false, excludeInterCompany = true, workspaceId = null } = options;
+        const { excludeTransfers = false, excludeInterCompany = true, workspaceId = null, includeHidden = false } = options;
 
         // Default to all-time if no range specified
         const start = dateRange.start || new Date('2020-01-01');
@@ -303,18 +303,18 @@ module.exports = function createDataProvider(deps) {
 
         for (const op of operations) {
             // Skip inter-company transfers if requested
-            if (excludeInterCompany && op.fromCompanyId && op.toCompanyId) {
-                continue;
-            }
+        if (excludeInterCompany && !includeHidden && op.fromCompanyId && op.toCompanyId) {
+            continue;
+        }
 
             // Skip retail write-offs
             if (op.isRetailWriteOff || op.retailWriteOff) {
                 continue;
             }
 
-            // Skip intermediary individuals (linked to accounts)
+            // Skip intermediary individuals (linked to accounts) only when not forcing includeHidden
             const opIndividualId = op.individualId?._id || op.individualId;
-            if (opIndividualId && accountIndividualIds.has(String(opIndividualId))) {
+            if (!includeHidden && opIndividualId && accountIndividualIds.has(String(opIndividualId))) {
                 continue;
             }
 
@@ -522,7 +522,7 @@ module.exports = function createDataProvider(deps) {
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
             await Promise.all([
                 getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId }),
-                getOperations(userId, { start, end }, { workspaceId }),
+                getOperations(userId, { start, end }, { workspaceId, includeHidden }),
                 getCompanies(userId, workspaceId),
                 getProjects(userId, workspaceId),
                 getCategories(userId, workspaceId),
