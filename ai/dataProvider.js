@@ -42,15 +42,21 @@ module.exports = function createDataProvider(deps) {
         return `${dd}.${mm}.${yy}`;
     };
 
-    // Helper for userId queries (matches both ObjectId and String)
+    // Helper for userId queries (matches both ObjectId and String, supports arrays)
     const _uQuery = (userId) => {
-        const variants = [String(userId)];
-        try {
-            if (mongoose.Types.ObjectId.isValid(userId)) {
-                variants.push(new mongoose.Types.ObjectId(String(userId)));
-            }
-        } catch (e) { }
-        return { $in: variants };
+        const ids = Array.isArray(userId) ? userId : [userId];
+        const variants = [];
+        for (const id of ids) {
+            if (!id) continue;
+            const str = String(id);
+            variants.push(str);
+            try {
+                if (mongoose.Types.ObjectId.isValid(id)) {
+                    variants.push(new mongoose.Types.ObjectId(str));
+                }
+            } catch (e) { }
+        }
+        return { $in: Array.from(new Set(variants)) };
     };
 
     // For models that definitely use ObjectId (Account, Project, etc.)

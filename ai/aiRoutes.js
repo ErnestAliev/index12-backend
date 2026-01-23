@@ -281,7 +281,13 @@ module.exports = function createAiRouter(deps) {
       }
 
       // Build data packet from database
-      const dbData = await dataProvider.buildDataPacket(effectiveUserId, {
+      const userIdsList = Array.from(
+        new Set(
+          [effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String)
+        )
+      );
+
+      const dbData = await dataProvider.buildDataPacket(userIdsList, {
         includeHidden: req?.body?.includeHidden !== false,
         visibleAccountIds: req?.body?.visibleAccountIds || null,
         dateRange: req?.body?.periodFilter || null,
