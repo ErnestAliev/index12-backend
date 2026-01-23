@@ -592,18 +592,6 @@ module.exports = function createAiRouter(deps) {
         debugInfo.hiddenCount = hiddenAccs.length;
         debugInfo.openNames = openAccs.map(a => a.name);
         debugInfo.openCount = openAccs.length;
-
-        const debugLines = [
-          aiResponse,
-          '',
-          'DEBUG:',
-          `Открытые счета: ${openAccs.length} (${debugInfo.openNames.join(', ') || 'нет'})`,
-          `Скрытые счета: ${hiddenAccs.length} (${debugInfo.hiddenNames.join(', ') || 'нет'})`
-        ];
-        return res.json({ text: debugLines.join('\n'), debug: debugInfo });
-      }
-
-      if (debugRequested) {
         return res.json({ text: aiResponse, debug: debugInfo });
       }
 
