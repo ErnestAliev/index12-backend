@@ -456,7 +456,7 @@ module.exports = function createDataProvider(deps) {
             [...projects, ...fallback].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
             projects = Array.from(map.values());
         }
-        return projects
+        let names = projects
             .map(p => {
                 const name = p.name || p.title || p.label || p.projectName;
                 if (name && String(name).trim()) return String(name).trim();
@@ -464,6 +464,23 @@ module.exports = function createDataProvider(deps) {
                 return `Проект ${String(p._id).slice(-4)}`;
             })
             .filter(Boolean);
+
+        // Extra fallback: если по прямому запросу ничего, попробуем достать projectId из событий
+        if (!names.length) {
+            const evQuery = { userId: _uQuery(userId), projectId: { $exists: true, $ne: null } };
+            const ws = _buildWsCondition(workspaceId);
+            if (ws) Object.assign(evQuery, ws);
+            const distinctIds = await Event.distinct('projectId', evQuery);
+            if (distinctIds && distinctIds.length) {
+                const extraProjects = await Project.find({ _id: { $in: distinctIds } }).select('name title label projectName').lean();
+                names = extraProjects.map(p => {
+                    const name = p.name || p.title || p.label || p.projectName;
+                    return (name && String(name).trim()) ? String(name).trim() : `Проект ${String(p._id).slice(-4)}`;
+                }).filter(Boolean);
+            }
+        }
+
+        return names;
     }
 
     async function getCategories(userId, workspaceId = null) {
