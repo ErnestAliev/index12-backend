@@ -93,7 +93,11 @@ module.exports = function createDataProvider(deps) {
         }
 
         // Fetch accounts without populate (we'll do manual lookups if needed)
-        const accounts = await Account.find(query).lean();
+        let accounts = await Account.find(query).lean();
+        // Fallback: legacy data without workspaceId
+        if (!accounts.length && workspaceId) {
+            accounts = await Account.find({ userId: _uQuery(userId) }).lean();
+        }
 
         // Get today for fact/forecast split
         const today = _kzStartOfDay(_kzNow());
@@ -224,14 +228,25 @@ module.exports = function createDataProvider(deps) {
         // query.date = { $gte: start, $lte: end }; // This line is now redundant
 
         // Fetch operations without populate (using lean for performance)
-        const operations = await Event.find(query)
+        let operations = await Event.find(query)
             .sort({ date: -1 })
             .lean();
+        if (!operations.length && workspaceId) {
+            // Fallback to legacy data without workspaceId
+            const fallbackQuery = {
+                userId: _uQuery(userId),
+                date: { $gte: start, $lte: end }
+            };
+            operations = await Event.find(fallbackQuery).sort({ date: -1 }).lean();
+        }
 
         // Get accounts for intermediary check (use same userId variants)
         const accountsQuery = { userId: _uQuery(userId) };
         if (workspaceId) accountsQuery.workspaceId = _uObjId(workspaceId);
-        const accounts = await Account.find(accountsQuery).lean();
+        let accounts = await Account.find(accountsQuery).lean();
+        if (!accounts.length && workspaceId) {
+            accounts = await Account.find({ userId: _uQuery(userId) }).lean();
+        }
         const accountIndividualIds = new Set(
             accounts
                 .filter(a => a.individualId)
@@ -343,35 +358,50 @@ module.exports = function createDataProvider(deps) {
     async function getCompanies(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
         if (workspaceId) query.workspaceId = _uObjId(workspaceId);
-        const companies = await Company.find(query).select('name').lean();
+        let companies = await Company.find(query).select('name').lean();
+        if (!companies.length && workspaceId) {
+            companies = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
+        }
         return companies.map(c => c.name).filter(Boolean);
     }
 
     async function getProjects(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
         if (workspaceId) query.workspaceId = _uObjId(workspaceId);
-        const projects = await Project.find(query).select('name').lean();
+        let projects = await Project.find(query).select('name').lean();
+        if (!projects.length && workspaceId) {
+            projects = await Project.find({ userId: _uQuery(userId) }).select('name').lean();
+        }
         return projects.map(p => p.name).filter(Boolean);
     }
 
     async function getCategories(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
         if (workspaceId) query.workspaceId = _uObjId(workspaceId);
-        const categories = await Category.find(query).select('name type').lean();
+        let categories = await Category.find(query).select('name type').lean();
+        if (!categories.length && workspaceId) {
+            categories = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
+        }
         return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
     }
 
     async function getContractors(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
         if (workspaceId) query.workspaceId = _uObjId(workspaceId);
-        const contractors = await Contractor.find(query).select('name').lean();
+        let contractors = await Contractor.find(query).select('name').lean();
+        if (!contractors.length && workspaceId) {
+            contractors = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
+        }
         return contractors.map(c => c.name).filter(Boolean);
     }
 
     async function getIndividuals(userId, workspaceId = null) {
         const query = { userId: _uQuery(userId) };
         if (workspaceId) query.workspaceId = _uObjId(workspaceId);
-        const individuals = await Individual.find(query).select('name').lean();
+        let individuals = await Individual.find(query).select('name').lean();
+        if (!individuals.length && workspaceId) {
+            individuals = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
+        }
         return individuals.map(i => i.name).filter(Boolean);
     }
 
