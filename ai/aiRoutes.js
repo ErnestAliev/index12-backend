@@ -465,14 +465,12 @@ module.exports = function createAiRouter(deps) {
       if (/\b(проект|project)\b/i.test(qLower)) {
         const projects = dbData.catalogs?.projects || [];
         if (!projects.length) {
-          const answer = 'Проекты не найдены.';
+          const answer = 'Проектов нет.';
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
 
-        const lines = ['Мои проекты', ''];
-        projects.forEach((p, i) => lines.push(`${i + 1}. ${p}`));
-        lines.push('', `Всего: ${projects.length}`);
+        const lines = ['Проекты:', ...projects.map((p, i) => `${i + 1}. ${p}`), `Всего: ${projects.length}`];
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -485,14 +483,12 @@ module.exports = function createAiRouter(deps) {
       if (/\b(контрагент|поставщик|партнёр|партнер)\b/i.test(qLower)) {
         const contractors = dbData.catalogs?.contractors || [];
         if (!contractors.length) {
-          const answer = 'Контрагенты не найдены.';
+          const answer = 'Контрагентов нет.';
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
 
-        const lines = ['Мои контрагенты', ''];
-        contractors.forEach((c, i) => lines.push(`${i + 1}. ${c}`));
-        lines.push('', `Всего: ${contractors.length}`);
+        const lines = ['Контрагенты:', ...contractors.map((c, i) => `${i + 1}. ${c}`), `Всего: ${contractors.length}`];
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -505,14 +501,12 @@ module.exports = function createAiRouter(deps) {
       if (/\b(физ\W*лиц|физическ|индивид|person)\b/i.test(qLower)) {
         const individuals = dbData.catalogs?.individuals || [];
         if (!individuals.length) {
-          const answer = 'Физические лица не найдены.';
+          const answer = 'Физических лиц нет.';
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
 
-        const lines = ['Физические лица', ''];
-        individuals.forEach((ind, i) => lines.push(`${i + 1}. ${ind}`));
-        lines.push('', `Всего: ${individuals.length}`);
+        const lines = ['Физические лица:', ...individuals.map((ind, i) => `${i + 1}. ${ind}`), `Всего: ${individuals.length}`];
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -525,14 +519,12 @@ module.exports = function createAiRouter(deps) {
       if (/\b(категори|category)\b/i.test(qLower)) {
         const categories = dbData.catalogs?.categories || [];
         if (!categories.length) {
-          const answer = 'Категории не найдены.';
+          const answer = 'Категорий нет.';
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
 
-        const lines = ['Мои категории', ''];
-        categories.forEach((cat, i) => lines.push(`${i + 1}. ${cat}`));
-        lines.push('', `Всего: ${categories.length}`);
+        const lines = ['Категории:', ...categories.map((cat, i) => `${i + 1}. ${cat}`), `Всего: ${categories.length}`];
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
