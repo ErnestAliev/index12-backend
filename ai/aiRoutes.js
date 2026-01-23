@@ -293,15 +293,24 @@ module.exports = function createAiRouter(deps) {
       }
 
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: req?.body?.includeHidden !== false,
+        includeHidden: true, // всегда берем скрытые для ответа AI
         visibleAccountIds: req?.body?.visibleAccountIds || null,
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
       });
 
-      if (process.env.AI_DEBUG === '1' || req?.body?.includeHidden) {
+      const debugRequested = process.env.AI_DEBUG === '1' || req?.body?.debugAi === true;
+      let debugInfo = null;
+
+      if (debugRequested || req?.body?.includeHidden) {
         const hiddenAccs = (dbData.accounts || []).filter(a => a.isHidden);
-        console.log('[AI_DEBUG] accounts total:', (dbData.accounts || []).length, 'hidden:', hiddenAccs.length);
+        const totalAccs = (dbData.accounts || []).length;
+        debugInfo = {
+          totalAccounts: totalAccs,
+          hiddenCount: hiddenAccs.length,
+          hiddenNames: hiddenAccs.map(a => a.name),
+        };
+        console.log('[AI_DEBUG] accounts total:', totalAccs, 'hidden:', hiddenAccs.length);
         if (hiddenAccs.length) {
           console.log('[AI_DEBUG] hidden list:', hiddenAccs.map(a => `${a.name} (${a._id})`).join(', '));
         }
@@ -361,11 +370,30 @@ module.exports = function createAiRouter(deps) {
         if (!accounts.length) {
           lines.push('Счета не найдены.');
         } else {
-          for (const acc of accounts) {
-            const balance = acc.currentBalance || 0;
-            const name = acc.name || 'Счет';
-            const marker = acc.isHidden ? ' (скрыт)' : '';
-            lines.push(`${name}${marker}: ${_formatTenge(balance)}`);
+          const openAccs = accounts.filter(a => !a.isHidden);
+          const hiddenAccs = accounts.filter(a => a.isHidden);
+
+          lines.push('Открытые:');
+          if (openAccs.length) {
+            for (const acc of openAccs) {
+              const balance = acc.currentBalance || 0;
+              const name = acc.name || 'Счет';
+              lines.push(`${name}: ${_formatTenge(balance)}`);
+            }
+          } else {
+            lines.push('- нет');
+          }
+
+          lines.push('');
+          lines.push('Скрытые:');
+          if (hiddenAccs.length) {
+            for (const acc of hiddenAccs) {
+              const balance = acc.currentBalance || 0;
+              const name = acc.name || 'Счет';
+              lines.push(`${name} (скрыт): ${_formatTenge(balance)}`);
+            }
+          } else {
+            lines.push('- нет');
           }
 
           lines.push('');
@@ -555,6 +583,10 @@ module.exports = function createAiRouter(deps) {
 
       const aiResponse = await _openAiChat(messages);
       _pushHistory(userIdStr, 'assistant', aiResponse);
+
+      if (debugRequested) {
+        return res.json({ text: aiResponse, debug: debugInfo });
+      }
 
       return res.json({ text: aiResponse });
 
