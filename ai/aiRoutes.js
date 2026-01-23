@@ -259,11 +259,6 @@ module.exports = function createAiRouter(deps) {
       const userId = req.user?.id || req.user?._id;
       const userIdStr = String(userId);
 
-      console.log('🔍 [AI QUERY] ================================================');
-      console.log('🔍 req.user:', JSON.stringify(req.user, null, 2));
-      console.log('🔍 userId extracted:', userId);
-      console.log('🔍 userIdStr:', userIdStr);
-
       const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
       const q = qRaw.trim();
       if (!q) return res.status(400).json({ message: 'Empty message' });
@@ -280,28 +275,17 @@ module.exports = function createAiRouter(deps) {
       if (typeof getCompositeUserId === 'function') {
         try {
           effectiveUserId = await getCompositeUserId(req);
-          console.log('🔍 getCompositeUserId returned:', effectiveUserId);
         } catch (e) {
           console.error('❌ Failed to get composite userId:', e);
         }
       }
 
-      console.log('🔍 effectiveUserId (final):', effectiveUserId);
-      console.log('🔍 includeHidden:', req?.body?.includeHidden);
-      console.log('🔍 visibleAccountIds:', req?.body?.visibleAccountIds);
-      console.log('🔍 periodFilter:', req?.body?.periodFilter);
-
       // Build data packet from database
-      console.log(`🔍 [AI] Calling dataProvider.buildDataPacket for user: ${effectiveUserId}`);
       const dbData = await dataProvider.buildDataPacket(effectiveUserId, {
         includeHidden: req?.body?.includeHidden !== false,
         visibleAccountIds: req?.body?.visibleAccountIds || null,
         dateRange: req?.body?.periodFilter || null,
       });
-
-      console.log(`🔍 [AI] DB Results - Accounts: ${dbData.accounts?.length || 0}, Ops: ${dbData.operations?.length || 0}`);
-      console.log('🔍 [AI] First 3 accounts:', dbData.accounts?.slice(0, 3).map(a => ({ name: a.name, id: a._id })));
-      console.log('🔍 ================================================');
 
       // Store user message in history
       _pushHistory(userIdStr, 'user', q);
@@ -543,9 +527,6 @@ module.exports = function createAiRouter(deps) {
       ].join('\n');
 
       const dataContext = _formatDbDataForAi(dbData);
-      console.log(`[AI] Prompt Context - Scounts: ${dbData.accounts?.length || 0}, Ops: ${dbData.operations?.length || 0}`);
-      // console.log('[AI] Context Preview:', dataContext.substring(0, 500) + '...');
-
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'system', content: dataContext },

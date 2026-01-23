@@ -78,8 +78,6 @@ module.exports = function createDataProvider(deps) {
     async function getAccounts(userId, options = {}) {
         const { includeHidden = false, visibleAccountIds = null } = options;
 
-        console.log(`[DP] getAccounts: userId=${userId}, includeHidden=${includeHidden}`);
-
         // Build query
         const query = { userId: _uQuery(userId) };
 
@@ -94,11 +92,6 @@ module.exports = function createDataProvider(deps) {
         // Fetch accounts without populate (we'll do manual lookups if needed)
         const accounts = await Account.find(query).lean();
 
-        console.log(`[DP] Found ${accounts.length} accounts in DB for query:`, JSON.stringify(query));
-        if (accounts.length > 0) {
-            console.log(`[DP] Account names: ${accounts.map(a => a.name).join(', ')}`);
-        }
-
         // Get today for fact/forecast split
         const today = _kzStartOfDay(_kzNow());
         const todayEnd = _kzEndOfDay(_kzNow());
@@ -111,11 +104,8 @@ module.exports = function createDataProvider(deps) {
 
             // Skip hidden accounts if not requested
             if (!includeHidden && isHidden) {
-                console.log(`[DP] Skipping hidden account: ${acc.name}`);
                 return null;
             }
-
-            console.log(`[DP] Processing account: ${acc.name} (isHidden=${isHidden})`);
 
             // Get all operations for this account
             // ⚠️ Event.userId is often a String in this DB, while Account.userId is ObjectId
@@ -380,8 +370,6 @@ module.exports = function createDataProvider(deps) {
     async function buildDataPacket(userId, options = {}) {
         const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null } = options;
 
-        console.log(`[DP] buildDataPacket: userId=${userId}, periodFilter=`, periodFilter);
-
         // ✅ Parse dateRange from periodFilter
         let start = null;
         let end = null;
@@ -403,8 +391,6 @@ module.exports = function createDataProvider(deps) {
             start = _kzStartOfDay(new Date(now.getFullYear(), now.getMonth(), 1));
             end = _kzEndOfDay(new Date(now.getFullYear(), now.getMonth() + 1, 0));
         }
-
-        console.log(`[DP] Date range: ${start.toISOString()} to ${end.toISOString()}`);
 
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
             await Promise.all([
