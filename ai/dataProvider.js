@@ -433,78 +433,72 @@ module.exports = function createDataProvider(deps) {
 
     async function getCompanies(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        let companies = await Company.find(q).select('name').lean();
-        const fallback = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
+        const docs = await Company.find(q).select('name').lean();
+        const idsFromEvents = await Event.distinct('companyId', { userId: _uQuery(userId), companyId: { $ne: null } });
+        const extraDocs = idsFromEvents.length ? await Company.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
         const map = new Map();
-        [...companies, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-        companies = Array.from(map.values());
-        return companies.map(c => c.name).filter(Boolean);
+        [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        const names = Array.from(map.values()).map(c => c.name || `Компания ${String(c._id).slice(-4)}`).filter(Boolean);
+        return names;
     }
 
     async function getProjects(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        let projects = await Project.find(q).select('name title label projectName').lean();
-        const fallback = await Project.find({ userId: _uQuery(userId) }).select('name title label projectName').lean();
+        const docs = await Project.find(q).select('name title label projectName').lean();
+        const idsFromEvents = await Event.distinct('projectId', { userId: _uQuery(userId), projectId: { $ne: null } });
+        const extraDocs = idsFromEvents.length ? await Project.find({ _id: { $in: idsFromEvents } }).select('name title label projectName').lean() : [];
         const map = new Map();
-        [...projects, ...fallback].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
-        projects = Array.from(map.values());
-        let names = projects
-            .map(p => {
-                const name = p.name || p.title || p.label || p.projectName;
-                if (name && String(name).trim()) return String(name).trim();
-                // fallback, чтобы не терять проекты без имени
-                return `Проект ${String(p._id).slice(-4)}`;
-            })
-            .filter(Boolean);
-
-        // Extra fallback: если по прямому запросу ничего, попробуем достать projectId из событий
-        if (!names.length) {
-            const evQuery = { userId: _uQuery(userId), projectId: { $exists: true, $ne: null } };
-            const distinctIds = await Event.distinct('projectId', evQuery);
-            if (distinctIds && distinctIds.length) {
-                const extraProjects = await Project.find({ _id: { $in: distinctIds } }).select('name title label projectName').lean();
-                names = extraProjects.map(p => {
-                    const name = p.name || p.title || p.label || p.projectName;
-                    return (name && String(name).trim()) ? String(name).trim() : `Проект ${String(p._id).slice(-4)}`;
-                }).filter(Boolean);
-                // Если в БД нет документов Project, но есть projectId в событиях — всё равно отобразим как «Проект <id>»
-                if (!names.length) {
-                    names = distinctIds.map(id => `Проект ${String(id).slice(-4)}`);
-                }
+        [...docs, ...extraDocs].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
+        // Если нет документов Project, но есть id из событий — добавим заглушки
+        idsFromEvents.forEach(id => {
+            if (!map.has(String(id))) {
+                map.set(String(id), { _id: id, name: null });
             }
-        }
-
+        });
+        const names = Array.from(map.values()).map(p => {
+            const name = p.name || p.title || p.label || p.projectName;
+            return (name && String(name).trim()) ? String(name).trim() : `Проект ${String(p._id).slice(-4)}`;
+        }).filter(Boolean);
         return names;
     }
 
     async function getCategories(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        let categories = await Category.find(q).select('name type').lean();
-        const fallback = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
+        const docs = await Category.find(q).select('name type').lean();
+        const idsFromEvents = await Event.distinct('categoryId', { userId: _uQuery(userId), categoryId: { $ne: null } });
+        const extraDocs = idsFromEvents.length ? await Category.find({ _id: { $in: idsFromEvents } }).select('name type').lean() : [];
         const map = new Map();
-        [...categories, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-        categories = Array.from(map.values());
-        return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
+        [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
+        return Array.from(map.values())
+            .map(c => ({ name: c.name || `Категория ${String(c._id).slice(-4)}`, type: c.type }))
+            .filter(c => c.name);
     }
 
     async function getContractors(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        let contractors = await Contractor.find(q).select('name').lean();
-        const fallback = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
+        const docs = await Contractor.find(q).select('name').lean();
+        const idsFromEvents = await Event.distinct('contractorId', { userId: _uQuery(userId), contractorId: { $ne: null } });
+        const extraDocs = idsFromEvents.length ? await Contractor.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
         const map = new Map();
-        [...contractors, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-        contractors = Array.from(map.values());
-        return contractors.map(c => c.name).filter(Boolean);
+        [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
+        return Array.from(map.values())
+            .map(c => c.name || `Контрагент ${String(c._id).slice(-4)}`)
+            .filter(Boolean);
     }
 
     async function getIndividuals(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        let individuals = await Individual.find(q).select('name').lean();
-        const fallback = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
+        const docs = await Individual.find(q).select('name').lean();
+        const idsFromEvents = await Event.distinct('individualId', { userId: _uQuery(userId), individualId: { $ne: null } });
+        const extraDocs = idsFromEvents.length ? await Individual.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
         const map = new Map();
-        [...individuals, ...fallback].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
-        individuals = Array.from(map.values());
-        return individuals.map(i => i.name).filter(Boolean);
+        [...docs, ...extraDocs].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
+        idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
+        return Array.from(map.values())
+            .map(i => i.name || `Физлицо ${String(i._id).slice(-4)}`)
+            .filter(Boolean);
     }
 
     // ========================
