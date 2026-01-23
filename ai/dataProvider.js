@@ -433,29 +433,21 @@ module.exports = function createDataProvider(deps) {
 
     async function getCompanies(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsCondition(workspaceId);
-        if (ws) Object.assign(q, ws);
         let companies = await Company.find(q).select('name').lean();
-        if (workspaceId) {
-            const fallback = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
-            const map = new Map();
-            [...companies, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-            companies = Array.from(map.values());
-        }
+        const fallback = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
+        const map = new Map();
+        [...companies, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        companies = Array.from(map.values());
         return companies.map(c => c.name).filter(Boolean);
     }
 
     async function getProjects(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsCondition(workspaceId);
-        if (ws) Object.assign(q, ws);
         let projects = await Project.find(q).select('name title label projectName').lean();
-        if (workspaceId) {
-            const fallback = await Project.find({ userId: _uQuery(userId) }).select('name title label projectName').lean();
-            const map = new Map();
-            [...projects, ...fallback].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
-            projects = Array.from(map.values());
-        }
+        const fallback = await Project.find({ userId: _uQuery(userId) }).select('name title label projectName').lean();
+        const map = new Map();
+        [...projects, ...fallback].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
+        projects = Array.from(map.values());
         let names = projects
             .map(p => {
                 const name = p.name || p.title || p.label || p.projectName;
@@ -483,43 +475,31 @@ module.exports = function createDataProvider(deps) {
 
     async function getCategories(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsCondition(workspaceId);
-        if (ws) Object.assign(q, ws);
         let categories = await Category.find(q).select('name type').lean();
-        if (workspaceId) {
-            const fallback = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
-            const map = new Map();
-            [...categories, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-            categories = Array.from(map.values());
-        }
+        const fallback = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
+        const map = new Map();
+        [...categories, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        categories = Array.from(map.values());
         return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
     }
 
     async function getContractors(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsCondition(workspaceId);
-        if (ws) Object.assign(q, ws);
         let contractors = await Contractor.find(q).select('name').lean();
-        if (workspaceId) {
-            const fallback = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
-            const map = new Map();
-            [...contractors, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-            contractors = Array.from(map.values());
-        }
+        const fallback = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
+        const map = new Map();
+        [...contractors, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        contractors = Array.from(map.values());
         return contractors.map(c => c.name).filter(Boolean);
     }
 
     async function getIndividuals(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsCondition(workspaceId);
-        if (ws) Object.assign(q, ws);
         let individuals = await Individual.find(q).select('name').lean();
-        if (workspaceId) {
-            const fallback = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
-            const map = new Map();
-            [...individuals, ...fallback].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
-            individuals = Array.from(map.values());
-        }
+        const fallback = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
+        const map = new Map();
+        [...individuals, ...fallback].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
+        individuals = Array.from(map.values());
         return individuals.map(i => i.name).filter(Boolean);
     }
 
