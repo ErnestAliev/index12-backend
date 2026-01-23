@@ -302,7 +302,7 @@ module.exports = function createDataProvider(deps) {
         );
 
         // Filter and normalize operations
-        const today = _kzStartOfDay(_kzNow());
+        const todayEnd = _kzEndOfDay(_kzNow());
         const normalized = [];
 
         for (const op of operations) {
@@ -344,7 +344,7 @@ module.exports = function createDataProvider(deps) {
 
             // Determine fact vs forecast
             const opDate = new Date(op.date);
-            const isFact = opDate <= today;
+            const isFact = opDate <= todayEnd;
 
             normalized.push({
                 _id: String(op._id),
