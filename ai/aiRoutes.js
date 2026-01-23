@@ -287,6 +287,11 @@ module.exports = function createAiRouter(deps) {
         )
       );
 
+      if (process.env.AI_DEBUG === '1') {
+        console.log('[AI_DEBUG] effectiveUserId:', effectiveUserId, 'allUserIds:', userIdsList, 'workspaceId:', req.user?.currentWorkspaceId);
+        console.log('[AI_DEBUG] includeHidden flag:', req?.body?.includeHidden, 'visibleAccountIds:', req?.body?.visibleAccountIds);
+      }
+
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
         includeHidden: req?.body?.includeHidden !== false,
         visibleAccountIds: req?.body?.visibleAccountIds || null,

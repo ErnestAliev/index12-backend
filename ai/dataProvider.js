@@ -110,6 +110,16 @@ module.exports = function createDataProvider(deps) {
             accounts = await Account.find({ userId: _uQuery(userId) }).lean();
         }
 
+        if (process.env.AI_DEBUG === '1') {
+            const hiddenList = accounts.filter(a => {
+                const isExcluded = !!(a.isExcluded || a.excluded || a.excludeFromTotal || a.excludedFromTotal);
+                const isHiddenFlag = !!(a.hidden || a.isHidden);
+                return isExcluded || isHiddenFlag;
+            }).map(a => `${a.name} (${a._id})`);
+            console.log('[AI_DEBUG] getAccounts query=', JSON.stringify(query), 'count=', accounts.length, 'hiddenFound=', hiddenList.length);
+            if (hiddenList.length) console.log('[AI_DEBUG] hidden accounts:', hiddenList.join(', '));
+        }
+
         // Get today for fact/forecast split
         const today = _kzStartOfDay(_kzNow());
         const todayEnd = _kzEndOfDay(_kzNow());
