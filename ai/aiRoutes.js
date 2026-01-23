@@ -449,10 +449,10 @@ module.exports = function createAiRouter(deps) {
 
         lines.push(`Расходы за период ${periodLabel}`);
         lines.push('');
-        lines.push(`Факт: ${_formatTenge(expenseData.fact?.total || 0)} (${expenseData.fact?.count || 0} операций)`);
-        lines.push(`Прогноз: ${_formatTenge(expenseData.forecast?.total || 0)} (${expenseData.forecast?.count || 0} операций)`);
+        lines.push(`Факт: ${_formatTenge(expenseData.fact?.total ? -expenseData.fact.total : 0)} (${expenseData.fact?.count || 0} операций)`);
+        lines.push(`Прогноз: ${_formatTenge(expenseData.forecast?.total ? -expenseData.forecast.total : 0)} (${expenseData.forecast?.count || 0} операций)`);
         lines.push('');
-        lines.push(`Итого: ${_formatTenge(expenseData.total || 0)}`);
+        lines.push(`Итого: ${_formatTenge(expenseData.total ? -expenseData.total : 0)}`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
