@@ -468,8 +468,6 @@ module.exports = function createDataProvider(deps) {
         // Extra fallback: если по прямому запросу ничего, попробуем достать projectId из событий
         if (!names.length) {
             const evQuery = { userId: _uQuery(userId), projectId: { $exists: true, $ne: null } };
-            const ws = _buildWsCondition(workspaceId);
-            if (ws) Object.assign(evQuery, ws);
             const distinctIds = await Event.distinct('projectId', evQuery);
             if (distinctIds && distinctIds.length) {
                 const extraProjects = await Project.find({ _id: { $in: distinctIds } }).select('name title label projectName').lean();

@@ -450,7 +450,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // PROJECTS CATALOG
       // =========================
-      if (/\b(проект|project)\b/i.test(qLower)) {
+      if (/\b(проек\w*|project)\b/i.test(qLower)) {
         const projects = dbData.catalogs?.projects || [];
         if (!projects.length) {
           const answer = 'Проектов нет.';
