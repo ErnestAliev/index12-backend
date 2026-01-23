@@ -266,13 +266,17 @@ module.exports = function createDataProvider(deps) {
         let operations = await Event.find(query)
             .sort({ date: -1 })
             .lean();
-        if (!operations.length && workspaceId) {
-            // Fallback to legacy data without workspaceId
+        if (workspaceId) {
             const fallbackQuery = {
                 userId: _uQuery(userId),
                 date: { $gte: start, $lte: end }
             };
-            operations = await Event.find(fallbackQuery).sort({ date: -1 }).lean();
+            const legacyOps = await Event.find(fallbackQuery).sort({ date: -1 }).lean();
+            const map = new Map();
+            [...operations, ...legacyOps].forEach(op => {
+                if (op && op._id) map.set(String(op._id), op);
+            });
+            operations = Array.from(map.values());
         }
 
         // Get accounts for intermediary check (use same userId variants)
@@ -303,9 +307,9 @@ module.exports = function createDataProvider(deps) {
 
         for (const op of operations) {
             // Skip inter-company transfers if requested
-        if (excludeInterCompany && !includeHidden && op.fromCompanyId && op.toCompanyId) {
-            continue;
-        }
+            if (excludeInterCompany && !includeHidden && op.fromCompanyId && op.toCompanyId) {
+                continue;
+            }
 
             // Skip retail write-offs
             if (op.isRetailWriteOff || op.retailWriteOff) {
@@ -319,6 +323,12 @@ module.exports = function createDataProvider(deps) {
             }
 
 
+            // Normalize amount (support both amount and sum fields)
+            const rawAmount = (typeof op.amount === 'number')
+                ? op.amount
+                : (typeof op.sum === 'number' ? op.sum : 0);
+            const absAmount = Math.abs(rawAmount || 0);
+
             // Determine operation kind - ONLY income, expense, or transfer
             let kind = 'unknown';
             const type = String(op.type || '').toLowerCase();
@@ -326,9 +336,9 @@ module.exports = function createDataProvider(deps) {
             if (op.isTransfer || type === 'transfer') {
                 kind = 'transfer';
                 if (excludeTransfers) continue;
-            } else if (type === 'income' || (op.amount && op.amount > 0 && !op.isTransfer)) {
+            } else if (type === 'income' || (rawAmount > 0 && !op.isTransfer)) {
                 kind = 'income';
-            } else if (type === 'expense' || (op.amount && op.amount < 0)) {
+            } else if (type === 'expense' || (rawAmount < 0)) {
                 kind = 'expense';
             }
 
@@ -344,8 +354,8 @@ module.exports = function createDataProvider(deps) {
                 type: kind, // 'income', 'expense', 'transfer', or 'unknown'
                 kind,
                 isFact,
-                amount: Math.abs(op.amount || 0),
-                rawAmount: op.amount || 0,
+                amount: absAmount,
+                rawAmount,
                 description: op.description || null,
             });
         }
@@ -417,7 +427,13 @@ module.exports = function createDataProvider(deps) {
         const q = { userId: _uQuery(userId) };
         const ws = _buildWsCondition(workspaceId);
         if (ws) Object.assign(q, ws);
-        const companies = await Company.find(q).select('name').lean();
+        let companies = await Company.find(q).select('name').lean();
+        if (workspaceId) {
+            const fallback = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
+            const map = new Map();
+            [...companies, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+            companies = Array.from(map.values());
+        }
         return companies.map(c => c.name).filter(Boolean);
     }
 
@@ -425,7 +441,13 @@ module.exports = function createDataProvider(deps) {
         const q = { userId: _uQuery(userId) };
         const ws = _buildWsCondition(workspaceId);
         if (ws) Object.assign(q, ws);
-        const projects = await Project.find(q).select('name').lean();
+        let projects = await Project.find(q).select('name').lean();
+        if (workspaceId) {
+            const fallback = await Project.find({ userId: _uQuery(userId) }).select('name').lean();
+            const map = new Map();
+            [...projects, ...fallback].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
+            projects = Array.from(map.values());
+        }
         return projects.map(p => p.name).filter(Boolean);
     }
 
@@ -433,7 +455,13 @@ module.exports = function createDataProvider(deps) {
         const q = { userId: _uQuery(userId) };
         const ws = _buildWsCondition(workspaceId);
         if (ws) Object.assign(q, ws);
-        const categories = await Category.find(q).select('name type').lean();
+        let categories = await Category.find(q).select('name type').lean();
+        if (workspaceId) {
+            const fallback = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
+            const map = new Map();
+            [...categories, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+            categories = Array.from(map.values());
+        }
         return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
     }
 
@@ -441,7 +469,13 @@ module.exports = function createDataProvider(deps) {
         const q = { userId: _uQuery(userId) };
         const ws = _buildWsCondition(workspaceId);
         if (ws) Object.assign(q, ws);
-        const contractors = await Contractor.find(q).select('name').lean();
+        let contractors = await Contractor.find(q).select('name').lean();
+        if (workspaceId) {
+            const fallback = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
+            const map = new Map();
+            [...contractors, ...fallback].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+            contractors = Array.from(map.values());
+        }
         return contractors.map(c => c.name).filter(Boolean);
     }
 
@@ -449,7 +483,13 @@ module.exports = function createDataProvider(deps) {
         const q = { userId: _uQuery(userId) };
         const ws = _buildWsCondition(workspaceId);
         if (ws) Object.assign(q, ws);
-        const individuals = await Individual.find(q).select('name').lean();
+        let individuals = await Individual.find(q).select('name').lean();
+        if (workspaceId) {
+            const fallback = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
+            const map = new Map();
+            [...individuals, ...fallback].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
+            individuals = Array.from(map.values());
+        }
         return individuals.map(i => i.name).filter(Boolean);
     }
 
