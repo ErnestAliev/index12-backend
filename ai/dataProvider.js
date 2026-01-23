@@ -340,28 +340,38 @@ module.exports = function createDataProvider(deps) {
     // CATALOG QUERIES
     // ========================
 
-    async function getCompanies(userId) {
-        const companies = await Company.find({ userId: _uQuery(userId) }).select('name').lean();
+    async function getCompanies(userId, workspaceId = null) {
+        const query = { userId: _uQuery(userId) };
+        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        const companies = await Company.find(query).select('name').lean();
         return companies.map(c => c.name).filter(Boolean);
     }
 
-    async function getProjects(userId) {
-        const projects = await Project.find({ userId: _uQuery(userId) }).select('name').lean();
+    async function getProjects(userId, workspaceId = null) {
+        const query = { userId: _uQuery(userId) };
+        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        const projects = await Project.find(query).select('name').lean();
         return projects.map(p => p.name).filter(Boolean);
     }
 
-    async function getCategories(userId) {
-        const categories = await Category.find({ userId: _uQuery(userId) }).select('name type').lean();
+    async function getCategories(userId, workspaceId = null) {
+        const query = { userId: _uQuery(userId) };
+        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        const categories = await Category.find(query).select('name type').lean();
         return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
     }
 
-    async function getContractors(userId) {
-        const contractors = await Contractor.find({ userId: _uQuery(userId) }).select('name').lean();
+    async function getContractors(userId, workspaceId = null) {
+        const query = { userId: _uQuery(userId) };
+        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        const contractors = await Contractor.find(query).select('name').lean();
         return contractors.map(c => c.name).filter(Boolean);
     }
 
-    async function getIndividuals(userId) {
-        const individuals = await Individual.find({ userId: _uQuery(userId) }).select('name').lean();
+    async function getIndividuals(userId, workspaceId = null) {
+        const query = { userId: _uQuery(userId) };
+        if (workspaceId) query.workspaceId = _uObjId(workspaceId);
+        const individuals = await Individual.find(query).select('name').lean();
         return individuals.map(i => i.name).filter(Boolean);
     }
 
@@ -404,11 +414,11 @@ module.exports = function createDataProvider(deps) {
             await Promise.all([
                 getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId }),
                 getOperations(userId, { start, end }, { workspaceId }),
-                getCompanies(userId),
-                getProjects(userId),
-                getCategories(userId),
-                getContractors(userId),
-                getIndividuals(userId)
+                getCompanies(userId, workspaceId),
+                getProjects(userId, workspaceId),
+                getCategories(userId, workspaceId),
+                getContractors(userId, workspaceId),
+                getIndividuals(userId, workspaceId)
             ]);
 
         return {
