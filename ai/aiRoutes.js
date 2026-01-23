@@ -297,6 +297,7 @@ module.exports = function createAiRouter(deps) {
         visibleAccountIds: req?.body?.visibleAccountIds || null,
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
+        now: req?.body?.asOf || null,
       });
 
       const debugRequested = process.env.AI_DEBUG === '1' || req?.body?.debugAi === true;
@@ -427,8 +428,6 @@ module.exports = function createAiRouter(deps) {
         lines.push('');
         lines.push(`Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0} операций)`);
         lines.push(`Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0} операций)`);
-        lines.push('');
-        lines.push(`Итого: ${_formatTenge(incomeData.total || 0)}`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -558,7 +557,7 @@ module.exports = function createAiRouter(deps) {
       const systemPrompt = [
         'Ты финансовый аналитик INDEX12.',
         'Отвечай строго по данным, ничего не придумывай.',
-        'Коротко: до 10 строк, только факты и суммы, без советов и вопросов.',
+        'Коротко и по делу, без советов и вопросов. Если данных много — либо выведи полный список, либо сгруппируй (например, по категориям/счетам) и явно отметь, что это агрегирование. Ничего важного не обрезай.',
         'Не путай доходы и прибыль: показывай доходы и расходы отдельно, не считай разницу, если это не запросили.',
         'Деньги: "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
         'Для счетов: перечисли открытые и скрытые отдельно, затем итоги.',

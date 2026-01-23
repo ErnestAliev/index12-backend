@@ -22,17 +22,6 @@ module.exports = function createDataProvider(deps) {
         return new Date(utc.getTime() + KZ_OFFSET_MS);
     };
 
-    const _kzStartOfDay = (d) => {
-        const kz = new Date(d.getTime());
-        kz.setHours(0, 0, 0, 0);
-        return kz;
-    };
-
-    const _kzEndOfDay = (d) => {
-        const kz = new Date(d.getTime());
-        kz.setHours(23, 59, 59, 999);
-        return kz;
-    };
 
     const _fmtDateDDMMYY = (d) => {
         if (!d || !(d instanceof Date) || isNaN(d.getTime())) return null;
@@ -40,6 +29,27 @@ module.exports = function createDataProvider(deps) {
         const mm = String(d.getMonth() + 1).padStart(2, '0');
         const yy = String(d.getFullYear()).slice(2);
         return `${dd}.${mm}.${yy}`;
+    };
+
+    // Local time helpers (use client-provided "now" when есть, иначе fallback KZ)
+    const _localStartOfDay = (d) => {
+        const x = new Date(d.getTime());
+        x.setHours(0, 0, 0, 0);
+        return x;
+    };
+
+    const _localEndOfDay = (d) => {
+        const x = new Date(d.getTime());
+        x.setHours(23, 59, 59, 999);
+        return x;
+    };
+
+    const _resolveNow = (nowOverride) => {
+        if (nowOverride) {
+            const d = new Date(nowOverride);
+            if (!isNaN(d.getTime())) return d;
+        }
+        return _kzNow();
     };
 
     // Helper for userId queries (matches both ObjectId and String, supports arrays)
@@ -82,7 +92,8 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Object>} Accounts data with balances
      */
     async function getAccounts(userId, options = {}) {
-        const { includeHidden = false, visibleAccountIds = null, workspaceId = null } = options;
+        const { includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null } = options;
+        const nowRef = _resolveNow(now);
 
         // Build query
         const query = { userId: _uQuery(userId) };
@@ -127,10 +138,6 @@ module.exports = function createDataProvider(deps) {
             if (hiddenList.length) console.log('[AI_DEBUG] hidden accounts:', hiddenList.join(', '));
         }
 
-        // Get today for fact/forecast split
-        const today = _kzStartOfDay(_kzNow());
-        const todayEnd = _kzEndOfDay(_kzNow());
-
         // Calculate balances for each account
         const accountsWithBalances = await Promise.all(accounts.map(async (acc) => {
             const isExcluded = !!(acc.isExcluded || acc.excluded || acc.excludeFromTotal || acc.excludedFromTotal);
@@ -155,8 +162,8 @@ module.exports = function createDataProvider(deps) {
 
             const allOps = await Event.find(opsQuery).lean();
 
-            // Calculate current balance (up to today)
-            const currentOps = allOps.filter(op => new Date(op.date) <= todayEnd);
+            // Calculate current balance (up to nowRef)
+            const currentOps = allOps.filter(op => new Date(op.date) <= nowRef);
             let currentBalance = acc.initialBalance || 0;
             for (const op of currentOps) {
                 if (String(op.accountId) === String(acc._id)) {
@@ -217,7 +224,7 @@ module.exports = function createDataProvider(deps) {
                 }
             },
             meta: {
-                today: _fmtDateDDMMYY(_kzNow()),
+                today: _fmtDateDDMMYY(nowRef),
                 count: validAccounts.length,
                 openCount: openAccounts.length,
                 hiddenCount: hiddenAccounts.length,
@@ -237,7 +244,9 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Array>} Normalized operations
      */
     async function getOperations(userId, dateRange = {}, options = {}) {
-        const { excludeTransfers = false, excludeInterCompany = true, workspaceId = null, includeHidden = false } = options;
+        const { excludeTransfers = false, excludeInterCompany = true, workspaceId = null, includeHidden = false, now = null } = options;
+        const nowRef = _resolveNow(now);
+        const nowTs = nowRef.getTime();
 
         // Default to all-time if no range specified
         const start = dateRange.start || new Date('2020-01-01');
@@ -302,7 +311,6 @@ module.exports = function createDataProvider(deps) {
         );
 
         // Filter and normalize operations
-        const todayEnd = _kzEndOfDay(_kzNow());
         const normalized = [];
 
         for (const op of operations) {
@@ -344,7 +352,7 @@ module.exports = function createDataProvider(deps) {
 
             // Determine fact vs forecast
             const opDate = new Date(op.date);
-            const isFact = opDate <= todayEnd;
+            const isFact = opDate.getTime() <= nowTs;
 
             normalized.push({
                 _id: String(op._id),
@@ -398,7 +406,7 @@ module.exports = function createDataProvider(deps) {
                 }
             },
             meta: {
-                today: _fmtDateDDMMYY(_kzNow()),
+                today: _fmtDateDDMMYY(nowRef),
                 rangeStart: _fmtDateDDMMYY(start),
                 rangeEnd: _fmtDateDDMMYY(end)
             }
@@ -504,7 +512,8 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Object>} Data packet for AI
      */
     async function buildDataPacket(userId, options = {}) {
-        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null, workspaceId = null } = options;
+        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null } = options;
+        const nowRef = _resolveNow(now);
 
         // ✅ Parse dateRange from periodFilter
         let start = null;
@@ -513,25 +522,25 @@ module.exports = function createDataProvider(deps) {
         if (periodFilter && periodFilter.mode === 'custom') {
             if (periodFilter.customStart) {
                 const parsed = new Date(periodFilter.customStart);
-                start = _kzStartOfDay(parsed);
+                start = _localStartOfDay(parsed);
             }
             if (periodFilter.customEnd) {
                 const parsed = new Date(periodFilter.customEnd);
-                end = _kzEndOfDay(parsed);
+                end = _localEndOfDay(parsed);
             }
         }
 
         // ✅ If no date range, default to current month
         if (!start || !end) {
-            const now = new Date();
-            start = _kzStartOfDay(new Date(now.getFullYear(), now.getMonth(), 1));
-            end = _kzEndOfDay(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+            const nowLocal = nowRef || new Date();
+            start = _localStartOfDay(new Date(nowLocal.getFullYear(), nowLocal.getMonth(), 1));
+            end = _localEndOfDay(new Date(nowLocal.getFullYear(), nowLocal.getMonth() + 1, 0));
         }
 
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
             await Promise.all([
-                getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId }),
-                getOperations(userId, { start, end }, { workspaceId, includeHidden }),
+                getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId, now: nowRef }),
+                getOperations(userId, { start, end }, { workspaceId, includeHidden, now: nowRef }),
                 getCompanies(userId, workspaceId),
                 getProjects(userId, workspaceId),
                 getCategories(userId, workspaceId),
@@ -541,11 +550,11 @@ module.exports = function createDataProvider(deps) {
 
         return {
             meta: {
-                today: _fmtDateDDMMYY(_kzNow()),
+                today: _fmtDateDDMMYY(nowRef),
                 periodStart: _fmtDateDDMMYY(start),
                 periodEnd: _fmtDateDDMMYY(end),
                 forecastUntil: operationsData.meta.rangeEnd,
-                todayTimestamp: _kzNow().getTime(),
+                todayTimestamp: nowRef.getTime(),
                 source: 'database'
             },
             totals: accountsData.totals,
