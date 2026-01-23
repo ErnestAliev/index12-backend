@@ -467,6 +467,10 @@ module.exports = function createDataProvider(deps) {
                     const name = p.name || p.title || p.label || p.projectName;
                     return (name && String(name).trim()) ? String(name).trim() : `Проект ${String(p._id).slice(-4)}`;
                 }).filter(Boolean);
+                // Если в БД нет документов Project, но есть projectId в событиях — всё равно отобразим как «Проект <id>»
+                if (!names.length) {
+                    names = distinctIds.map(id => `Проект ${String(id).slice(-4)}`);
+                }
             }
         }
 
