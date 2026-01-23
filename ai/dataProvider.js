@@ -107,9 +107,14 @@ module.exports = function createDataProvider(deps) {
 
         // Fetch accounts without populate (we'll do manual lookups if needed)
         let accounts = await Account.find(query).lean();
-        // Fallback: legacy data without workspaceId
-        if (!accounts.length && workspaceId) {
-            accounts = await Account.find({ userId: _uQuery(userId) }).lean();
+        // Fallbacks: legacy data without workspaceId or mismatched type
+        if (workspaceId) {
+            const legacyAccs = await Account.find({ userId: _uQuery(userId), $or: [{ workspaceId: { $exists: false } }, { workspaceId: null }] }).lean();
+            const allAccsNoFilter = await Account.find({ userId: _uQuery(userId) }).lean();
+            // Merge all unique accounts by _id if fallback has more
+            const accMap = new Map();
+            [...accounts, ...legacyAccs, ...allAccsNoFilter].forEach(a => { if (a && a._id) accMap.set(String(a._id), a); });
+            accounts = Array.from(accMap.values());
         }
 
         if (process.env.AI_DEBUG === '1') {

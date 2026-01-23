@@ -574,6 +574,8 @@ module.exports = function createAiRouter(deps) {
         'Добавляй 1 уточняющий вопрос, если есть что прояснить.',
       ].join('\n');
 
+      const hiddenAccs = (dbData.accounts || []).filter(a => a.isHidden);
+      const openAccs = (dbData.accounts || []).filter(a => !a.isHidden);
       const dataContext = _formatDbDataForAi(dbData);
       const messages = [
         { role: 'system', content: systemPrompt },
@@ -583,6 +585,23 @@ module.exports = function createAiRouter(deps) {
 
       const aiResponse = await _openAiChat(messages);
       _pushHistory(userIdStr, 'assistant', aiResponse);
+
+      if (debugRequested) {
+        debugInfo = debugInfo || {};
+        debugInfo.hiddenNames = hiddenAccs.map(a => a.name);
+        debugInfo.hiddenCount = hiddenAccs.length;
+        debugInfo.openNames = openAccs.map(a => a.name);
+        debugInfo.openCount = openAccs.length;
+
+        const debugLines = [
+          aiResponse,
+          '',
+          'DEBUG:',
+          `Открытые счета: ${openAccs.length} (${debugInfo.openNames.join(', ') || 'нет'})`,
+          `Скрытые счета: ${hiddenAccs.length} (${debugInfo.hiddenNames.join(', ') || 'нет'})`
+        ];
+        return res.json({ text: debugLines.join('\n'), debug: debugInfo });
+      }
 
       if (debugRequested) {
         return res.json({ text: aiResponse, debug: debugInfo });
