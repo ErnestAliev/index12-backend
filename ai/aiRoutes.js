@@ -583,6 +583,14 @@ module.exports = function createAiRouter(deps) {
         debugInfo.hiddenCount = hiddenAccs.length;
         debugInfo.openNames = openAccs.map(a => a.name);
         debugInfo.openCount = openAccs.length;
+        debugInfo.opsSummary = dbData.operationsSummary || {};
+        debugInfo.sampleOps = (dbData.operations || []).slice(0, 5).map(op => ({
+          date: op.date,
+          amount: op.amount,
+          rawAmount: op.rawAmount,
+          kind: op.kind,
+          isFact: op.isFact
+        }));
         return res.json({ text: aiResponse, debug: debugInfo });
       }
 

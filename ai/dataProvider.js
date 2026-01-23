@@ -399,49 +399,56 @@ module.exports = function createDataProvider(deps) {
     // CATALOG QUERIES
     // ========================
 
-    const _buildWsOr = (workspaceId) => {
+    const _buildWsCondition = (workspaceId) => {
         if (!workspaceId) return null;
         const wsStr = String(workspaceId);
         const wsId = _uObjId(workspaceId);
-        return { $in: [wsStr, wsId, null] };
+        const variants = [wsStr, wsId];
+        return {
+            $or: [
+                { workspaceId: { $in: variants } },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ]
+        };
     };
 
     async function getCompanies(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsOr(workspaceId);
-        if (ws) q.workspaceId = ws;
+        const ws = _buildWsCondition(workspaceId);
+        if (ws) Object.assign(q, ws);
         const companies = await Company.find(q).select('name').lean();
         return companies.map(c => c.name).filter(Boolean);
     }
 
     async function getProjects(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsOr(workspaceId);
-        if (ws) q.workspaceId = ws;
+        const ws = _buildWsCondition(workspaceId);
+        if (ws) Object.assign(q, ws);
         const projects = await Project.find(q).select('name').lean();
         return projects.map(p => p.name).filter(Boolean);
     }
 
     async function getCategories(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsOr(workspaceId);
-        if (ws) q.workspaceId = ws;
+        const ws = _buildWsCondition(workspaceId);
+        if (ws) Object.assign(q, ws);
         const categories = await Category.find(q).select('name type').lean();
         return categories.map(c => ({ name: c.name, type: c.type })).filter(c => c.name);
     }
 
     async function getContractors(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsOr(workspaceId);
-        if (ws) q.workspaceId = ws;
+        const ws = _buildWsCondition(workspaceId);
+        if (ws) Object.assign(q, ws);
         const contractors = await Contractor.find(q).select('name').lean();
         return contractors.map(c => c.name).filter(Boolean);
     }
 
     async function getIndividuals(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const ws = _buildWsOr(workspaceId);
-        if (ws) q.workspaceId = ws;
+        const ws = _buildWsCondition(workspaceId);
+        if (ws) Object.assign(q, ws);
         const individuals = await Individual.find(q).select('name').lean();
         return individuals.map(i => i.name).filter(Boolean);
     }
