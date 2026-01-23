@@ -299,6 +299,14 @@ module.exports = function createAiRouter(deps) {
         workspaceId: req.user?.currentWorkspaceId || null,
       });
 
+      if (process.env.AI_DEBUG === '1' || req?.body?.includeHidden) {
+        const hiddenAccs = (dbData.accounts || []).filter(a => a.isHidden);
+        console.log('[AI_DEBUG] accounts total:', (dbData.accounts || []).length, 'hidden:', hiddenAccs.length);
+        if (hiddenAccs.length) {
+          console.log('[AI_DEBUG] hidden list:', hiddenAccs.map(a => `${a.name} (${a._id})`).join(', '));
+        }
+      }
+
       // Store user message in history
       _pushHistory(userIdStr, 'user', q);
 
