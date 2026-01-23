@@ -180,31 +180,43 @@ module.exports = function createAiRouter(deps) {
   };
 
   const _formatDbDataForAi = (data) => {
-    const lines = [`ТЕКУЩИЕ ДАННЫЕ (из БД на ${data.meta?.today || 'сегодня'}):`];
+    const lines = [];
+    const meta = data.meta || {};
+    const opsSummary = data.operationsSummary || {};
+    const totals = data.totals || {};
 
-    lines.push('СЧЕТА:');
-    (data.accounts || []).forEach(a => {
-      const hiddenMarker = a.isHidden ? ' [СКРЫТ/ИСКЛЮЧЕН]' : '';
-      lines.push(`- ${a.name}${hiddenMarker}: ${_formatTenge(a.currentBalance || 0)} (Прогноз: ${_formatTenge(a.futureBalance || 0)})`);
+    lines.push(`Данные БД: период ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
+    lines.push(`Сегодня: ${meta.today || '?'}`);
+
+    // Accounts
+    lines.push('Счета (текущий → прогноз):');
+    (data.accounts || []).slice(0, 50).forEach(a => {
+      const hiddenMarker = a.isHidden ? ' [скрыт]' : '';
+      const curr = _formatTenge(a.currentBalance || 0);
+      const fut = _formatTenge(a.futureBalance || 0);
+      lines.push(`- ${a.name}${hiddenMarker}: ${curr} → ${fut}`);
     });
+    const totalOpen = totals.open?.current ?? 0;
+    const totalHidden = totals.hidden?.current ?? 0;
+    const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
+    lines.push(`Итоги счетов: открытые ${_formatTenge(totalOpen)}, скрытые ${_formatTenge(totalHidden)}, все ${_formatTenge(totalAll)}`);
 
-    lines.push('');
-    lines.push('СВОДКА ОПЕРАЦИЙ:');
-    const s = data.operationsSummary || {};
-    lines.push(`Доходы: Факт ${_formatTenge(s.income?.fact?.total || 0)}, Прогноз ${_formatTenge(s.income?.forecast?.total || 0)}`);
-    lines.push(`Расходы: Факт ${_formatTenge(s.expense?.fact?.total || 0)}, Прогноз ${_formatTenge(s.expense?.forecast?.total || 0)}`);
+    // Operations summary
+    const inc = opsSummary.income || {};
+    const exp = opsSummary.expense || {};
+    lines.push('Сводка операций:');
+    lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
+    lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
 
-    lines.push('');
-    lines.push('КАТАЛОГИ:');
-    lines.push(`Проекты: ${(data.catalogs?.projects || []).join(', ')}`);
-    lines.push(`Контрагенты: ${(data.catalogs?.contractors || []).join(', ')}`);
-    lines.push(`Категории: ${(data.catalogs?.categories || []).map(c => typeof c === 'string' ? c : c.name).join(', ')}`);
-
-    lines.push('');
-    lines.push('ПОСЛЕДНИЕ ОПЕРАЦИИ:');
-    (data.operations || []).slice(0, 50).forEach(op => {
-      lines.push(`${op.date} | ${op.kind} | ${op.amount} | ${op.category || 'Без кат.'} | ${op.description || ''}`);
-    });
+    // Last operations (short)
+    const recentOps = (data.operations || []).slice(0, 15);
+    if (recentOps.length) {
+      lines.push('Последние операции:');
+      recentOps.forEach(op => {
+        const sign = op.kind === 'expense' ? '-' : op.kind === 'income' ? '+' : '';
+        lines.push(`- ${op.date}: ${sign}${_formatTenge(op.amount || 0)} (${op.kind}) ${op.description ? '| ' + op.description : ''}`);
+      });
+    }
 
     return lines.join('\n');
   };
@@ -353,10 +365,13 @@ module.exports = function createAiRouter(deps) {
           }
 
           lines.push('');
-          lines.push(`Всего (без скрытых): ${_formatTenge(totals.open?.current || 0)}`);
-          if (totals.hidden?.current) {
-            lines.push(`Всего (включая скрытые): ${_formatTenge(totals.all?.current || 0)}`);
-          }
+          const totalOpen = totals.open?.current ?? 0;
+          const totalHidden = totals.hidden?.current ?? 0;
+          const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
+
+          lines.push(`Итого по открытым счетам: ${_formatTenge(totalOpen)}`);
+          lines.push(`Итого по скрытым счетам: ${_formatTenge(totalHidden)}`);
+          lines.push(`Итого по всем счетам: ${_formatTenge(totalAll)}`);
         }
 
         const answer = lines.join('\n');
@@ -517,14 +532,14 @@ module.exports = function createAiRouter(deps) {
       // Universal fallback for all queries
       // =========================
       const systemPrompt = [
-        'Ты финансовый помощник INDEX12.',
-        'Твоя задача: отвечать на вопросы пользователя, используя предоставленные данные из базы данных.',
-        'ДАННЫЕ РЕАЛЬНЫЕ, не выдумывай их.',
-        'Если данных нет (например, 0 операций), так и скажи.',
-        'Тон: профессиональный, лаконичный.',
-        'Формат денег: 1 234 ₸.',
-        'Максимальная длина ответа: 10-15 строк.',
-        'Всегда ссылайся на даты из данных.',
+        'Ты финансовый аналитик INDEX12.',
+        'Отвечай строго по данным, ничего не придумывай.',
+        'Форматируй коротко (до 12 строк), в блоках: период, основное, риски/совет, вопрос.',
+        'Деньги форматируй как "1 234 ₸", расходы показывай со знаком минус, доходы с плюсом.',
+        'Если запрос про счета — перечисли счета и итоги: открытые, скрытые, все.',
+        'Если данных нет, так и скажи, без воды.',
+        'Указывай даты из данных (дд.мм.гг).',
+        'Добавляй 1 уточняющий вопрос, если есть что прояснить.',
       ].join('\n');
 
       const dataContext = _formatDbDataForAi(dbData);

@@ -105,7 +105,9 @@ module.exports = function createDataProvider(deps) {
 
         // Calculate balances for each account
         const accountsWithBalances = await Promise.all(accounts.map(async (acc) => {
-            const isHidden = !!(acc.isExcluded || acc.hidden || acc.isHidden);
+            const isExcluded = !!(acc.isExcluded || acc.excluded || acc.excludeFromTotal || acc.excludedFromTotal);
+            const isHiddenFlag = !!(acc.hidden || acc.isHidden);
+            const isHidden = isHiddenFlag || isExcluded;
 
             // Skip hidden accounts if not requested
             if (!includeHidden && isHidden) {
@@ -162,6 +164,7 @@ module.exports = function createDataProvider(deps) {
                 currentBalance: Math.round(currentBalance),
                 futureBalance: Math.round(futureBalance),
                 isHidden,
+                isExcluded,
             };
         }));
 
@@ -229,8 +232,8 @@ module.exports = function createDataProvider(deps) {
             .sort({ date: -1 })
             .lean();
 
-        // Get accounts for intermediary check
-        const accounts = await Account.find({ userId }).lean();
+        // Get accounts for intermediary check (use same userId variants)
+        const accounts = await Account.find({ userId: _uQuery(userId) }).lean();
         const accountIndividualIds = new Set(
             accounts
                 .filter(a => a.individualId)
@@ -385,22 +388,20 @@ module.exports = function createDataProvider(deps) {
 
         if (periodFilter && periodFilter.mode === 'custom') {
             if (periodFilter.customStart) {
-                start = new Date(periodFilter.customStart);
-                start.setHours(0, 0, 0, 0);
+                const parsed = new Date(periodFilter.customStart);
+                start = _kzStartOfDay(parsed);
             }
             if (periodFilter.customEnd) {
-                end = new Date(periodFilter.customEnd);
-                end.setHours(23, 59, 59, 999);
+                const parsed = new Date(periodFilter.customEnd);
+                end = _kzEndOfDay(parsed);
             }
         }
 
         // ✅ If no date range, default to current month
         if (!start || !end) {
             const now = new Date();
-            start = new Date(now.getFullYear(), now.getMonth(), 1);
-            start.setHours(0, 0, 0, 0);
-            end = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-            end.setHours(23, 59, 59, 999);
+            start = _kzStartOfDay(new Date(now.getFullYear(), now.getMonth(), 1));
+            end = _kzEndOfDay(new Date(now.getFullYear(), now.getMonth() + 1, 0));
         }
 
         console.log(`[DP] Date range: ${start.toISOString()} to ${end.toISOString()}`);
