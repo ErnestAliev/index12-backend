@@ -470,9 +470,8 @@ module.exports = function createDataProvider(deps) {
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
-        return Array.from(map.values())
-            .map(c => ({ name: c.name || `Категория ${String(c._id).slice(-4)}`, type: c.type }))
-            .filter(c => c.name);
+        const names = Array.from(map.values()).map(c => c.name || `Категория ${String(c._id).slice(-4)}`);
+        return names.filter(Boolean);
     }
 
     async function getContractors(userId, workspaceId = null) {
@@ -564,7 +563,7 @@ module.exports = function createDataProvider(deps) {
             catalogs: {
                 companies,
                 projects,
-                categories: categories.map(c => c.name),
+                categories,
                 contractors,
                 individuals
             }

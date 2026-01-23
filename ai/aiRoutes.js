@@ -254,6 +254,9 @@ module.exports = function createAiRouter(deps) {
       if (!q) return res.status(400).json({ message: 'Empty message' });
 
       const qLower = q.toLowerCase();
+      if (process.env.AI_DEBUG === '1') {
+        console.log('[AI_DEBUG] query text:', qLower);
+      }
 
       // =========================
       // 🔥 PURE DATABASE MODE
@@ -458,15 +461,18 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // PROJECTS CATALOG
       // =========================
-      if (/\b(проек\w*|project)\b/i.test(qLower)) {
+      if (qLower.includes('проек') || qLower.includes('project')) {
         const projects = dbData.catalogs?.projects || [];
-        if (!projects.length) {
-          const answer = 'Проектов нет.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
+        if (process.env.AI_DEBUG === '1') {
+          console.log('[AI_DEBUG] projects branch hit, count=', projects.length, 'sample=', projects.slice(0, 3));
         }
-
-        const lines = ['Проекты:', ...projects.map((p, i) => `${i + 1}. ${p}`), `Всего: ${projects.length}`];
+        const lines = ['Проекты:'];
+        if (projects.length) {
+          lines.push(...projects.map((p, i) => `${i + 1}. ${p}`));
+        } else {
+          lines.push('- нет имен');
+        }
+        lines.push(`Всего: ${projects.length}`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -476,15 +482,18 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // CONTRACTORS CATALOG
       // =========================
-      if (/\b(контрагент|поставщик|партнёр|партнер)\b/i.test(qLower)) {
+      if (qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр')) {
         const contractors = dbData.catalogs?.contractors || [];
-        if (!contractors.length) {
-          const answer = 'Контрагентов нет.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
+        if (process.env.AI_DEBUG === '1') {
+          console.log('[AI_DEBUG] contractors branch hit, count=', contractors.length, 'sample=', contractors.slice(0, 3));
         }
-
-        const lines = ['Контрагенты:', ...contractors.map((c, i) => `${i + 1}. ${c}`), `Всего: ${contractors.length}`];
+        const lines = ['Контрагенты:'];
+        if (contractors.length) {
+          lines.push(...contractors.map((c, i) => `${i + 1}. ${c}`));
+        } else {
+          lines.push('- нет имен');
+        }
+        lines.push(`Всего: ${contractors.length}`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -494,15 +503,18 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // INDIVIDUALS CATALOG
       // =========================
-      if (/\b(физ\W*лиц|физическ|индивид|person)\b/i.test(qLower)) {
+      if (qLower.includes('физ') || qLower.includes('индивид') || qLower.includes('person')) {
         const individuals = dbData.catalogs?.individuals || [];
-        if (!individuals.length) {
-          const answer = 'Физических лиц нет.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
+        if (process.env.AI_DEBUG === '1') {
+          console.log('[AI_DEBUG] individuals branch hit, count=', individuals.length, 'sample=', individuals.slice(0, 3));
         }
-
-        const lines = ['Физические лица:', ...individuals.map((ind, i) => `${i + 1}. ${ind}`), `Всего: ${individuals.length}`];
+        const lines = ['Физические лица:'];
+        if (individuals.length) {
+          lines.push(...individuals.map((ind, i) => `${i + 1}. ${ind}`));
+        } else {
+          lines.push('- нет имен');
+        }
+        lines.push(`Всего: ${individuals.length}`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -512,15 +524,18 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // CATEGORIES CATALOG
       // =========================
-      if (/\b(категори|category)\b/i.test(qLower)) {
+      if (qLower.includes('категор') || qLower.includes('category')) {
         const categories = dbData.catalogs?.categories || [];
-        if (!categories.length) {
-          const answer = 'Категорий нет.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
+        if (process.env.AI_DEBUG === '1') {
+          console.log('[AI_DEBUG] categories branch hit, count=', categories.length, 'sample=', categories.slice(0, 3));
         }
-
-        const lines = ['Категории:', ...categories.map((cat, i) => `${i + 1}. ${cat}`), `Всего: ${categories.length}`];
+        const lines = ['Категории:'];
+        if (categories.length) {
+          lines.push(...categories.map((cat, i) => `${i + 1}. ${cat}`));
+        } else {
+          lines.push('- нет имен');
+        }
+        lines.push(`Всего: ${categories.length}`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -530,16 +545,17 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // COMPANIES CATALOG
       // =========================
-      if (/\b(компани|фирм|организаци|company)\b/i.test(qLower)) {
+      if (qLower.includes('компан') || qLower.includes('фирм') || qLower.includes('организаци') || qLower.includes('company')) {
         const companies = dbData.catalogs?.companies || [];
-        if (!companies.length) {
-          const answer = 'Компании не найдены.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
+        if (process.env.AI_DEBUG === '1') {
+          console.log('[AI_DEBUG] companies branch hit, count=', companies.length, 'sample=', companies.slice(0, 3));
         }
-
         const lines = ['Мои компании', ''];
-        companies.forEach((comp, i) => lines.push(`${i + 1}. ${comp}`));
+        if (companies.length) {
+          companies.forEach((comp, i) => lines.push(`${i + 1}. ${comp}`));
+        } else {
+          lines.push('- нет имен');
+        }
         lines.push('', `Всего: ${companies.length}`);
 
         const answer = lines.join('\n');
@@ -595,6 +611,11 @@ module.exports = function createAiRouter(deps) {
           categories: dbData.catalogs?.categories?.length || 0,
           contractors: dbData.catalogs?.contractors?.length || 0,
           individuals: dbData.catalogs?.individuals?.length || 0,
+          projectsSample: (dbData.catalogs?.projects || []).slice(0, 3),
+          categoriesSample: (dbData.catalogs?.categories || []).slice(0, 3),
+          contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
+          individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
+          companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
         };
         return res.json({ text: aiResponse, debug: debugInfo });
       }
