@@ -128,7 +128,7 @@ module.exports = function createDataProvider(deps) {
         const accountsWithBalances = await Promise.all(accounts.map(async (acc) => {
             const isExcluded = !!(acc.isExcluded || acc.excluded || acc.excludeFromTotal || acc.excludedFromTotal);
             const isHiddenFlag = !!(acc.hidden || acc.isHidden);
-            const isHidden = isHiddenFlag || isExcluded;
+            const isHidden = isHiddenFlag; // Исключённые не считаем скрытыми, чтобы AI видел открытые счета
 
             // Skip hidden accounts if not requested
             if (!includeHidden && isHidden) {
