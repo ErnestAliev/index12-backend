@@ -367,6 +367,7 @@ module.exports = function createDataProvider(deps) {
                 description: op.description || null,
                 projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
                 contractorId: op.contractorId?._id ? String(op.contractorId._id) : (op.contractorId ? String(op.contractorId) : null),
+                categoryId: op.categoryId?._id ? String(op.categoryId._id) : (op.categoryId ? String(op.categoryId) : null),
             });
         }
 
@@ -474,9 +475,10 @@ module.exports = function createDataProvider(deps) {
         const extraDocs = idsFromEvents.length ? await Category.find({ _id: { $in: idsFromEvents } }).select('name type').lean() : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-        idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
-        const names = Array.from(map.values()).map(c => c.name || `Категория ${String(c._id).slice(-4)}`);
-        return names.filter(Boolean);
+        idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null, type: null }); });
+        return Array.from(map.values())
+            .map(c => ({ id: String(c._id), name: c.name || `Категория ${String(c._id).slice(-4)}`, type: c.type || null }))
+            .filter(c => c.name);
     }
 
     async function getContractors(userId, workspaceId = null) {
@@ -584,6 +586,40 @@ module.exports = function createDataProvider(deps) {
             return bVol - aVol;
         });
 
+        // Category summary (по операциям)
+        const categoryMap = new Map();
+        (categories || []).forEach(c => { if (c?.id) categoryMap.set(String(c.id), { name: c.name, type: c.type }); });
+        const categorySummaryMap = new Map();
+        (operationsData.operations || []).forEach(op => {
+            const cid = op.categoryId ? String(op.categoryId) : null;
+            if (!cid) return;
+            if (!categorySummaryMap.has(cid)) {
+                const meta = categoryMap.get(cid) || { name: `Категория ${cid.slice(-4)}`, type: null };
+                categorySummaryMap.set(cid, {
+                    id: cid,
+                    name: meta.name,
+                    type: meta.type,
+                    incomeFact: 0,
+                    incomeForecast: 0,
+                    expenseFact: 0,
+                    expenseForecast: 0,
+                });
+            }
+            const rec = categorySummaryMap.get(cid);
+            if (op.kind === 'income') {
+                if (op.isFact) rec.incomeFact += op.amount || 0;
+                else rec.incomeForecast += op.amount || 0;
+            } else if (op.kind === 'expense') {
+                if (op.isFact) rec.expenseFact += op.amount || 0;
+                else rec.expenseForecast += op.amount || 0;
+            }
+        });
+        const categorySummary = Array.from(categorySummaryMap.values()).sort((a, b) => {
+            const aVol = a.incomeFact + a.incomeForecast + a.expenseFact + a.expenseForecast;
+            const bVol = b.incomeFact + b.incomeForecast + b.expenseFact + b.expenseForecast;
+            return bVol - aVol;
+        });
+
         return {
             meta: {
                 today: _fmtDateDDMMYY(nowRef),
@@ -600,11 +636,12 @@ module.exports = function createDataProvider(deps) {
             catalogs: {
                 companies,
                 projects,
-                categories,
+                categories: categories.map(c => c.name),
                 contractors: contractors.map(c => c.name),
                 individuals
             },
-            contractorSummary
+            contractorSummary,
+            categorySummary
         };
     }
 

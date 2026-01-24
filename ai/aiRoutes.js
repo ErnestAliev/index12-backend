@@ -218,6 +218,18 @@ module.exports = function createAiRouter(deps) {
       });
     }
 
+    // Categories summary (top 5 by volume)
+    const categorySummary = (data.categorySummary || []).slice(0, 5);
+    if (categorySummary.length) {
+      lines.push('Категории (топ по обороту):');
+      categorySummary.forEach(cat => {
+        const incomeTotal = cat.incomeFact + cat.incomeForecast;
+        const expenseTotal = cat.expenseFact + cat.expenseForecast;
+        const vol = incomeTotal + expenseTotal;
+        lines.push(`- ${cat.name}: доход +${_formatTenge(incomeTotal)}, расход -${_formatTenge(expenseTotal)}, оборот ${_formatTenge(vol)}`);
+      });
+    }
+
     return lines.join('\n');
   };
 
