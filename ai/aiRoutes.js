@@ -728,6 +728,7 @@ module.exports = function createAiRouter(deps) {
             'Различай доходы и прибыль: не путай, не своди всё к одной цифре, если не просили.',
             'Деньги формата "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
             'Не используй шаблонные списки "покажи ..." — отвечай естественно по вопросу.',
+            'Гайд по аренде (используй, если просят расчёты): GPR=A_m2*Rent_m2_m; VacancyLoss=GPR*Vac; EGR=GPR-VacancyLoss+OtherInc; NOI=EGR-OPEX; CF=NOI-CAPEX-DebtPay-Tax; CapRate=NOI_y/Price; DSCR=NOI_y/DebtPay_y; Payback=Investment/(CF_m*12). Если нет входных данных — спроси 1 уточнение.'
           ].join('\n');
         }
         return [
