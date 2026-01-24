@@ -467,6 +467,59 @@ module.exports = function createAiRouter(deps) {
       // =========================
       const projectMention = qLower.includes('проек') || qLower.includes('project');
       const wantsProjectAnalysis = projectMention && (qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary') || qLower.includes('успеш') || qLower.includes('лучш') || qLower.includes('прибыл'));
+
+      // Специальный сценарий: «самый перспективный/лучший/успешный проект»
+      if (projectMention && (qLower.includes('перспектив') || qLower.includes('лучш') || qLower.includes('успеш'))) {
+        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
+        const projList = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
+        const projNameById = new Map();
+        projList.forEach(p => {
+          if (!p) return;
+          if (typeof p === 'string') projNameById.set(p, p);
+          else if (p.id) projNameById.set(String(p.id), p.name || p.id);
+        });
+
+        const agg = new Map();
+        for (const op of ops) {
+          if (!op.projectId) continue;
+          const id = String(op.projectId);
+          if (!agg.has(id)) {
+            agg.set(id, { id, name: projNameById.get(id) || `Проект ${id.slice(-4)}`, incFact: 0, incFc: 0, expFact: 0, expFc: 0 });
+          }
+          const a = agg.get(id);
+          if (op.kind === 'income') {
+            if (op.isFact) a.incFact += op.amount || 0;
+            else a.incFc += op.amount || 0;
+          } else if (op.kind === 'expense') {
+            if (op.isFact) a.expFact += op.amount || 0;
+            else a.expFc += op.amount || 0;
+          }
+        }
+
+        if (!agg.size) {
+          const answer = 'Нет данных по проектам за выбранный период.';
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+
+        const ranked = Array.from(agg.values()).map(p => ({
+          ...p,
+          profitFact: (p.incFact - p.expFact),
+          profitFc: (p.incFc - p.expFc),
+          profitTotal: (p.incFact + p.incFc - p.expFact - p.expFc),
+        })).sort((a, b) => b.profitTotal - a.profitTotal);
+
+        const top = ranked.slice(0, 3);
+        const lines = [`Топ проектов за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
+        top.forEach((p, i) => {
+          lines.push(`${i + 1}. ${p.name}: прибыль факт ${_formatTenge(p.profitFact)}, прогноз ${_formatTenge(p.profitFc)}, итог ${_formatTenge(p.profitTotal)}`);
+        });
+
+        const answer = lines.join('\n');
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
       if (projectMention && (isCommand || wantsProjectAnalysis)) {
         const projects = dbData.catalogs?.projects || [];
         if (process.env.AI_DEBUG === '1') {
