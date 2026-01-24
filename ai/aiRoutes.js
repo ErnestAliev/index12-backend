@@ -465,12 +465,14 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // PROJECTS CATALOG
       // =========================
-      if ((qLower.includes('проек') || qLower.includes('project')) && isCommand) {
+      const projectMention = qLower.includes('проек') || qLower.includes('project');
+      const wantsProjectAnalysis = projectMention && (qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary') || qLower.includes('успеш') || qLower.includes('лучш') || qLower.includes('прибыл'));
+      if (projectMention && (isCommand || wantsProjectAnalysis)) {
         const projects = dbData.catalogs?.projects || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] projects branch hit, count=', projects.length, 'sample=', projects.slice(0, 3));
         }
-        const wantsAnalysis = qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary');
+        const wantsAnalysis = wantsProjectAnalysis;
 
         // Если нужен анализ — считаем по операциям
         if (wantsAnalysis) {
