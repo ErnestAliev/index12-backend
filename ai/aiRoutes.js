@@ -139,7 +139,7 @@ module.exports = function createAiRouter(deps) {
     }
     const payload = JSON.stringify(payloadObj);
 
-    return new Promise((resolve, reject) => {
+      return new Promise((resolve, reject) => {
       const gptReq = https.request(
         {
           hostname: 'api.openai.com',
@@ -177,6 +177,14 @@ module.exports = function createAiRouter(deps) {
       gptReq.write(payload);
       gptReq.end();
     });
+  };
+
+  const _absExpense = (op) => {
+    if (!op || op.isTransfer) return 0;
+    const raw = Number(op.rawAmount ?? op.amount ?? 0);
+    if (op.kind === 'income') return 0;
+    if (op.kind === 'expense' || raw < 0) return Math.abs(raw || 0);
+    return 0;
   };
 
   const _formatDbDataForAi = (data) => {
@@ -714,6 +722,104 @@ module.exports = function createAiRouter(deps) {
       // AI GENERATION (OpenAI)
       // Universal fallback for all queries
       // =========================
+      const wantsLosses = qLower.includes('теря') || qLower.includes('потер');
+      const lossDimension = (() => {
+        if (qLower.includes('контраг')) return 'contractor';
+        if (qLower.includes('проект')) return 'project';
+        if (qLower.includes('счет') || qLower.includes('касс')) return 'account';
+        return 'category';
+      })();
+
+      if (wantsLosses) {
+        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
+        const catalogs = dbData.catalogs || {};
+
+        const nameByDim = {
+          category: (id) => {
+            const cats = catalogs.categories || [];
+            const found = cats.find(c => (c.id || c._id) === id || c === id);
+            if (typeof found === 'string') return found;
+            return found?.name || 'Без категории';
+          },
+          contractor: (id) => {
+            const list = catalogs.contractors || [];
+            const found = list.find(c => (c.id || c._id) === id || c === id);
+            if (typeof found === 'string') return found;
+            return found?.name || 'Без контрагента';
+          },
+          project: (id) => {
+            const list = catalogs.projects || [];
+            const found = list.find(p => (p.id || p._id) === id || p === id);
+            if (typeof found === 'string') return found;
+            return found?.name || 'Без проекта';
+          },
+          account: (id) => {
+            const list = dbData.accounts || [];
+            const found = list.find(a => (a.id || a._id) === id || a === id);
+            if (typeof found === 'string') return found;
+            return found?.name || 'Без счета';
+          }
+        };
+
+        const agg = new Map();
+        let totalExp = 0;
+        for (const op of ops) {
+          const amt = _absExpense(op);
+          if (amt <= 0) continue;
+          totalExp += amt;
+
+          let key = null;
+          if (lossDimension === 'contractor') key = op.contractorId || op.contractor || null;
+          else if (lossDimension === 'project') key = op.projectId || op.project || null;
+          else if (lossDimension === 'account') key = op.accountId || op.account || null;
+          else key = op.categoryId || op.category || null;
+
+          if (!key) key = 'none';
+          const id = typeof key === 'object' && key._id ? key._id : String(key);
+          if (!agg.has(id)) agg.set(id, { id, sum: 0 });
+          agg.get(id).sum += amt;
+        }
+
+        const items = Array.from(agg.values())
+          .filter(it => lossDimension !== 'contractor' ? it.sum > 0 : it.sum > 0) // contractor also exclude 0
+          .sort((a, b) => b.sum - a.sum);
+
+        const top = items.slice(0, 3);
+        const topSum = top.reduce((s, it) => s + it.sum, 0);
+
+        if (!top.length) {
+          const answer = 'Нет расходных операций для расчёта потерь.';
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+
+        const dimLabel = {
+          category: 'категориям',
+          contractor: 'контрагентам',
+          project: 'проектам',
+          account: 'счетам'
+        }[lossDimension] || 'категориям';
+
+        const lines = [`ТОП-3 по ${dimLabel}:`];
+        top.forEach((it, idx) => {
+          const name = nameByDim[lossDimension]?.(it.id) || 'Без категории';
+          lines.push(`${idx + 1}. ${name} — ${_formatTenge(it.sum)}`);
+        });
+        lines.push(`Сумма ТОП-3: ${_formatTenge(topSum)}`);
+        lines.push(`Итог расходов: ${_formatTenge(totalExp)}`);
+
+        const followUp = (() => {
+          if (lossDimension === 'category') return 'Показать ТОП по контрагентам?';
+          if (lossDimension === 'contractor') return 'Показать ТОП по проектам?';
+          return 'Показать ТОП по категориям?';
+        })();
+        lines.push(followUp);
+
+        const answer = lines.join('\n');
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
       const systemPrompt = (() => {
         if (isDeep) {
           return [
