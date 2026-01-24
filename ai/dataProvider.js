@@ -695,6 +695,38 @@ module.exports = function createDataProvider(deps) {
             return { ...cat, volume: vol, tags, incomeShare, expenseShare };
         }).sort((a, b) => b.volume - a.volume);
 
+        // Tag-level aggregation (rent/payroll/tax/utility/transfer)
+        const tagSummaryMap = new Map();
+        categorySummary.forEach(cat => {
+            (cat.tags || []).forEach(tag => {
+                if (!tagSummaryMap.has(tag)) {
+                    tagSummaryMap.set(tag, {
+                        tag,
+                        incomeFact: 0,
+                        incomeForecast: 0,
+                        expenseFact: 0,
+                        expenseForecast: 0,
+                        categories: new Set()
+                    });
+                }
+                const rec = tagSummaryMap.get(tag);
+                rec.incomeFact += cat.incomeFact || 0;
+                rec.incomeForecast += cat.incomeForecast || 0;
+                rec.expenseFact += cat.expenseFact || 0;
+                rec.expenseForecast += cat.expenseForecast || 0;
+                if (cat.name) rec.categories.add(cat.name);
+            });
+        });
+        const tagSummary = Array.from(tagSummaryMap.values()).map(t => ({
+            tag: t.tag,
+            incomeFact: t.incomeFact,
+            incomeForecast: t.incomeForecast,
+            expenseFact: t.expenseFact,
+            expenseForecast: t.expenseForecast,
+            volume: t.incomeFact + t.incomeForecast + t.expenseFact + t.expenseForecast,
+            categories: Array.from(t.categories)
+        })).sort((a, b) => b.volume - a.volume);
+
         const contractorSummaryWithShare = contractorSummary.map(c => {
             const vol = c.incomeFact + c.incomeForecast + c.expenseFact + c.expenseForecast;
             const share = (totalIncomeAll + totalExpenseAll) ? vol / (totalIncomeAll + totalExpenseAll) : 0;
@@ -733,6 +765,7 @@ module.exports = function createDataProvider(deps) {
             },
             contractorSummary: contractorSummaryWithShare,
             categorySummary,
+            tagSummary,
             outliers: {
                 income: incomeOutliers,
                 expense: expenseOutliers

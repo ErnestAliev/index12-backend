@@ -243,6 +243,15 @@ module.exports = function createAiRouter(deps) {
       });
     }
 
+    // Tag summary (rent/payroll/tax/utility/transfer)
+    const tagSummary = (data.tagSummary || []).slice(0, 5);
+    if (tagSummary.length) {
+      lines.push('Теги (по ключевым темам):');
+      tagSummary.forEach(t => {
+        lines.push(`- ${t.tag}: доход +${_formatTenge(t.incomeFact + t.incomeForecast)}, расход -${_formatTenge(t.expenseFact + t.expenseForecast)}`);
+      });
+    }
+
     return lines.join('\n');
   };
 
@@ -760,24 +769,25 @@ module.exports = function createAiRouter(deps) {
         kind: op.kind,
         isFact: op.isFact
       }));
-      debugInfo.catalogs = debugInfo.catalogs || {
-        companies: dbData.catalogs?.companies?.length || 0,
-        projects: dbData.catalogs?.projects?.length || 0,
-        categories: dbData.catalogs?.categories?.length || 0,
-        contractors: dbData.catalogs?.contractors?.length || 0,
-        individuals: dbData.catalogs?.individuals?.length || 0,
-        projectsSample: (dbData.catalogs?.projects || []).slice(0, 3),
-        categoriesSample: (dbData.catalogs?.categories || []).slice(0, 3),
-        contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
-        individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
-        companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
-        contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
-        daySummarySample: (dbData.daySummary || []).slice(0, 3),
-        categorySummarySample: (dbData.categorySummary || []).slice(0, 3),
-        outliersSample: dbData.outliers || {},
-      };
-      return res.json({ text: aiResponse, debug: debugInfo });
-    }
+        debugInfo.catalogs = debugInfo.catalogs || {
+          companies: dbData.catalogs?.companies?.length || 0,
+          projects: dbData.catalogs?.projects?.length || 0,
+          categories: dbData.catalogs?.categories?.length || 0,
+          contractors: dbData.catalogs?.contractors?.length || 0,
+          individuals: dbData.catalogs?.individuals?.length || 0,
+          projectsSample: (dbData.catalogs?.projects || []).slice(0, 3),
+          categoriesSample: (dbData.catalogs?.categories || []).slice(0, 3),
+          contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
+          individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
+          companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
+          contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
+          daySummarySample: (dbData.daySummary || []).slice(0, 3),
+          categorySummarySample: (dbData.categorySummary || []).slice(0, 3),
+          tagSummarySample: (dbData.tagSummary || []).slice(0, 3),
+          outliersSample: dbData.outliers || {},
+        };
+        return res.json({ text: aiResponse, debug: debugInfo });
+      }
 
       return res.json({ text: aiResponse });
 
