@@ -614,11 +614,48 @@ module.exports = function createDataProvider(deps) {
                 else rec.expenseForecast += op.amount || 0;
             }
         });
-        const categorySummary = Array.from(categorySummaryMap.values()).sort((a, b) => {
-            const aVol = a.incomeFact + a.incomeForecast + a.expenseFact + a.expenseForecast;
-            const bVol = b.incomeFact + b.incomeForecast + b.expenseFact + b.expenseForecast;
-            return bVol - aVol;
+        // Мапа тегов по ключевым словам (распространяется как на категории, так и на описания операций)
+        const TAG_RULES = [
+            { tag: 'rent', keywords: ['аренд', 'rent', 'lease', 'шаляпина', 'акмекен', 'пушкина'] },
+            { tag: 'payroll', keywords: ['фот', 'зарплат', 'оклад', 'salary', 'payroll', 'прем', 'бонуст'] },
+            { tag: 'tax', keywords: ['налог', 'ндс', 'нпн', 'пн', 'соц', 'ипн'] },
+            { tag: 'utility', keywords: ['коммун', 'utility', 'газ', 'свет', 'электр', 'вода', 'тепло'] },
+            { tag: 'transfer', keywords: ['перевод', 'трансфер', 'между компаниями'] },
+        ];
+
+        const _tagByText = (text) => {
+            const t = String(text || '').toLowerCase();
+            if (!t) return new Set();
+            const found = new Set();
+            TAG_RULES.forEach(rule => {
+                if (rule.keywords.some(k => t.includes(k))) found.add(rule.tag);
+            });
+            return found;
+        };
+
+        // Распространяем теги на категории и операции
+        const categoryTags = new Map();
+        (categories || []).forEach(c => {
+            const tags = _tagByText(c.name);
+            categoryTags.set(String(c.id), tags);
         });
+
+        // Пополняем теги из описаний операций (если категория не подсказала)
+        (operationsData.operations || []).forEach(op => {
+            const cid = op.categoryId ? String(op.categoryId) : null;
+            if (!cid) return;
+            const opTags = _tagByText(op.description);
+            if (!opTags.size) return;
+            const cur = categoryTags.get(cid) || new Set();
+            opTags.forEach(t => cur.add(t));
+            categoryTags.set(cid, cur);
+        });
+
+        const categorySummary = Array.from(categorySummaryMap.values()).map(cat => {
+            const vol = cat.incomeFact + cat.incomeForecast + cat.expenseFact + cat.expenseForecast;
+            const tags = Array.from(categoryTags.get(cat.id) || []);
+            return { ...cat, volume: vol, tags };
+        }).sort((a, b) => b.volume - a.volume);
 
         return {
             meta: {

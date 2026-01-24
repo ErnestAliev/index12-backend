@@ -226,7 +226,8 @@ module.exports = function createAiRouter(deps) {
         const incomeTotal = cat.incomeFact + cat.incomeForecast;
         const expenseTotal = cat.expenseFact + cat.expenseForecast;
         const vol = incomeTotal + expenseTotal;
-        lines.push(`- ${cat.name}: доход +${_formatTenge(incomeTotal)}, расход -${_formatTenge(expenseTotal)}, оборот ${_formatTenge(vol)}`);
+        const tags = (cat.tags && cat.tags.length) ? ` [${cat.tags.join(', ')}]` : '';
+        lines.push(`- ${cat.name}${tags}: доход +${_formatTenge(incomeTotal)}, расход -${_formatTenge(expenseTotal)}, оборот ${_formatTenge(vol)}`);
       });
     }
 
