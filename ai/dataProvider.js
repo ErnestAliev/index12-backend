@@ -734,11 +734,12 @@ module.exports = function createDataProvider(deps) {
         });
 
         // Аномалии: топ операции по сумме
-        const incomeOutliers = normalized
+        const opsForOutliers = Array.isArray(operationsData.operations) ? operationsData.operations : [];
+        const incomeOutliers = opsForOutliers
             .filter(o => o.kind === 'income')
             .sort((a, b) => b.amount - a.amount)
             .slice(0, 3);
-        const expenseOutliers = normalized
+        const expenseOutliers = opsForOutliers
             .filter(o => o.kind === 'expense')
             .sort((a, b) => b.amount - a.amount)
             .slice(0, 3);
