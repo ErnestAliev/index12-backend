@@ -214,7 +214,8 @@ module.exports = function createAiRouter(deps) {
       lines.push('Контрагенты (топ по обороту):');
       contractorSummary.forEach(c => {
         const vol = (c.incomeFact + c.incomeForecast + c.expenseFact + c.expenseForecast);
-        lines.push(`- ${c.name}: доход +${_formatTenge(c.incomeFact + c.incomeForecast)}, расход -${_formatTenge(c.expenseFact + c.expenseForecast)}, оборот ${_formatTenge(vol)}`);
+        const sharePct = c.share ? Math.round(c.share * 1000) / 10 : 0;
+        lines.push(`- ${c.name}: доход +${_formatTenge(c.incomeFact + c.incomeForecast)}, расход -${_formatTenge(c.expenseFact + c.expenseForecast)}, оборот ${_formatTenge(vol)} (${sharePct}%)`);
       });
     }
 
@@ -227,7 +228,9 @@ module.exports = function createAiRouter(deps) {
         const expenseTotal = cat.expenseFact + cat.expenseForecast;
         const vol = incomeTotal + expenseTotal;
         const tags = (cat.tags && cat.tags.length) ? ` [${cat.tags.join(', ')}]` : '';
-        lines.push(`- ${cat.name}${tags}: доход +${_formatTenge(incomeTotal)}, расход -${_formatTenge(expenseTotal)}, оборот ${_formatTenge(vol)}`);
+        const incPct = cat.incomeShare ? Math.round(cat.incomeShare * 1000) / 10 : 0;
+        const expPct = cat.expenseShare ? Math.round(cat.expenseShare * 1000) / 10 : 0;
+        lines.push(`- ${cat.name}${tags}: доход +${_formatTenge(incomeTotal)} (${incPct}%), расход -${_formatTenge(expenseTotal)} (${expPct}%), оборот ${_formatTenge(vol)}`);
       });
     }
 
@@ -743,36 +746,38 @@ module.exports = function createAiRouter(deps) {
       const aiResponse = await _openAiChat(messages);
       _pushHistory(userIdStr, 'assistant', aiResponse);
 
-      if (debugRequested) {
-        debugInfo = debugInfo || {};
-        debugInfo.hiddenNames = hiddenAccs.map(a => a.name);
-        debugInfo.hiddenCount = hiddenAccs.length;
-        debugInfo.openNames = openAccs.map(a => a.name);
-        debugInfo.openCount = openAccs.length;
-        debugInfo.opsSummary = dbData.operationsSummary || {};
-        debugInfo.sampleOps = (dbData.operations || []).slice(0, 5).map(op => ({
-          date: op.date,
-          amount: op.amount,
-          rawAmount: op.rawAmount,
-          kind: op.kind,
-          isFact: op.isFact
-        }));
-        debugInfo.catalogs = debugInfo.catalogs || {
-          companies: dbData.catalogs?.companies?.length || 0,
-          projects: dbData.catalogs?.projects?.length || 0,
-          categories: dbData.catalogs?.categories?.length || 0,
-          contractors: dbData.catalogs?.contractors?.length || 0,
-          individuals: dbData.catalogs?.individuals?.length || 0,
-          projectsSample: (dbData.catalogs?.projects || []).slice(0, 3),
-          categoriesSample: (dbData.catalogs?.categories || []).slice(0, 3),
-          contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
-          individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
-          companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
-          contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
-          daySummarySample: (dbData.daySummary || []).slice(0, 3),
-        };
-        return res.json({ text: aiResponse, debug: debugInfo });
-      }
+    if (debugRequested) {
+      debugInfo = debugInfo || {};
+      debugInfo.hiddenNames = hiddenAccs.map(a => a.name);
+      debugInfo.hiddenCount = hiddenAccs.length;
+      debugInfo.openNames = openAccs.map(a => a.name);
+      debugInfo.openCount = openAccs.length;
+      debugInfo.opsSummary = dbData.operationsSummary || {};
+      debugInfo.sampleOps = (dbData.operations || []).slice(0, 5).map(op => ({
+        date: op.date,
+        amount: op.amount,
+        rawAmount: op.rawAmount,
+        kind: op.kind,
+        isFact: op.isFact
+      }));
+      debugInfo.catalogs = debugInfo.catalogs || {
+        companies: dbData.catalogs?.companies?.length || 0,
+        projects: dbData.catalogs?.projects?.length || 0,
+        categories: dbData.catalogs?.categories?.length || 0,
+        contractors: dbData.catalogs?.contractors?.length || 0,
+        individuals: dbData.catalogs?.individuals?.length || 0,
+        projectsSample: (dbData.catalogs?.projects || []).slice(0, 3),
+        categoriesSample: (dbData.catalogs?.categories || []).slice(0, 3),
+        contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
+        individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
+        companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
+        contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
+        daySummarySample: (dbData.daySummary || []).slice(0, 3),
+        categorySummarySample: (dbData.categorySummary || []).slice(0, 3),
+        outliersSample: dbData.outliers || {},
+      };
+      return res.json({ text: aiResponse, debug: debugInfo });
+    }
 
       return res.json({ text: aiResponse });
 

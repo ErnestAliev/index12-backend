@@ -684,11 +684,32 @@ module.exports = function createDataProvider(deps) {
             categoryTags.set(cid, cur);
         });
 
+        const totalIncomeAll = operationsData.summary.income.total || 0;
+        const totalExpenseAll = operationsData.summary.expense.total || 0;
+
         const categorySummary = Array.from(categorySummaryMap.values()).map(cat => {
             const vol = cat.incomeFact + cat.incomeForecast + cat.expenseFact + cat.expenseForecast;
             const tags = Array.from(categoryTags.get(cat.id) || []);
-            return { ...cat, volume: vol, tags };
+            const incomeShare = totalIncomeAll ? (cat.incomeFact + cat.incomeForecast) / totalIncomeAll : 0;
+            const expenseShare = totalExpenseAll ? (cat.expenseFact + cat.expenseForecast) / totalExpenseAll : 0;
+            return { ...cat, volume: vol, tags, incomeShare, expenseShare };
         }).sort((a, b) => b.volume - a.volume);
+
+        const contractorSummaryWithShare = contractorSummary.map(c => {
+            const vol = c.incomeFact + c.incomeForecast + c.expenseFact + c.expenseForecast;
+            const share = (totalIncomeAll + totalExpenseAll) ? vol / (totalIncomeAll + totalExpenseAll) : 0;
+            return { ...c, volume: vol, share };
+        });
+
+        // Аномалии: топ операции по сумме
+        const incomeOutliers = normalized
+            .filter(o => o.kind === 'income')
+            .sort((a, b) => b.amount - a.amount)
+            .slice(0, 3);
+        const expenseOutliers = normalized
+            .filter(o => o.kind === 'expense')
+            .sort((a, b) => b.amount - a.amount)
+            .slice(0, 3);
 
         return {
             meta: {
@@ -710,8 +731,12 @@ module.exports = function createDataProvider(deps) {
                 contractors: contractors.map(c => c.name),
                 individuals
             },
-            contractorSummary,
-            categorySummary
+            contractorSummary: contractorSummaryWithShare,
+            categorySummary,
+            outliers: {
+                income: incomeOutliers,
+                expense: expenseOutliers
+            }
         };
     }
 
