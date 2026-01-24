@@ -256,10 +256,11 @@ module.exports = function createAiRouter(deps) {
       const qLower = q.toLowerCase();
       const source = req.body?.source || 'freeform';
       const quickKey = req.body?.quickKey || null;
+      const isDeep = (req.body?.mode || '').toLowerCase() === 'deep';
       const isQuick = source === 'quick_button' || !!quickKey;
-      const isCommand = isQuick || /(^|\s)(покажи|список|выведи|сколько)\b/i.test(qLower);
+      const isCommand = !isDeep && (isQuick || /(^|\s)(покажи|список|выведи|сколько)\b/i.test(qLower));
       if (process.env.AI_DEBUG === '1') {
-        console.log('[AI_DEBUG] query text:', qLower);
+        console.log('[AI_DEBUG] query text:', qLower, 'isDeep=', isDeep, 'source=', source);
       }
 
       // =========================
@@ -361,7 +362,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // ACCOUNTS QUERY
       // =========================
-      if (/\b(сч[её]т|счета|касс[аы]|баланс)\b/i.test(qLower)) {
+      if (!isDeep && /\b(сч[её]т|счета|касс[аы]|баланс)\b/i.test(qLower)) {
         const lines = [];
         const accounts = dbData.accounts || [];
         const totals = dbData.totals || {};
@@ -420,7 +421,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // INCOME QUERY
       // =========================
-      if (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower)) {
+      if (!isDeep && (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower))) {
         const summary = dbData.operationsSummary || {};
         const incomeData = summary.income || {};
 
@@ -441,7 +442,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // EXPENSE QUERY
       // =========================
-      if (/\b(расход|трат|затрат)\b/i.test(qLower)) {
+      if (!isDeep && (/\b(расход|трат|затрат)\b/i.test(qLower))) {
         const summary = dbData.operationsSummary || {};
         const expenseData = summary.expense || {};
 
@@ -469,7 +470,7 @@ module.exports = function createAiRouter(deps) {
       const wantsProjectAnalysis = projectMention && (qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary') || qLower.includes('успеш') || qLower.includes('лучш') || qLower.includes('прибыл'));
 
       // Специальный сценарий: «самый перспективный/лучший/успешный проект»
-      if (projectMention && (qLower.includes('перспектив') || qLower.includes('лучш') || qLower.includes('успеш'))) {
+      if (projectMention && !isDeep && (qLower.includes('перспектив') || qLower.includes('лучш') || qLower.includes('успеш'))) {
         const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
         const projList = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
         const projNameById = new Map();
@@ -520,7 +521,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
-      if (projectMention && (isCommand || wantsProjectAnalysis)) {
+      if (projectMention && (isCommand || wantsProjectAnalysis) && !isDeep) {
         const projects = dbData.catalogs?.projects || [];
         if (process.env.AI_DEBUG === '1') {
           console.log('[AI_DEBUG] projects branch hit, count=', projects.length, 'sample=', projects.slice(0, 3));
