@@ -366,6 +366,7 @@ module.exports = function createDataProvider(deps) {
                 rawAmount,
                 description: op.description || null,
                 projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
+                contractorId: op.contractorId?._id ? String(op.contractorId._id) : (op.contractorId ? String(op.contractorId) : null),
             });
         }
 
@@ -487,8 +488,8 @@ module.exports = function createDataProvider(deps) {
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
         return Array.from(map.values())
-            .map(c => c.name || `Контрагент ${String(c._id).slice(-4)}`)
-            .filter(Boolean);
+            .map(c => ({ id: String(c._id), name: c.name || `Контрагент ${String(c._id).slice(-4)}` }))
+            .filter(c => c.name);
     }
 
     async function getIndividuals(userId, workspaceId = null) {
@@ -551,6 +552,38 @@ module.exports = function createDataProvider(deps) {
                 getIndividuals(userId, workspaceId)
             ]);
 
+        // Contractor summary (по операциям)
+        const contractorMap = new Map();
+        (contractors || []).forEach(c => { if (c?.id) contractorMap.set(String(c.id), c.name || c.id); });
+        const contractorSummaryMap = new Map();
+        (operationsData.operations || []).forEach(op => {
+            const cid = op.contractorId ? String(op.contractorId) : null;
+            if (!cid) return;
+            if (!contractorSummaryMap.has(cid)) {
+                contractorSummaryMap.set(cid, {
+                    id: cid,
+                    name: contractorMap.get(cid) || `Контрагент ${cid.slice(-4)}`,
+                    incomeFact: 0,
+                    incomeForecast: 0,
+                    expenseFact: 0,
+                    expenseForecast: 0,
+                });
+            }
+            const rec = contractorSummaryMap.get(cid);
+            if (op.kind === 'income') {
+                if (op.isFact) rec.incomeFact += op.amount || 0;
+                else rec.incomeForecast += op.amount || 0;
+            } else if (op.kind === 'expense') {
+                if (op.isFact) rec.expenseFact += op.amount || 0;
+                else rec.expenseForecast += op.amount || 0;
+            }
+        });
+        const contractorSummary = Array.from(contractorSummaryMap.values()).sort((a, b) => {
+            const aVol = a.incomeFact + a.incomeForecast + a.expenseFact + a.expenseForecast;
+            const bVol = b.incomeFact + b.incomeForecast + b.expenseFact + b.expenseForecast;
+            return bVol - aVol;
+        });
+
         return {
             meta: {
                 today: _fmtDateDDMMYY(nowRef),
@@ -568,9 +601,10 @@ module.exports = function createDataProvider(deps) {
                 companies,
                 projects,
                 categories,
-                contractors,
+                contractors: contractors.map(c => c.name),
                 individuals
-            }
+            },
+            contractorSummary
         };
     }
 

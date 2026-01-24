@@ -208,6 +208,16 @@ module.exports = function createAiRouter(deps) {
     lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
     lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
 
+    // Contractors summary (top 5 by volume)
+    const contractorSummary = (data.contractorSummary || []).slice(0, 5);
+    if (contractorSummary.length) {
+      lines.push('Контрагенты (топ по обороту):');
+      contractorSummary.forEach(c => {
+        const vol = (c.incomeFact + c.incomeForecast + c.expenseFact + c.expenseForecast);
+        lines.push(`- ${c.name}: доход +${_formatTenge(c.incomeFact + c.incomeForecast)}, расход -${_formatTenge(c.expenseFact + c.expenseForecast)}, оборот ${_formatTenge(vol)}`);
+      });
+    }
+
     return lines.join('\n');
   };
 
@@ -735,6 +745,7 @@ module.exports = function createAiRouter(deps) {
           contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
           individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
           companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
+          contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
         };
         return res.json({ text: aiResponse, debug: debugInfo });
       }
