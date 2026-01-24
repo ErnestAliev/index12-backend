@@ -379,6 +379,38 @@ module.exports = function createDataProvider(deps) {
         const factExpenseOps = expenseOps.filter(o => o.isFact);
         const forecastExpenseOps = expenseOps.filter(o => !o.isFact);
 
+        // Пересчёт по датам (для поиска напряжённых дней)
+        const dayMap = new Map(); // dateIso -> aggregate
+        const _accDay = (iso, op, field) => {
+            if (!iso) return;
+            if (!dayMap.has(iso)) {
+                dayMap.set(iso, {
+                    dateIso: iso,
+                    date: op.date,
+                    ts: op.ts,
+                    incomeFact: 0,
+                    incomeForecast: 0,
+                    expenseFact: 0,
+                    expenseForecast: 0,
+                });
+            }
+            const d = dayMap.get(iso);
+            d[field] += op.amount || 0;
+        };
+        for (const op of normalized) {
+            if (op.kind === 'income') {
+                _accDay(op.dateIso, op, op.isFact ? 'incomeFact' : 'incomeForecast');
+            } else if (op.kind === 'expense') {
+                _accDay(op.dateIso, op, op.isFact ? 'expenseFact' : 'expenseForecast');
+            }
+        }
+        const daySummary = Array.from(dayMap.values()).map(d => {
+            const incomeTotal = d.incomeFact + d.incomeForecast;
+            const expenseTotal = d.expenseFact + d.expenseForecast;
+            const volume = incomeTotal + expenseTotal;
+            return { ...d, incomeTotal, expenseTotal, volume };
+        }).sort((a, b) => b.volume - a.volume);
+
         return {
             operations: normalized,
             summary: {
@@ -412,7 +444,8 @@ module.exports = function createDataProvider(deps) {
                 today: _fmtDateDDMMYY(nowRef),
                 rangeStart: _fmtDateDDMMYY(start),
                 rangeEnd: _fmtDateDDMMYY(end)
-            }
+            },
+            daySummary
         };
     }
 

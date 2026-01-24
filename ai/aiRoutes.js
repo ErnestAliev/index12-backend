@@ -231,6 +231,15 @@ module.exports = function createAiRouter(deps) {
       });
     }
 
+    // Days summary (top 3 by volume)
+    const daySummary = (data.daySummary || []).slice(0, 3);
+    if (daySummary.length) {
+      lines.push('Дни (напряжённые по обороту):');
+      daySummary.forEach(d => {
+        lines.push(`- ${d.dateIso}: доход +${_formatTenge(d.incomeTotal)}, расход -${_formatTenge(d.expenseTotal)}`);
+      });
+    }
+
     return lines.join('\n');
   };
 
@@ -760,6 +769,7 @@ module.exports = function createAiRouter(deps) {
           individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
           companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
           contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
+          daySummarySample: (dbData.daySummary || []).slice(0, 3),
         };
         return res.json({ text: aiResponse, debug: debugInfo });
       }
