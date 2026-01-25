@@ -314,6 +314,10 @@ module.exports = function createDataProvider(deps) {
         const normalized = [];
 
         for (const op of operations) {
+            // Управленческие родители и исключенные из итогов не должны попадать в расчеты AI
+            if (op.excludeFromTotals) continue;
+            if (op.isSplitParent) continue;
+
             // Skip inter-company transfers if requested
             if (excludeInterCompany && !includeHidden && op.fromCompanyId && op.toCompanyId) {
                 continue;
