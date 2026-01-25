@@ -119,15 +119,15 @@ module.exports = function createAiRouter(deps) {
     }
   };
 
-  const _openAiChat = async (messages, { temperature = 0, maxTokens = 600 } = {}) => {
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 600, modelOverride = null } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn('OPENAI_API_KEY is missing');
       return 'Ошибка: OPENAI_API_KEY не задан.';
     }
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-    const isReasoningModel = /^o[13]|gpt-5/.test(model);
+    const model = modelOverride || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const isReasoningModel = /^(o\d|gpt-5)/.test(String(model || ''));
 
     const payloadObj = {
       model,
@@ -280,6 +280,20 @@ module.exports = function createAiRouter(deps) {
     }
   };
 
+  // =========================
+  // Finance situation intent
+  // =========================
+  const _isFinanceSituationQuery = (s) => {
+    const t = String(s || '').toLowerCase();
+    if (!t) return false;
+    // user wants “как дела по деньгам / финансовая картина / ситуация / итоги”
+    if (t.includes('финанс') || t.includes('картина') || t.includes('ситуац') || t.includes('итог') || t.includes('как дела')) {
+      // if explicitly asked for accounts/balances, let accounts handler answer
+      if (/(сч[её]т|счета|касс[аы]|баланс)/i.test(t)) return false;
+      return true;
+    }
+    return false;
+  };
   // =========================
   // Routes
   // =========================
@@ -511,6 +525,61 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Итого: ${_formatTenge(expenseData.total ? -expenseData.total : 0)}`);
 
         const answer = lines.join('\n');
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
+      // =========================
+      // FINANCIAL SITUATION (profit-first)
+      // =========================
+      if (_isFinanceSituationQuery(qLower)) {
+        const totals = dbData.totals || {};
+        const incFact = Number(dbData.operationsSummary?.income?.fact?.total || 0);
+        const expFact = Number(dbData.operationsSummary?.expense?.fact?.total || 0);
+        const profitFact = incFact - expFact;
+
+        const totalOpen = Number(totals.open?.current ?? 0);
+        const totalHidden = Number(totals.hidden?.current ?? 0);
+        const totalAll = Number(totals.all?.current ?? (totalOpen + totalHidden));
+
+        const expSharePct = incFact > 0 ? Math.round((expFact / incFact) * 100) : 0;
+        const marginPct = incFact > 0 ? Math.round((profitFact / incFact) * 100) : 0;
+
+        // Quick cash-risk hint (very rough): compare open cash vs 7 days of average expense
+        const periodStart = dbData.meta?.periodStart || null;
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || null;
+        let days = 30;
+        try {
+          if (periodStart && periodEnd) {
+            const p1 = periodStart.split('.');
+            const p2 = periodEnd.split('.');
+            if (p1.length === 3 && p2.length === 3) {
+              const d1 = new Date(Number('20' + p1[2]), Number(p1[1]) - 1, Number(p1[0]));
+              const d2 = new Date(Number('20' + p2[2]), Number(p2[1]) - 1, Number(p2[0]));
+              const diff = Math.max(1, Math.round((d2 - d1) / (24 * 60 * 60 * 1000)) + 1);
+              days = diff;
+            }
+          }
+        } catch (_) {}
+
+        const avgDailyExp = days > 0 ? (expFact / days) : 0;
+        const runwayDaysOpen = avgDailyExp > 0 ? Math.floor(totalOpen / avgDailyExp) : null;
+
+        const lines = [];
+        lines.push(`Прибыль (факт): +${_formatTenge(profitFact)}`);
+        lines.push(`Маржа: ~${marginPct}% | Расходы: ${_formatTenge(expFact)} (~${expSharePct}% от доходов)`);
+        lines.push(`Деньги: открытые ${_formatTenge(totalOpen)}, скрытые ${_formatTenge(totalHidden)}, итого ${_formatTenge(totalAll)}`);
+
+        if (runwayDaysOpen !== null) {
+          lines.push(`Открытые покрывают ~${runwayDaysOpen} дн. средних расходов`);
+        } else {
+          lines.push('Риск кассы по дням: нет данных для расчёта');
+        }
+
+        lines.push('');
+        lines.push('Вопрос: показать прибыль по проектам или самые крупные расходы?');
+
+        const answer = lines.join('\n').trim();
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
@@ -956,7 +1025,28 @@ module.exports = function createAiRouter(deps) {
         ..._getHistoryMessages(userIdStr)
       ];
 
-      const aiResponse = await _openAiChat(messages);
+      // DIP can use a heavier model via env var
+      // Preferred key: OPENAI_MODEL_DEEP
+      // Backward/typo-friendly fallbacks (in case env was added with a different name)
+      const deepModelEnv =
+        process.env.OPENAI_MODEL_DEEP ||
+        process.env.OPENAI_MODEL_DIP ||
+        process.env.OPENAI_MODEL_DEEP_MODE ||
+        process.env['OpenAI_модель_дип'] ||
+        process.env['OPENAI_модель_дип'] ||
+        null;
+
+      const modelOverride = isDeep ? deepModelEnv : null;
+
+      if (process.env.AI_DEBUG === '1') {
+        console.log('[AI_DEBUG] modelOverride:', modelOverride || '(none)', 'baseModel:', process.env.OPENAI_MODEL || '(default)');
+      }
+
+      const aiResponse = await _openAiChat(messages, {
+        modelOverride,
+        temperature: 0,
+        maxTokens: isDeep ? 900 : 650,
+      });
       _pushHistory(userIdStr, 'assistant', aiResponse);
 
     if (debugRequested) {
