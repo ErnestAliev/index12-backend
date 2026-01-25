@@ -272,6 +272,11 @@ const eventSchema = new mongoose.Schema({
     fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     excludeFromTotals: { type: Boolean, default: false },
+    // Управленческие разбиения по проектам
+    parentOpId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null },
+    isSplitChild: { type: Boolean, default: false },
+    isSplitParent: { type: Boolean, default: false },
+    splitMeta: { type: Array, default: [] }, // [{ projectId, amount }]
     isSalary: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 });
@@ -1876,15 +1881,15 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             createdBy: req.user.id, // Track real user who created this operation
             workspaceId: req.user.currentWorkspaceId // 🟢 NEW
         });
-        await newEvent.save();
+                await newEvent.save();
 
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+                await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
-        emitToUser(req, userId, 'operation_added', newEvent);
+                emitToUser(req, userId, 'operation_added', newEvent);
 
-        res.status(201).json(newEvent);
-    } catch (err) { res.status(400).json({ message: err.message }); }
-});
+                res.status(201).json(newEvent);
+            } catch (err) { res.status(400).json({ message: err.message }); }
+        });
 
 // 🟢 UPDATED: Use canEdit middleware
 app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, async (req, res) => {
@@ -1984,6 +1989,11 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
         // Proceed with regular delete
 
         await Event.deleteOne({ _id: id });
+
+        // Cascade delete split children if parent
+        if (eventToDelete.isSplitParent) {
+            await Event.deleteMany({ parentOpId: eventToDelete._id });
+        }
 
         emitToUser(req, userId, 'operation_deleted', id);
 
