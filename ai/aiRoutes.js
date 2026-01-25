@@ -577,11 +577,19 @@ module.exports = function createAiRouter(deps) {
       if (projectMention && wantsProjectSpend && !isDeep) {
         const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
         const projList = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
+        const catList = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
         const projNameById = new Map();
         projList.forEach(p => {
           if (!p) return;
           if (typeof p === 'string') projNameById.set(p, p);
           else if (p.id) projNameById.set(String(p.id), p.name || p.id);
+        });
+        const catNameById = new Map();
+        catList.forEach(c => {
+          if (!c) return;
+          const cid = c.id || c._id;
+          if (!cid) return;
+          catNameById.set(String(cid), c.name || `Категория ${String(cid).slice(-4)}`);
         });
 
         const byProject = new Map();
@@ -593,7 +601,7 @@ module.exports = function createAiRouter(deps) {
           const catId = op.categoryId ? String(op.categoryId) : 'Без категории';
           const catMap = byProject.get(projName);
           const prev = catMap.get(catId) || { sum: 0, name: null };
-          const catName = dbData.catalogs?.categories?.find(c => String(c.id || c._id) === catId)?.name || op.category || 'Без категории';
+          const catName = catNameById.get(catId) || op.categoryName || op.category || (catId === 'Без категории' ? 'Без категории' : `Категория ${catId.slice(-4)}`);
           prev.sum += op.amount || 0;
           prev.name = catName;
           catMap.set(catId, prev);
