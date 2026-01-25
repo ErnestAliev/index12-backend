@@ -591,6 +591,48 @@ module.exports = function createDataProvider(deps) {
                 getIndividuals(userId, workspaceId)
             ]);
 
+        // Обогатим операции человекочитаемыми названиями (категория/контрагент/физлицо)
+        if (Array.isArray(operationsData.operations)) {
+            const catNameById = new Map();
+            categories.forEach(c => {
+                const cid = c.id || c._id;
+                if (!cid) return;
+                catNameById.set(String(cid), c.name || `Категория ${String(cid).slice(-4)}`);
+            });
+
+            const contractorNameById = new Map();
+            contractors.forEach(c => {
+                const cid = c.id || c._id;
+                if (!cid) return;
+                contractorNameById.set(String(cid), c.name || `Контрагент ${String(cid).slice(-4)}`);
+            });
+
+            const individualNameById = new Map();
+            individuals.forEach(i => {
+                const iid = i.id || i._id;
+                if (!iid) return;
+                individualNameById.set(String(iid), i.name || `Физлицо ${String(iid).slice(-4)}`);
+            });
+
+            operationsData.operations.forEach(op => {
+                const catId = op.categoryId ? String(op.categoryId) : null;
+                const contrId = op.contractorId ? String(op.contractorId) : null;
+                const indivContrId = op.counterpartyIndividualId ? String(op.counterpartyIndividualId) : null;
+
+                if (catId && !op.categoryName) op.categoryName = catNameById.get(catId) || op.categoryName;
+
+                // Контрагент: сначала из contractorId, fallback на counterpartyIndividualId
+                let contractorName = contrId ? contractorNameById.get(contrId) : null;
+                if (!contractorName && indivContrId) contractorName = individualNameById.get(indivContrId);
+                if (contractorName && !op.contractorName) op.contractorName = contractorName;
+
+                // Если contractorId отсутствует, но есть физлицо-получатель — подставим его как contractorId для дальнейшей агрегации
+                if (!op.contractorId && indivContrId) {
+                    op.contractorId = indivContrId;
+                }
+            });
+        }
+
         // Contractor summary (по операциям)
         const contractorMap = new Map();
         (contractors || []).forEach(c => { if (c?.id) contractorMap.set(String(c.id), c.name || c.id); });
