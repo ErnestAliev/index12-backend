@@ -766,7 +766,7 @@ module.exports = function createDataProvider(deps) {
                 projects,
                 // Сохраняем id+name, чтобы маршруты могли сопоставлять категории по id
                 categories,
-                contractors: contractors.map(c => c.name),
+                contractors,
                 individuals
             },
             contractorSummary: contractorSummaryWithShare,
