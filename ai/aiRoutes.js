@@ -520,6 +520,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       const projectMention = qLower.includes('проек') || qLower.includes('project');
       const wantsProjectAnalysis = projectMention && (qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary') || qLower.includes('успеш') || qLower.includes('лучш') || qLower.includes('прибыл'));
+      const wantsProjectSpend = projectMention && (qLower.includes('что потрат') || qLower.includes('на что потрат') || qLower.includes('куда потрат') || (qLower.includes('категор') && qLower.includes('расход')));
 
       // Специальный сценарий: «самый перспективный/лучший/успешный проект»
       if (projectMention && !isDeep && (qLower.includes('перспектив') || qLower.includes('лучш') || qLower.includes('успеш'))) {
@@ -573,6 +574,51 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
+      if (projectMention && wantsProjectSpend && !isDeep) {
+        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
+        const projList = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
+        const projNameById = new Map();
+        projList.forEach(p => {
+          if (!p) return;
+          if (typeof p === 'string') projNameById.set(p, p);
+          else if (p.id) projNameById.set(String(p.id), p.name || p.id);
+        });
+
+        const byProject = new Map();
+        for (const op of ops) {
+          if (op.kind !== 'expense') continue;
+          const pid = op.projectId ? String(op.projectId) : null;
+          const projName = pid ? (projNameById.get(pid) || `Проект ${pid.slice(-4)}`) : 'Без проекта';
+          if (!byProject.has(projName)) byProject.set(projName, new Map());
+          const catId = op.categoryId ? String(op.categoryId) : 'Без категории';
+          const catMap = byProject.get(projName);
+          const prev = catMap.get(catId) || { sum: 0, name: null };
+          const catName = dbData.catalogs?.categories?.find(c => String(c.id || c._id) === catId)?.name || op.category || 'Без категории';
+          prev.sum += op.amount || 0;
+          prev.name = catName;
+          catMap.set(catId, prev);
+        }
+
+        if (!byProject.size) {
+          const answer = 'Нет расходов по проектам за выбранный период.';
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+
+        const lines = [`Расходы по проектам за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
+        byProject.forEach((catMap, projName) => {
+          lines.push(`${projName}`);
+          const sorted = Array.from(catMap.values()).sort((a, b) => Math.abs(b.sum) - Math.abs(a.sum));
+          sorted.forEach(c => {
+            lines.push(`- ${c.name}: ${_formatTenge(-c.sum)}`);
+          });
+          lines.push('');
+        });
+        const answer = lines.join('\n').trim();
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
       if (projectMention && (isCommand || wantsProjectAnalysis) && !isDeep) {
         const projects = dbData.catalogs?.projects || [];
         if (process.env.AI_DEBUG === '1') {
@@ -602,16 +648,27 @@ module.exports = function createAiRouter(deps) {
             }
           }
 
+          let totalProfitFact = 0;
+          projectMap.forEach(p => { totalProfitFact += (p.incomeFact - p.expenseFact); });
+
           const lines = [`Проекты (анализ) за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
           if (!projectMap.size) {
             lines.push('- нет данных');
           } else {
             let idx = 1;
             for (const [, p] of projectMap) {
-              lines.push(`${idx}. ${p.name}: доход факт ${_formatTenge(p.incomeFact)}, прогноз ${_formatTenge(p.incomeForecast)}; расход факт ${_formatTenge(-p.expenseFact)}, прогноз ${_formatTenge(-p.expenseForecast)}`);
+              const profitFact = p.incomeFact - p.expenseFact;
+              lines.push(`${idx}. ${p.name}: доход факт ${_formatTenge(p.incomeFact)}, прогноз ${_formatTenge(p.incomeForecast)}; расход факт ${_formatTenge(-p.expenseFact)}, прогноз ${_formatTenge(-p.expenseForecast)}; прибыль факт ${_formatTenge(profitFact)}`);
               idx += 1;
             }
           }
+
+          if (projectMap.size) {
+            lines.unshift(`Итого прибыль (факт): ${_formatTenge(totalProfitFact)}`);
+          }
+          lines.push('');
+          lines.push('Показать ТОП по контрагентам?');
+          lines.push('Показать на что потратили в проектах?');
 
           const answer = lines.join('\n');
           _pushHistory(userIdStr, 'assistant', answer);
