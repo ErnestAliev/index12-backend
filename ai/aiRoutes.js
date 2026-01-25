@@ -126,7 +126,9 @@ module.exports = function createAiRouter(deps) {
       return 'Ошибка: OPENAI_API_KEY не задан.';
     }
 
-    const model = modelOverride || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    // Normalize model name to lowercase + trim so ENV values like "O3-pro" or "GPT-4O" won't break
+    const rawModel = modelOverride || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = String(rawModel || '').trim().toLowerCase();
     const isReasoningModel = /^(o\d|gpt-5)/.test(String(model || ''));
 
     const payloadObj = {
@@ -139,7 +141,7 @@ module.exports = function createAiRouter(deps) {
     }
     const payload = JSON.stringify(payloadObj);
 
-      return new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const gptReq = https.request(
         {
           hostname: 'api.openai.com',
@@ -158,6 +160,70 @@ module.exports = function createAiRouter(deps) {
             try {
               if (resp.statusCode < 200 || resp.statusCode >= 300) {
                 console.error(`OpenAI Error ${resp.statusCode}:`, data);
+
+                // Auto-fallback: if DEEP model is not found / not supported, retry once with base model
+                const baseRaw = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+                const baseModel = String(baseRaw || '').trim().toLowerCase();
+
+                const looksLikeModelIssue = resp.statusCode === 404 || /not\s+supported|not\s+a\s+chat\s+model|model\s+not\s+found|does\s+not\s+exist/i.test(String(data || ''));
+                const isUsingOverride = Boolean(modelOverride);
+
+                if (looksLikeModelIssue && isUsingOverride && baseModel && baseModel !== model) {
+                  console.warn('[AI] Deep model failed, falling back to base model:', baseModel);
+
+                  // Build fallback payload
+                  const fallbackObj = {
+                    model: baseModel,
+                    messages,
+                    max_completion_tokens: maxTokens,
+                  };
+
+                  const fallbackIsReasoning = /^(o\d|gpt-5)/.test(String(baseModel || ''));
+                  if (!fallbackIsReasoning) {
+                    fallbackObj.temperature = temperature;
+                  }
+
+                  const fallbackPayload = JSON.stringify(fallbackObj);
+
+                  const fbReq = https.request(
+                    {
+                      hostname: 'api.openai.com',
+                      path: '/v1/chat/completions',
+                      method: 'POST',
+                      headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(fallbackPayload),
+                        'Authorization': `Bearer ${apiKey}`
+                      }
+                    },
+                    (fbResp) => {
+                      let fbData = '';
+                      fbResp.on('data', (chunk) => { fbData += chunk; });
+                      fbResp.on('end', () => {
+                        try {
+                          if (fbResp.statusCode < 200 || fbResp.statusCode >= 300) {
+                            console.error(`OpenAI Fallback Error ${fbResp.statusCode}:`, fbData);
+                            resolve(`Ошибка OpenAI (${resp.statusCode}).`);
+                            return;
+                          }
+                          const fbParsed = JSON.parse(fbData);
+                          resolve(fbParsed?.choices?.[0]?.message?.content || 'Нет ответа от AI.');
+                        } catch (e2) {
+                          console.error('Fallback Parse Error:', e2);
+                          resolve('Ошибка обработки ответа AI.');
+                        }
+                      });
+                    }
+                  );
+                  fbReq.on('error', (e2) => {
+                    console.error('Fallback Request Error:', e2);
+                    resolve('Ошибка связи с AI.');
+                  });
+                  fbReq.write(fallbackPayload);
+                  fbReq.end();
+                  return;
+                }
+
                 resolve(`Ошибка OpenAI (${resp.statusCode}).`);
                 return;
               }
