@@ -119,17 +119,15 @@ module.exports = function createAiRouter(deps) {
     }
   };
 
-  const _openAiChat = async (messages, { temperature = 0, maxTokens = 600, modelOverride = null } = {}) => {
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 600 } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn('OPENAI_API_KEY is missing');
       return 'Ошибка: OPENAI_API_KEY не задан.';
     }
 
-    // Normalize model name to lowercase + trim so ENV values like "O3-pro" or "GPT-4O" won't break
-    const rawModel = modelOverride || process.env.OPENAI_MODEL || 'gpt-4o-mini';
-    const model = String(rawModel || '').trim().toLowerCase();
-    const isReasoningModel = /^(o\d|gpt-5)/.test(String(model || ''));
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const isReasoningModel = /^o[13]|gpt-5/.test(model);
 
     const payloadObj = {
       model,
@@ -141,7 +139,7 @@ module.exports = function createAiRouter(deps) {
     }
     const payload = JSON.stringify(payloadObj);
 
-    return new Promise((resolve, reject) => {
+      return new Promise((resolve, reject) => {
       const gptReq = https.request(
         {
           hostname: 'api.openai.com',
@@ -160,70 +158,6 @@ module.exports = function createAiRouter(deps) {
             try {
               if (resp.statusCode < 200 || resp.statusCode >= 300) {
                 console.error(`OpenAI Error ${resp.statusCode}:`, data);
-
-                // Auto-fallback: if DEEP model is not found / not supported, retry once with base model
-                const baseRaw = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-                const baseModel = String(baseRaw || '').trim().toLowerCase();
-
-                const looksLikeModelIssue = resp.statusCode === 404 || /not\s+supported|not\s+a\s+chat\s+model|model\s+not\s+found|does\s+not\s+exist/i.test(String(data || ''));
-                const isUsingOverride = Boolean(modelOverride);
-
-                if (looksLikeModelIssue && isUsingOverride && baseModel && baseModel !== model) {
-                  console.warn('[AI] Deep model failed, falling back to base model:', baseModel);
-
-                  // Build fallback payload
-                  const fallbackObj = {
-                    model: baseModel,
-                    messages,
-                    max_completion_tokens: maxTokens,
-                  };
-
-                  const fallbackIsReasoning = /^(o\d|gpt-5)/.test(String(baseModel || ''));
-                  if (!fallbackIsReasoning) {
-                    fallbackObj.temperature = temperature;
-                  }
-
-                  const fallbackPayload = JSON.stringify(fallbackObj);
-
-                  const fbReq = https.request(
-                    {
-                      hostname: 'api.openai.com',
-                      path: '/v1/chat/completions',
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'Content-Length': Buffer.byteLength(fallbackPayload),
-                        'Authorization': `Bearer ${apiKey}`
-                      }
-                    },
-                    (fbResp) => {
-                      let fbData = '';
-                      fbResp.on('data', (chunk) => { fbData += chunk; });
-                      fbResp.on('end', () => {
-                        try {
-                          if (fbResp.statusCode < 200 || fbResp.statusCode >= 300) {
-                            console.error(`OpenAI Fallback Error ${fbResp.statusCode}:`, fbData);
-                            resolve(`Ошибка OpenAI (${resp.statusCode}).`);
-                            return;
-                          }
-                          const fbParsed = JSON.parse(fbData);
-                          resolve(fbParsed?.choices?.[0]?.message?.content || 'Нет ответа от AI.');
-                        } catch (e2) {
-                          console.error('Fallback Parse Error:', e2);
-                          resolve('Ошибка обработки ответа AI.');
-                        }
-                      });
-                    }
-                  );
-                  fbReq.on('error', (e2) => {
-                    console.error('Fallback Request Error:', e2);
-                    resolve('Ошибка связи с AI.');
-                  });
-                  fbReq.write(fallbackPayload);
-                  fbReq.end();
-                  return;
-                }
-
                 resolve(`Ошибка OpenAI (${resp.statusCode}).`);
                 return;
               }
@@ -346,20 +280,6 @@ module.exports = function createAiRouter(deps) {
     }
   };
 
-  // =========================
-  // Finance situation intent
-  // =========================
-  const _isFinanceSituationQuery = (s) => {
-    const t = String(s || '').toLowerCase();
-    if (!t) return false;
-    // user wants “как дела по деньгам / финансовая картина / ситуация / итоги”
-    if (t.includes('финанс') || t.includes('картина') || t.includes('ситуац') || t.includes('итог') || t.includes('как дела')) {
-      // if explicitly asked for accounts/balances, let accounts handler answer
-      if (/(сч[её]т|счета|касс[аы]|баланс)/i.test(t)) return false;
-      return true;
-    }
-    return false;
-  };
   // =========================
   // Routes
   // =========================
@@ -591,61 +511,6 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Итого: ${_formatTenge(expenseData.total ? -expenseData.total : 0)}`);
 
         const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // FINANCIAL SITUATION (profit-first)
-      // =========================
-      if (_isFinanceSituationQuery(qLower)) {
-        const totals = dbData.totals || {};
-        const incFact = Number(dbData.operationsSummary?.income?.fact?.total || 0);
-        const expFact = Number(dbData.operationsSummary?.expense?.fact?.total || 0);
-        const profitFact = incFact - expFact;
-
-        const totalOpen = Number(totals.open?.current ?? 0);
-        const totalHidden = Number(totals.hidden?.current ?? 0);
-        const totalAll = Number(totals.all?.current ?? (totalOpen + totalHidden));
-
-        const expSharePct = incFact > 0 ? Math.round((expFact / incFact) * 100) : 0;
-        const marginPct = incFact > 0 ? Math.round((profitFact / incFact) * 100) : 0;
-
-        // Quick cash-risk hint (very rough): compare open cash vs 7 days of average expense
-        const periodStart = dbData.meta?.periodStart || null;
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || null;
-        let days = 30;
-        try {
-          if (periodStart && periodEnd) {
-            const p1 = periodStart.split('.');
-            const p2 = periodEnd.split('.');
-            if (p1.length === 3 && p2.length === 3) {
-              const d1 = new Date(Number('20' + p1[2]), Number(p1[1]) - 1, Number(p1[0]));
-              const d2 = new Date(Number('20' + p2[2]), Number(p2[1]) - 1, Number(p2[0]));
-              const diff = Math.max(1, Math.round((d2 - d1) / (24 * 60 * 60 * 1000)) + 1);
-              days = diff;
-            }
-          }
-        } catch (_) {}
-
-        const avgDailyExp = days > 0 ? (expFact / days) : 0;
-        const runwayDaysOpen = avgDailyExp > 0 ? Math.floor(totalOpen / avgDailyExp) : null;
-
-        const lines = [];
-        lines.push(`Прибыль (факт): +${_formatTenge(profitFact)}`);
-        lines.push(`Маржа: ~${marginPct}% | Расходы: ${_formatTenge(expFact)} (~${expSharePct}% от доходов)`);
-        lines.push(`Деньги: открытые ${_formatTenge(totalOpen)}, скрытые ${_formatTenge(totalHidden)}, итого ${_formatTenge(totalAll)}`);
-
-        if (runwayDaysOpen !== null) {
-          lines.push(`Открытые покрывают ~${runwayDaysOpen} дн. средних расходов`);
-        } else {
-          lines.push('Риск кассы по дням: нет данных для расчёта');
-        }
-
-        lines.push('');
-        lines.push('Вопрос: показать прибыль по проектам или самые крупные расходы?');
-
-        const answer = lines.join('\n').trim();
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
@@ -1021,64 +886,38 @@ module.exports = function createAiRouter(deps) {
       }
 
       const systemPrompt = (() => {
-        const base = [
-          'Ты — INDEX12 CFO HARDCORE. Ты говоришь от лица денег пользователя и как финансовый директор.',
-          'Цель: живой диалог короткими ходами. Без портянок. Без воды. Только смысл и цифры.',
-          '',
-          'Формат денег: "1 234 567 ₸". Доход: "+", расход: "-".',
-          'Отвечай строго по данным из контекста. Ничего не придумывай.',
-          '',
-          'Понимай смысл запроса, а не слова. Любая формулировка про деньги сводится к одному из намерений:',
-          '1) Где деньги? (счета/ликвидность)',
-          '2) Куда ушли? (расходы/структура)',
-          '3) Откуда пришли? (доходы/источники)',
-          '4) Что осталось? (прибыль/CF)',
-          '5) Что может порваться? (кассовый пик/разрыв)',
-          '6) Сколько можно инвестировать? (коридор/без боли)',
-          '',
-          'Всегда выбирай один лучший срез данных: счета ИЛИ категории ИЛИ контрагенты ИЛИ проекты ИЛИ дни. Один ответ — один срез.',
-          '',
-          'Длина ответа ВСЕГДА короткая: максимум 4–6 строк. Это один ход диалога.',
-          'Структура ответа обязательна:',
-          '1) Главная цифра (1 строка)',
-          '2) Короткая раскладка (2–3 пункта)',
-          '3) Жёсткий вывод (1 строка)',
-          '4) Следующий шаг (1 вопрос отдельной строкой)',
-          '',
-          'Правило сигнала: любой вывод должен иметь цифру-основание. Если сигнала нет — скажи: "Сигнала нет — значит сейчас это не проблема".',
-          '',
-          'Ты помнишь контекст текущего чата и не повторяешь одно и то же. Двигай пользователя вперёд.',
-        ];
-
-        const chatRules = [
-          'Режим CHAT: отвечай по запросу и веди одним следующим вопросом. Без лишних вариантов.',
-        ];
-
-        const deepRules = [
-          'Режим DIP (deep): ответ по длине такой же короткий, но умнее: находи сигналы/аномалии, выбирай лучший срез и задавай более точный следующий вопрос.',
-          'В DIP можно задать 1 уточняющий вопрос, если без него невозможно дать правильную цифру.',
-        ];
-
-        const scenarios = [
-          'Сценарий "инвестиции ежемесячно": всегда давай коридор в 3 режимах:',
-          '- Агрессивно: … ₸/мес',
-          '- Нормально: … ₸/мес',
-          '- Спокойно: … ₸/мес',
-          'И 1 строка условия: что учтено (резерв/обязательства).',
-          'Если ключевого параметра нет — спроси 1 вопрос и остановись (например: "Сколько уходит на жили-были в месяц?").',
-          '',
-          'Сценарий "куда ушли деньги/на что тратили": покажи структуру расходов по одному срезу (обычно категории).',
-          'Сценарий "что на счетах": покажи общий итог и 2–3 самых крупных счета.',
-          'Сценарий "по проектам": показывай доход/расход/прибыль по проектам, а операции без projectId учитывай как "Без проекта".',
-        ];
-
-        // Собираем промпт
+        if (isDeep) {
+          return [
+            'Ты финансовый аналитик INDEX12.',
+            'Режим: deep — 6–8 коротких предложений, только цифры, доли и выводы, без воды.',
+            'Не придумывай новые имена контрагентов/физлиц. Используй только contractorName/counterpartyIndividualName из данных, иначе пиши "Без контрагента".',
+            'Если просят "где теряю деньги"/"потери": default группировка = категории. Не смешивай измерения (категории ≠ контрагенты ≠ проекты ≠ счета) в одном списке. Формат: "ТОП-3 по {dimension}: 1) … — … ₸  2) … — … ₸  3) … — … ₸. Итог расходов: … ₸".',
+            'Если в запросе указано измерение: "по контрагентам"/"по проектам"/"по счетам" — используй его вместо категорий. Не объединяй разные измерения.',
+            'После ТОП-3 предложи переключение измерения одной строкой: "Показать ТОП по контрагентам?" или "…по проектам?".',
+            'Категорийные флажки: коммуналка — только вопрос про перевыставление/утечки/счетчики, без "оптимизируй тариф"; ФОТ — предупреждай про риск потери людей, предложи анализ по сотрудникам; комиссии/проценты владельцу — это структурные выплаты, не "утечки".',
+            'Запрещены общие фразы вроде "может быть оптимизировано", "стоит обратить внимание", "в целом для улучшения".',
+            'Если данных не хватает — задай один уточняющий вопрос, например: "Коммуналка перевыставляется арендаторам?".',
+            'Сравни доходы/расходы в процентах, считай маржу (прибыль/доход), выделяй топ категории расходов vs доходов по доле. Проекты — по прибыли (факт/прогноз), лидеры и аутсайдеры. Контрагенты — ключевые по сумме/кол-ву операций.',
+            'Кэш-флоу: самый напряжённый день по расходам, предупреди о риске кассового разрыва, если видно.',
+            'Сравнивай корректно по знакам, различай доходы и прибыль. Деньги: "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
+            'Рынок (если спросили "нормально ли по рынку"): зарплаты — ориентиры HH; аренда м² — Krisha.kz; инфляция — stat.gov.kz; вывод: выше/ниже/в рынке.',
+            'Гайд по аренде (если просят расчёты): GPR=A_m2*Rent_m2_m; VacancyLoss=GPR*Vac; EGR=GPR-VacancyLoss+OtherInc; NOI=EGR-OPEX; CF=NOI-CAPEX-DebtPay-Tax; CapRate=NOI_y/Price; DSCR=NOI_y/DebtPay_y; Payback=Investment/(CF_m*12). Если нет входных данных — спроси 1 уточнение.'
+          ].join('\n');
+        }
         return [
-          ...base,
-          '',
-          ...(isDeep ? deepRules : chatRules),
-          '',
-          ...scenarios,
+          'Ты финансовый аналитик INDEX12.',
+          'Отвечай строго по данным, ничего не придумывай. Максимум 3–4 строки, без воды и шаблонов.',
+          'Не придумывай новые имена контрагентов/физлиц. Используй только contractorName/counterpartyIndividualName из данных, иначе пиши "Без контрагента".',
+          'Если спрашивают "где теряю деньги"/"потери": default группировка = категории. Не смешивай измерения (категории ≠ контрагенты ≠ проекты ≠ счета) в одном списке. Формат: "ТОП-3 по {dimension}: 1) … — … ₸  2) … — … ₸  3) … — … ₸. Итог расходов: … ₸".',
+          'Если в запросе указано измерение: "по контрагентам"/"по проектам"/"по счетам" — используй его вместо категорий. Не объединяй разные измерения.',
+          'После ТОП-3 предложи 1 действие-уточнение: "Показать ТОП по контрагентам?" или "…по проектам?" или "Разложить ФОТ по людям?".',
+          'Категорийные флажки: коммуналка — только вопрос про перевыставление/утечки/счетчики; ФОТ — предупреди про риск потери людей, предложи анализ по сотрудникам; комиссии/проценты владельцу — это структурные выплаты, не утечки.',
+          'Запрещены фразы "может быть оптимизировано", "стоит обратить внимание", "в целом для улучшения".',
+          'Если данных не хватает — задай один уточняющий вопрос вместо советов.',
+          'Не путай доходы и прибыль: показывай доходы и расходы отдельно, не считай разницу, если не просили. Деньги: "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
+          'Для счетов: перечисли открытые и скрытые отдельно, затем итоги. Если данных нет — так и напиши.',
+          'Рынок (если спрашивают "нормально ли по рынку"): зарплаты — HH; аренда м² — Krisha.kz; инфляция — stat.gov.kz; вывод: выше/ниже/в рынке.',
+          'Указывай даты операций в формате дд.мм.гг, если они есть.',
         ].join('\n');
       })();
 
@@ -1091,28 +930,7 @@ module.exports = function createAiRouter(deps) {
         ..._getHistoryMessages(userIdStr)
       ];
 
-      // DIP can use a heavier model via env var
-      // Preferred key: OPENAI_MODEL_DEEP
-      // Backward/typo-friendly fallbacks (in case env was added with a different name)
-      const deepModelEnv =
-        process.env.OPENAI_MODEL_DEEP ||
-        process.env.OPENAI_MODEL_DIP ||
-        process.env.OPENAI_MODEL_DEEP_MODE ||
-        process.env['OpenAI_модель_дип'] ||
-        process.env['OPENAI_модель_дип'] ||
-        null;
-
-      const modelOverride = isDeep ? deepModelEnv : null;
-
-      if (process.env.AI_DEBUG === '1') {
-        console.log('[AI_DEBUG] modelOverride:', modelOverride || '(none)', 'baseModel:', process.env.OPENAI_MODEL || '(default)');
-      }
-
-      const aiResponse = await _openAiChat(messages, {
-        modelOverride,
-        temperature: 0,
-        maxTokens: isDeep ? 900 : 650,
-      });
+      const aiResponse = await _openAiChat(messages);
       _pushHistory(userIdStr, 'assistant', aiResponse);
 
     if (debugRequested) {
