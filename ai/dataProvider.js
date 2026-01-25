@@ -764,7 +764,8 @@ module.exports = function createDataProvider(deps) {
             catalogs: {
                 companies,
                 projects,
-                categories: categories.map(c => c.name),
+                // Сохраняем id+name, чтобы маршруты могли сопоставлять категории по id
+                categories,
                 contractors: contractors.map(c => c.name),
                 individuals
             },
