@@ -126,7 +126,7 @@ module.exports = function createAiRouter(deps) {
       return 'Ошибка: OPENAI_API_KEY не задан.';
     }
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
     const isReasoningModel = /^o[13]|gpt-5/.test(model);
 
     const payloadObj = {

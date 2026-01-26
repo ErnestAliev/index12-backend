@@ -459,7 +459,7 @@ module.exports = function createAiRouter(deps) {
       throw err;
     }
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
 
     // o1/o3/gpt-5 models don't support temperature parameter
     const isReasoningModel = /^o[13]|gpt-5/.test(model);
@@ -548,7 +548,7 @@ module.exports = function createAiRouter(deps) {
       isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
       email: req.user?.email || null,
       ai: {
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+        model: process.env.OPENAI_MODEL || 'gpt-4o',
         keyPresent: Boolean(process.env.OPENAI_API_KEY),
         allowAll: String(process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true'
       }
