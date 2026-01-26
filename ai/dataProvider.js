@@ -369,9 +369,19 @@ module.exports = function createDataProvider(deps) {
                 amount: absAmount,
                 rawAmount,
                 description: op.description || null,
+                accountId: op.accountId?._id ? String(op.accountId._id) : (op.accountId ? String(op.accountId) : null),
+                fromAccountId: op.fromAccountId?._id ? String(op.fromAccountId._id) : (op.fromAccountId ? String(op.fromAccountId) : null),
+                toAccountId: op.toAccountId?._id ? String(op.toAccountId._id) : (op.toAccountId ? String(op.toAccountId) : null),
                 projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
                 contractorId: op.contractorId?._id ? String(op.contractorId._id) : (op.contractorId ? String(op.contractorId) : null),
                 categoryId: op.categoryId?._id ? String(op.categoryId._id) : (op.categoryId ? String(op.categoryId) : null),
+                companyId: op.companyId?._id ? String(op.companyId._id) : (op.companyId ? String(op.companyId) : null),
+                fromCompanyId: op.fromCompanyId?._id ? String(op.fromCompanyId._id) : (op.fromCompanyId ? String(op.fromCompanyId) : null),
+                toCompanyId: op.toCompanyId?._id ? String(op.toCompanyId._id) : (op.toCompanyId ? String(op.toCompanyId) : null),
+                individualId: op.individualId?._id ? String(op.individualId._id) : (op.individualId ? String(op.individualId) : null),
+                counterpartyIndividualId: op.counterpartyIndividualId?._id ? String(op.counterpartyIndividualId._id) : (op.counterpartyIndividualId ? String(op.counterpartyIndividualId) : null),
+                fromIndividualId: op.fromIndividualId?._id ? String(op.fromIndividualId._id) : (op.fromIndividualId ? String(op.fromIndividualId) : null),
+                toIndividualId: op.toIndividualId?._id ? String(op.toIndividualId._id) : (op.toIndividualId ? String(op.toIndividualId) : null),
             });
         }
 
@@ -478,8 +488,10 @@ module.exports = function createDataProvider(deps) {
         const extraDocs = idsFromEvents.length ? await Company.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
-        const names = Array.from(map.values()).map(c => c.name || `Компания ${String(c._id).slice(-4)}`).filter(Boolean);
-        return names;
+        idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
+        return Array.from(map.values())
+            .map(c => ({ id: String(c._id), name: c.name || `Компания ${String(c._id).slice(-4)}` }))
+            .filter(c => c.name);
     }
 
     async function getProjects(userId, workspaceId = null) {
@@ -540,8 +552,8 @@ module.exports = function createDataProvider(deps) {
         [...docs, ...extraDocs].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
         return Array.from(map.values())
-            .map(i => i.name || `Физлицо ${String(i._id).slice(-4)}`)
-            .filter(Boolean);
+            .map(i => ({ id: String(i._id), name: i.name || `Физлицо ${String(i._id).slice(-4)}` }))
+            .filter(i => i.name);
     }
 
     // ========================
@@ -591,13 +603,26 @@ module.exports = function createDataProvider(deps) {
                 getIndividuals(userId, workspaceId)
             ]);
 
-        // Обогатим операции человекочитаемыми названиями (категория/контрагент/физлицо)
+        // Обогатим операции человекочитаемыми названиями (категория/контрагент/физлицо/счета/компании)
         if (Array.isArray(operationsData.operations)) {
+            const accountNameById = new Map();
+            accountsData.accounts.forEach(a => {
+                if (!a || !a._id) return;
+                accountNameById.set(String(a._id), a.name || `Счет ${String(a._id).slice(-4)}`);
+            });
+
             const catNameById = new Map();
             categories.forEach(c => {
                 const cid = c.id || c._id;
                 if (!cid) return;
                 catNameById.set(String(cid), c.name || `Категория ${String(cid).slice(-4)}`);
+            });
+
+            const companyNameById = new Map();
+            companies.forEach(c => {
+                const cid = c.id || c._id;
+                if (!cid) return;
+                companyNameById.set(String(cid), c.name || `Компания ${String(cid).slice(-4)}`);
             });
 
             const contractorNameById = new Map();
@@ -618,8 +643,26 @@ module.exports = function createDataProvider(deps) {
                 const catId = op.categoryId ? String(op.categoryId) : null;
                 const contrId = op.contractorId ? String(op.contractorId) : null;
                 const indivContrId = op.counterpartyIndividualId ? String(op.counterpartyIndividualId) : null;
+                const accId = op.accountId ? String(op.accountId) : null;
+                const fromAccId = op.fromAccountId ? String(op.fromAccountId) : null;
+                const toAccId = op.toAccountId ? String(op.toAccountId) : null;
+                const companyId = op.companyId ? String(op.companyId) : null;
+                const fromCompanyId = op.fromCompanyId ? String(op.fromCompanyId) : null;
+                const toCompanyId = op.toCompanyId ? String(op.toCompanyId) : null;
+                const individualId = op.individualId ? String(op.individualId) : null;
+                const fromIndividualId = op.fromIndividualId ? String(op.fromIndividualId) : null;
+                const toIndividualId = op.toIndividualId ? String(op.toIndividualId) : null;
 
                 if (catId && !op.categoryName) op.categoryName = catNameById.get(catId) || op.categoryName;
+                if (accId && !op.accountName) op.accountName = accountNameById.get(accId) || op.accountName;
+                if (fromAccId && !op.fromAccountName) op.fromAccountName = accountNameById.get(fromAccId) || op.fromAccountName;
+                if (toAccId && !op.toAccountName) op.toAccountName = accountNameById.get(toAccId) || op.toAccountName;
+                if (companyId && !op.companyName) op.companyName = companyNameById.get(companyId) || op.companyName;
+                if (fromCompanyId && !op.fromCompanyName) op.fromCompanyName = companyNameById.get(fromCompanyId) || op.fromCompanyName;
+                if (toCompanyId && !op.toCompanyName) op.toCompanyName = companyNameById.get(toCompanyId) || op.toCompanyName;
+                if (individualId && !op.individualName) op.individualName = individualNameById.get(individualId) || op.individualName;
+                if (fromIndividualId && !op.fromIndividualName) op.fromIndividualName = individualNameById.get(fromIndividualId) || op.fromIndividualName;
+                if (toIndividualId && !op.toIndividualName) op.toIndividualName = individualNameById.get(toIndividualId) || op.toIndividualName;
 
                 // Контрагент: сначала из contractorId, fallback на counterpartyIndividualId
                 let contractorName = contrId ? contractorNameById.get(contrId) : null;

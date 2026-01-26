@@ -611,13 +611,59 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
+      if (!isDeep && /\b(перевод|трансфер)\b/i.test(qLower)) {
+        const transfers = (dbData.operations || []).filter(op => op.kind === 'transfer' && op.isFact);
+        const lines = ['ПЕРЕВОДЫ'];
+
+        if (!transfers.length) {
+          lines.push('- нет фактических переводов за период');
+        } else {
+          const pickName = (...candidates) => candidates.find(v => v && String(v).trim());
+          const fmtAmount = (n) => _formatTenge(Math.abs(Number(n || 0))).replace(' ₸', ' т');
+
+          transfers.slice(0, 5).forEach(tr => {
+            const amountStr = fmtAmount(tr.amount || tr.rawAmount || 0);
+            const fromName = pickName(
+              tr.fromAccountName,
+              tr.fromCompanyName,
+              tr.accountName,
+              tr.companyName,
+              tr.contractorName,
+              tr.fromIndividualName,
+              tr.individualName,
+              tr.description
+            ) || '?';
+            const toName = pickName(
+              tr.toAccountName,
+              tr.toCompanyName,
+              tr.toIndividualName,
+              tr.contractorName,
+              tr.description
+            ) || '?';
+            lines.push(`${amountStr}: ${fromName} → ${toName}`);
+          });
+
+          if (transfers.length > 5) lines.push(`... и ещё ${transfers.length - 5}`);
+        }
+
+        const answer = lines.join('\n');
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
       // =========================
       // CATALOGS (quick)
       // =========================
       const _simpleList = (title, arr) => {
         const lines = [title];
-        if (Array.isArray(arr) && arr.length) lines.push(...arr.map((x, i) => `${i + 1}. ${x}`));
-        else lines.push('- нет');
+        if (Array.isArray(arr) && arr.length) {
+          lines.push(...arr.map((x, i) => {
+            const name = (x && typeof x === 'object' && x.name) ? x.name : x;
+            return `${i + 1}. ${name || '-'}`;
+          }));
+        } else {
+          lines.push('- нет');
+        }
         lines.push(`Всего: ${Array.isArray(arr) ? arr.length : 0}`);
         return lines.join('\n');
       };
