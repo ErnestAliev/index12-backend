@@ -1,11 +1,17 @@
 // backend/ai/aiRoutes.js
 // AI assistant routes - PURE DATABASE MODE
 // All data comes from MongoDB via dataProvider (no uiSnapshot)
+//
+// ✅ Features:
+// - QUICK mode: deterministic lists (accounts / income / expense / catalogs)
+// - DIAG command: diagnostics of DB packet
+// - DEEP (DIP) mode: CFO dialog (profit/margin/risks/next-step), no UI repetition
+// - Separate model for DIP via env: OPENAI_MODEL_DEEP
+// - Deterministic investment math (no "выдуманных" цифр)
 
 const express = require('express');
 
-const AIROUTES_VERSION = 'db-only-v5.0';
-
+const AIROUTES_VERSION = 'db-only-v5.1';
 const https = require('https');
 
 // =========================
@@ -27,7 +33,7 @@ const _getChatSession = (userId) => {
 
   const fresh = {
     expiresAt: now + SESSION_TTL_MS,
-    prefs: { format: 'short', limit: 50 },
+    prefs: { format: 'short', limit: 50, livingMonthly: null },
     pending: null,
     history: [],
   };
@@ -83,7 +89,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // =========================
-  // KZ time helpers (Asia/Almaty ~ UTC+05:00)
+  // KZ time helpers (UTC+05:00)
   // =========================
   const KZ_OFFSET_MS = 5 * 60 * 60 * 1000;
 
@@ -119,27 +125,32 @@ module.exports = function createAiRouter(deps) {
     }
   };
 
-  const _openAiChat = async (messages, { temperature = 0, maxTokens = 600 } = {}) => {
+  // =========================
+  // OpenAI caller (supports model override)
+  // =========================
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 550, modelOverride = null } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn('OPENAI_API_KEY is missing');
       return 'Ошибка: OPENAI_API_KEY не задан.';
     }
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4o';
-    const isReasoningModel = /^o[13]|gpt-5/.test(model);
+    const defaultModel = process.env.OPENAI_MODEL || 'gpt-4o';
+    const model = modelOverride || defaultModel;
+
+    // Reasoning models (o1/o3, gpt-5*) ignore temperature in many cases
+    const isReasoningModel = /^o[13]/i.test(model) || /^gpt-5/i.test(model);
 
     const payloadObj = {
       model,
       messages,
       max_completion_tokens: maxTokens,
     };
-    if (!isReasoningModel) {
-      payloadObj.temperature = temperature;
-    }
+    if (!isReasoningModel) payloadObj.temperature = temperature;
+
     const payload = JSON.stringify(payloadObj);
 
-      return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const gptReq = https.request(
         {
           hostname: 'api.openai.com',
@@ -179,6 +190,9 @@ module.exports = function createAiRouter(deps) {
     });
   };
 
+  // =========================
+  // Helpers for expenses/income
+  // =========================
   const _absExpense = (op) => {
     if (!op || op.isTransfer) return 0;
     const raw = Number(op.rawAmount ?? op.amount ?? 0);
@@ -187,6 +201,119 @@ module.exports = function createAiRouter(deps) {
     return 0;
   };
 
+  // =========================
+  // Deterministic CFO metrics (code, not LLM)
+  // =========================
+  const _parseDdMmYy = (s) => {
+    try {
+      const t = String(s || '').trim();
+      const m = t.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
+      if (!m) return null;
+      const dd = Number(m[1]);
+      const mm = Number(m[2]);
+      const yy = Number(m[3]);
+      const yyyy = 2000 + yy;
+      return new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0));
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const _daysBetween = (a, b) => {
+    try {
+      const A = a instanceof Date ? a : _parseDdMmYy(a);
+      const B = b instanceof Date ? b : _parseDdMmYy(b);
+      if (!A || !B) return 30;
+      const diff = Math.max(1, Math.round((B.getTime() - A.getTime()) / (24 * 60 * 60 * 1000)) + 1);
+      return diff;
+    } catch (_) {
+      return 30;
+    }
+  };
+
+  const _parseMoneyKzt = (text) => {
+    const s = String(text || '').toLowerCase().replace(/₸/g, '');
+    // "10 млн", "10m", "10 м"
+    const m1 = s.match(/([0-9]+(?:[\.,][0-9]+)?)\s*(млн|миллион|миллиона|миллионов)\b/i);
+    if (m1) {
+      const v = Number(String(m1[1]).replace(',', '.'));
+      if (Number.isFinite(v)) return Math.round(v * 1_000_000);
+    }
+    const m2 = s.match(/([0-9]+(?:[\.,][0-9]+)?)\s*(м|m)\b/i);
+    if (m2) {
+      const v = Number(String(m2[1]).replace(',', '.'));
+      if (Number.isFinite(v)) return Math.round(v * 1_000_000);
+    }
+    // "10 000 000"
+    const m3 = s.match(/([0-9][0-9\s]{2,})/);
+    if (m3) {
+      const v = Number(String(m3[1]).replace(/\s+/g, ''));
+      if (Number.isFinite(v)) return Math.round(v);
+    }
+    // "500000"
+    const m4 = s.match(/\b([0-9]+(?:[\.,][0-9]+)?)\b/);
+    if (m4) {
+      const v = Number(String(m4[1]).replace(',', '.'));
+      if (Number.isFinite(v)) return Math.round(v);
+    }
+    return null;
+  };
+
+  const _calcCoreMetrics = (dbData) => {
+    const summary = dbData?.operationsSummary || {};
+    const inc = summary.income || {};
+    const exp = summary.expense || {};
+
+    const incFact = Number(inc.fact?.total || 0);
+    const expFactRaw = Number(exp.fact?.total || 0);
+    const expFact = Math.abs(expFactRaw);
+
+    const profitFact = incFact - expFact;
+    const marginPct = incFact > 0 ? Math.round((profitFact / incFact) * 1000) / 10 : 0;
+
+    const totals = dbData?.totals || {};
+    const openCash = Number(totals.open?.current ?? 0);
+    const hiddenCash = Number(totals.hidden?.current ?? 0);
+    const totalCash = Number(totals.all?.current ?? (openCash + hiddenCash));
+
+    const periodStart = dbData?.meta?.periodStart || dbData?.meta?.today || null;
+    const periodEnd = dbData?.meta?.periodEnd || dbData?.meta?.today || null;
+    const daysPeriod = _daysBetween(periodStart, periodEnd);
+
+    const avgDailyExp = daysPeriod > 0 ? (expFact / daysPeriod) : expFact;
+    const runwayDaysOpen = avgDailyExp > 0 ? Math.floor(openCash / avgDailyExp) : null;
+
+    const cats = Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [];
+    const topExpCat = cats
+      .map(c => ({ name: c.name || 'Без категории', expFact: Number(c.expenseFact || 0) }))
+      .filter(x => x.expFact > 0)
+      .sort((a, b) => b.expFact - a.expFact)[0] || null;
+
+    const topExpCatSharePct = (topExpCat && expFact > 0)
+      ? Math.round((topExpCat.expFact / expFact) * 1000) / 10
+      : 0;
+
+    return {
+      incFact,
+      expFact,
+      profitFact,
+      marginPct,
+      openCash,
+      hiddenCash,
+      totalCash,
+      daysPeriod,
+      avgDailyExp,
+      runwayDaysOpen,
+      topExpCat,
+      topExpCatSharePct,
+      periodStart,
+      periodEnd,
+    };
+  };
+
+  // =========================
+  // DB data context for LLM (kept but DIP should NOT repeat it)
+  // =========================
   const _formatDbDataForAi = (data) => {
     const lines = [];
     const meta = data.meta || {};
@@ -311,16 +438,14 @@ module.exports = function createAiRouter(deps) {
       const isDeep = (req.body?.mode || '').toLowerCase() === 'deep';
       const isQuick = source === 'quick_button' || !!quickKey;
       const isCommand = !isDeep && (isQuick || /(^|\s)(покажи|список|выведи|сколько)\b/i.test(qLower));
+
       if (process.env.AI_DEBUG === '1') {
-        console.log('[AI_DEBUG] query text:', qLower, 'isDeep=', isDeep, 'source=', source);
+        console.log('[AI_DEBUG] query:', qLower, 'deep=', isDeep, 'source=', source);
       }
 
       // =========================
       // 🔥 PURE DATABASE MODE
-      // All data comes from MongoDB via dataProvider
       // =========================
-
-      // Get effective userId (handles workspace isolation)
       let effectiveUserId = userId;
       if (typeof getCompositeUserId === 'function') {
         try {
@@ -330,20 +455,12 @@ module.exports = function createAiRouter(deps) {
         }
       }
 
-      // Build data packet from database
       const userIdsList = Array.from(
-        new Set(
-          [effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String)
-        )
+        new Set([effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String))
       );
 
-      if (process.env.AI_DEBUG === '1') {
-        console.log('[AI_DEBUG] effectiveUserId:', effectiveUserId, 'allUserIds:', userIdsList, 'workspaceId:', req.user?.currentWorkspaceId);
-        console.log('[AI_DEBUG] includeHidden flag:', req?.body?.includeHidden, 'visibleAccountIds:', req?.body?.visibleAccountIds);
-      }
-
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: true, // всегда берем скрытые для ответа AI
+        includeHidden: true,
         visibleAccountIds: req?.body?.visibleAccountIds || null,
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
@@ -368,14 +485,9 @@ module.exports = function createAiRouter(deps) {
             individuals: dbData.catalogs?.individuals?.length || 0,
           }
         };
-        console.log('[AI_DEBUG] accounts total:', totalAccs, 'hidden:', hiddenAccs.length);
-        if (hiddenAccs.length) {
-          console.log('[AI_DEBUG] hidden list:', hiddenAccs.map(a => `${a.name} (${a._id})`).join(', '));
-        }
-        console.log('[AI_DEBUG] catalogs counts:', debugInfo.catalogs);
       }
 
-      // Store user message in history
+      // History
       _pushHistory(userIdStr, 'user', q);
 
       // =========================
@@ -384,7 +496,7 @@ module.exports = function createAiRouter(deps) {
       const _isDiagnosticsQuery = (s) => {
         const t = String(s || '').toLowerCase();
         if (!t) return false;
-        if (t.includes('диагност') || t.includes('агност') || t.includes('diagnostic')) return true;
+        if (t.includes('диагност') || t.includes('diagnostic')) return true;
         return /(^|[^a-z])diag([^a-z]|$)/i.test(t);
       };
 
@@ -412,7 +524,7 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // ACCOUNTS QUERY
+      // QUICK MODE: deterministic endpoints
       // =========================
       if (!isDeep && /\b(сч[её]т|счета|касс[аы]|баланс)\b/i.test(qLower)) {
         const lines = [];
@@ -423,7 +535,7 @@ module.exports = function createAiRouter(deps) {
         const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
         const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `на ${periodEnd}`;
 
-        lines.push(`Счета за период ${periodLabel}`);
+        lines.push(`Счета (${periodLabel})`);
         lines.push('');
 
         if (!accounts.length) {
@@ -434,35 +546,22 @@ module.exports = function createAiRouter(deps) {
 
           lines.push('Открытые:');
           if (openAccs.length) {
-            for (const acc of openAccs) {
-              const balance = acc.currentBalance || 0;
-              const name = acc.name || 'Счет';
-              lines.push(`${name}: ${_formatTenge(balance)}`);
-            }
-          } else {
-            lines.push('- нет');
-          }
+            for (const acc of openAccs) lines.push(`${acc.name || 'Счет'}: ${_formatTenge(acc.currentBalance || 0)}`);
+          } else lines.push('- нет');
 
           lines.push('');
           lines.push('Скрытые:');
           if (hiddenAccs.length) {
-            for (const acc of hiddenAccs) {
-              const balance = acc.currentBalance || 0;
-              const name = acc.name || 'Счет';
-              lines.push(`${name} (скрыт): ${_formatTenge(balance)}`);
-            }
-          } else {
-            lines.push('- нет');
-          }
+            for (const acc of hiddenAccs) lines.push(`${acc.name || 'Счет'} (скрыт): ${_formatTenge(acc.currentBalance || 0)}`);
+          } else lines.push('- нет');
 
           lines.push('');
           const totalOpen = totals.open?.current ?? 0;
           const totalHidden = totals.hidden?.current ?? 0;
           const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
-
-          lines.push(`Итого по открытым счетам: ${_formatTenge(totalOpen)}`);
-          lines.push(`Итого по скрытым счетам: ${_formatTenge(totalHidden)}`);
-          lines.push(`Итого по всем счетам: ${_formatTenge(totalAll)}`);
+          lines.push(`Итого открытые: ${_formatTenge(totalOpen)}`);
+          lines.push(`Итого скрытые: ${_formatTenge(totalHidden)}`);
+          lines.push(`Итого все: ${_formatTenge(totalAll)}`);
         }
 
         const answer = lines.join('\n');
@@ -470,45 +569,39 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
-      // =========================
-      // INCOME QUERY
-      // =========================
       if (!isDeep && (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower))) {
         const summary = dbData.operationsSummary || {};
         const incomeData = summary.income || {};
 
-        const lines = [];
         const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '';
         const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '';
         const periodLabel = periodStart && periodEnd ? `${periodStart} — ${periodEnd}` : (periodStart || periodEnd || 'не указан');
 
-        lines.push(`Доходы за период ${periodLabel}`);
-        lines.push(`Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0} операций)`);
-        lines.push(`Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0} операций)`);
+        const lines = [
+          `Доходы (${periodLabel})`,
+          `Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0})`,
+          `Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0})`,
+        ];
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
-      // =========================
-      // EXPENSE QUERY
-      // =========================
       if (!isDeep && (/\b(расход|трат|затрат)\b/i.test(qLower))) {
         const summary = dbData.operationsSummary || {};
         const expenseData = summary.expense || {};
 
-        const lines = [];
         const periodStart = dbData.meta?.periodStart || '';
         const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
-        const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `до ${periodEnd}`;
+        const periodLabel = periodStart ? `${periodStart} — ${periodEnd}` : `до ${periodEnd}`;
 
-        lines.push(`Расходы за период ${periodLabel}`);
-        lines.push('');
-        lines.push(`Факт: ${_formatTenge(expenseData.fact?.total ? -expenseData.fact.total : 0)} (${expenseData.fact?.count || 0} операций)`);
-        lines.push(`Прогноз: ${_formatTenge(expenseData.forecast?.total ? -expenseData.forecast.total : 0)} (${expenseData.forecast?.count || 0} операций)`);
-        lines.push('');
-        lines.push(`Итого: ${_formatTenge(expenseData.total ? -expenseData.total : 0)}`);
+        const lines = [
+          `Расходы (${periodLabel})`,
+          `Факт: ${_formatTenge(expenseData.fact?.total ? -expenseData.fact.total : 0)} (${expenseData.fact?.count || 0})`,
+          `Прогноз: ${_formatTenge(expenseData.forecast?.total ? -expenseData.forecast.total : 0)} (${expenseData.forecast?.count || 0})`,
+          `Итого: ${_formatTenge(expenseData.total ? -expenseData.total : 0)}`,
+        ];
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
@@ -516,454 +609,227 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // PROJECTS CATALOG
+      // CATALOGS (quick)
       // =========================
-      const projectMention = qLower.includes('проек') || qLower.includes('project');
-      const wantsProjectAnalysis = projectMention && (qLower.includes('анализ') || qLower.includes('итог') || qLower.includes('summary') || qLower.includes('успеш') || qLower.includes('лучш') || qLower.includes('прибыл'));
-      const wantsProjectSpend = projectMention && (qLower.includes('что потрат') || qLower.includes('на что потрат') || qLower.includes('куда потрат') || (qLower.includes('категор') && qLower.includes('расход')));
+      const _simpleList = (title, arr) => {
+        const lines = [title];
+        if (Array.isArray(arr) && arr.length) lines.push(...arr.map((x, i) => `${i + 1}. ${x}`));
+        else lines.push('- нет');
+        lines.push(`Всего: ${Array.isArray(arr) ? arr.length : 0}`);
+        return lines.join('\n');
+      };
 
-      // Специальный сценарий: «самый перспективный/лучший/успешный проект»
-      if (projectMention && !isDeep && (qLower.includes('перспектив') || qLower.includes('лучш') || qLower.includes('успеш'))) {
-        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-        const projList = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
-        const projNameById = new Map();
-        projList.forEach(p => {
-          if (!p) return;
-          if (typeof p === 'string') projNameById.set(p, p);
-          else if (p.id) projNameById.set(String(p.id), p.name || p.id);
-        });
-
-        const agg = new Map();
-        for (const op of ops) {
-          if (!op.projectId) continue;
-          const id = String(op.projectId);
-          if (!agg.has(id)) {
-            agg.set(id, { id, name: projNameById.get(id) || `Проект ${id.slice(-4)}`, incFact: 0, incFc: 0, expFact: 0, expFc: 0 });
-          }
-          const a = agg.get(id);
-          if (op.kind === 'income') {
-            if (op.isFact) a.incFact += op.amount || 0;
-            else a.incFc += op.amount || 0;
-          } else if (op.kind === 'expense') {
-            if (op.isFact) a.expFact += op.amount || 0;
-            else a.expFc += op.amount || 0;
-          }
-        }
-
-        if (!agg.size) {
-          const answer = 'Нет данных по проектам за выбранный период.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        const ranked = Array.from(agg.values()).map(p => ({
-          ...p,
-          profitFact: (p.incFact - p.expFact),
-          profitFc: (p.incFc - p.expFc),
-          profitTotal: (p.incFact + p.incFc - p.expFact - p.expFc),
-        })).sort((a, b) => b.profitTotal - a.profitTotal);
-
-        const top = ranked.slice(0, 3);
-        const lines = [`Топ проектов за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
-        top.forEach((p, i) => {
-          lines.push(`${i + 1}. ${p.name}: прибыль факт ${_formatTenge(p.profitFact)}, прогноз ${_formatTenge(p.profitFc)}, итог ${_formatTenge(p.profitTotal)}`);
-        });
-
-        const answer = lines.join('\n');
+      if (!isDeep && isCommand && (qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр'))) {
+        const answer = _simpleList('Контрагенты:', dbData.catalogs?.contractors || []);
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
-      if (projectMention && wantsProjectSpend && !isDeep) {
-        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-        const projList = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
-        const catList = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
-        const projNameById = new Map();
-        projList.forEach(p => {
-          if (!p) return;
-          if (typeof p === 'string') projNameById.set(p, p);
-          else if (p.id) projNameById.set(String(p.id), p.name || p.id);
-        });
-        const catNameById = new Map();
-        catList.forEach(c => {
-          if (!c) return;
-          const cid = c.id || c._id;
-          if (!cid) return;
-          catNameById.set(String(cid), c.name || `Категория ${String(cid).slice(-4)}`);
-        });
-
-        const byProject = new Map();
-        for (const op of ops) {
-          if (op.kind !== 'expense') continue;
-          const pid = op.projectId ? String(op.projectId) : null;
-          const projName = pid ? (projNameById.get(pid) || `Проект ${pid.slice(-4)}`) : 'Без проекта';
-          if (!byProject.has(projName)) byProject.set(projName, new Map());
-          const catId = op.categoryId ? String(op.categoryId) : 'Без категории';
-          const catMap = byProject.get(projName);
-          const prev = catMap.get(catId) || { sum: 0, name: null };
-          const catName = catNameById.get(catId) || op.categoryName || op.category || (catId === 'Без категории' ? 'Без категории' : `Категория ${catId.slice(-4)}`);
-          prev.sum += op.amount || 0;
-          prev.name = catName;
-          catMap.set(catId, prev);
-        }
-
-        if (!byProject.size) {
-          const answer = 'Нет расходов по проектам за выбранный период.';
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        const lines = [`Расходы по проектам за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
-        byProject.forEach((catMap, projName) => {
-          lines.push(`${projName}`);
-          const sorted = Array.from(catMap.values()).sort((a, b) => Math.abs(b.sum) - Math.abs(a.sum));
-          sorted.forEach(c => {
-            lines.push(`- ${c.name}: ${_formatTenge(-c.sum)}`);
-          });
-          lines.push('');
-        });
-        const answer = lines.join('\n').trim();
+      if (!isDeep && isCommand && (qLower.includes('физ') || qLower.includes('индивид') || qLower.includes('person'))) {
+        const answer = _simpleList('Физлица:', dbData.catalogs?.individuals || []);
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
-      if (projectMention && (isCommand || wantsProjectAnalysis) && !isDeep) {
-        const projects = dbData.catalogs?.projects || [];
-        if (process.env.AI_DEBUG === '1') {
-          console.log('[AI_DEBUG] projects branch hit, count=', projects.length, 'sample=', projects.slice(0, 3));
+      if (!isDeep && isCommand && (qLower.includes('категор') || qLower.includes('category'))) {
+        const answer = _simpleList('Категории:', dbData.catalogs?.categories || []);
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
+      if (!isDeep && isCommand && (qLower.includes('компан') || qLower.includes('организаци') || qLower.includes('company') || qLower.includes('фирм'))) {
+        const answer = _simpleList('Компании:', dbData.catalogs?.companies || []);
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
+      // =========================
+      // DEEP (DIP) CFO MODE (deterministic)
+      // =========================
+      if (isDeep) {
+        const s = _getChatSession(userIdStr);
+        const m = _calcCoreMetrics(dbData);
+
+        const wantsInvest = /инвест|влож|инвестици/i.test(qLower);
+        const wantsFinance = /ситуац|картина|финанс|прибыл|марж|как дела|что по деньг/i.test(qLower);
+        const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
+        const wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
+
+        // If awaiting living monthly input
+        const maybeMoney = _parseMoneyKzt(q);
+        if (s && s.pending && s.pending.type === 'ask_living' && maybeMoney) {
+          s.prefs.livingMonthly = maybeMoney;
+          s.pending = null;
         }
-        const wantsAnalysis = wantsProjectAnalysis;
 
-        // Если нужен анализ — считаем по операциям
-        if (wantsAnalysis) {
-          const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-          const projectMap = new Map();
-          projects.forEach(p => {
-            const id = typeof p === 'string' ? p : p.id;
-            const name = typeof p === 'string' ? p : (p.name || p.id);
-            if (id) projectMap.set(String(id), { name, incomeFact: 0, incomeForecast: 0, expenseFact: 0, expenseForecast: 0 });
-          });
+        if (wantsFinance) {
+          const lines = [];
+          lines.push(`Прибыль (факт): +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`);
+          lines.push(`Доход: +${_formatTenge(m.incFact)} | Расход: -${_formatTenge(m.expFact)}`);
 
-          for (const op of ops) {
-            if (!op.projectId || !projectMap.has(String(op.projectId))) continue;
-            const proj = projectMap.get(String(op.projectId));
-            if (op.kind === 'income') {
-              if (op.isFact) proj.incomeFact += op.amount || 0;
-              else proj.incomeForecast += op.amount || 0;
-            } else if (op.kind === 'expense') {
-              if (op.isFact) proj.expenseFact += op.amount || 0;
-              else proj.expenseForecast += op.amount || 0;
-            }
+          if (m.runwayDaysOpen !== null) {
+            lines.push(`Открытая ликвидность: ~${m.runwayDaysOpen} дней`);
           }
 
-          let totalProfitFact = 0;
-          projectMap.forEach(p => { totalProfitFact += (p.incomeFact - p.expenseFact); });
-
-          const lines = [`Проекты (анализ) за период ${dbData.meta?.periodStart || ''} — ${dbData.meta?.periodEnd || ''}`];
-          if (!projectMap.size) {
-            lines.push('- нет данных');
-          } else {
-            let idx = 1;
-            for (const [, p] of projectMap) {
-              const profitFact = p.incomeFact - p.expenseFact;
-              lines.push(`${idx}. ${p.name}: доход факт ${_formatTenge(p.incomeFact)}, прогноз ${_formatTenge(p.incomeForecast)}; расход факт ${_formatTenge(-p.expenseFact)}, прогноз ${_formatTenge(-p.expenseForecast)}; прибыль факт ${_formatTenge(profitFact)}`);
-              idx += 1;
-            }
+          if (m.topExpCat) {
+            lines.push(`Самый тяжелый расход: ${m.topExpCat.name} (~${m.topExpCatSharePct}%)`);
           }
 
-          if (projectMap.size) {
-            lines.unshift(`Итого прибыль (факт): ${_formatTenge(totalProfitFact)}`);
-          }
+          // quick risk flags
+          if (m.profitFact < 0) lines.push(`Риск: период убыточный → инвестиции только из резерва.`);
+          else if (m.runwayDaysOpen !== null && m.runwayDaysOpen < 7) lines.push(`Риск: на открытых мало денег → возможен кассовый разрыв.`);
+
           lines.push('');
-          lines.push('Показать ТОП по контрагентам?');
-          lines.push('Показать на что потратили в проектах?');
-
+          lines.push('Дальше: прибыль по проектам или кассовые риски по дням?');
           const answer = lines.join('\n');
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
-        } else {
-          const lines = ['Проекты:'];
-          if (projects.length) {
-            lines.push(...projects.map((p, i) => {
-              if (typeof p === 'string') return `${i + 1}. ${p}`;
-              return `${i + 1}. ${p.name || p.id || '—'}`;
-            }));
-          } else {
-            lines.push('- нет имен');
+        }
+
+        if (wantsLosses) {
+          // Not TOP. It's classification: structural vs controllable.
+          const cats = Array.isArray(dbData.categorySummary) ? dbData.categorySummary : [];
+          const expCats = cats.map(c => ({ name: c.name || 'Без категории', expFact: Number(c.expenseFact || 0) })).filter(x => x.expFact > 0);
+
+          const classify = (name) => {
+            const n = String(name || '').toLowerCase();
+            if (/(коммун|ккх|жкх|свет|вода|отоп|газ|электро)/i.test(n)) return 'structural';
+            if (/(налог|кпн|ндс|осмс|енпф|соц|пенс|штраф)/i.test(n)) return 'structural';
+            if (/(фот|зарплат|оклад|аванс)/i.test(n)) return 'structural';
+            if (/(процент|дивиденд|владельц|эрнест\s*5|комисси)/i.test(n)) return 'structural';
+            if (/(ремонт|хоз|канцел|маркет|реклам|достав|транспорт|услуг|подряд|материал|закуп|проч)/i.test(n)) return 'controllable';
+            return 'check';
+          };
+
+          let structural = 0, controllable = 0, check = 0;
+          for (const c of expCats) {
+            const cls = classify(c.name);
+            if (cls === 'structural') structural += c.expFact;
+            else if (cls === 'controllable') controllable += c.expFact;
+            else check += c.expFact;
           }
-          lines.push(`Всего: ${projects.length}`);
+
+          const pct = (v) => (m.expFact > 0 ? Math.round((v / m.expFact) * 1000) / 10 : 0);
+
+          const lines = [];
+          lines.push(`Расходы: -${_formatTenge(m.expFact)} | Прибыль: +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`);
+          lines.push(`Структурно: ${pct(structural)}% | Управляемо: ${pct(controllable)}% | Проверить: ${pct(check)}%`);
+          lines.push(pct(controllable) >= 25
+            ? 'Вывод: утечки чаще сидят в управляемых расходах (ремонты/услуги/прочее).'
+            : 'Вывод: расходы в основном структурные → работаем доходом/арендой/долгами.'
+          );
+          lines.push('');
+          lines.push('Дальше: разложить управляемые по контрагентам или по проектам?');
 
           const answer = lines.join('\n');
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
-      }
 
-      // =========================
-      // CONTRACTORS CATALOG
-      // =========================
-      if ((qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр')) && isCommand) {
-        const contractors = dbData.catalogs?.contractors || [];
-        if (process.env.AI_DEBUG === '1') {
-          console.log('[AI_DEBUG] contractors branch hit, count=', contractors.length, 'sample=', contractors.slice(0, 3));
-        }
-        const lines = ['Контрагенты:'];
-        if (contractors.length) {
-          lines.push(...contractors.map((c, i) => `${i + 1}. ${c}`));
-        } else {
-          lines.push('- нет имен');
-        }
-        lines.push(`Всего: ${contractors.length}`);
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // INDIVIDUALS CATALOG
-      // =========================
-      if ((qLower.includes('физ') || qLower.includes('индивид') || qLower.includes('person')) && isCommand) {
-        const individuals = dbData.catalogs?.individuals || [];
-        if (process.env.AI_DEBUG === '1') {
-          console.log('[AI_DEBUG] individuals branch hit, count=', individuals.length, 'sample=', individuals.slice(0, 3));
-        }
-        const lines = ['Физические лица:'];
-        if (individuals.length) {
-          lines.push(...individuals.map((ind, i) => `${i + 1}. ${ind}`));
-        } else {
-          lines.push('- нет имен');
-        }
-        lines.push(`Всего: ${individuals.length}`);
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // CATEGORIES CATALOG
-      // =========================
-      if ((qLower.includes('категор') || qLower.includes('category')) && isCommand) {
-        const categories = dbData.catalogs?.categories || [];
-        if (process.env.AI_DEBUG === '1') {
-          console.log('[AI_DEBUG] categories branch hit, count=', categories.length, 'sample=', categories.slice(0, 3));
-        }
-        const lines = ['Категории:'];
-        if (categories.length) {
-          lines.push(...categories.map((cat, i) => `${i + 1}. ${cat}`));
-        } else {
-          lines.push('- нет имен');
-        }
-        lines.push(`Всего: ${categories.length}`);
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // COMPANIES CATALOG
-      // =========================
-      if ((qLower.includes('компан') || qLower.includes('фирм') || qLower.includes('организаци') || qLower.includes('company')) && isCommand) {
-        const companies = dbData.catalogs?.companies || [];
-        if (process.env.AI_DEBUG === '1') {
-          console.log('[AI_DEBUG] companies branch hit, count=', companies.length, 'sample=', companies.slice(0, 3));
-        }
-        const lines = ['Мои компании', ''];
-        if (companies.length) {
-          companies.forEach((comp, i) => lines.push(`${i + 1}. ${comp}`));
-        } else {
-          lines.push('- нет имен');
-        }
-        lines.push('', `Всего: ${companies.length}`);
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // AI GENERATION (OpenAI)
-      // Universal fallback for all queries
-      // =========================
-      const wantsLosses = qLower.includes('теря') || qLower.includes('потер');
-      const lossDimension = (() => {
-        if (qLower.includes('контраг')) return 'contractor';
-        if (qLower.includes('проект')) return 'project';
-        if (qLower.includes('счет') || qLower.includes('касс')) return 'account';
-        return 'category';
-      })();
-
-      if (wantsLosses) {
-        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-        const catalogs = dbData.catalogs || {};
-
-        const nameByDim = {
-          category: (id) => {
-            const cats = catalogs.categories || [];
-            const found = cats.find(c => (c.id || c._id) === id || c === id);
-            if (typeof found === 'string') return found;
-            return found?.name || 'Без категории';
-          },
-          contractor: (id) => {
-            const list = catalogs.contractors || [];
-            const found = list.find(c => (c.id || c._id) === id || c === id);
-            if (typeof found === 'string') return found;
-            return found?.name || 'Без контрагента';
-          },
-          project: (id) => {
-            const list = catalogs.projects || [];
-            const found = list.find(p => (p.id || p._id) === id || p === id);
-            if (typeof found === 'string') return found;
-            return found?.name || 'Без проекта';
-          },
-          account: (id) => {
-            const list = dbData.accounts || [];
-            const found = list.find(a => (a.id || a._id) === id || a === id);
-            if (typeof found === 'string') return found;
-            return found?.name || 'Без счета';
+        if (wantsTellUnknown) {
+          const lines = [];
+          // "unknown": open liquidity risk + profit margin + hidden share
+          const hiddenShare = m.totalCash > 0 ? Math.round((m.hiddenCash / m.totalCash) * 1000) / 10 : 0;
+          lines.push(`Факт-прибыль: +${_formatTenge(m.profitFact)} (маржа ${m.marginPct}%)`);
+          lines.push(`Скрытые деньги: ${_formatTenge(m.hiddenCash)} (${hiddenShare}%)`);
+          if (m.runwayDaysOpen !== null) {
+            lines.push(`Открытые держат ~${m.runwayDaysOpen} дней расходов — это твой реальный риск кассы.`);
+          } else {
+            lines.push('По расходам нет достаточно данных, чтобы оценить кассовый риск.');
           }
-        };
+          lines.push('');
+          lines.push('Дальше: усиливаем прибыль или закрываем кассовые риски?');
 
-        const agg = new Map();
-        let totalExp = 0;
-        for (const op of ops) {
-          const amt = _absExpense(op);
-          if (amt <= 0) continue;
-          totalExp += amt;
-
-          let key = null;
-          if (lossDimension === 'contractor') key = op.contractorId || op.contractor || null;
-          else if (lossDimension === 'project') key = op.projectId || op.project || null;
-          else if (lossDimension === 'account') key = op.accountId || op.account || null;
-          else key = op.categoryId || op.category || null;
-
-          if (!key) key = 'none';
-          const id = typeof key === 'object' && key._id ? key._id : String(key);
-          if (!agg.has(id)) agg.set(id, { id, sum: 0 });
-          agg.get(id).sum += amt;
-        }
-
-        const items = Array.from(agg.values())
-          .filter(it => lossDimension !== 'contractor' ? it.sum > 0 : it.sum > 0) // contractor also exclude 0
-          .sort((a, b) => b.sum - a.sum);
-
-        const top = items.slice(0, 3);
-        const topSum = top.reduce((s, it) => s + it.sum, 0);
-
-        if (!top.length) {
-          const answer = 'Нет расходных операций для расчёта потерь.';
+          const answer = lines.join('\n');
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
 
-        const dimLabel = {
-          category: 'категориям',
-          contractor: 'контрагентам',
-          project: 'проектам',
-          account: 'счетам'
-        }[lossDimension] || 'категориям';
+        if (wantsInvest) {
+          const living = s?.prefs?.livingMonthly;
+          if (!living) {
+            if (s) s.pending = { type: 'ask_living', ts: Date.now() };
+            const answer = 'Сколько уходит на жили-были в месяц? (пример: 3 млн)';
+            _pushHistory(userIdStr, 'assistant', answer);
+            return res.json({ text: answer });
+          }
 
-        const lines = [`ТОП-3 по ${dimLabel}:`];
-        top.forEach((it, idx) => {
-          const name = nameByDim[lossDimension]?.(it.id) || 'Без категории';
-          lines.push(`${idx + 1}. ${name} — ${_formatTenge(it.sum)}`);
-        });
-        lines.push(`Сумма ТОП-3: ${_formatTenge(topSum)}`);
-        lines.push(`Итог расходов: ${_formatTenge(totalExp)}`);
+          // investment math:
+          // if profit covers living -> invest = 50% of free cashflow
+          // else invest from hidden reserves = 0.6%/month (≈ 7.2% годовых из резерва)
+          const freeMonthly = Math.max(0, m.profitFact - living);
 
-        const followUp = (() => {
-          if (lossDimension === 'category') return 'Показать ТОП по контрагентам?';
-          if (lossDimension === 'contractor') return 'Показать ТОП по проектам?';
-          return 'Показать ТОП по категориям?';
-        })();
-        lines.push(followUp);
+          const lines = [];
+          lines.push(`Прибыль: +${_formatTenge(m.profitFact)} /мес`);
+          lines.push(`Жили-были: -${_formatTenge(living)} /мес`);
 
+          if (freeMonthly > 0) {
+            const invest = Math.round(freeMonthly * 0.5);
+            lines.push(`Свободно: +${_formatTenge(freeMonthly)} → инвест ${_formatTenge(invest)} /мес (0.5×)`);
+            lines.push('');
+            lines.push('Дальше: из потока (безопасно) или из резерва (агрессивно)?');
+          } else {
+            const invest = Math.round(m.hiddenCash * 0.006);
+            lines.push('Поток не покрывает жили-были → инвест только из резерва (скрытые).');
+            lines.push(`Ритм: ${_formatTenge(invest)} /мес (~0.6% скрытых)`);
+            lines.push('');
+            lines.push('Дальше: цель доходности и срок инвестиций?');
+          }
+
+          const answer = lines.join('\n');
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+
+        // DIP default if message unknown: profit snapshot + next question
+        const lines = [
+          `Прибыль: +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`,
+          `Открытые: ${_formatTenge(m.openCash)} | Скрытые: ${_formatTenge(m.hiddenCash)}`,
+          '',
+          'Что делаем: прибыль по проектам, расходы-утечки или инвестиции?'
+        ];
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
+      // =========================
+      // AI GENERATION (OpenAI) - fallback
+      // =========================
       const systemPrompt = (() => {
         if (isDeep) {
           return [
-            'Ты финансовый аналитик INDEX12.',
-            'Режим: deep — 6–8 коротких предложений, только цифры, доли и выводы, без воды.',
-            'Не придумывай новые имена контрагентов/физлиц. Используй только contractorName/counterpartyIndividualName из данных, иначе пиши "Без контрагента".',
-            'Если просят "где теряю деньги"/"потери": default группировка = категории. Не смешивай измерения (категории ≠ контрагенты ≠ проекты ≠ счета) в одном списке. Формат: "ТОП-3 по {dimension}: 1) … — … ₸  2) … — … ₸  3) … — … ₸. Итог расходов: … ₸".',
-            'Если в запросе указано измерение: "по контрагентам"/"по проектам"/"по счетам" — используй его вместо категорий. Не объединяй разные измерения.',
-            'После ТОП-3 предложи переключение измерения одной строкой: "Показать ТОП по контрагентам?" или "…по проектам?".',
-            'Категорийные флажки: коммуналка — только вопрос про перевыставление/утечки/счетчики, без "оптимизируй тариф"; ФОТ — предупреждай про риск потери людей, предложи анализ по сотрудникам; комиссии/проценты владельцу — это структурные выплаты, не "утечки".',
-            'Запрещены общие фразы вроде "может быть оптимизировано", "стоит обратить внимание", "в целом для улучшения".',
-            'Если данных не хватает — задай один уточняющий вопрос, например: "Коммуналка перевыставляется арендаторам?".',
-            'Сравни доходы/расходы в процентах, считай маржу (прибыль/доход), выделяй топ категории расходов vs доходов по доле. Проекты — по прибыли (факт/прогноз), лидеры и аутсайдеры. Контрагенты — ключевые по сумме/кол-ву операций.',
-            'Кэш-флоу: самый напряжённый день по расходам, предупреди о риске кассового разрыва, если видно.',
-            'Сравнивай корректно по знакам, различай доходы и прибыль. Деньги: "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
-            'Рынок (если спросили "нормально ли по рынку"): зарплаты — ориентиры HH; аренда м² — Krisha.kz; инфляция — stat.gov.kz; вывод: выше/ниже/в рынке.',
-            'Гайд по аренде (если просят расчёты): GPR=A_m2*Rent_m2_m; VacancyLoss=GPR*Vac; EGR=GPR-VacancyLoss+OtherInc; NOI=EGR-OPEX; CF=NOI-CAPEX-DebtPay-Tax; CapRate=NOI_y/Price; DSCR=NOI_y/DebtPay_y; Payback=Investment/(CF_m*12). Если нет входных данных — спроси 1 уточнение.'
+            'Ты CFO-агент INDEX12. Диалог, коротко.',
+            'НЕ повторяй интерфейс (списки счетов/топы) без прямого запроса пользователя.',
+            'Всегда начинай с: прибыль/маржа/риски/следующий шаг.',
+            'Один следующий вопрос в конце.'
           ].join('\n');
         }
         return [
           'Ты финансовый аналитик INDEX12.',
-          'Отвечай строго по данным, ничего не придумывай. Максимум 3–4 строки, без воды и шаблонов.',
-          'Не придумывай новые имена контрагентов/физлиц. Используй только contractorName/counterpartyIndividualName из данных, иначе пиши "Без контрагента".',
-          'Если спрашивают "где теряю деньги"/"потери": default группировка = категории. Не смешивай измерения (категории ≠ контрагенты ≠ проекты ≠ счета) в одном списке. Формат: "ТОП-3 по {dimension}: 1) … — … ₸  2) … — … ₸  3) … — … ₸. Итог расходов: … ₸".',
-          'Если в запросе указано измерение: "по контрагентам"/"по проектам"/"по счетам" — используй его вместо категорий. Не объединяй разные измерения.',
-          'После ТОП-3 предложи 1 действие-уточнение: "Показать ТОП по контрагентам?" или "…по проектам?" или "Разложить ФОТ по людям?".',
-          'Категорийные флажки: коммуналка — только вопрос про перевыставление/утечки/счетчики; ФОТ — предупреди про риск потери людей, предложи анализ по сотрудникам; комиссии/проценты владельцу — это структурные выплаты, не утечки.',
-          'Запрещены фразы "может быть оптимизировано", "стоит обратить внимание", "в целом для улучшения".',
-          'Если данных не хватает — задай один уточняющий вопрос вместо советов.',
-          'Не путай доходы и прибыль: показывай доходы и расходы отдельно, не считай разницу, если не просили. Деньги: "1 234 ₸"; расходы со знаком минус, доходы с плюсом.',
-          'Для счетов: перечисли открытые и скрытые отдельно, затем итоги. Если данных нет — так и напиши.',
-          'Рынок (если спрашивают "нормально ли по рынку"): зарплаты — HH; аренда м² — Krisha.kz; инфляция — stat.gov.kz; вывод: выше/ниже/в рынке.',
-          'Указывай даты операций в формате дд.мм.гг, если они есть.',
+          'Отвечай строго по данным. 3–4 строки. Без воды.',
+          'Не придумывай имена. Если нет — пиши "Без контрагента".'
         ].join('\n');
       })();
 
-      const hiddenAccs = (dbData.accounts || []).filter(a => a.isHidden);
-      const openAccs = (dbData.accounts || []).filter(a => !a.isHidden);
       const dataContext = _formatDbDataForAi(dbData);
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'system', content: dataContext },
-        ..._getHistoryMessages(userIdStr)
+        ..._getHistoryMessages(userIdStr),
       ];
 
-      const aiResponse = await _openAiChat(messages);
+      const modelOverride = isDeep ? (process.env.OPENAI_MODEL_DEEP || process.env.OPENAI_MODEL || null) : null;
+      const aiResponse = await _openAiChat(messages, { modelOverride });
+
       _pushHistory(userIdStr, 'assistant', aiResponse);
 
-    if (debugRequested) {
-      debugInfo = debugInfo || {};
-      debugInfo.hiddenNames = hiddenAccs.map(a => a.name);
-      debugInfo.hiddenCount = hiddenAccs.length;
-      debugInfo.openNames = openAccs.map(a => a.name);
-      debugInfo.openCount = openAccs.length;
-      debugInfo.opsSummary = dbData.operationsSummary || {};
-      debugInfo.sampleOps = (dbData.operations || []).slice(0, 5).map(op => ({
-        date: op.date,
-        amount: op.amount,
-        rawAmount: op.rawAmount,
-        kind: op.kind,
-        isFact: op.isFact
-      }));
-        debugInfo.catalogs = debugInfo.catalogs || {
-          companies: dbData.catalogs?.companies?.length || 0,
-          projects: dbData.catalogs?.projects?.length || 0,
-          categories: dbData.catalogs?.categories?.length || 0,
-          contractors: dbData.catalogs?.contractors?.length || 0,
-          individuals: dbData.catalogs?.individuals?.length || 0,
-          projectsSample: (dbData.catalogs?.projects || []).slice(0, 3),
-          categoriesSample: (dbData.catalogs?.categories || []).slice(0, 3),
-          contractorsSample: (dbData.catalogs?.contractors || []).slice(0, 3),
-          individualsSample: (dbData.catalogs?.individuals || []).slice(0, 3),
-          companiesSample: (dbData.catalogs?.companies || []).slice(0, 3),
-          contractorSummarySample: (dbData.contractorSummary || []).slice(0, 3),
-          daySummarySample: (dbData.daySummary || []).slice(0, 3),
-          categorySummarySample: (dbData.categorySummary || []).slice(0, 3),
-          tagSummarySample: (dbData.tagSummary || []).slice(0, 3),
-          outliersSample: dbData.outliers || {},
-        };
+      if (debugRequested) {
+        debugInfo = debugInfo || {};
+        debugInfo.opsSummary = dbData.operationsSummary || {};
+        debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
+        debugInfo.modelUsed = modelOverride || (process.env.OPENAI_MODEL || 'gpt-4o');
+        debugInfo.modelDeep = process.env.OPENAI_MODEL_DEEP || null;
         return res.json({ text: aiResponse, debug: debugInfo });
       }
 
