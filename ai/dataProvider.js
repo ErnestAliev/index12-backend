@@ -199,6 +199,7 @@ module.exports = function createDataProvider(deps) {
                 name: acc.name || 'Без названия',
                 currentBalance: Math.round(currentBalance),
                 futureBalance: Math.round(futureBalance),
+                companyId: acc.companyId ? String(acc.companyId) : null,
                 isHidden,
                 isExcluded,
             };

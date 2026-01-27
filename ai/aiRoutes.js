@@ -613,54 +613,31 @@ module.exports = function createAiRouter(deps) {
 
     // COMPANИИ
     if (/(компан|организаци|company|фирм)/.test(qLower)) {
-      const stats = new Map();
-      const add = (name, isFact, kind, amount) => {
-        const key = name || 'Без компании';
-        if (!stats.has(key)) stats.set(key, {
-          name: key,
-          incFact: 0, incForecast: 0,
-          expFact: 0, expForecast: 0,
-        });
-        const rec = stats.get(key);
-        if (kind === 'income') {
-          if (isFact) rec.incFact += amount; else rec.incForecast += amount;
-        } else if (kind === 'expense') {
-          if (isFact) rec.expFact += amount; else rec.expForecast += amount;
+      // Суммируем балансы связанных счетов по companyId
+      const companyNameById = new Map((dbData.catalogs?.companies || []).map(c => [String(c.id || c._id), c.name || `Компания ${String(c.id || c._id).slice(-4)}`]));
+      const buckets = new Map(); // key -> {name, balance}
+      const addBalance = (companyId, balance) => {
+        const key = companyId || 'none';
+        if (!buckets.has(key)) {
+          const name = companyId ? (companyNameById.get(companyId) || `Компания ${companyId.slice(-4)}`) : 'Без компании';
+          buckets.set(key, { name, balance: 0 });
         }
+        buckets.get(key).balance += balance;
       };
 
-      (dbData.operations || []).forEach(op => {
-        const name = op.companyName || op.fromCompanyName || op.toCompanyName || 'Без компании';
-        if (op.kind === 'income' || op.kind === 'expense') add(name, !!op.isFact, op.kind, op.amount || 0);
+      (dbData.accounts || []).forEach(acc => {
+        addBalance(acc.companyId || null, Number(acc.currentBalance || 0));
       });
 
-      const rows = Array.from(stats.values()).sort((a, b) => {
-        const av = Math.abs(a.incFact + a.incForecast + a.expFact + a.expForecast);
-        const bv = Math.abs(b.incFact + b.incForecast + b.expFact + b.expForecast);
-        return bv - av;
-      });
-
-      const lines = [];
-      lines.push('Компании (факт):');
+      const rows = Array.from(buckets.values()).sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
+      const lines = ['Компании (баланс счетов):'];
       if (!rows.length) {
-        lines.push('- нет операций');
+        lines.push('- нет счетов');
       } else {
         rows.forEach(r => {
-          const net = r.incFact - r.expFact;
-          lines.push(`- ${r.name}: доход +${_t(r.incFact)}, расход -${_t(r.expFact)}, итог ${_t(net)}`);
+          lines.push(`- ${r.name}: ${_t(r.balance)}`);
         });
       }
-      const hasForecast = rows.some(r => r.incForecast || r.expForecast);
-      if (hasForecast) {
-        lines.push('');
-        lines.push('Прогноз (до конца месяца):');
-        rows.forEach(r => {
-          if (!(r.incForecast || r.expForecast)) return;
-          const net = r.incForecast - r.expForecast;
-          lines.push(`- ${r.name}: доход +${_t(r.incForecast)}, расход -${_t(r.expForecast)}, итог ${_t(net)}`);
-        });
-      }
-
       return lines.join('\n');
     }
 
