@@ -615,6 +615,25 @@ module.exports = function createAiRouter(deps) {
     if (/(компан|организаци|company|фирм)/.test(qLower)) {
       // Суммируем балансы связанных счетов по companyId
       const companyNameById = new Map((dbData.catalogs?.companies || []).map(c => [String(c.id || c._id), c.name || `Компания ${String(c.id || c._id).slice(-4)}`]));
+      // Попробуем угадать companyId счета по операциям, если оно пустое
+      const accountCompanyGuess = new Map();
+      (dbData.operations || []).forEach(op => {
+        const accIds = [
+          op.accountId ? String(op.accountId) : null,
+          op.fromAccountId ? String(op.fromAccountId) : null,
+          op.toAccountId ? String(op.toAccountId) : null,
+        ].filter(Boolean);
+        const compIds = [
+          op.companyId ? String(op.companyId) : null,
+          op.fromCompanyId ? String(op.fromCompanyId) : null,
+          op.toCompanyId ? String(op.toCompanyId) : null,
+        ].filter(Boolean);
+        if (!compIds.length) return;
+        accIds.forEach(aid => {
+          if (!accountCompanyGuess.has(aid)) accountCompanyGuess.set(aid, compIds[0]);
+        });
+      });
+
       const buckets = new Map(); // key -> {name, balance}
       const addBalance = (companyId, balance) => {
         const key = companyId || 'none';
@@ -626,7 +645,11 @@ module.exports = function createAiRouter(deps) {
       };
 
       (dbData.accounts || []).forEach(acc => {
-        addBalance(acc.companyId || null, Number(acc.currentBalance || 0));
+        const accId = acc._id ? String(acc._id) : null;
+        const compId = acc.companyId
+          ? String(acc.companyId)
+          : (accId && accountCompanyGuess.get(accId)) || null;
+        addBalance(compId, Number(acc.currentBalance || 0));
       });
 
       const rows = Array.from(buckets.values()).sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
