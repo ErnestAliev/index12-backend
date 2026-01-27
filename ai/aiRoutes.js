@@ -427,19 +427,25 @@ module.exports = function createAiRouter(deps) {
 
         lines.push('Открытые:');
         if (openAccs.length) {
-          for (const acc of openAccs) lines.push(`${acc.name || 'Счет'}: ${_t(acc.currentBalance || 0)}`);
+          for (const acc of openAccs) {
+            const bal = acc.futureBalance !== undefined ? acc.futureBalance : acc.currentBalance;
+            lines.push(`${acc.name || 'Счет'}: ${_t(bal || 0)}`);
+          }
         } else lines.push('- нет');
 
         lines.push('');
         lines.push('Скрытые:');
         if (hiddenAccs.length) {
-          for (const acc of hiddenAccs) lines.push(`${acc.name || 'Счет'} (скрыт): ${_t(acc.currentBalance || 0)}`);
+          for (const acc of hiddenAccs) {
+            const bal = acc.futureBalance !== undefined ? acc.futureBalance : acc.currentBalance;
+            lines.push(`${acc.name || 'Счет'} (скрыт): ${_t(bal || 0)}`);
+          }
         } else lines.push('- нет');
 
         lines.push('');
-        const totalOpen = totals.open?.current ?? 0;
-        const totalHidden = totals.hidden?.current ?? 0;
-        const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
+        const totalOpen = totals.open?.future ?? totals.open?.current ?? 0;
+        const totalHidden = totals.hidden?.future ?? totals.hidden?.current ?? 0;
+        const totalAll = totals.all?.future ?? totals.all?.current ?? (totalOpen + totalHidden);
         lines.push(`Итого открытые: ${_t(totalOpen)}`);
         lines.push(`Итого скрытые: ${_t(totalHidden)}`);
         lines.push(`Итого все: ${_t(totalAll)}`);
@@ -649,7 +655,6 @@ module.exports = function createAiRouter(deps) {
         const compId = acc.companyId
           ? String(acc.companyId)
           : (accId && accountCompanyGuess.get(accId)) || null;
-        // Используем futureBalance если есть, чтобы совпасть с логикой «с учетом будущих»
         const bal = acc.futureBalance !== undefined ? Number(acc.futureBalance || 0) : Number(acc.currentBalance || 0);
         addBalance(compId, bal);
       });
@@ -764,7 +769,7 @@ module.exports = function createAiRouter(deps) {
       const forceAllAccounts = isProjectIntent; // для проектных запросов убираем фильтр по видимым счетам
 
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: forceAllAccounts ? true : true, // always include hidden; project intent enforces null visible accounts
+        includeHidden: forceAllAccounts ? true : !!req?.body?.includeHidden,
         visibleAccountIds: forceAllAccounts ? null : (req?.body?.visibleAccountIds || null),
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
