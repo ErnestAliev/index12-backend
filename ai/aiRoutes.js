@@ -924,7 +924,7 @@ module.exports = function createAiRouter(deps) {
           buildProjectsReportAll,
           buildProjectReport,
           findProject,
-        }, { includeHidden: !!req?.body?.includeHidden });
+        }, { includeHidden: true }); // показываем все счета, видимость регулируем в выводе
         _pushHistory(userIdStr, 'assistant', answer);
         if (debugRequested) return res.json({ text: answer, debug: debugInfo || {} });
         return res.json({ text: answer });
