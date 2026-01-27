@@ -831,14 +831,32 @@ module.exports = function createAiRouter(deps) {
         });
         const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
         const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-        const lines = [`Отчет по проектам (прибыль) ${periodStart} — ${periodEnd}`];
+        const totalFactProfit = rows.reduce((s, r) => s + (r.incFact - r.expFact), 0);
+        const totalFcProfit = rows.reduce((s, r) => s + (r.incForecast - r.expForecast), 0);
+
+        const lines = [];
+        lines.push(`С ${periodStart} до ${periodEnd}`);
+        lines.push(`Прибыль по проектам: ${_formatTenge(totalFactProfit)}`);
+        lines.push('Из них:');
         if (!rows.length) {
-          lines.push('Нет операций по проектам.');
+          lines.push('- нет операций по проектам');
         } else {
           rows.forEach(r => {
             const factNet = r.incFact - r.expFact;
+            lines.push(`- ${r.name}: ${_formatTenge(factNet)}`);
+          });
+        }
+
+        lines.push('');
+        lines.push(`Прогнозируемая прибыль по проектам: ${_formatTenge(totalFcProfit)} (до ${periodEnd})`);
+        lines.push('Из них:');
+        const forecastRows = rows.filter(r => (r.incForecast - r.expForecast) !== 0);
+        if (!forecastRows.length) {
+          lines.push('- нет прогнозируемых операций по проектам');
+        } else {
+          forecastRows.forEach(r => {
             const fcNet = r.incForecast - r.expForecast;
-            lines.push(`${r.name}: прибыль факт ${_formatTenge(factNet)} (${r.countFact} оп.), прогноз ${_formatTenge(fcNet)} (${r.countForecast} оп.)`);
+            lines.push(`- ${r.name}: ${_formatTenge(fcNet)} (до ${periodEnd})`);
           });
         }
         lines.push(`[${CHAT_VERSION_TAG}]`);
