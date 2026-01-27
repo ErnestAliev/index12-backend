@@ -738,6 +738,56 @@ module.exports = function createAiRouter(deps) {
         return lines.join('\n');
       };
 
+      const _findProject = (qLowerText) => {
+        const projects = dbData.catalogs?.projects || [];
+        let best = null;
+        projects.forEach(p => {
+          const name = String(p?.name || '').trim();
+          if (!name) return;
+          const nameLower = name.toLowerCase();
+          if (qLowerText.includes(nameLower)) best = { id: String(p.id || p._id), name };
+        });
+        return best;
+      };
+
+      if (!isDeep) {
+        const looksLikeProjectReport = /\b(отч[её]т|покажи|что по|итог)\b.*проект|\bпроект\b.*\b(отч[её]т|итог)/i.test(qLower);
+        const projectMatch = _findProject(qLower);
+        if (looksLikeProjectReport && projectMatch) {
+          const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
+          const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
+          const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
+
+          let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
+          let factCount = 0, forecastCount = 0;
+
+          ops.forEach(op => {
+            if (op.kind === 'income') {
+              if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
+              else { forecastIncome += op.amount || 0; forecastCount += 1; }
+            } else if (op.kind === 'expense') {
+              if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
+              else { forecastExpense += op.amount || 0; forecastCount += 1; }
+            }
+          });
+
+          const factNet = factIncome - factExpense;
+          const forecastNet = forecastIncome - forecastExpense;
+
+          const lines = [];
+          lines.push(`Проект: ${projectMatch.name}`);
+          lines.push(`Период: ${periodStart} — ${periodEnd}`);
+          lines.push('');
+          lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
+          lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
+          if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
+
+          const answer = lines.join('\n');
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+      }
+
       if (!isDeep && isCommand && (qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр'))) {
         const answer = _simpleList('Контрагенты:', dbData.catalogs?.contractors || []);
         _pushHistory(userIdStr, 'assistant', answer);
