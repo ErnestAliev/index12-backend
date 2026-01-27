@@ -685,41 +685,42 @@ module.exports = function createAiRouter(deps) {
       }
 
       if (!isDeep && /\b(перевод(ы|ов)?|трансфер)\b/i.test(qLower)) {
-        const transfers = (dbData.operations || []).filter(op => op.kind === 'transfer' && op.isFact);
-        const lines = ['ПЕРЕВОДЫ'];
+        const maskId = (id) => {
+          const s = String(id || '').trim();
+          return s ? `…${s.slice(-4)}` : '?';
+        };
+        const pickName = (...candidates) => {
+          const hit = candidates.find(v => v && String(v).trim());
+          return hit ? String(hit).trim() : null;
+        };
+        const fmtAmount = (n) => _formatTenge(Math.abs(Number(n || 0))).replace(' ₸', ' т');
 
+        const transfers = (dbData.operations || []).filter(op => {
+          const isTransferKind = op.kind === 'transfer';
+          const looksLikeTransfer = op.fromAccountId && op.toAccountId;
+          return (isTransferKind || looksLikeTransfer) && op.isFact;
+        });
+
+        const lines = ['ПЕРЕВОДЫ'];
         if (!transfers.length) {
           lines.push('- нет фактических переводов за период');
         } else {
-          const pickName = (...candidates) => {
-            const hit = candidates.find(v => v && String(v).trim());
-            return hit ? String(hit).trim() : null;
-          };
-          const fmtAmount = (n) => _formatTenge(Math.abs(Number(n || 0))).replace(' ₸', ' т');
-
           transfers.slice(0, 5).forEach(tr => {
             const amountStr = fmtAmount(tr.amount || tr.rawAmount || 0);
             const fromName = pickName(
-              tr.fromCompanyName,
               tr.fromAccountName,
+              tr.fromCompanyName,
               tr.companyName,
-              tr.accountName,
-              tr.contractorName,
-              tr.fromIndividualName,
-              tr.individualName,
-              tr.description
-            ) || '?';
+              tr.accountName
+            ) || maskId(tr.fromAccountId);
             const toName = pickName(
-              tr.toCompanyName,
               tr.toAccountName,
+              tr.toCompanyName,
               tr.companyName,
-              tr.toIndividualName,
-              tr.contractorName,
-              tr.description
-            ) || '?';
-            lines.push(`${amountStr}: ${fromName}→ ${toName}`);
+              tr.accountName
+            ) || maskId(tr.toAccountId);
+            lines.push(`${amountStr}: ${fromName} → ${toName}`);
           });
-
           if (transfers.length > 5) lines.push(`... и ещё ${transfers.length - 5}`);
         }
 
