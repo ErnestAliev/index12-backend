@@ -762,6 +762,12 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
+      if (!isDeep && isCommand && (qLower.includes('проект'))) {
+        const answer = _simpleList('Проекты:', dbData.catalogs?.projects || []);
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
       // =========================
       // NON-DEEP "Что по деньгам" (deterministic, no LLM)
       // =========================
