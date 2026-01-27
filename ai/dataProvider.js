@@ -92,8 +92,9 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Object>} Accounts data with balances
      */
     async function getAccounts(userId, options = {}) {
-        const { includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null } = options;
+        const { includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null, end = null } = options;
         const nowRef = _resolveNow(now);
+        const endRef = end ? _localEndOfDay(end) : _localEndOfDay(nowRef);
 
         // Build query
         const query = { userId: _uQuery(userId) };
@@ -122,9 +123,20 @@ module.exports = function createDataProvider(deps) {
         if (workspaceId) {
             const legacyAccs = await Account.find({ userId: _uQuery(userId), $or: [{ workspaceId: { $exists: false } }, { workspaceId: null }] }).lean();
             const allAccsNoFilter = await Account.find({ userId: _uQuery(userId) }).lean();
-            // Merge all unique accounts by _id if fallback has more
+
+            const allowIds = (visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length)
+                ? new Set(visibleAccountIds.map(id => String(id)))
+                : null;
+
             const accMap = new Map();
-            [...accounts, ...legacyAccs, ...allAccsNoFilter].forEach(a => { if (a && a._id) accMap.set(String(a._id), a); });
+            const maybeAdd = (a) => {
+                if (!a || !a._id) return;
+                const id = String(a._id);
+                if (allowIds && !allowIds.has(id)) return;
+                accMap.set(id, a);
+            };
+
+            [...accounts, ...legacyAccs, ...allAccsNoFilter].forEach(maybeAdd);
             accounts = Array.from(accMap.values());
         }
 
@@ -178,10 +190,8 @@ module.exports = function createDataProvider(deps) {
                 }
             }
 
-        // Calculate future balance (all operations)
-        // Прогноз: учитываем операции до конца текущего месяца (как в виджете)
-        const endOfMonth = new Date(Date.UTC(nowRef.getUTCFullYear(), nowRef.getUTCMonth() + 1, 1, 0, 0, 0) - 1);
-        const futureOps = allOps.filter(op => new Date(op.date) <= endOfMonth);
+        // Calculate future balance (operations up to endRef)
+        const futureOps = allOps.filter(op => new Date(op.date) <= endRef);
 
         let futureBalance = acc.initialBalance || 0;
         for (const op of futureOps) {

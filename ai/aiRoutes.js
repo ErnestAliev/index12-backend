@@ -1637,5 +1637,59 @@ module.exports = function createAiRouter(deps) {
     }
   });
 
+  // =========================
+  // SNAPSHOT-ONLY TEST ROUTE (не трогаем основную логику)
+  // =========================
+  router.post('/query_snapshot', isAuthenticated, async (req, res) => {
+    try {
+      const snap = req.body?.snapshot;
+      const qRaw = String(req.body?.message || '').trim().toLowerCase();
+      const includeHidden = !!req.body?.includeHidden;
+
+      if (!snap) return res.status(400).json({ text: 'snapshot not provided' });
+      if (!/сч[её]т|счета|касс|баланс/.test(qRaw)) {
+        return res.json({ text: 'Этот тестовый маршрут поддерживает пока только запросы про счета.' });
+      }
+
+      // Берём счета из снапшота (как у виджета)
+      const rawAccs = snap.accounts || snap.currentAccountBalances || [];
+      const accounts = rawAccs.map(a => ({
+        _id: String(a._id || a.id || a.accountId || ''),
+        name: a.name || a.accountName || 'Счет',
+        currentBalance: Math.round(Number(a.currentBalance ?? a.balance ?? 0)),
+        futureBalance: Math.round(Number(a.futureBalance ?? a.balance ?? 0)),
+        isHidden: !!(a.isHidden || a.hidden || a.excluded || a.excludeFromTotal),
+      })).filter(a => a._id);
+
+      const openAccs = accounts.filter(a => !a.isHidden);
+      const hiddenAccs = includeHidden ? accounts.filter(a => a.isHidden) : [];
+
+      const sum = (arr, field) => arr.reduce((s, x) => s + Number(x[field] || 0), 0);
+      const totalOpen = sum(openAccs, 'futureBalance');
+      const totalHidden = sum(hiddenAccs, 'futureBalance');
+      const totalAll = totalOpen + totalHidden;
+
+      const lines = [];
+      lines.push('Счета (snapshot)');
+      lines.push('');
+      lines.push('Открытые:');
+      if (openAccs.length) openAccs.forEach(acc => lines.push(`${acc.name}: ${_formatTenge(acc.futureBalance)}`));
+      else lines.push('- нет');
+      lines.push('');
+      lines.push('Скрытые:');
+      if (hiddenAccs.length) hiddenAccs.forEach(acc => lines.push(`${acc.name} (скрыт): ${_formatTenge(acc.futureBalance)}`));
+      else lines.push('- нет');
+      lines.push('');
+      lines.push(`Итого открытые: ${_formatTenge(totalOpen)}`);
+      lines.push(`Итого скрытые: ${_formatTenge(totalHidden)}`);
+      lines.push(`Итого все: ${_formatTenge(totalAll)}`);
+
+      return res.json({ text: lines.join('\n') });
+    } catch (err) {
+      console.error('[AI SNAPSHOT ERROR]', err);
+      return res.status(500).json({ text: `Ошибка snapshot: ${err.message}` });
+    }
+  });
+
   return router;
 };
