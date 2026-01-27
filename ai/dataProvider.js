@@ -611,6 +611,13 @@ module.exports = function createDataProvider(deps) {
                 accountNameById.set(String(a._id), a.name || `Счет ${String(a._id).slice(-4)}`);
             });
 
+            const projectNameById = new Map();
+            projects.forEach(p => {
+                const pid = p.id || p._id;
+                if (!pid) return;
+                projectNameById.set(String(pid), p.name || `Проект ${String(pid).slice(-4)}`);
+            });
+
             const catNameById = new Map();
             categories.forEach(c => {
                 const cid = c.id || c._id;
@@ -643,6 +650,7 @@ module.exports = function createDataProvider(deps) {
                 const catId = op.categoryId ? String(op.categoryId) : null;
                 const contrId = op.contractorId ? String(op.contractorId) : null;
                 const indivContrId = op.counterpartyIndividualId ? String(op.counterpartyIndividualId) : null;
+                const projId = op.projectId ? String(op.projectId) : null;
                 const accId = op.accountId ? String(op.accountId) : null;
                 const fromAccId = op.fromAccountId ? String(op.fromAccountId) : null;
                 const toAccId = op.toAccountId ? String(op.toAccountId) : null;
@@ -654,6 +662,7 @@ module.exports = function createDataProvider(deps) {
                 const toIndividualId = op.toIndividualId ? String(op.toIndividualId) : null;
 
                 if (catId && !op.categoryName) op.categoryName = catNameById.get(catId) || op.categoryName;
+                if (projId && !op.projectName) op.projectName = projectNameById.get(projId) || op.projectName;
                 if (accId && !op.accountName) op.accountName = accountNameById.get(accId) || op.accountName;
                 if (fromAccId && !op.fromAccountName) op.fromAccountName = accountNameById.get(fromAccId) || op.fromAccountName;
                 if (toAccId && !op.toAccountName) op.toAccountName = accountNameById.get(toAccId) || op.toAccountName;
