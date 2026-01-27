@@ -393,6 +393,299 @@ module.exports = function createAiRouter(deps) {
     return lines.join('\n');
   };
 
+  // =========================
+  // QUICK HANDLER (deterministic, no LLM)
+  // =========================
+  const _handleQuick = (qLower, dbData, helpers) => {
+    const {
+      formatTenge: _t,
+      fmtDateKZ: _d,
+      endOfToday: _today,
+      buildProjectsReportAll,
+      buildProjectReport,
+      findProject,
+    } = helpers;
+
+    // ACCOUNTS
+    if (/сч[её]т|счета|касс|баланс/.test(qLower)) {
+      const lines = [];
+      const accounts = dbData.accounts || [];
+      const totals = dbData.totals || {};
+
+      const periodStart = dbData.meta?.periodStart || '';
+      const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _d(_today());
+      const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `на ${periodEnd}`;
+
+      lines.push(`Счета (${periodLabel})`);
+      lines.push('');
+
+      if (!accounts.length) {
+        lines.push('Счета не найдены.');
+      } else {
+        const openAccs = accounts.filter(a => !a.isHidden);
+        const hiddenAccs = accounts.filter(a => a.isHidden);
+
+        lines.push('Открытые:');
+        if (openAccs.length) {
+          for (const acc of openAccs) lines.push(`${acc.name || 'Счет'}: ${_t(acc.currentBalance || 0)}`);
+        } else lines.push('- нет');
+
+        lines.push('');
+        lines.push('Скрытые:');
+        if (hiddenAccs.length) {
+          for (const acc of hiddenAccs) lines.push(`${acc.name || 'Счет'} (скрыт): ${_t(acc.currentBalance || 0)}`);
+        } else lines.push('- нет');
+
+        lines.push('');
+        const totalOpen = totals.open?.current ?? 0;
+        const totalHidden = totals.hidden?.current ?? 0;
+        const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
+        lines.push(`Итого открытые: ${_t(totalOpen)}`);
+        lines.push(`Итого скрытые: ${_t(totalHidden)}`);
+        lines.push(`Итого все: ${_t(totalAll)}`);
+      }
+
+      return lines.join('\n');
+    }
+
+    // INCOME
+    if (/\b(доход|поступлен|приход)\b/.test(qLower) && !/\bрасход\b/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
+      const summary = dbData.operationsSummary || {};
+      const incomeData = summary.income || {};
+
+      const todayStr = dbData.meta?.today || _d(_today());
+      const periodStart = dbData.meta?.periodStart || todayStr;
+      const periodEndMonth = dbData.meta?.periodEnd || todayStr;
+
+      const factTotal = incomeData.fact?.total || 0;
+      const factCount = incomeData.fact?.count || 0;
+      const forecastTotal = incomeData.forecast?.total || 0;
+      const forecastCount = incomeData.forecast?.count || 0;
+
+      const lines = [];
+      lines.push(`Фактические доходы с ${periodStart} по ${todayStr}:`);
+      lines.push(`- ${_t(factTotal)} (${factCount} операций).`);
+      lines.push('');
+      lines.push(`Прогнозные доходы с ${todayStr} по ${periodEndMonth}:`);
+      lines.push(`- ${_t(forecastTotal)} (${forecastCount} операций).`);
+      if (!forecastTotal) lines.push('Прогнозируемых доходов нет.');
+
+      return lines.join('\n');
+    }
+
+    // EXPENSES
+    if (/(расход|трат|затрат)/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
+      const summary = dbData.operationsSummary || {};
+      const expenseData = summary.expense || {};
+
+      const todayStr = dbData.meta?.today || _d(_today());
+      const periodStart = dbData.meta?.periodStart || todayStr;
+      const periodEndMonth = dbData.meta?.periodEnd || todayStr;
+
+      const wantsContractor = /(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)/.test(qLower);
+      const cleanName = (name) => String(name || '').replace(/\s*\[[^\]]+\]\s*$/, '').trim() || 'Без названия';
+
+      const factTotal = Math.abs(expenseData.fact?.total || 0);
+      const factCount = expenseData.fact?.count || 0;
+      const forecastTotal = Math.abs(expenseData.forecast?.total || 0);
+      const forecastCount = expenseData.forecast?.count || 0;
+
+      const lines = [];
+      lines.push(`Фактические расходы с ${periodStart} по ${todayStr} составили:`);
+      lines.push(`- ${_t(factTotal)} (${factCount} операций).`);
+      lines.push('');
+      lines.push('Из них:');
+
+      if (wantsContractor) {
+        const contrFact = (dbData.contractorSummary || [])
+          .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseFact || 0) }))
+          .filter(c => c.amount > 0)
+          .sort((a, b) => b.amount - a.amount);
+
+        if (!contrFact.length) lines.push('- нет расходов по контрагентам');
+        else {
+          contrFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
+          if (contrFact.length > 5) lines.push(`... и ещё ${contrFact.length - 5}`);
+        }
+      } else {
+        const catsFact = (dbData.categorySummary || [])
+          .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseFact || 0) }))
+          .filter(c => c.amount > 0)
+          .sort((a, b) => b.amount - a.amount);
+
+        if (!catsFact.length) lines.push('- нет расходов по категориям');
+        else {
+          catsFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
+          if (catsFact.length > 5) lines.push(`... и ещё ${catsFact.length - 5}`);
+        }
+      }
+
+      lines.push('');
+      lines.push(`С ${todayStr} до конца месяца запланированы расходы на сумму:`);
+      lines.push(`- ${_t(forecastTotal)} (${forecastCount} операций).`);
+
+      if (forecastTotal > 0) {
+        lines.push('');
+        lines.push('Из них:');
+
+        if (wantsContractor) {
+          const contrForecast = (dbData.contractorSummary || [])
+            .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseForecast || 0) }))
+            .filter(c => c.amount > 0)
+            .sort((a, b) => b.amount - a.amount);
+
+          if (!contrForecast.length) lines.push('- нет запланированных расходов по контрагентам');
+          else {
+            contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
+            if (contrForecast.length > 5) lines.push(`... и ещё ${contrForecast.length - 5}`);
+          }
+        } else {
+          const catsForecast = (dbData.categorySummary || [])
+            .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseForecast || 0) }))
+            .filter(c => c.amount > 0)
+            .sort((a, b) => b.amount - a.amount);
+
+          if (!catsForecast.length) lines.push('- нет запланированных расходов по категориям');
+          else {
+            catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
+            if (catsForecast.length > 5) lines.push(`... и ещё ${catsForecast.length - 5}`);
+          }
+        }
+      } else {
+        lines.push('Прогнозируемых расходов нет.');
+      }
+
+      return lines.join('\n');
+    }
+
+    // TRANSFERS
+    if (/(перевод|трансфер|transfer)/.test(qLower)) {
+      const maskId = (id) => {
+        const s = String(id || '').trim();
+        return s ? `…${s.slice(-4)}` : '?';
+      };
+      const pickName = (...candidates) => {
+        const hit = candidates.find(v => v && String(v).trim());
+        return hit ? String(hit).trim() : null;
+      };
+      const fmtAmount = (n) => _t(Math.abs(Number(n || 0))).replace(' ₸', ' т');
+
+      const allTransfers = (dbData.operations || []).filter(op => {
+        const isTransferKind = op.kind === 'transfer';
+        const looksLikeTransfer = op.fromAccountId && op.toAccountId;
+        return (isTransferKind || looksLikeTransfer);
+      });
+      const factTransfers = allTransfers.filter(op => op.isFact);
+      const forecastTransfers = allTransfers.filter(op => !op.isFact);
+      const transfers = factTransfers.length ? factTransfers : forecastTransfers;
+
+      const lines = ['ПЕРЕВОДЫ'];
+      if (!transfers.length) {
+        lines.push('- нет фактических переводов за период');
+      } else {
+        transfers.slice(0, 5).forEach(tr => {
+          const amountStr = fmtAmount(tr.amount || tr.rawAmount || 0);
+          const fromName = pickName(
+            tr.fromAccountName,
+            tr.fromCompanyName,
+            tr.companyName,
+            tr.accountName
+          ) || maskId(tr.fromAccountId);
+          const toName = pickName(
+            tr.toAccountName,
+            tr.toCompanyName,
+            tr.companyName,
+            tr.accountName
+          ) || maskId(tr.toAccountId);
+          lines.push(`${amountStr}: ${fromName} → ${toName}`);
+        });
+        if (transfers.length > 5) lines.push(`... и ещё ${transfers.length - 5}`);
+      }
+
+      return lines.join('\n');
+    }
+
+    // PROJECTS
+    if (/проект/.test(qLower)) {
+      const projectMatch = findProject(qLower);
+      return projectMatch ? buildProjectReport(projectMatch) : buildProjectsReportAll();
+    }
+
+    // COMPANИИ
+    if (/(компан|организаци|company|фирм)/.test(qLower)) {
+      const stats = new Map();
+      const add = (name, isFact, kind, amount) => {
+        const key = name || 'Без компании';
+        if (!stats.has(key)) stats.set(key, {
+          name: key,
+          incFact: 0, incForecast: 0,
+          expFact: 0, expForecast: 0,
+        });
+        const rec = stats.get(key);
+        if (kind === 'income') {
+          if (isFact) rec.incFact += amount; else rec.incForecast += amount;
+        } else if (kind === 'expense') {
+          if (isFact) rec.expFact += amount; else rec.expForecast += amount;
+        }
+      };
+
+      (dbData.operations || []).forEach(op => {
+        const name = op.companyName || op.fromCompanyName || op.toCompanyName || 'Без компании';
+        if (op.kind === 'income' || op.kind === 'expense') add(name, !!op.isFact, op.kind, op.amount || 0);
+      });
+
+      const rows = Array.from(stats.values()).sort((a, b) => {
+        const av = Math.abs(a.incFact + a.incForecast + a.expFact + a.expForecast);
+        const bv = Math.abs(b.incFact + b.incForecast + b.expFact + b.expForecast);
+        return bv - av;
+      });
+
+      const lines = [];
+      lines.push('Компании (факт):');
+      if (!rows.length) {
+        lines.push('- нет операций');
+      } else {
+        rows.forEach(r => {
+          const net = r.incFact - r.expFact;
+          lines.push(`- ${r.name}: доход +${_t(r.incFact)}, расход -${_t(r.expFact)}, итог ${_t(net)}`);
+        });
+      }
+      const hasForecast = rows.some(r => r.incForecast || r.expForecast);
+      if (hasForecast) {
+        lines.push('');
+        lines.push('Прогноз (до конца месяца):');
+        rows.forEach(r => {
+          if (!(r.incForecast || r.expForecast)) return;
+          const net = r.incForecast - r.expForecast;
+          lines.push(`- ${r.name}: доход +${_t(r.incForecast)}, расход -${_t(r.expForecast)}, итог ${_t(net)}`);
+        });
+      }
+
+      return lines.join('\n');
+    }
+
+    const _simpleList = (title, arr) => {
+      const lines = [title];
+      if (Array.isArray(arr) && arr.length) {
+        lines.push(...arr.map((x, i) => {
+          const name = (x && typeof x === 'object' && x.name) ? x.name : x;
+          return `${i + 1}. ${name || '-'}`;
+        }));
+      } else {
+        lines.push('- нет');
+      }
+      lines.push(`Всего: ${Array.isArray(arr) ? arr.length : 0}`);
+      return lines.join('\n');
+    };
+
+    if (/(контраг|поставщик|партнер|партнёр)/.test(qLower)) return _simpleList('Контрагенты:', dbData.catalogs?.contractors || []);
+    if (/(физ|индивид|person)/.test(qLower)) return _simpleList('Физлица:', dbData.catalogs?.individuals || []);
+    if (/(категор|category)/.test(qLower)) return _simpleList('Категории:', dbData.catalogs?.categories || []);
+    if (/проекты?/.test(qLower)) return _simpleList('Проекты:', dbData.catalogs?.projects || []);
+
+    return 'Кнопка пока не поддержана. Уточните запрос текстом.';
+  };
+
   const _isAiAllowed = (req) => {
     try {
       if ((process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true') return true;
@@ -599,6 +892,21 @@ module.exports = function createAiRouter(deps) {
 
       // write user message to history once
       _pushHistory(userIdStr, 'user', q);
+
+      // QUICK BUTTONS → детерминированный ответ, без LLM
+      if (isQuick) {
+        const answer = _handleQuick(qLower, dbData, {
+          formatTenge: _formatTenge,
+          fmtDateKZ: _fmtDateKZ,
+          endOfToday: _endOfToday,
+          buildProjectsReportAll,
+          buildProjectReport,
+          findProject,
+        });
+        _pushHistory(userIdStr, 'assistant', answer);
+        if (debugRequested) return res.json({ text: answer, debug: debugInfo || {} });
+        return res.json({ text: answer });
+      }
 
       // =========================
       // PROJECTS: приоритетная ветка (выше всех остальных)
@@ -1283,7 +1591,9 @@ module.exports = function createAiRouter(deps) {
         ..._getHistoryMessages(userIdStr),
       ];
 
-      const modelOverride = isDeep ? (process.env.OPENAI_MODEL_DEEP || process.env.OPENAI_MODEL || null) : null;
+      const modelOverride = isDeep
+        ? (process.env.OPENAI_MODEL_DEEP || 'gpt-3.5-turbo')
+        : (process.env.OPENAI_MODEL || 'gpt-4o');
       const aiResponse = await _openAiChat(messages, { modelOverride });
 
       _pushHistory(userIdStr, 'assistant', aiResponse);
