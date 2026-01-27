@@ -600,6 +600,7 @@ module.exports = function createAiRouter(deps) {
         const periodEndMonth = dbData.meta?.periodEnd || todayStr;
 
         const wantsContractor = /\b(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)\b/i.test(qLower);
+        const cleanName = (name) => String(name || '').replace(/\s*\[[^\]]+\]\s*$/,'').trim() || 'Без названия';
 
         const factTotal = Math.abs(expenseData.fact?.total || 0);
         const factCount = expenseData.fact?.count || 0;
@@ -614,7 +615,7 @@ module.exports = function createAiRouter(deps) {
 
         if (wantsContractor) {
           const contrFact = (dbData.contractorSummary || [])
-            .map(c => ({ name: c.name || 'Без контрагента', amount: Number(c.expenseFact || 0) }))
+            .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseFact || 0) }))
             .filter(c => c.amount > 0)
             .sort((a, b) => b.amount - a.amount);
 
@@ -625,7 +626,7 @@ module.exports = function createAiRouter(deps) {
           }
         } else {
           const catsFact = (dbData.categorySummary || [])
-            .map(c => ({ name: c.name || 'Без категории', amount: Number(c.expenseFact || 0) }))
+            .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseFact || 0) }))
             .filter(c => c.amount > 0)
             .sort((a, b) => b.amount - a.amount);
 
@@ -639,31 +640,36 @@ module.exports = function createAiRouter(deps) {
         lines.push('');
         lines.push(`С ${todayStr} до конца месяца запланированы расходы на сумму:`);
         lines.push(`- ${_formatTenge(forecastTotal)} (${forecastCount} операций).`);
-        lines.push('');
-        lines.push('Из них:');
 
-        if (wantsContractor) {
-          const contrForecast = (dbData.contractorSummary || [])
-            .map(c => ({ name: c.name || 'Без контрагента', amount: Number(c.expenseForecast || 0) }))
-            .filter(c => c.amount > 0)
-            .sort((a, b) => b.amount - a.amount);
+        if (forecastTotal > 0) {
+          lines.push('');
+          lines.push('Из них:');
 
-          if (!contrForecast.length) lines.push('- нет запланированных расходов по контрагентам');
-          else {
-            contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
-            if (contrForecast.length > 5) lines.push(`... и ещё ${contrForecast.length - 5}`);
+          if (wantsContractor) {
+            const contrForecast = (dbData.contractorSummary || [])
+              .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseForecast || 0) }))
+              .filter(c => c.amount > 0)
+              .sort((a, b) => b.amount - a.amount);
+
+            if (!contrForecast.length) lines.push('- нет запланированных расходов по контрагентам');
+            else {
+              contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
+              if (contrForecast.length > 5) lines.push(`... и ещё ${contrForecast.length - 5}`);
+            }
+          } else {
+            const catsForecast = (dbData.categorySummary || [])
+              .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseForecast || 0) }))
+              .filter(c => c.amount > 0)
+              .sort((a, b) => b.amount - a.amount);
+
+            if (!catsForecast.length) lines.push('- нет запланированных расходов по категориям');
+            else {
+              catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
+              if (catsForecast.length > 5) lines.push(`... и ещё ${catsForecast.length - 5}`);
+            }
           }
         } else {
-          const catsForecast = (dbData.categorySummary || [])
-            .map(c => ({ name: c.name || 'Без категории', amount: Number(c.expenseForecast || 0) }))
-            .filter(c => c.amount > 0)
-            .sort((a, b) => b.amount - a.amount);
-
-          if (!catsForecast.length) lines.push('- нет запланированных расходов по категориям');
-          else {
-            catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
-            if (catsForecast.length > 5) lines.push(`... и ещё ${catsForecast.length - 5}`);
-          }
+          lines.push('Прогнозируемых расходов нет.');
         }
 
         const answer = lines.join('\n');
