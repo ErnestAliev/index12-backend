@@ -573,6 +573,74 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
+      // Targeted diagnostics: "Диагностика + <entity>"
+      const hasDiag = _isDiagnosticsQuery(qLower) || _isFullDiagnosticsQuery(qLower);
+      const wants = (word) => qLower.includes(word);
+      const diagLines = [];
+
+      const pushEntityList = (title, items, mapper) => {
+        diagLines.push(`${title} (${items.length}):`);
+        items.forEach(it => diagLines.push(mapper(it)));
+        diagLines.push('');
+      };
+
+      if (hasDiag && (
+        wants('проект') || wants('расход') || wants('доход') || wants('контраг') ||
+        wants('перевод') || wants('физ') || wants('счет') || wants('категор') || wants('категор')
+      )) {
+        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
+
+        if (wants('проект')) {
+          const projects = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
+          pushEntityList('Проекты', projects, p => `- id=${p.id || p._id || '?'} | name=${p.name || p}`);
+        }
+
+        if (wants('расход')) {
+          const exp = ops.filter(o => o.kind === 'expense');
+          pushEntityList('Расходы', exp, o =>
+            `- op=${o._id || '?'} | ${o.date || o.dateIso || ''} | amt=${o.amount} | acc=${o.accountId || o.fromAccountId || '?'} | cat=${o.categoryId || '?'} | proj=${o.projectId || '?'} | ctr=${o.contractorId || '?'}`
+          );
+        }
+
+        if (wants('доход')) {
+          const inc = ops.filter(o => o.kind === 'income');
+          pushEntityList('Доходы', inc, o =>
+            `- op=${o._id || '?'} | ${o.date || o.dateIso || ''} | amt=${o.amount} | acc=${o.accountId || '?'} | cat=${o.categoryId || '?'} | proj=${o.projectId || '?'} | ctr=${o.contractorId || '?'}`
+          );
+        }
+
+        if (wants('контраг')) {
+          const contractors = Array.isArray(dbData.catalogs?.contractors) ? dbData.catalogs.contractors : [];
+          pushEntityList('Контрагенты', contractors, c => `- id=${c.id || c._id || '?'} | name=${c.name || c}`);
+        }
+
+        if (wants('перевод')) {
+          const trs = ops.filter(o => o.kind === 'transfer' || (o.fromAccountId && o.toAccountId));
+          pushEntityList('Переводы', trs, o =>
+            `- op=${o._id || '?'} | ${o.date || o.dateIso || ''} | amt=${o.amount} | fromAcc=${o.fromAccountId || '?'} | toAcc=${o.toAccountId || '?'} | fromComp=${o.fromCompanyId || '?'} | toComp=${o.toCompanyId || '?'}`
+          );
+        }
+
+        if (wants('физ')) {
+          const individuals = Array.isArray(dbData.catalogs?.individuals) ? dbData.catalogs.individuals : [];
+          pushEntityList('Физлица', individuals, i => `- id=${i.id || i._id || '?'} | name=${i.name || i}`);
+        }
+
+        if (wants('счет')) {
+          const accounts = Array.isArray(dbData.accounts) ? dbData.accounts : [];
+          pushEntityList('Счета', accounts, a => `- id=${a._id || '?'} | name=${a.name || 'Счет'} | hidden=${a.isHidden ? 'yes' : 'no'}`);
+        }
+
+        if (wants('категор')) {
+          const categories = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
+          pushEntityList('Категории', categories, c => `- id=${c.id || c._id || '?'} | name=${c.name || c} | type=${c.type || ''}`);
+        }
+
+        const answer = diagLines.join('\n');
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
       if (_isDiagnosticsQuery(qLower)) {
         const diag = [
           `Диагностика AI (версия: ${AIROUTES_VERSION})`,
