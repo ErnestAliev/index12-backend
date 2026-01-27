@@ -684,7 +684,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
-      if (!isDeep && /\b(перевод(ы|ов)?|трансфер)\b/i.test(qLower)) {
+      if (!isDeep && /\b(перевод(ы|ов)?|трансфер|transfer)\b/i.test(qLower)) {
         const maskId = (id) => {
           const s = String(id || '').trim();
           return s ? `…${s.slice(-4)}` : '?';
@@ -695,11 +695,14 @@ module.exports = function createAiRouter(deps) {
         };
         const fmtAmount = (n) => _formatTenge(Math.abs(Number(n || 0))).replace(' ₸', ' т');
 
-        const transfers = (dbData.operations || []).filter(op => {
+        const allTransfers = (dbData.operations || []).filter(op => {
           const isTransferKind = op.kind === 'transfer';
           const looksLikeTransfer = op.fromAccountId && op.toAccountId;
-          return (isTransferKind || looksLikeTransfer) && op.isFact;
+          return (isTransferKind || looksLikeTransfer);
         });
+        const factTransfers = allTransfers.filter(op => op.isFact);
+        const forecastTransfers = allTransfers.filter(op => !op.isFact);
+        const transfers = factTransfers.length ? factTransfers : forecastTransfers;
 
         const lines = ['ПЕРЕВОДЫ'];
         if (!transfers.length) {
