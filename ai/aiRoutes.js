@@ -941,58 +941,7 @@ module.exports = function createAiRouter(deps) {
 
         // Отчет по всем проектам
         if (!projectMatch && looksLikeProjectReport && /\bпроект/i.test(qLower)) {
-          const ops = dbData.operations || [];
-          const projectStats = new Map();
-          const getName = (id) => {
-            const p = (dbData.catalogs?.projects || []).find(x => String(x.id || x._id) === id);
-            return p?.name || 'Без проекта';
-          };
-          const add = (id, isFact, kind, amount, nameHint) => {
-            const key = id || 'none';
-            if (!projectStats.has(key)) {
-              projectStats.set(key, {
-                id: id || null,
-                name: nameHint || getName(id) || 'Без проекта',
-                incFact: 0, expFact: 0, incForecast: 0, expForecast: 0,
-                countFact: 0, countForecast: 0,
-              });
-            }
-            const rec = projectStats.get(key);
-            if (kind === 'income') {
-              if (isFact) { rec.incFact += amount; rec.countFact++; }
-              else { rec.incForecast += amount; rec.countForecast++; }
-            } else if (kind === 'expense') {
-              if (isFact) { rec.expFact += amount; rec.countFact++; }
-              else { rec.expForecast += amount; rec.countForecast++; }
-            }
-          };
-
-          ops.forEach(op => {
-            const id = op.projectId ? String(op.projectId) : null;
-            add(id, op.isFact, op.kind, op.amount || 0, op.projectName);
-          });
-
-          const rows = Array.from(projectStats.values()).sort((a, b) => {
-            const aVol = a.incFact + a.incForecast + a.expFact + a.expForecast;
-            const bVol = b.incFact + b.incForecast + b.expFact + b.expForecast;
-            return bVol - aVol;
-          });
-
-          const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-          const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-          const lines = [`Отчет по проектам (${periodStart} — ${periodEnd})`];
-          if (!rows.length) {
-            lines.push('Нет операций по проектам.');
-          } else {
-            rows.forEach(r => {
-              const factNet = r.incFact - r.expFact;
-              const fcNet = r.incForecast - r.expForecast;
-              lines.push(`${r.name}:`);
-              lines.push(`  Факт: доход ${_formatTenge(r.incFact)}, расход ${_formatTenge(-r.expFact)}, итог ${_formatTenge(factNet)} (${r.countFact})`);
-              lines.push(`  Прогноз: доход ${_formatTenge(r.incForecast)}, расход ${_formatTenge(-r.expForecast)}, итог ${_formatTenge(fcNet)} (${r.countForecast})`);
-            });
-          }
-          const answer = lines.join('\n');
+          const answer = buildProjectsReportAll();
           _pushHistory(userIdStr, 'assistant', answer);
           return res.json({ text: answer });
         }
@@ -1247,3 +1196,54 @@ module.exports = function createAiRouter(deps) {
 
   return router;
 };
+      const buildProjectsReportAll = () => {
+        const ops = dbData.operations || [];
+        const projectStats = new Map();
+        const getName = (id) => {
+          const p = (dbData.catalogs?.projects || []).find(x => String(x.id || x._id) === id);
+          return p?.name || 'Без проекта';
+        };
+        const add = (id, isFact, kind, amount, nameHint) => {
+          const key = id || 'none';
+          if (!projectStats.has(key)) {
+            projectStats.set(key, {
+              id: id || null,
+              name: nameHint || getName(id) || 'Без проекта',
+              incFact: 0, expFact: 0, incForecast: 0, expForecast: 0,
+              countFact: 0, countForecast: 0,
+            });
+          }
+          const rec = projectStats.get(key);
+          if (kind === 'income') {
+            if (isFact) { rec.incFact += amount; rec.countFact++; }
+            else { rec.incForecast += amount; rec.countForecast++; }
+          } else if (kind === 'expense') {
+            if (isFact) { rec.expFact += amount; rec.countFact++; }
+            else { rec.expForecast += amount; rec.countForecast++; }
+          }
+        };
+        ops.forEach(op => {
+          const id = op.projectId ? String(op.projectId) : null;
+          add(id, op.isFact, op.kind, op.amount || 0, op.projectName);
+        });
+        const rows = Array.from(projectStats.values()).sort((a, b) => {
+          const aVol = a.incFact + a.incForecast + a.expFact + a.expForecast;
+          const bVol = b.incFact + b.incForecast + b.expFact + b.expForecast;
+          return bVol - aVol;
+        });
+        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
+        const lines = [`Отчет по проектам (${periodStart} — ${periodEnd})`];
+        if (!rows.length) {
+          lines.push('Нет операций по проектам.');
+        } else {
+          rows.forEach(r => {
+            const factNet = r.incFact - r.expFact;
+            const fcNet = r.incForecast - r.expForecast;
+            lines.push(`${r.name}:`);
+            lines.push(`  Факт: доход ${_formatTenge(r.incFact)}, расход ${_formatTenge(-r.expFact)}, итог ${_formatTenge(factNet)} (${r.countFact})`);
+            lines.push(`  Прогноз: доход ${_formatTenge(r.incForecast)}, расход ${_formatTenge(-r.expForecast)}, итог ${_formatTenge(fcNet)} (${r.countForecast})`);
+          });
+        }
+        return lines.join('\n');
+      };
