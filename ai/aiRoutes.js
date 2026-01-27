@@ -11,7 +11,7 @@
 
 const express = require('express');
 
-const AIROUTES_VERSION = 'db-only-v5.1';
+const AIROUTES_VERSION = 'db-only-v5.2';
 const https = require('https');
 
 // =========================
@@ -89,7 +89,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-v6-project-report-fix';
+  const CHAT_VERSION_TAG = 'aiRoutes-v7-project-report-hotfix';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -476,52 +476,106 @@ module.exports = function createAiRouter(deps) {
         now: req?.body?.asOf || null,
       });
 
-      // =========================
-      // EARLY HARD STOP: PROJECT REPORT (avoid any other branching/LLM)
-      // =========================
-      if (!isDeep && /\bпроект/i.test(qLower)) {
-        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
-        const projectMatch = _findProject(qLower);
-        if (looksLikeProjectReport) {
-          if (projectMatch) {
-            const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
-            const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-            const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-
-            let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
-            let factCount = 0, forecastCount = 0;
-
-            ops.forEach(op => {
-              if (op.kind === 'income') {
-                if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
-                else { forecastIncome += op.amount || 0; forecastCount += 1; }
-              } else if (op.kind === 'expense') {
-                if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
-                else { forecastExpense += op.amount || 0; forecastCount += 1; }
-              }
-            });
-
-            const factNet = factIncome - factExpense;
-            const forecastNet = forecastIncome - forecastExpense;
-
-            const lines = [];
-            lines.push(`Проект: ${projectMatch.name}`);
-            lines.push(`Период: ${periodStart} — ${periodEnd}`);
-            lines.push('');
-            lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
-            lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
-            if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
-            lines.push(`[${CHAT_VERSION_TAG}]`);
-            const answer = lines.join('\n');
-            _pushHistory(userIdStr, 'assistant', answer);
-            return res.json({ text: answer });
-          } else {
-            const answer = buildProjectsReportAll() + `\n[${CHAT_VERSION_TAG}]`;
-            _pushHistory(userIdStr, 'assistant', answer);
-            return res.json({ text: answer });
+      // -------------------------
+      // Helpers tied to dbData
+      // -------------------------
+      const findProject = (textLower) => {
+        const projects = dbData.catalogs?.projects || [];
+        let hit = null;
+        projects.forEach(p => {
+          const name = String(p?.name || '').trim();
+          if (!name) return;
+          if (textLower.includes(name.toLowerCase())) {
+            hit = { id: String(p.id || p._id), name };
           }
+        });
+        return hit;
+      };
+
+      const buildProjectReport = (project) => {
+        const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === project.id);
+        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
+
+        let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
+        let factCount = 0, forecastCount = 0;
+
+        ops.forEach(op => {
+          if (op.kind === 'income') {
+            if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
+            else { forecastIncome += op.amount || 0; forecastCount += 1; }
+          } else if (op.kind === 'expense') {
+            if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
+            else { forecastExpense += op.amount || 0; forecastCount += 1; }
+          }
+        });
+
+        const factNet = factIncome - factExpense;
+        const forecastNet = forecastIncome - forecastExpense;
+
+        const lines = [];
+        lines.push(`Проект: ${project.name}`);
+        lines.push(`Период: ${periodStart} — ${periodEnd}`);
+        lines.push('');
+        lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
+        lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
+        if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
+        lines.push(`[${CHAT_VERSION_TAG}]`);
+        return lines.join('\n');
+      };
+
+      const buildProjectsReportAll = () => {
+        const ops = dbData.operations || [];
+        const projectStats = new Map();
+        const getName = (id) => {
+          const p = (dbData.catalogs?.projects || []).find(x => String(x.id || x._id) === id);
+          return p?.name || 'Без проекта';
+        };
+        const add = (id, isFact, kind, amount, nameHint) => {
+          const key = id || 'none';
+          if (!projectStats.has(key)) {
+            projectStats.set(key, {
+              id: id || null,
+              name: nameHint || getName(id) || 'Без проекта',
+              incFact: 0, expFact: 0, incForecast: 0, expForecast: 0,
+              countFact: 0, countForecast: 0,
+            });
+          }
+          const rec = projectStats.get(key);
+          if (kind === 'income') {
+            if (isFact) { rec.incFact += amount; rec.countFact++; }
+            else { rec.incForecast += amount; rec.countForecast++; }
+          } else if (kind === 'expense') {
+            if (isFact) { rec.expFact += amount; rec.countFact++; }
+            else { rec.expForecast += amount; rec.countForecast++; }
+          }
+        };
+        ops.forEach(op => {
+          const id = op.projectId ? String(op.projectId) : null;
+          add(id, op.isFact, op.kind, op.amount || 0, op.projectName);
+        });
+        const rows = Array.from(projectStats.values()).sort((a, b) => {
+          const aVol = a.incFact + a.incForecast + a.expFact + a.expForecast;
+          const bVol = b.incFact + b.incForecast + b.expFact + b.expForecast;
+          return bVol - aVol;
+        });
+        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
+        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
+        const lines = [`Отчет по проектам (${periodStart} — ${periodEnd})`];
+        if (!rows.length) {
+          lines.push('Нет операций по проектам.');
+        } else {
+          rows.forEach(r => {
+            const factNet = r.incFact - r.expFact;
+            const fcNet = r.incForecast - r.expForecast;
+            lines.push(`${r.name}:`);
+            lines.push(`  Факт: доход ${_formatTenge(r.incFact)}, расход ${_formatTenge(-r.expFact)}, итог ${_formatTenge(factNet)} (${r.countFact})`);
+            lines.push(`  Прогноз: доход ${_formatTenge(r.incForecast)}, расход ${_formatTenge(-r.expForecast)}, итог ${_formatTenge(fcNet)} (${r.countForecast})`);
+          });
         }
-      }
+        lines.push(`[${CHAT_VERSION_TAG}]`);
+        return lines.join('\n');
+      };
 
       const debugRequested = process.env.AI_DEBUG === '1' || req?.body?.debugAi === true;
       let debugInfo = null;
@@ -543,57 +597,29 @@ module.exports = function createAiRouter(deps) {
         };
       }
 
+      // =========================
+      // PROJECTS: приоритетная ветка (выше всех остальных)
+      // =========================
+      if (!isDeep && /\bпроект/i.test(qLower)) {
+        const projectMatch = findProject(qLower);
+        const answer = projectMatch
+          ? buildProjectReport(projectMatch)
+          : buildProjectsReportAll();
+        _pushHistory(userIdStr, 'user', q);
+        _pushHistory(userIdStr, 'assistant', answer);
+        if (debugRequested) {
+          debugInfo = debugInfo || {};
+          debugInfo.opsSummary = dbData.operationsSummary || {};
+          debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
+          debugInfo.modelUsed = process.env.OPENAI_MODEL || 'gpt-4o';
+          debugInfo.modelDeep = process.env.OPENAI_MODEL_DEEP || null;
+          return res.json({ text: answer, debug: debugInfo });
+        }
+        return res.json({ text: answer });
+      }
+
       // History
       _pushHistory(userIdStr, 'user', q);
-
-      // =========================
-      // HARD PRIORITY: PROJECT REPORT (before any other handler)
-      // =========================
-      if (!isDeep && isProjectIntent) {
-        const projectMatchImmediate = _findProject(qLower);
-        const looksLikeProjectReportImmediate = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
-
-        if (projectMatchImmediate && looksLikeProjectReportImmediate) {
-          const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatchImmediate.id);
-          const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-          const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-
-          let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
-          let factCount = 0, forecastCount = 0;
-
-          ops.forEach(op => {
-            if (op.kind === 'income') {
-              if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
-              else { forecastIncome += op.amount || 0; forecastCount += 1; }
-            } else if (op.kind === 'expense') {
-              if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
-              else { forecastExpense += op.amount || 0; forecastCount += 1; }
-            }
-          });
-
-          const factNet = factIncome - factExpense;
-          const forecastNet = forecastIncome - forecastExpense;
-
-          const lines = [];
-          lines.push(`Проект: ${projectMatchImmediate.name}`);
-          lines.push(`Период: ${periodStart} — ${periodEnd}`);
-          lines.push('');
-          lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
-          lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
-          if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
-          lines.push(`[${CHAT_VERSION_TAG}]`);
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        if (looksLikeProjectReportImmediate) {
-          const answer = buildProjectsReportAll() + `\n[${CHAT_VERSION_TAG}]`;
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-      }
 
       // =========================
       // DIAGNOSTICS COMMANDS
@@ -839,54 +865,6 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
-      // ----- PROJECT REPORT (priority before expenses/income/LLM) -----
-      if (!isDeep && /\bпроект/i.test(qLower)) {
-        const projectMatch = _findProject(qLower);
-        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
-
-        // конкретный проект
-        if (projectMatch && looksLikeProjectReport) {
-          const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
-          const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-          const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-
-          let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
-          let factCount = 0, forecastCount = 0;
-
-          ops.forEach(op => {
-            if (op.kind === 'income') {
-              if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
-              else { forecastIncome += op.amount || 0; forecastCount += 1; }
-            } else if (op.kind === 'expense') {
-              if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
-              else { forecastExpense += op.amount || 0; forecastCount += 1; }
-            }
-          });
-
-          const factNet = factIncome - factExpense;
-          const forecastNet = forecastIncome - forecastExpense;
-
-          const lines = [];
-          lines.push(`Проект: ${projectMatch.name}`);
-          lines.push(`Период: ${periodStart} — ${periodEnd}`);
-          lines.push('');
-          lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
-          lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
-          if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        // все проекты
-        if (looksLikeProjectReport) {
-          const answer = buildProjectsReportAll();
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-      }
-
       if (!isDeep && (/\b(расход|трат|затрат)\b/i.test(qLower)) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
         const summary = dbData.operationsSummary || {};
         const expenseData = summary.expense || {};
@@ -1038,63 +1016,6 @@ module.exports = function createAiRouter(deps) {
         return lines.join('\n');
       };
 
-      const _findProject = (qLowerText) => {
-        const projects = dbData.catalogs?.projects || [];
-        let best = null;
-        projects.forEach(p => {
-          const name = String(p?.name || '').trim();
-          if (!name) return;
-          const nameLower = name.toLowerCase();
-          if (qLowerText.includes(nameLower)) best = { id: String(p.id || p._id), name };
-        });
-        return best;
-      };
-
-      if (!isDeep) {
-        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
-        const projectMatch = _findProject(qLower);
-        if (projectMatch && looksLikeProjectReport) {
-          const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
-          const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-          const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-
-          let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
-          let factCount = 0, forecastCount = 0;
-
-          ops.forEach(op => {
-            if (op.kind === 'income') {
-              if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
-              else { forecastIncome += op.amount || 0; forecastCount += 1; }
-            } else if (op.kind === 'expense') {
-              if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
-              else { forecastExpense += op.amount || 0; forecastCount += 1; }
-            }
-          });
-
-          const factNet = factIncome - factExpense;
-          const forecastNet = forecastIncome - forecastExpense;
-
-          const lines = [];
-          lines.push(`Проект: ${projectMatch.name}`);
-          lines.push(`Период: ${periodStart} — ${periodEnd}`);
-          lines.push('');
-          lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
-          lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
-          if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        // Отчет по всем проектам
-        if (!projectMatch && looksLikeProjectReport && /\bпроект/i.test(qLower)) {
-          const answer = buildProjectsReportAll();
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-      }
-
       if (!isDeep && isCommand && (qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр'))) {
         const answer = _simpleList('Контрагенты:', dbData.catalogs?.contractors || []);
         _pushHistory(userIdStr, 'assistant', answer);
@@ -1115,12 +1036,6 @@ module.exports = function createAiRouter(deps) {
 
       if (!isDeep && isCommand && (qLower.includes('компан') || qLower.includes('организаци') || qLower.includes('company') || qLower.includes('фирм'))) {
         const answer = _simpleList('Компании:', dbData.catalogs?.companies || []);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && isCommand && (qLower.includes('проект'))) {
-        const answer = _simpleList('Проекты:', dbData.catalogs?.projects || []);
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
@@ -1295,15 +1210,6 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // FORCE PROJECT REPORT before LLM (safety net)
-      // =========================
-      if (!isDeep && /\bпроект/i.test(qLower)) {
-        const answer = buildProjectsReportAll();
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
       // AI GENERATION (OpenAI) - fallback
       // =========================
       const systemPrompt = (() => {
@@ -1353,54 +1259,3 @@ module.exports = function createAiRouter(deps) {
 
   return router;
 };
-      const buildProjectsReportAll = () => {
-        const ops = dbData.operations || [];
-        const projectStats = new Map();
-        const getName = (id) => {
-          const p = (dbData.catalogs?.projects || []).find(x => String(x.id || x._id) === id);
-          return p?.name || 'Без проекта';
-        };
-        const add = (id, isFact, kind, amount, nameHint) => {
-          const key = id || 'none';
-          if (!projectStats.has(key)) {
-            projectStats.set(key, {
-              id: id || null,
-              name: nameHint || getName(id) || 'Без проекта',
-              incFact: 0, expFact: 0, incForecast: 0, expForecast: 0,
-              countFact: 0, countForecast: 0,
-            });
-          }
-          const rec = projectStats.get(key);
-          if (kind === 'income') {
-            if (isFact) { rec.incFact += amount; rec.countFact++; }
-            else { rec.incForecast += amount; rec.countForecast++; }
-          } else if (kind === 'expense') {
-            if (isFact) { rec.expFact += amount; rec.countFact++; }
-            else { rec.expForecast += amount; rec.countForecast++; }
-          }
-        };
-        ops.forEach(op => {
-          const id = op.projectId ? String(op.projectId) : null;
-          add(id, op.isFact, op.kind, op.amount || 0, op.projectName);
-        });
-        const rows = Array.from(projectStats.values()).sort((a, b) => {
-          const aVol = a.incFact + a.incForecast + a.expFact + a.expForecast;
-          const bVol = b.incFact + b.incForecast + b.expFact + b.expForecast;
-          return bVol - aVol;
-        });
-        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-        const lines = [`Отчет по проектам (${periodStart} — ${periodEnd})`];
-        if (!rows.length) {
-          lines.push('Нет операций по проектам.');
-        } else {
-          rows.forEach(r => {
-            const factNet = r.incFact - r.expFact;
-            const fcNet = r.incForecast - r.expForecast;
-            lines.push(`${r.name}:`);
-            lines.push(`  Факт: доход ${_formatTenge(r.incFact)}, расход ${_formatTenge(-r.expFact)}, итог ${_formatTenge(factNet)} (${r.countFact})`);
-            lines.push(`  Прогноз: доход ${_formatTenge(r.incForecast)}, расход ${_formatTenge(-r.expForecast)}, итог ${_formatTenge(fcNet)} (${r.countForecast})`);
-          });
-        }
-        return lines.join('\n');
-      };
