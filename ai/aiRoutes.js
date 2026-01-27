@@ -396,7 +396,7 @@ module.exports = function createAiRouter(deps) {
   // =========================
   // QUICK HANDLER (deterministic, no LLM)
   // =========================
-  const _handleQuick = (qLower, dbData, helpers) => {
+  const _handleQuick = (qLower, dbData, helpers, opts = {}) => {
     const {
       formatTenge: _t,
       fmtDateKZ: _d,
@@ -405,6 +405,7 @@ module.exports = function createAiRouter(deps) {
       buildProjectReport,
       findProject,
     } = helpers;
+    const includeHidden = opts.includeHidden === true;
 
     // ACCOUNTS
     if (/сч[её]т|счета|касс|баланс/.test(qLower)) {
@@ -423,7 +424,7 @@ module.exports = function createAiRouter(deps) {
         lines.push('Счета не найдены.');
       } else {
         const openAccs = accounts.filter(a => !a.isHidden);
-        const hiddenAccs = (!!req?.body?.includeHidden) ? accounts.filter(a => a.isHidden) : [];
+        const hiddenAccs = includeHidden ? accounts.filter(a => a.isHidden) : [];
 
         lines.push('Открытые:');
         if (openAccs.length) {
@@ -444,7 +445,7 @@ module.exports = function createAiRouter(deps) {
 
         lines.push('');
         const totalOpen = totals.open?.future ?? totals.open?.current ?? 0;
-        const totalHidden = (!!req?.body?.includeHidden) ? (totals.hidden?.future ?? totals.hidden?.current ?? 0) : 0;
+        const totalHidden = includeHidden ? (totals.hidden?.future ?? totals.hidden?.current ?? 0) : 0;
         const totalAll = totalOpen + totalHidden;
         lines.push(`Итого открытые: ${_t(totalOpen)}`);
         lines.push(`Итого скрытые: ${_t(totalHidden)}`);
@@ -923,7 +924,7 @@ module.exports = function createAiRouter(deps) {
           buildProjectsReportAll,
           buildProjectReport,
           findProject,
-        });
+        }, { includeHidden: !!req?.body?.includeHidden });
         _pushHistory(userIdStr, 'assistant', answer);
         if (debugRequested) return res.json({ text: answer, debug: debugInfo || {} });
         return res.json({ text: answer });
