@@ -599,48 +599,94 @@ module.exports = function createAiRouter(deps) {
         const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
         const periodLabel = periodStart ? `${periodStart} — ${periodEnd}` : `до ${periodEnd}`;
 
+        const wantsContractor = /\b(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)\b/i.test(qLower);
+
+        // Base totals
         const lines = [
           `Расходы (${periodLabel})`,
           `Факт: ${_formatTenge(expenseData.fact?.total ? -expenseData.fact.total : 0)} (${expenseData.fact?.count || 0})`,
           `Прогноз: ${_formatTenge(expenseData.forecast?.total ? -expenseData.forecast.total : 0)} (${expenseData.forecast?.count || 0})`,
           `Итого: ${_formatTenge(expenseData.total ? -expenseData.total : 0)}`,
+          ''
         ];
+
+        if (wantsContractor) {
+          const contr = (dbData.contractorSummary || [])
+            .map(c => ({
+              name: c.name || 'Без контрагента',
+              amount: Number(c.expenseFact || 0) + Number(c.expenseForecast || 0)
+            }))
+            .filter(c => c.amount > 0)
+            .sort((a, b) => b.amount - a.amount);
+
+          lines.push('По контрагентам:');
+          if (!contr.length) {
+            lines.push('- нет расходов по контрагентам');
+          } else {
+            contr.slice(0, 5).forEach(c => {
+              lines.push(`- ${c.name}: ${_formatTenge(-c.amount)}`);
+            });
+            if (contr.length > 5) lines.push(`... и ещё ${contr.length - 5}`);
+          }
+        } else {
+          const cats = (dbData.categorySummary || [])
+            .map(c => ({
+              name: c.name || 'Без категории',
+              amount: Number(c.expenseFact || 0) + Number(c.expenseForecast || 0)
+            }))
+            .filter(c => c.amount > 0)
+            .sort((a, b) => b.amount - a.amount);
+
+          lines.push('По категориям:');
+          if (!cats.length) {
+            lines.push('- нет расходов по категориям');
+          } else {
+            cats.slice(0, 5).forEach(c => {
+              lines.push(`- ${c.name}: ${_formatTenge(-c.amount)}`);
+            });
+            if (cats.length > 5) lines.push(`... и ещё ${cats.length - 5}`);
+          }
+        }
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
-      if (!isDeep && /\b(перевод|трансфер)\b/i.test(qLower)) {
+      if (!isDeep && /\b(перевод(ы|ов)?|трансфер)\b/i.test(qLower)) {
         const transfers = (dbData.operations || []).filter(op => op.kind === 'transfer' && op.isFact);
         const lines = ['ПЕРЕВОДЫ'];
 
         if (!transfers.length) {
           lines.push('- нет фактических переводов за период');
         } else {
-          const pickName = (...candidates) => candidates.find(v => v && String(v).trim());
+          const pickName = (...candidates) => {
+            const hit = candidates.find(v => v && String(v).trim());
+            return hit ? String(hit).trim() : null;
+          };
           const fmtAmount = (n) => _formatTenge(Math.abs(Number(n || 0))).replace(' ₸', ' т');
 
           transfers.slice(0, 5).forEach(tr => {
             const amountStr = fmtAmount(tr.amount || tr.rawAmount || 0);
             const fromName = pickName(
-              tr.fromAccountName,
               tr.fromCompanyName,
-              tr.accountName,
+              tr.fromAccountName,
               tr.companyName,
+              tr.accountName,
               tr.contractorName,
               tr.fromIndividualName,
               tr.individualName,
               tr.description
             ) || '?';
             const toName = pickName(
-              tr.toAccountName,
               tr.toCompanyName,
+              tr.toAccountName,
+              tr.companyName,
               tr.toIndividualName,
               tr.contractorName,
               tr.description
             ) || '?';
-            lines.push(`${amountStr}: ${fromName} → ${toName}`);
+            lines.push(`${amountStr}: ${fromName}→ ${toName}`);
           });
 
           if (transfers.length > 5) lines.push(`... и ещё ${transfers.length - 5}`);
