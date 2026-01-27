@@ -572,7 +572,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
-      if (!isDeep && (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower))) {
+      if (!isDeep && (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower) && !/\b(перевод|трансфер)\b/i.test(qLower))) {
         const summary = dbData.operationsSummary || {};
         const incomeData = summary.income || {};
 
@@ -598,7 +598,7 @@ module.exports = function createAiRouter(deps) {
         return res.json({ text: answer });
       }
 
-      if (!isDeep && (/\b(расход|трат|затрат)\b/i.test(qLower))) {
+      if (!isDeep && (/\b(расход|трат|затрат)\b/i.test(qLower)) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
         const summary = dbData.operationsSummary || {};
         const expenseData = summary.expense || {};
 
