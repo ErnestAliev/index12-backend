@@ -1034,7 +1034,56 @@ module.exports = function createAiRouter(deps) {
       }
 
       if (!isDeep && isCommand && (qLower.includes('компан') || qLower.includes('организаци') || qLower.includes('company') || qLower.includes('фирм'))) {
-        const answer = _simpleList('Компании:', dbData.catalogs?.companies || []);
+        // агрегируем по companyId/fromCompanyId/toCompanyId
+        const stats = new Map();
+        const add = (name, isFact, kind, amount) => {
+          const key = name || 'Без компании';
+          if (!stats.has(key)) stats.set(key, {
+            name: key,
+            incFact: 0, incForecast: 0,
+            expFact: 0, expForecast: 0,
+          });
+          const rec = stats.get(key);
+          if (kind === 'income') {
+            if (isFact) rec.incFact += amount; else rec.incForecast += amount;
+          } else if (kind === 'expense') {
+            if (isFact) rec.expFact += amount; else rec.expForecast += amount;
+          }
+        };
+
+        (dbData.operations || []).forEach(op => {
+          const name = op.companyName || op.fromCompanyName || op.toCompanyName || 'Без компании';
+          if (op.kind === 'income' || op.kind === 'expense') add(name, !!op.isFact, op.kind, op.amount || 0);
+        });
+
+        const rows = Array.from(stats.values()).sort((a, b) => {
+          const av = Math.abs(a.incFact + a.incForecast + a.expFact + a.expForecast);
+          const bv = Math.abs(b.incFact + b.incForecast + b.expFact + b.expForecast);
+          return bv - av;
+        });
+
+        const lines = [];
+        lines.push('Компании (факт):');
+        if (!rows.length) {
+          lines.push('- нет операций');
+        } else {
+          rows.forEach(r => {
+            const net = r.incFact - r.expFact;
+            lines.push(`- ${r.name}: доход +${_formatTenge(r.incFact)}, расход -${_formatTenge(r.expFact)}, итог ${_formatTenge(net)}`);
+          });
+        }
+        const hasForecast = rows.some(r => r.incForecast || r.expForecast);
+        if (hasForecast) {
+          lines.push('');
+          lines.push('Прогноз (до конца месяца):');
+          rows.forEach(r => {
+            if (!(r.incForecast || r.expForecast)) return;
+            const net = r.incForecast - r.expForecast;
+            lines.push(`- ${r.name}: доход +${_formatTenge(r.incForecast)}, расход -${_formatTenge(r.expForecast)}, итог ${_formatTenge(net)}`);
+          });
+        }
+
+        const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
