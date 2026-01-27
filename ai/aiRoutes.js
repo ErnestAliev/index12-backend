@@ -790,7 +790,6 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Прибыль (факт): ${_formatTenge(factNet)} (${factCount} операций)`);
         lines.push(`Прибыль (прогноз): ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
         if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
-        lines.push(`[${CHAT_VERSION_TAG}]`);
         return lines.join('\n');
       };
 
@@ -859,7 +858,6 @@ module.exports = function createAiRouter(deps) {
             lines.push(`- ${r.name}: ${_formatTenge(fcNet)} (до ${periodEnd})`);
           });
         }
-        lines.push(`[${CHAT_VERSION_TAG}]`);
         return lines.join('\n');
       };
 
