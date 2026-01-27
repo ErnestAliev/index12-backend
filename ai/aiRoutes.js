@@ -787,8 +787,8 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Проект: ${project.name}`);
         lines.push(`Период: ${periodStart} — ${periodEnd}`);
         lines.push('');
-        lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
-        lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
+        lines.push(`Прибыль (факт): ${_formatTenge(factNet)} (${factCount} операций)`);
+        lines.push(`Прибыль (прогноз): ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
         if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
         lines.push(`[${CHAT_VERSION_TAG}]`);
         return lines.join('\n');
@@ -831,16 +831,14 @@ module.exports = function createAiRouter(deps) {
         });
         const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
         const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-        const lines = [`Отчет по проектам (${periodStart} — ${periodEnd})`];
+        const lines = [`Отчет по проектам (прибыль) ${periodStart} — ${periodEnd}`];
         if (!rows.length) {
           lines.push('Нет операций по проектам.');
         } else {
           rows.forEach(r => {
             const factNet = r.incFact - r.expFact;
             const fcNet = r.incForecast - r.expForecast;
-            lines.push(`${r.name}:`);
-            lines.push(`  Факт: доход ${_formatTenge(r.incFact)}, расход ${_formatTenge(-r.expFact)}, итог ${_formatTenge(factNet)} (${r.countFact})`);
-            lines.push(`  Прогноз: доход ${_formatTenge(r.incForecast)}, расход ${_formatTenge(-r.expForecast)}, итог ${_formatTenge(fcNet)} (${r.countForecast})`);
+            lines.push(`${r.name}: прибыль факт ${_formatTenge(factNet)} (${r.countFact} оп.), прогноз ${_formatTenge(fcNet)} (${r.countForecast} оп.)`);
           });
         }
         lines.push(`[${CHAT_VERSION_TAG}]`);
