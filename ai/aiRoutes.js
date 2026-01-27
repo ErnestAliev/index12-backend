@@ -462,9 +462,12 @@ module.exports = function createAiRouter(deps) {
         new Set([effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String))
       );
 
+      const isProjectIntent = /\bпроект/i.test(qLower);
+      const forceAllAccounts = isProjectIntent; // для проектных запросов убираем фильтр по видимым счетам
+
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
         includeHidden: true,
-        visibleAccountIds: req?.body?.visibleAccountIds || null,
+        visibleAccountIds: forceAllAccounts ? null : (req?.body?.visibleAccountIds || null),
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
         now: req?.body?.asOf || null,
