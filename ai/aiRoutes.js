@@ -576,15 +576,22 @@ module.exports = function createAiRouter(deps) {
         const summary = dbData.operationsSummary || {};
         const incomeData = summary.income || {};
 
-        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '';
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '';
-        const periodLabel = periodStart && periodEnd ? `${periodStart} — ${periodEnd}` : (periodStart || periodEnd || 'не указан');
+        const todayStr = dbData.meta?.today || _fmtDateKZ(_endOfToday());
+        const periodStart = dbData.meta?.periodStart || todayStr;
+        const periodEndMonth = dbData.meta?.periodEnd || todayStr;
 
-        const lines = [
-          `Доходы (${periodLabel})`,
-          `Факт: ${_formatTenge(incomeData.fact?.total || 0)} (${incomeData.fact?.count || 0})`,
-          `Прогноз: ${_formatTenge(incomeData.forecast?.total || 0)} (${incomeData.forecast?.count || 0})`,
-        ];
+        const factTotal = incomeData.fact?.total || 0;
+        const factCount = incomeData.fact?.count || 0;
+        const forecastTotal = incomeData.forecast?.total || 0;
+        const forecastCount = incomeData.forecast?.count || 0;
+
+        const lines = [];
+        lines.push(`Фактические доходы с ${periodStart} по ${todayStr}:`);
+        lines.push(`- ${_formatTenge(factTotal)} (${factCount} операций).`);
+        lines.push('');
+        lines.push(`Прогнозные доходы с ${todayStr} по ${periodEndMonth}:`);
+        lines.push(`- ${_formatTenge(forecastTotal)} (${forecastCount} операций).`);
+        if (!forecastTotal) lines.push('Прогнозируемых доходов нет.');
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'assistant', answer);
