@@ -160,11 +160,11 @@ module.exports = function createDataProvider(deps) {
                 ]
             };
 
-            const allOps = await Event.find(opsQuery).lean();
+        const allOps = await Event.find(opsQuery).lean();
 
-            // Calculate current balance (up to nowRef)
-            const currentOps = allOps.filter(op => new Date(op.date) <= nowRef);
-            let currentBalance = acc.initialBalance || 0;
+        // Calculate current balance (up to nowRef)
+        const currentOps = allOps.filter(op => new Date(op.date) <= nowRef);
+        let currentBalance = acc.initialBalance || 0;
             for (const op of currentOps) {
                 if (String(op.accountId) === String(acc._id)) {
                     // Regular operation on this account
@@ -178,14 +178,18 @@ module.exports = function createDataProvider(deps) {
                 }
             }
 
-            // Calculate future balance (all operations)
-            let futureBalance = acc.initialBalance || 0;
-            for (const op of allOps) {
-                if (String(op.accountId) === String(acc._id)) {
-                    futureBalance += (op.amount || 0);
-                } else if (String(op.toAccountId) === String(acc._id)) {
-                    futureBalance += Math.abs(op.amount || 0);
-                } else if (String(op.fromAccountId) === String(acc._id)) {
+        // Calculate future balance (all operations)
+        // ⚠️ Прогноз ограничиваем концом текущего месяца, чтобы не тянуть “бесконечный” будущий кэш
+        const endOfMonth = new Date(Date.UTC(nowRef.getUTCFullYear(), nowRef.getUTCMonth() + 1, 1, 0, 0, 0) - 1);
+        const futureOps = allOps.filter(op => new Date(op.date) <= endOfMonth);
+
+        let futureBalance = acc.initialBalance || 0;
+        for (const op of futureOps) {
+            if (String(op.accountId) === String(acc._id)) {
+                futureBalance += (op.amount || 0);
+            } else if (String(op.toAccountId) === String(acc._id)) {
+                futureBalance += Math.abs(op.amount || 0);
+            } else if (String(op.fromAccountId) === String(acc._id)) {
                     futureBalance -= Math.abs(op.amount || 0);
                 }
             }
