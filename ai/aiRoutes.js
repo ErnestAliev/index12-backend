@@ -449,7 +449,7 @@ module.exports = function createAiRouter(deps) {
     }
 
     // INCOME
-    if (/\b(доход|поступлен|приход)\b/.test(qLower) && !/\bрасход\b/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
+    if (/(доход[а-я]*|поступлен|приход)/.test(qLower) && !/(расход|трат|затрат)/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
       const summary = dbData.operationsSummary || {};
       const incomeData = summary.income || {};
 
@@ -474,7 +474,7 @@ module.exports = function createAiRouter(deps) {
     }
 
     // EXPENSES
-    if (/(расход|трат|затрат)/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
+    if (/(расход[а-я]*|трат|затрат)/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
       const summary = dbData.operationsSummary || {};
       const expenseData = summary.expense || {};
 
@@ -559,7 +559,7 @@ module.exports = function createAiRouter(deps) {
     }
 
     // TRANSFERS
-    if (/(перевод|трансфер|transfer)/.test(qLower)) {
+    if (/(перевод[а-я]*|трансфер|transfer)/.test(qLower)) {
       const maskId = (id) => {
         const s = String(id || '').trim();
         return s ? `…${s.slice(-4)}` : '?';
