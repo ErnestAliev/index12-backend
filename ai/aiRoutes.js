@@ -1147,6 +1147,15 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
+      // FORCE PROJECT REPORT before LLM (safety net)
+      // =========================
+      if (!isDeep && /\bпроект/i.test(qLower)) {
+        const answer = buildProjectsReportAll();
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
+
+      // =========================
       // AI GENERATION (OpenAI) - fallback
       // =========================
       const systemPrompt = (() => {
