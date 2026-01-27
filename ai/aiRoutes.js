@@ -500,6 +500,55 @@ module.exports = function createAiRouter(deps) {
       _pushHistory(userIdStr, 'user', q);
 
       // =========================
+      // HARD PRIORITY: PROJECT REPORT (before any other handler)
+      // =========================
+      if (!isDeep && isProjectIntent) {
+        const projectMatchImmediate = _findProject(qLower);
+        const looksLikeProjectReportImmediate = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
+
+        if (projectMatchImmediate && looksLikeProjectReportImmediate) {
+          const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatchImmediate.id);
+          const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
+          const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
+
+          let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
+          let factCount = 0, forecastCount = 0;
+
+          ops.forEach(op => {
+            if (op.kind === 'income') {
+              if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
+              else { forecastIncome += op.amount || 0; forecastCount += 1; }
+            } else if (op.kind === 'expense') {
+              if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
+              else { forecastExpense += op.amount || 0; forecastCount += 1; }
+            }
+          });
+
+          const factNet = factIncome - factExpense;
+          const forecastNet = forecastIncome - forecastExpense;
+
+          const lines = [];
+          lines.push(`Проект: ${projectMatchImmediate.name}`);
+          lines.push(`Период: ${periodStart} — ${periodEnd}`);
+          lines.push('');
+          lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
+          lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
+          if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
+          lines.push(`[${CHAT_VERSION_TAG}]`);
+
+          const answer = lines.join('\n');
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+
+        if (looksLikeProjectReportImmediate) {
+          const answer = buildProjectsReportAll() + `\n[${CHAT_VERSION_TAG}]`;
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
+        }
+      }
+
+      // =========================
       // DIAGNOSTICS COMMANDS
       // =========================
       const _isDiagnosticsQuery = (s) => {
