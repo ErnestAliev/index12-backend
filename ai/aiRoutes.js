@@ -494,7 +494,7 @@ module.exports = function createAiRouter(deps) {
       _pushHistory(userIdStr, 'user', q);
 
       // =========================
-      // DIAGNOSTICS COMMAND
+      // DIAGNOSTICS COMMANDS
       // =========================
       const _isDiagnosticsQuery = (s) => {
         const t = String(s || '').toLowerCase();
@@ -502,6 +502,76 @@ module.exports = function createAiRouter(deps) {
         if (t.includes('диагност') || t.includes('diagnostic')) return true;
         return /(^|[^a-z])diag([^a-z]|$)/i.test(t);
       };
+
+      const _isFullDiagnosticsQuery = (s) => {
+        const t = String(s || '').toLowerCase();
+        // Специальный триггер с опечаткой "дикагностика"
+        return t.includes('дикагност');
+      };
+
+      if (_isFullDiagnosticsQuery(qLower)) {
+        const lines = [];
+        const meta = dbData.meta || {};
+
+        lines.push('ДИКАГНОСТИКА (полный список)');
+        lines.push(`Период: ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
+        lines.push(`Сегодня: ${meta.today || '?'}`);
+        lines.push('');
+
+        // Счета
+        const accounts = Array.isArray(dbData.accounts) ? dbData.accounts : [];
+        lines.push(`Счета (${accounts.length}):`);
+        accounts.forEach(a => lines.push(`- ${a.name || 'Счет'} | cur=${_formatTenge(a.currentBalance || 0)} | hidden=${a.isHidden ? 'yes' : 'no'} | id=${a._id}`));
+        lines.push('');
+
+        // Компании
+        const companies = Array.isArray(dbData.catalogs?.companies) ? dbData.catalogs.companies : [];
+        lines.push(`Компании (${companies.length}):`);
+        companies.forEach(c => lines.push(`- ${c.name || c} | id=${c.id || c._id || '?'}`));
+        lines.push('');
+
+        // Проекты
+        const projects = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
+        lines.push(`Проекты (${projects.length}):`);
+        projects.forEach(p => lines.push(`- ${p.name || p} | id=${p.id || p._id || '?'}`));
+        lines.push('');
+
+        // Категории
+        const categories = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
+        lines.push(`Категории (${categories.length}):`);
+        categories.forEach(c => lines.push(`- ${c.name || c} | type=${c.type || ''} | id=${c.id || c._id || '?'}`));
+        lines.push('');
+
+        // Контрагенты
+        const contractors = Array.isArray(dbData.catalogs?.contractors) ? dbData.catalogs.contractors : [];
+        lines.push(`Контрагенты (${contractors.length}):`);
+        contractors.forEach(c => lines.push(`- ${c.name || c} | id=${c.id || c._id || '?'}`));
+        lines.push('');
+
+        // Физлица
+        const individuals = Array.isArray(dbData.catalogs?.individuals) ? dbData.catalogs.individuals : [];
+        lines.push(`Физлица (${individuals.length}):`);
+        individuals.forEach(i => lines.push(`- ${i.name || i} | id=${i.id || i._id || '?'}`));
+        lines.push('');
+
+        // Операции
+        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
+        lines.push(`Операции (${ops.length}):`);
+        ops.forEach(op => {
+          const dir = op.kind === 'expense' ? '-' : op.kind === 'income' ? '+' : '';
+          const amt = _formatTenge(dir === '-' ? -Math.abs(op.amount || 0) : Math.abs(op.amount || 0));
+          const acc = op.accountName || op.fromAccountName || op.toAccountName || '';
+          const proj = op.projectId ? `proj=${op.projectId}` : '';
+          const cat = op.categoryId ? `cat=${op.categoryId}` : '';
+          const contr = op.contractorId ? `ctr=${op.contractorId}` : '';
+          const fact = op.isFact ? 'fact' : 'forecast';
+          lines.push(`- ${op.date || op.dateIso}: ${op.kind || op.type} ${amt} ${fact} ${acc} ${proj} ${cat} ${contr} ${op.description || ''}`);
+        });
+
+        const answer = lines.join('\n');
+        _pushHistory(userIdStr, 'assistant', answer);
+        return res.json({ text: answer });
+      }
 
       if (_isDiagnosticsQuery(qLower)) {
         const diag = [
