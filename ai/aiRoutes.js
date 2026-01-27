@@ -770,8 +770,8 @@ module.exports = function createAiRouter(deps) {
       const forceAllAccounts = isProjectIntent; // для проектных запросов убираем фильтр по видимым счетам
 
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: true,
-        visibleAccountIds: null,
+        includeHidden: forceAllAccounts ? true : !!req?.body?.includeHidden,
+        visibleAccountIds: forceAllAccounts ? null : (req?.body?.visibleAccountIds || null),
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
         now: req?.body?.asOf || null,
@@ -924,7 +924,7 @@ module.exports = function createAiRouter(deps) {
           buildProjectsReportAll,
           buildProjectReport,
           findProject,
-        }, { includeHidden: true }); // показываем все счета, видимость регулируем в выводе
+        }, { includeHidden: !!req?.body?.includeHidden });
         _pushHistory(userIdStr, 'assistant', answer);
         if (debugRequested) return res.json({ text: answer, debug: debugInfo || {} });
         return res.json({ text: answer });
