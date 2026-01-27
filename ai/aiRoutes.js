@@ -649,7 +649,9 @@ module.exports = function createAiRouter(deps) {
         const compId = acc.companyId
           ? String(acc.companyId)
           : (accId && accountCompanyGuess.get(accId)) || null;
-        addBalance(compId, Number(acc.currentBalance || 0));
+        // Используем futureBalance если есть, чтобы совпасть с логикой «с учетом будущих»
+        const bal = acc.futureBalance !== undefined ? Number(acc.futureBalance || 0) : Number(acc.currentBalance || 0);
+        addBalance(compId, bal);
       });
 
       const rows = Array.from(buckets.values()).sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
