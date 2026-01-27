@@ -465,7 +465,7 @@ module.exports = function createAiRouter(deps) {
         new Set([effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String))
       );
 
-      const isProjectIntent = /\bпроект/i.test(qLower);
+      const isProjectIntent = /проект/i.test(qLower);
       const forceAllAccounts = isProjectIntent; // для проектных запросов убираем фильтр по видимым счетам
 
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
@@ -597,15 +597,17 @@ module.exports = function createAiRouter(deps) {
         };
       }
 
+      // write user message to history once
+      _pushHistory(userIdStr, 'user', q);
+
       // =========================
       // PROJECTS: приоритетная ветка (выше всех остальных)
       // =========================
-      if (!isDeep && /\bпроект/i.test(qLower)) {
+      if (!isDeep && /проект/i.test(qLower)) {
         const projectMatch = findProject(qLower);
         const answer = projectMatch
           ? buildProjectReport(projectMatch)
           : buildProjectsReportAll();
-        _pushHistory(userIdStr, 'user', q);
         _pushHistory(userIdStr, 'assistant', answer);
         if (debugRequested) {
           debugInfo = debugInfo || {};
@@ -617,9 +619,6 @@ module.exports = function createAiRouter(deps) {
         }
         return res.json({ text: answer });
       }
-
-      // History
-      _pushHistory(userIdStr, 'user', q);
 
       // =========================
       // DIAGNOSTICS COMMANDS
