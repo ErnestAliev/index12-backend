@@ -423,7 +423,7 @@ module.exports = function createAiRouter(deps) {
         lines.push('Счета не найдены.');
       } else {
         const openAccs = accounts.filter(a => !a.isHidden);
-        const hiddenAccs = accounts.filter(a => a.isHidden);
+        const hiddenAccs = (!!req?.body?.includeHidden) ? accounts.filter(a => a.isHidden) : [];
 
         lines.push('Открытые:');
         if (openAccs.length) {
@@ -444,8 +444,8 @@ module.exports = function createAiRouter(deps) {
 
         lines.push('');
         const totalOpen = totals.open?.future ?? totals.open?.current ?? 0;
-        const totalHidden = totals.hidden?.future ?? totals.hidden?.current ?? 0;
-        const totalAll = totals.all?.future ?? totals.all?.current ?? (totalOpen + totalHidden);
+        const totalHidden = (!!req?.body?.includeHidden) ? (totals.hidden?.future ?? totals.hidden?.current ?? 0) : 0;
+        const totalAll = totalOpen + totalHidden;
         lines.push(`Итого открытые: ${_t(totalOpen)}`);
         lines.push(`Итого скрытые: ${_t(totalHidden)}`);
         lines.push(`Итого все: ${_t(totalAll)}`);
@@ -768,11 +768,9 @@ module.exports = function createAiRouter(deps) {
       const isProjectIntent = /проект/i.test(qLower);
       const forceAllAccounts = isProjectIntent; // для проектных запросов убираем фильтр по видимым счетам
 
-      // Для консистентности быстрых ответов всегда тянем все счета (открытые и скрытые),
-      // без ограничений visibleAccountIds; видимость решаем в ответе.
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: true,
-        visibleAccountIds: null,
+        includeHidden: forceAllAccounts ? true : !!req?.body?.includeHidden,
+        visibleAccountIds: forceAllAccounts ? null : (req?.body?.visibleAccountIds || null),
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
         now: req?.body?.asOf || null,
