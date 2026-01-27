@@ -739,7 +739,7 @@ module.exports = function createAiRouter(deps) {
       const forceAllAccounts = isProjectIntent; // для проектных запросов убираем фильтр по видимым счетам
 
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: forceAllAccounts ? true : true, // always include hidden; project intent enforces null visible accounts
+        includeHidden: forceAllAccounts ? true : !!req?.body?.includeHidden,
         visibleAccountIds: forceAllAccounts ? null : (req?.body?.visibleAccountIds || null),
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
