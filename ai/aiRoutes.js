@@ -601,13 +601,13 @@ module.exports = function createAiRouter(deps) {
 
         const wantsContractor = /\b(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)\b/i.test(qLower);
 
-        const factTotal = expenseData.fact?.total ? -expenseData.fact.total : 0;
+        const factTotal = Math.abs(expenseData.fact?.total || 0);
         const factCount = expenseData.fact?.count || 0;
-        const forecastTotal = expenseData.forecast?.total ? -expenseData.forecast.total : 0;
+        const forecastTotal = Math.abs(expenseData.forecast?.total || 0);
         const forecastCount = expenseData.forecast?.count || 0;
 
         const lines = [];
-        lines.push(`Фактические расходы с ${periodStart} по ${todayStr}:`);
+        lines.push(`Фактические расходы с ${periodStart} по ${todayStr} составили:`);
         lines.push(`- ${_formatTenge(factTotal)} (${factCount} операций).`);
         lines.push('');
         lines.push('Из них:');
@@ -620,7 +620,7 @@ module.exports = function createAiRouter(deps) {
 
           if (!contrFact.length) lines.push('- нет расходов по контрагентам');
           else {
-            contrFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(-c.amount)}`));
+            contrFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
             if (contrFact.length > 5) lines.push(`... и ещё ${contrFact.length - 5}`);
           }
         } else {
@@ -631,13 +631,13 @@ module.exports = function createAiRouter(deps) {
 
           if (!catsFact.length) lines.push('- нет расходов по категориям');
           else {
-            catsFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(-c.amount)}`));
+            catsFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
             if (catsFact.length > 5) lines.push(`... и ещё ${catsFact.length - 5}`);
           }
         }
 
         lines.push('');
-        lines.push(`Запланированные расходы с ${todayStr} по ${periodEndMonth}:`);
+        lines.push(`С ${todayStr} до конца месяца запланированы расходы на сумму:`);
         lines.push(`- ${_formatTenge(forecastTotal)} (${forecastCount} операций).`);
         lines.push('');
         lines.push('Из них:');
@@ -650,7 +650,7 @@ module.exports = function createAiRouter(deps) {
 
           if (!contrForecast.length) lines.push('- нет запланированных расходов по контрагентам');
           else {
-            contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(-c.amount)}`));
+            contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
             if (contrForecast.length > 5) lines.push(`... и ещё ${contrForecast.length - 5}`);
           }
         } else {
@@ -661,7 +661,7 @@ module.exports = function createAiRouter(deps) {
 
           if (!catsForecast.length) lines.push('- нет запланированных расходов по категориям');
           else {
-            catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(-c.amount)}`));
+            catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
             if (catsForecast.length > 5) lines.push(`... и ещё ${catsForecast.length - 5}`);
           }
         }
