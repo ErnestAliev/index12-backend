@@ -476,6 +476,53 @@ module.exports = function createAiRouter(deps) {
         now: req?.body?.asOf || null,
       });
 
+      // =========================
+      // EARLY HARD STOP: PROJECT REPORT (avoid any other branching/LLM)
+      // =========================
+      if (!isDeep && /\bпроект/i.test(qLower)) {
+        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
+        const projectMatch = _findProject(qLower);
+        if (looksLikeProjectReport) {
+          if (projectMatch) {
+            const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
+            const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
+            const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
+
+            let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
+            let factCount = 0, forecastCount = 0;
+
+            ops.forEach(op => {
+              if (op.kind === 'income') {
+                if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
+                else { forecastIncome += op.amount || 0; forecastCount += 1; }
+              } else if (op.kind === 'expense') {
+                if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
+                else { forecastExpense += op.amount || 0; forecastCount += 1; }
+              }
+            });
+
+            const factNet = factIncome - factExpense;
+            const forecastNet = forecastIncome - forecastExpense;
+
+            const lines = [];
+            lines.push(`Проект: ${projectMatch.name}`);
+            lines.push(`Период: ${periodStart} — ${periodEnd}`);
+            lines.push('');
+            lines.push(`Факт: доход ${_formatTenge(factIncome)}, расход ${_formatTenge(-factExpense)}, итог ${_formatTenge(factNet)} (${factCount} операций)`);
+            lines.push(`Прогноз: доход ${_formatTenge(forecastIncome)}, расход ${_formatTenge(-forecastExpense)}, итог ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
+            if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
+            lines.push(`[${CHAT_VERSION_TAG}]`);
+            const answer = lines.join('\n');
+            _pushHistory(userIdStr, 'assistant', answer);
+            return res.json({ text: answer });
+          } else {
+            const answer = buildProjectsReportAll() + `\n[${CHAT_VERSION_TAG}]`;
+            _pushHistory(userIdStr, 'assistant', answer);
+            return res.json({ text: answer });
+          }
+        }
+      }
+
       const debugRequested = process.env.AI_DEBUG === '1' || req?.body?.debugAi === true;
       let debugInfo = null;
 
