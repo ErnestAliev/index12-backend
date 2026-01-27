@@ -179,9 +179,12 @@ module.exports = function createDataProvider(deps) {
             }
 
         // Calculate future balance (all operations)
-        // Прогноз: считаем по всем операциям (без обрезки месяцем), чтобы совпадать с виджетами
+        // Прогноз: учитываем операции до конца текущего месяца, как в виджете
+        const endOfMonth = new Date(Date.UTC(nowRef.getUTCFullYear(), nowRef.getUTCMonth() + 1, 1, 0, 0, 0) - 1);
+        const futureOps = allOps.filter(op => new Date(op.date) <= endOfMonth);
+
         let futureBalance = acc.initialBalance || 0;
-        for (const op of allOps) {
+        for (const op of futureOps) {
             if (String(op.accountId) === String(acc._id)) {
                 futureBalance += (op.amount || 0);
             } else if (String(op.toAccountId) === String(acc._id)) {
