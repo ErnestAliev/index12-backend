@@ -751,9 +751,9 @@ module.exports = function createAiRouter(deps) {
       };
 
       if (!isDeep) {
-        const looksLikeProjectReport = /\b(отч[её]т|покажи|что по|итог)\b.*проект|\bпроект\b.*\b(отч[её]т|итог)/i.test(qLower);
+        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай)\b/i.test(qLower);
         const projectMatch = _findProject(qLower);
-        if (looksLikeProjectReport && projectMatch) {
+        if (projectMatch && looksLikeProjectReport) {
           const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
           const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
           const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
