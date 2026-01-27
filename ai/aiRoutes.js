@@ -903,7 +903,7 @@ module.exports = function createAiRouter(deps) {
       };
 
       if (!isDeep) {
-        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай)\b/i.test(qLower);
+        const looksLikeProjectReport = /\b(отч[её]т|сводк|итог|покажи|показ|дай|сделай)\b/i.test(qLower);
         const projectMatch = _findProject(qLower);
         if (projectMatch && looksLikeProjectReport) {
           const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === projectMatch.id);
