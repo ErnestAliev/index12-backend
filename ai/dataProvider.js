@@ -316,9 +316,14 @@ module.exports = function createDataProvider(deps) {
             ];
         }
         let accounts = await Account.find(accountsQuery).lean();
-        if (!accounts.length && workspaceId) {
-            accounts = await Account.find({ userId: _uQuery(userId) }).lean();
-        }
+        // Дополнительно загрузим все аккаунты пользователя (без workspace-фильтра) для имени переводов
+        const allUserAccounts = await Account.find({ userId: _uQuery(userId) }).lean();
+        const accMap = new Map();
+        const addAcc = (a) => { if (a && a._id) accMap.set(String(a._id), a); };
+        accounts.forEach(addAcc);
+        allUserAccounts.forEach(addAcc);
+        accounts = Array.from(accMap.values());
+
         const accNameById = new Map(accounts.map(a => [String(a._id), a.name || 'Счет']));
         const accountIndividualIds = new Set(
             accounts
