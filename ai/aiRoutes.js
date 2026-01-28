@@ -1647,8 +1647,11 @@ module.exports = function createAiRouter(deps) {
       const includeHidden = !!req.body?.includeHidden; // оставляем для совместимости, но ниже показываем скрытые всегда
 
       if (!snap) return res.status(400).json({ text: 'snapshot not provided' });
-      if (!/сч[её]т|счета|касс|баланс/.test(qRaw)) {
-        return res.json({ text: 'Этот тестовый маршрут поддерживает пока только запросы про счета.' });
+      const isAccountsQuery = /сч[её]т|счета|касс|баланс/.test(qRaw);
+      const isCompaniesQuery = /компан/i.test(qRaw);
+
+      if (!isAccountsQuery && !isCompaniesQuery) {
+        return res.json({ text: 'Этот тестовый маршрут поддерживает пока запросы про счета и компании.' });
       }
 
       // Берём счета из снапшота (как у виджета)
@@ -1675,6 +1678,39 @@ module.exports = function createAiRouter(deps) {
       const hiddenAccs = accounts.filter(a => a.isHidden);
 
       const sum = (arr, field) => arr.reduce((s, x) => s + Number(x[field] || 0), 0);
+
+      // --------- COMPANIES FROM SNAPSHOT ----------
+      if (isCompaniesQuery) {
+        const companies = Array.isArray(snap.companies) ? snap.companies : [];
+        const nameById = new Map(companies.map(c => [String(c._id || c.id), c.name || 'Без названия']));
+
+        const useHidden = includeHidden;
+        const accPool = useHidden ? [...openAccs, ...hiddenAccs] : openAccs;
+
+        const agg = new Map();
+        const add = (acc) => {
+          const cid = acc.companyId ? String(acc.companyId) : 'null';
+          const name = cid === 'null' ? 'Без компании' : (nameById.get(cid) || 'Без названия');
+          const cur = agg.get(cid) || { name, total: 0 };
+          cur.total += acc.futureBalance;
+          agg.set(cid, cur);
+        };
+        accPool.forEach(add);
+
+        const rows = Array.from(agg.values()).sort((a, b) => b.total - a.total);
+        const totalAll = rows.reduce((s, r) => s + r.total, 0);
+
+        const lines = [];
+        lines.push('Компании (snapshot, баланс счетов)');
+        rows.forEach(r => lines.push(`${r.name}: ${_formatTenge(r.total)}`));
+        lines.push('');
+        lines.push(`Итого: ${_formatTenge(totalAll)}`);
+        if (!useHidden) lines.push('(Скрытые счета не включены)');
+
+        return res.json({ text: lines.join('\n') });
+      }
+
+      // --------- ACCOUNTS FROM SNAPSHOT ----------
       const totalOpen = sum(openAccs, 'futureBalance');
       const totalHidden = sum(hiddenAccs, 'futureBalance');
       const totalAll = totalOpen + totalHidden;
