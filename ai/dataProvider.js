@@ -303,7 +303,7 @@ module.exports = function createDataProvider(deps) {
             operations = Array.from(map.values());
         }
 
-        // Get accounts for intermediary check (use same userId variants)
+        // Get accounts for intermediary check (use same userId variants) and names for transfers
         const accountsQuery = { userId: _uQuery(userId) };
         if (workspaceId) {
             const wsStr = String(workspaceId);
@@ -319,6 +319,7 @@ module.exports = function createDataProvider(deps) {
         if (!accounts.length && workspaceId) {
             accounts = await Account.find({ userId: _uQuery(userId) }).lean();
         }
+        const accNameById = new Map(accounts.map(a => [String(a._id), a.name || 'Счет']));
         const accountIndividualIds = new Set(
             accounts
                 .filter(a => a.individualId)
@@ -387,6 +388,8 @@ module.exports = function createDataProvider(deps) {
                 accountId: op.accountId?._id ? String(op.accountId._id) : (op.accountId ? String(op.accountId) : null),
                 fromAccountId: op.fromAccountId?._id ? String(op.fromAccountId._id) : (op.fromAccountId ? String(op.fromAccountId) : null),
                 toAccountId: op.toAccountId?._id ? String(op.toAccountId._id) : (op.toAccountId ? String(op.toAccountId) : null),
+                fromAccountName: op.fromAccountId?.name || accNameById.get(String(op.fromAccountId || '')) || null,
+                toAccountName: op.toAccountId?.name || accNameById.get(String(op.toAccountId || '')) || null,
                 projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
                 contractorId: op.contractorId?._id ? String(op.contractorId._id) : (op.contractorId ? String(op.contractorId) : null),
                 categoryId: op.categoryId?._id ? String(op.categoryId._id) : (op.categoryId ? String(op.categoryId) : null),
