@@ -1667,6 +1667,7 @@ module.exports = function createAiRouter(deps) {
         return {
           _id: String(a._id || a.id || a.accountId || ''),
           name: a.name || a.accountName || 'Счет',
+          companyId: a.companyId ? String(a.companyId) : null,
           currentBalance: Math.round(Number(a.currentBalance ?? a.balance ?? 0)),
           futureBalance: Math.round(Number(a.futureBalance ?? a.balance ?? 0)),
           isHidden: hiddenFlag,
