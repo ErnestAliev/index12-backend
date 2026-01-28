@@ -326,6 +326,19 @@ module.exports = function createDataProvider(deps) {
                 .map(a => String(a.individualId))
         );
 
+        // Companies & individuals maps for transfers
+        let companies = [];
+        try {
+            companies = await Company.find({ userId: _uQuery(userId) }).lean();
+        } catch (_) { companies = []; }
+        const companyNameById = new Map(companies.map(c => [String(c._id), c.name || 'Компания']));
+
+        let individuals = [];
+        try {
+            individuals = await Individual.find({ userId: _uQuery(userId) }).lean();
+        } catch (_) { individuals = []; }
+        const individualNameById = new Map(individuals.map(i => [String(i._id), i.name || 'Физлицо']));
+
         // Filter and normalize operations
         const normalized = [];
 
@@ -396,10 +409,16 @@ module.exports = function createDataProvider(deps) {
                 companyId: op.companyId?._id ? String(op.companyId._id) : (op.companyId ? String(op.companyId) : null),
                 fromCompanyId: op.fromCompanyId?._id ? String(op.fromCompanyId._id) : (op.fromCompanyId ? String(op.fromCompanyId) : null),
                 toCompanyId: op.toCompanyId?._id ? String(op.toCompanyId._id) : (op.toCompanyId ? String(op.toCompanyId) : null),
+                companyName: op.companyId?.name || companyNameById.get(String(op.companyId || '')) || null,
+                fromCompanyName: op.fromCompanyId?.name || companyNameById.get(String(op.fromCompanyId || '')) || null,
+                toCompanyName: op.toCompanyId?.name || companyNameById.get(String(op.toCompanyId || '')) || null,
                 individualId: op.individualId?._id ? String(op.individualId._id) : (op.individualId ? String(op.individualId) : null),
                 counterpartyIndividualId: op.counterpartyIndividualId?._id ? String(op.counterpartyIndividualId._id) : (op.counterpartyIndividualId ? String(op.counterpartyIndividualId) : null),
                 fromIndividualId: op.fromIndividualId?._id ? String(op.fromIndividualId._id) : (op.fromIndividualId ? String(op.fromIndividualId) : null),
                 toIndividualId: op.toIndividualId?._id ? String(op.toIndividualId._id) : (op.toIndividualId ? String(op.toIndividualId) : null),
+                individualName: op.individualId?.name || individualNameById.get(String(op.individualId || '')) || null,
+                fromIndividualName: op.fromIndividualId?.name || individualNameById.get(String(op.fromIndividualId || '')) || null,
+                toIndividualName: op.toIndividualId?.name || individualNameById.get(String(op.toIndividualId || '')) || null,
             });
         }
 
