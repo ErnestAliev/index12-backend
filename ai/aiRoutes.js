@@ -1653,13 +1653,22 @@ module.exports = function createAiRouter(deps) {
 
       // Берём счета из снапшота (как у виджета)
       const rawAccs = snap.accounts || snap.currentAccountBalances || [];
-      const accounts = rawAccs.map(a => ({
-        _id: String(a._id || a.id || a.accountId || ''),
-        name: a.name || a.accountName || 'Счет',
-        currentBalance: Math.round(Number(a.currentBalance ?? a.balance ?? 0)),
-        futureBalance: Math.round(Number(a.futureBalance ?? a.balance ?? 0)),
-        isHidden: !!(a.isHidden || a.hidden || a.excluded || a.excludeFromTotal),
-      })).filter(a => a._id);
+      const accounts = rawAccs.map(a => {
+        const hiddenFlag = !!(
+          a.isHidden ||
+          a.hidden ||
+          a.isExcluded ||
+          a.excluded ||
+          a.excludeFromTotal
+        );
+        return {
+          _id: String(a._id || a.id || a.accountId || ''),
+          name: a.name || a.accountName || 'Счет',
+          currentBalance: Math.round(Number(a.currentBalance ?? a.balance ?? 0)),
+          futureBalance: Math.round(Number(a.futureBalance ?? a.balance ?? 0)),
+          isHidden: hiddenFlag,
+        };
+      }).filter(a => a._id);
 
       const openAccs = accounts.filter(a => !a.isHidden);
       const hiddenAccs = includeHidden ? accounts.filter(a => a.isHidden) : [];
