@@ -1644,7 +1644,7 @@ module.exports = function createAiRouter(deps) {
     try {
       const snap = req.body?.snapshot;
       const qRaw = String(req.body?.message || '').trim().toLowerCase();
-      const includeHidden = !!req.body?.includeHidden;
+      const includeHidden = !!req.body?.includeHidden; // оставляем для совместимости, но ниже показываем скрытые всегда
 
       if (!snap) return res.status(400).json({ text: 'snapshot not provided' });
       if (!/сч[её]т|счета|касс|баланс/.test(qRaw)) {
@@ -1671,7 +1671,8 @@ module.exports = function createAiRouter(deps) {
       }).filter(a => a._id);
 
       const openAccs = accounts.filter(a => !a.isHidden);
-      const hiddenAccs = includeHidden ? accounts.filter(a => a.isHidden) : [];
+      // Показываем скрытые всегда, чтобы их не смешивало с открытыми
+      const hiddenAccs = accounts.filter(a => a.isHidden);
 
       const sum = (arr, field) => arr.reduce((s, x) => s + Number(x[field] || 0), 0);
       const totalOpen = sum(openAccs, 'futureBalance');
