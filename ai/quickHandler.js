@@ -6,6 +6,13 @@ module.exports.handleSnapshot = function handleSnapshot({ req, res, formatTenge 
     const snap = req.body?.snapshot;
     const qRaw = String(req.body?.message || '').trim().toLowerCase();
     const includeHidden = !!req.body?.includeHidden; // kept for compatibility
+    const fmt = typeof formatTenge === 'function'
+      ? formatTenge
+      : (n) => {
+          const num = Number(n || 0);
+          const sign = num < 0 ? '- ' : '';
+          return sign + Math.abs(Math.round(num)).toLocaleString('ru-RU') + ' ₸';
+        };
 
     const isAccountsQuery = /сч[её]т|счета|касс|баланс/.test(qRaw);
     const isCompaniesQuery = /компан/i.test(qRaw);
@@ -57,9 +64,9 @@ module.exports.handleSnapshot = function handleSnapshot({ req, res, formatTenge 
 
       const lines = [];
       lines.push('Компании (snapshot, баланс счетов)');
-      rows.forEach(r => lines.push(`${r.name}: ${formatTenge(r.total)}`));
+      rows.forEach(r => lines.push(`${r.name}: ${fmt(r.total)}`));
       lines.push('');
-      lines.push(`Итого: ${formatTenge(totalAll)}`);
+      lines.push(`Итого: ${fmt(totalAll)}`);
       if (!includeHidden) lines.push('(Скрытые счета не включены)');
       return res.json({ text: lines.join('\n') });
     }
@@ -73,16 +80,16 @@ module.exports.handleSnapshot = function handleSnapshot({ req, res, formatTenge 
     lines.push('Счета (snapshot)');
     lines.push('');
     lines.push('Открытые:');
-    if (openAccs.length) openAccs.forEach(acc => lines.push(`${acc.name}: ${formatTenge(acc.futureBalance)}`));
+    if (openAccs.length) openAccs.forEach(acc => lines.push(`${acc.name}: ${fmt(acc.futureBalance)}`));
     else lines.push('- нет');
     lines.push('');
     lines.push('Скрытые:');
-    if (hiddenAccs.length) hiddenAccs.forEach(acc => lines.push(`${acc.name} (скрыт): ${formatTenge(acc.futureBalance)}`));
+    if (hiddenAccs.length) hiddenAccs.forEach(acc => lines.push(`${acc.name} (скрыт): ${fmt(acc.futureBalance)}`));
     else lines.push('- нет');
     lines.push('');
-    lines.push(`Итого открытые: ${formatTenge(totalOpen)}`);
-    lines.push(`Итого скрытые: ${formatTenge(totalHidden)}`);
-    lines.push(`Итого все: ${formatTenge(totalAll)}`);
+    lines.push(`Итого открытые: ${fmt(totalOpen)}`);
+    lines.push(`Итого скрытые: ${fmt(totalHidden)}`);
+    lines.push(`Итого все: ${fmt(totalAll)}`);
 
     return res.json({ text: lines.join('\n') });
   } catch (err) {
