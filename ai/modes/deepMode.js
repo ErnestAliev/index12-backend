@@ -195,7 +195,12 @@ async function handleDeepQuery({
             ...history,
             { role: 'user', content: query }
         ];
-        const aiResponse = await openAiChat(messages, { modelOverride: modelDeep });
+        // Deep Mode: quality over speed - 120s timeout, 4000 tokens
+        const aiResponse = await openAiChat(messages, {
+            modelOverride: modelDeep,
+            maxTokens: 4000,
+            timeout: 120000  // 2 minutes for thorough analysis
+        });
         return { answer: aiResponse, shouldSaveToHistory: true };
     }
 
