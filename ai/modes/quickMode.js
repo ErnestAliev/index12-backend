@@ -49,6 +49,14 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     }
 
     // =====================
+    // FINANCIAL ANALYSIS
+    // =====================
+    if (/(анализ|ситуац|картина|как дела|финанс)/i.test(qLower) && !/(проект)/i.test(qLower)) {
+        console.log('[quickMode] Matched: ANALYSIS');
+        return handleAnalysisQuery({ dbData, formatTenge });
+    }
+
+    // =====================
     // COMPANIES QUERY
     // =====================
     if (/компани/i.test(qLower)) {
@@ -202,6 +210,84 @@ function handleExpenseQuery({ dbData, formatTenge }) {
         lines.push('');
         lines.push(`Прогноз: ${formatTenge(Math.abs(exp.forecast.total))} (${count} операций)`);
     }
+
+    return lines.join('\n');
+}
+
+// =====================
+// FINANCIAL ANALYSIS
+// =====================
+function handleAnalysisQuery({ dbData, formatTenge }) {
+    const lines = [];
+    const periodStart = dbData.meta?.periodStart || '?';
+    const periodEnd = dbData.meta?.periodEnd || '?';
+    const summary = dbData.operationsSummary || {};
+
+    lines.push(`Анализ (${periodStart} — ${periodEnd})`);
+    lines.push('==============');
+    lines.push('');
+
+    // Get accounts
+    const allAccounts = dbData.accounts || [];
+    const openAccountIds = new Set(
+        allAccounts.filter(a => !a.isHidden && !a.isExcluded).map(a => String(a._id))
+    );
+    const hiddenAccountIds = new Set(
+        allAccounts.filter(a => a.isHidden || a.isExcluded).map(a => String(a._id))
+    );
+
+    // Calculate for open accounts
+    const openIncome = (dbData.operations || [])
+        .filter(op => op.kind === 'income' && op.isFact && op.accountId && openAccountIds.has(String(op.accountId)))
+        .reduce((sum, op) => sum + (op.amount || 0), 0);
+
+    const openExpense = (dbData.operations || [])
+        .filter(op => op.kind === 'expense' && op.isFact && op.accountId && openAccountIds.has(String(op.accountId)))
+        .reduce((sum, op) => sum + Math.abs(op.rawAmount || op.amount || 0), 0);
+
+    const openProfit = openIncome - openExpense;
+    const openMargin = openIncome > 0 ? Math.round((openProfit / openIncome) * 100) : 0;
+
+    // Calculate for hidden accounts
+    const hiddenIncome = (dbData.operations || [])
+        .filter(op => op.kind === 'income' && op.isFact && op.accountId && hiddenAccountIds.has(String(op.accountId)))
+        .reduce((sum, op) => sum + (op.amount || 0), 0);
+
+    const hiddenExpense = (dbData.operations || [])
+        .filter(op => op.kind === 'expense' && op.isFact && op.accountId && hiddenAccountIds.has(String(op.accountId)))
+        .reduce((sum, op) => sum + Math.abs(op.rawAmount || op.amount || 0), 0);
+
+    const hiddenProfit = hiddenIncome - hiddenExpense;
+    const hiddenMargin = hiddenIncome > 0 ? Math.round((hiddenProfit / hiddenIncome) * 100) : 0;
+
+    // Totals
+    const totalIncome = openIncome + hiddenIncome;
+    const totalExpense = openExpense + hiddenExpense;
+    const totalProfit = totalIncome - totalExpense;
+    const totalMargin = totalIncome > 0 ? Math.round((totalProfit / totalIncome) * 100) : 0;
+
+    // Build response
+    lines.push('Открытые счета:');
+    lines.push(`Доходы = ${formatTenge(openIncome)}`);
+    lines.push(`Расходы = ${formatTenge(openExpense)}`);
+    lines.push(`Прибыль = ${formatTenge(openProfit)}`);
+    lines.push(`Маржа = ${openMargin}%`);
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+    lines.push('Скрытые счета:');
+    lines.push(`Доходы = ${formatTenge(hiddenIncome)}`);
+    lines.push(`Расходы = ${formatTenge(hiddenExpense)}`);
+    lines.push(`Прибыль = ${formatTenge(hiddenProfit)}`);
+    lines.push(`Маржа = ${hiddenMargin}%`);
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+    lines.push('Суммарно:');
+    lines.push(`Доходы = ${formatTenge(totalIncome)}`);
+    lines.push(`Расходы = ${formatTenge(totalExpense)}`);
+    lines.push(`Прибыль = ${formatTenge(totalProfit)}`);
+    lines.push(`Маржа = ${totalMargin}%`);
 
     return lines.join('\n');
 }
