@@ -1616,7 +1616,6 @@ module.exports = function createAiRouter(deps) {
           history: _getHistoryMessages(userIdStr),
           modelDeep,
           openAiChat: _openAiChat,
-          systemPrompt,
           dataContext,
         });
 
@@ -1634,27 +1633,18 @@ module.exports = function createAiRouter(deps) {
       }
 
       // === Non-deep path ===
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'system', content: dataContext },
-        ..._getHistoryMessages(userIdStr),
-      ];
-
       const modelOverride = process.env.OPENAI_MODEL || 'gpt-4o';
-      const aiResponse = await _openAiChat(messages, { modelOverride });
-
-      _pushHistory(userIdStr, 'assistant', aiResponse);
-
-      if (debugRequested) {
-        debugInfo = debugInfo || {};
-        debugInfo.opsSummary = dbData.operationsSummary || {};
-        debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
-        debugInfo.modelUsed = modelOverride;
-        debugInfo.modelDeep = process.env.OPENAI_MODEL_DEEP || null;
-        return res.json({ text: aiResponse, debug: debugInfo });
-      }
-
-      return res.json({ text: aiResponse });
+      return handleChat({
+        dataContext,
+        history: _getHistoryMessages(userIdStr),
+        openAiChat: _openAiChat,
+        modelChat: modelOverride,
+        dbData,
+        debugRequested,
+        res,
+        userIdStr,
+        pushHistory: _pushHistory,
+      });
 
     } catch (err) {
       console.error('[AI ERROR]', err);

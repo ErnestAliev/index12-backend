@@ -1,6 +1,7 @@
 // Chat handler (non-deep, GPT-4o by default)
+const chatPrompt = require('./chatPrompt');
+
 module.exports = async function handleChat({
-  systemPrompt,
   dataContext,
   history,
   openAiChat,
@@ -12,7 +13,7 @@ module.exports = async function handleChat({
   pushHistory,
 }) {
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: chatPrompt },
     { role: 'system', content: dataContext },
     ...history,
   ];
