@@ -1607,15 +1607,40 @@ module.exports = function createAiRouter(deps) {
       })();
 
       const dataContext = _formatDbDataForAi(dbData);
+      if (isDeep) {
+        const handleDeep = require('./deepHandler');
+        const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-3o';
+        const aiResponse = await handleDeep({
+          qLower,
+          dbData,
+          history: _getHistoryMessages(userIdStr),
+          modelDeep,
+          openAiChat: _openAiChat,
+          systemPrompt,
+          dataContext,
+        });
+
+        _pushHistory(userIdStr, 'assistant', aiResponse);
+
+        if (debugRequested) {
+          debugInfo = debugInfo || {};
+          debugInfo.opsSummary = dbData.operationsSummary || {};
+          debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
+          debugInfo.modelUsed = modelDeep;
+          debugInfo.modelDeep = modelDeep;
+          return res.json({ text: aiResponse, debug: debugInfo });
+        }
+        return res.json({ text: aiResponse });
+      }
+
+      // === Non-deep path ===
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'system', content: dataContext },
         ..._getHistoryMessages(userIdStr),
       ];
 
-      const modelOverride = isDeep
-        ? (process.env.OPENAI_MODEL_DEEP || 'gpt-3.5-turbo')
-        : (process.env.OPENAI_MODEL || 'gpt-4o');
+      const modelOverride = process.env.OPENAI_MODEL || 'gpt-4o';
       const aiResponse = await _openAiChat(messages, { modelOverride });
 
       _pushHistory(userIdStr, 'assistant', aiResponse);
@@ -1624,7 +1649,7 @@ module.exports = function createAiRouter(deps) {
         debugInfo = debugInfo || {};
         debugInfo.opsSummary = dbData.operationsSummary || {};
         debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
-        debugInfo.modelUsed = modelOverride || (process.env.OPENAI_MODEL || 'gpt-4o');
+        debugInfo.modelUsed = modelOverride;
         debugInfo.modelDeep = process.env.OPENAI_MODEL_DEEP || null;
         return res.json({ text: aiResponse, debug: debugInfo });
       }
