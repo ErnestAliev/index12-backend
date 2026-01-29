@@ -185,32 +185,18 @@ async function handleDeepQuery({
     }
 
     // =====================
-    // FINANCIAL SITUATION
+    // FINANCIAL SITUATION → GPT Expert Analysis
     // =====================
     if (wantsFinance) {
-        const lines = [];
-        lines.push(`Прибыль (факт): +${formatTenge(metrics.profitFact)} | Маржа: ${metrics.marginPct}%`);
-        lines.push(`Доход: +${formatTenge(metrics.incFact)} | Расход: -${formatTenge(metrics.expFact)}`);
-
-        if (metrics.runwayDaysOpen !== null) {
-            lines.push(`Открытая ликвидность: ~${metrics.runwayDaysOpen} дней`);
-        }
-
-        if (metrics.topExpCat) {
-            lines.push(`Самый тяжелый расход: ${metrics.topExpCat.name} (~${metrics.topExpCatSharePct}%)`);
-        }
-
-        // Risk flags
-        if (metrics.profitFact < 0) {
-            lines.push('Риск: период убыточный → инвестиции только из резерва.');
-        } else if (metrics.runwayDaysOpen !== null && metrics.runwayDaysOpen < 7) {
-            lines.push('Риск: на открытых мало денег → возможен кассовый разрыв.');
-        }
-
-        lines.push('');
-        lines.push('Дальше: прибыль по проектам или кассовые риски по дням?');
-
-        return { answer: lines.join('\n'), shouldSaveToHistory: true };
+        const dataContext = formatDbDataForAi(dbData);
+        const messages = [
+            { role: 'system', content: deepPrompt },
+            { role: 'system', content: dataContext },
+            ...history,
+            { role: 'user', content: query }
+        ];
+        const aiResponse = await openAiChat(messages, { modelOverride: modelDeep });
+        return { answer: aiResponse, shouldSaveToHistory: true };
     }
 
     // =====================
