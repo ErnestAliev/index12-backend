@@ -525,14 +525,20 @@ module.exports = function createDataProvider(deps) {
 
     async function getCompanies(userId, workspaceId = null) {
         const q = { userId: _uQuery(userId) };
-        const docs = await Company.find(q).select('name').lean();
+        const docs = await Company.find(q).select('name taxRegime taxPercent identificationNumber').lean();
         const idsFromEvents = await Event.distinct('companyId', { userId: _uQuery(userId), companyId: { $ne: null } });
-        const extraDocs = idsFromEvents.length ? await Company.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
+        const extraDocs = idsFromEvents.length ? await Company.find({ _id: { $in: idsFromEvents } }).select('name taxRegime taxPercent identificationNumber').lean() : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
         return Array.from(map.values())
-            .map(c => ({ id: String(c._id), name: c.name || `Компания ${String(c._id).slice(-4)}` }))
+            .map(c => ({
+                id: String(c._id),
+                name: c.name || `Компания ${String(c._id).slice(-4)}`,
+                taxRegime: c.taxRegime || 'simplified',
+                taxPercent: c.taxPercent != null ? c.taxPercent : 3,
+                identificationNumber: c.identificationNumber || null
+            }))
             .filter(c => c.name);
     }
 
