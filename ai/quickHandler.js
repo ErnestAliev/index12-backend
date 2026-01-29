@@ -26,7 +26,7 @@ module.exports.handleSnapshot = function handleSnapshot({ req, res, formatTenge 
       ? snap.accounts
       : (Array.isArray(snap?.currentAccountBalances) ? snap.currentAccountBalances : []);
     if (!Array.isArray(rawAccs) || !rawAccs.length) {
-      return res.status(400).json({ text: 'В snapshot нет счетов.' });
+      return res.json({ text: 'В snapshot нет счетов.' });
     }
     const accounts = rawAccs.map(a => {
       const hiddenFlag = !!(
