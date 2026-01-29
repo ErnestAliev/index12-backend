@@ -84,8 +84,10 @@ function handleAccountsQuery({ dbData, formatTenge }) {
     lines.push(`Счета (на ${today})`);
     lines.push('');
 
-    const open = dbData.accountsData?.openAccounts || [];
-    const hidden = dbData.accountsData?.hiddenAccounts || [];
+    // Get accounts and filter
+    const allAccounts = dbData.accounts || [];
+    const open = allAccounts.filter(a => !a.isHidden && !a.isExcluded);
+    const hidden = allAccounts.filter(a => a.isHidden || a.isExcluded);
 
     if (open.length) {
         lines.push('Открытые:');
@@ -108,7 +110,7 @@ function handleAccountsQuery({ dbData, formatTenge }) {
     }
 
     lines.push('');
-    const totals = dbData.accountsData?.totals || {};
+    const totals = dbData.totals || {};
     lines.push(`Итого открытые: ${formatTenge(totals.open?.current || 0)}`);
     lines.push(`Итого скрытые: ${formatTenge(totals.hidden?.current || 0)}`);
     lines.push(`Итого все: ${formatTenge(totals.all?.current || 0)}`);
@@ -240,7 +242,7 @@ function handleTransfersQuery({ dbData, formatTenge }) {
 // =====================
 function handleCompaniesQuery({ dbData, formatTenge }) {
     const lines = [];
-    const accounts = dbData.accountsData?.accounts || [];
+    const accounts = dbData.accounts || [];
     const companies = dbData.catalogs?.companies || [];
 
     lines.push('Компании:');
