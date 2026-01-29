@@ -1,17 +1,16 @@
 // backend/ai/aiRoutes.js
-// AI assistant routes - PURE DATABASE MODE
-// All data comes from MongoDB via dataProvider (no uiSnapshot)
+// AI assistant routes - MODULAR ARCHITECTURE
 //
 // ✅ Features:
-// - QUICK mode: deterministic lists (accounts / income / expense / catalogs)
-// - DIAG command: diagnostics of DB packet
-// - DEEP (DIP) mode: CFO dialog (profit/margin/risks/next-step), no UI repetition
-// - Separate model for DIP via env: OPENAI_MODEL_DEEP
-// - Deterministic investment math (no "выдуманных" цифр)
+// - QUICK mode: deterministic lists → modes/quickMode.js
+// - CHAT mode: general conversation → modes/chatMode.js  
+// - DEEP mode: CFO analysis → modes/deepMode.js
+// - DIAG command: diagnostics
+// - Hybrid data: snapshot (accounts/companies) + MongoDB (operations)
 
 const express = require('express');
 
-const AIROUTES_VERSION = 'db-only-v5.2';
+const AIROUTES_VERSION = 'modular-v8.0';
 const https = require('https');
 
 // =========================
@@ -86,13 +85,15 @@ module.exports = function createAiRouter(deps) {
   const createDataProvider = require('./dataProvider');
   const dataProvider = createDataProvider({ ...models, mongoose });
 
-  // Import quick handler for snapshot-based responses
-  const quickHandler = require('./quickHandler');
+  // Import mode handlers
+  const quickMode = require('./modes/quickMode');
+  const chatMode = require('./modes/chatMode');
+  const deepMode = require('./modes/deepMode');
 
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-v7-project-report-hotfix';
+  const CHAT_VERSION_TAG = 'aiRoutes-modular-v8.0';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -197,128 +198,7 @@ module.exports = function createAiRouter(deps) {
   };
 
   // =========================
-  // Helpers for expenses/income
-  // =========================
-  const _absExpense = (op) => {
-    if (!op || op.isTransfer) return 0;
-    const raw = Number(op.rawAmount ?? op.amount ?? 0);
-    if (op.kind === 'income') return 0;
-    if (op.kind === 'expense' || raw < 0) return Math.abs(raw || 0);
-    return 0;
-  };
-
-  // =========================
-  // Deterministic CFO metrics (code, not LLM)
-  // =========================
-  const _parseDdMmYy = (s) => {
-    try {
-      const t = String(s || '').trim();
-      const m = t.match(/^(\d{2})\.(\d{2})\.(\d{2})$/);
-      if (!m) return null;
-      const dd = Number(m[1]);
-      const mm = Number(m[2]);
-      const yy = Number(m[3]);
-      const yyyy = 2000 + yy;
-      return new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0));
-    } catch (_) {
-      return null;
-    }
-  };
-
-  const _daysBetween = (a, b) => {
-    try {
-      const A = a instanceof Date ? a : _parseDdMmYy(a);
-      const B = b instanceof Date ? b : _parseDdMmYy(b);
-      if (!A || !B) return 30;
-      const diff = Math.max(1, Math.round((B.getTime() - A.getTime()) / (24 * 60 * 60 * 1000)) + 1);
-      return diff;
-    } catch (_) {
-      return 30;
-    }
-  };
-
-  const _parseMoneyKzt = (text) => {
-    const s = String(text || '').toLowerCase().replace(/₸/g, '');
-    // "10 млн", "10m", "10 м"
-    const m1 = s.match(/([0-9]+(?:[\.,][0-9]+)?)\s*(млн|миллион|миллиона|миллионов)\b/i);
-    if (m1) {
-      const v = Number(String(m1[1]).replace(',', '.'));
-      if (Number.isFinite(v)) return Math.round(v * 1_000_000);
-    }
-    const m2 = s.match(/([0-9]+(?:[\.,][0-9]+)?)\s*(м|m)\b/i);
-    if (m2) {
-      const v = Number(String(m2[1]).replace(',', '.'));
-      if (Number.isFinite(v)) return Math.round(v * 1_000_000);
-    }
-    // "10 000 000"
-    const m3 = s.match(/([0-9][0-9\s]{2,})/);
-    if (m3) {
-      const v = Number(String(m3[1]).replace(/\s+/g, ''));
-      if (Number.isFinite(v)) return Math.round(v);
-    }
-    // "500000"
-    const m4 = s.match(/\b([0-9]+(?:[\.,][0-9]+)?)\b/);
-    if (m4) {
-      const v = Number(String(m4[1]).replace(',', '.'));
-      if (Number.isFinite(v)) return Math.round(v);
-    }
-    return null;
-  };
-
-  const _calcCoreMetrics = (dbData) => {
-    const summary = dbData?.operationsSummary || {};
-    const inc = summary.income || {};
-    const exp = summary.expense || {};
-
-    const incFact = Number(inc.fact?.total || 0);
-    const expFactRaw = Number(exp.fact?.total || 0);
-    const expFact = Math.abs(expFactRaw);
-
-    const profitFact = incFact - expFact;
-    const marginPct = incFact > 0 ? Math.round((profitFact / incFact) * 1000) / 10 : 0;
-
-    const totals = dbData?.totals || {};
-    const openCash = Number(totals.open?.current ?? 0);
-    const hiddenCash = Number(totals.hidden?.current ?? 0);
-    const totalCash = Number(totals.all?.current ?? (openCash + hiddenCash));
-
-    const periodStart = dbData?.meta?.periodStart || dbData?.meta?.today || null;
-    const periodEnd = dbData?.meta?.periodEnd || dbData?.meta?.today || null;
-    const daysPeriod = _daysBetween(periodStart, periodEnd);
-
-    const avgDailyExp = daysPeriod > 0 ? (expFact / daysPeriod) : expFact;
-    const runwayDaysOpen = avgDailyExp > 0 ? Math.floor(openCash / avgDailyExp) : null;
-
-    const cats = Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [];
-    const topExpCat = cats
-      .map(c => ({ name: c.name || 'Без категории', expFact: Number(c.expenseFact || 0) }))
-      .filter(x => x.expFact > 0)
-      .sort((a, b) => b.expFact - a.expFact)[0] || null;
-
-    const topExpCatSharePct = (topExpCat && expFact > 0)
-      ? Math.round((topExpCat.expFact / expFact) * 1000) / 10
-      : 0;
-
-    return {
-      incFact,
-      expFact,
-      profitFact,
-      marginPct,
-      openCash,
-      hiddenCash,
-      totalCash,
-      daysPeriod,
-      avgDailyExp,
-      runwayDaysOpen,
-      topExpCat,
-      topExpCatSharePct,
-      periodStart,
-      periodEnd,
-    };
-  };
-
-  // =========================
-  // DB data context for LLM (kept but DIP should NOT repeat it)
+  // DB data context for LLM
   // =========================
   const _formatDbDataForAi = (data) => {
     const lines = [];
@@ -349,425 +229,72 @@ module.exports = function createAiRouter(deps) {
     lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
     lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
 
-    // Contractors summary (top 5 by volume)
-    const contractorSummary = (data.contractorSummary || []).slice(0, 5);
-    if (contractorSummary.length) {
-      lines.push('Контрагенты (топ по обороту):');
-      contractorSummary.forEach(c => {
-        const vol = (c.incomeFact + c.incomeForecast + c.expenseFact + c.expenseForecast);
-        const sharePct = c.share ? Math.round(c.share * 1000) / 10 : 0;
-        lines.push(`- ${c.name}: доход +${_formatTenge(c.incomeFact + c.incomeForecast)}, расход -${_formatTenge(c.expenseFact + c.expenseForecast)}, оборот ${_formatTenge(vol)} (${sharePct}%)`);
-      });
-    }
-
-    // Categories summary (top 5 by volume)
-    const categorySummary = (data.categorySummary || []).slice(0, 5);
-    if (categorySummary.length) {
-      lines.push('Категории (топ по обороту):');
-      categorySummary.forEach(cat => {
-        const incomeTotal = cat.incomeFact + cat.incomeForecast;
-        const expenseTotal = cat.expenseFact + cat.expenseForecast;
-        const vol = incomeTotal + expenseTotal;
-        const tags = (cat.tags && cat.tags.length) ? ` [${cat.tags.join(', ')}]` : '';
-        const incPct = cat.incomeShare ? Math.round(cat.incomeShare * 1000) / 10 : 0;
-        const expPct = cat.expenseShare ? Math.round(cat.expenseShare * 1000) / 10 : 0;
-        lines.push(`- ${cat.name}${tags}: доход +${_formatTenge(incomeTotal)} (${incPct}%), расход -${_formatTenge(expenseTotal)} (${expPct}%), оборот ${_formatTenge(vol)}`);
-      });
-    }
-
-    // Days summary (top 3 by volume)
-    const daySummary = (data.daySummary || []).slice(0, 3);
-    if (daySummary.length) {
-      lines.push('Дни (напряжённые по обороту):');
-      daySummary.forEach(d => {
-        lines.push(`- ${d.dateIso}: доход +${_formatTenge(d.incomeTotal)}, расход -${_formatTenge(d.expenseTotal)}`);
-      });
-    }
-
-    // Tag summary (rent/payroll/tax/utility/transfer)
-    const tagSummary = (data.tagSummary || []).slice(0, 5);
-    if (tagSummary.length) {
-      lines.push('Теги (по ключевым темам):');
-      tagSummary.forEach(t => {
-        lines.push(`- ${t.tag}: доход +${_formatTenge(t.incomeFact + t.incomeForecast)}, расход -${_formatTenge(t.expenseFact + t.expenseForecast)}`);
-      });
-    }
-
     return lines.join('\n');
   };
 
   // =========================
-  // QUICK HANDLER (deterministic, no LLM)
+  // Access control
   // =========================
-  const _handleQuick = (qLower, dbData, helpers, opts = {}) => {
-    const {
-      formatTenge: _t,
-      fmtDateKZ: _d,
-      endOfToday: _today,
-      buildProjectsReportAll,
-      buildProjectReport,
-      findProject,
-    } = helpers;
-    const includeHidden = opts.includeHidden === true;
-
-    // ACCOUNTS
-    if (/сч[её]т|счета|касс|баланс/.test(qLower)) {
-      const lines = [];
-      const accounts = dbData.accounts || [];
-      const totals = dbData.totals || {};
-
-      const periodStart = dbData.meta?.periodStart || '';
-      const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _d(_today());
-      const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `на ${periodEnd}`;
-
-      lines.push(`Счета (${periodLabel})`);
-      lines.push('');
-
-      if (!accounts.length) {
-        lines.push('Счета не найдены.');
-      } else {
-        const openAccs = accounts.filter(a => !a.isHidden);
-        const hiddenAccs = includeHidden ? accounts.filter(a => a.isHidden) : [];
-
-        lines.push('Открытые:');
-        if (openAccs.length) {
-          for (const acc of openAccs) {
-            const bal = acc.futureBalance !== undefined ? acc.futureBalance : acc.currentBalance;
-            lines.push(`${acc.name || 'Счет'}: ${_t(bal || 0)}`);
-          }
-        } else lines.push('- нет');
-
-        lines.push('');
-        lines.push('Скрытые:');
-        if (hiddenAccs.length) {
-          for (const acc of hiddenAccs) {
-            const bal = acc.futureBalance !== undefined ? acc.futureBalance : acc.currentBalance;
-            lines.push(`${acc.name || 'Счет'} (скрыт): ${_t(bal || 0)}`);
-          }
-        } else lines.push('- нет');
-
-        lines.push('');
-        const totalOpen = totals.open?.future ?? totals.open?.current ?? 0;
-        const totalHidden = includeHidden ? (totals.hidden?.future ?? totals.hidden?.current ?? 0) : 0;
-        const totalAll = totalOpen + totalHidden;
-        lines.push(`Итого открытые: ${_t(totalOpen)}`);
-        lines.push(`Итого скрытые: ${_t(totalHidden)}`);
-        lines.push(`Итого все: ${_t(totalAll)}`);
-      }
-
-      return lines.join('\n');
-    }
-
-    // INCOME
-    if (/(доход[а-я]*|поступлен|приход)/.test(qLower) && !/(расход|трат|затрат)/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
-      const summary = dbData.operationsSummary || {};
-      const incomeData = summary.income || {};
-
-      const todayStr = dbData.meta?.today || _d(_today());
-      const periodStart = dbData.meta?.periodStart || todayStr;
-      const periodEndMonth = dbData.meta?.periodEnd || todayStr;
-
-      const factTotal = incomeData.fact?.total || 0;
-      const factCount = incomeData.fact?.count || 0;
-      const forecastTotal = incomeData.forecast?.total || 0;
-      const forecastCount = incomeData.forecast?.count || 0;
-
-      const lines = [];
-      lines.push(`Фактические доходы с ${periodStart} по ${todayStr}:`);
-      lines.push(`- ${_t(factTotal)} (${factCount} операций).`);
-      lines.push('');
-      lines.push(`Прогнозные доходы с ${todayStr} по ${periodEndMonth}:`);
-      lines.push(`- ${_t(forecastTotal)} (${forecastCount} операций).`);
-      if (!forecastTotal) lines.push('Прогнозируемых доходов нет.');
-
-      return lines.join('\n');
-    }
-
-    // EXPENSES
-    if (/(расход[а-я]*|трат|затрат)/.test(qLower) && !/(перевод|трансфер)/.test(qLower)) {
-      const summary = dbData.operationsSummary || {};
-      const expenseData = summary.expense || {};
-
-      const todayStr = dbData.meta?.today || _d(_today());
-      const periodStart = dbData.meta?.periodStart || todayStr;
-      const periodEndMonth = dbData.meta?.periodEnd || todayStr;
-
-      const wantsContractor = /(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)/.test(qLower);
-      const cleanName = (name) => String(name || '').replace(/\s*\[[^\]]+\]\s*$/, '').trim() || 'Без названия';
-
-      const factTotal = Math.abs(expenseData.fact?.total || 0);
-      const factCount = expenseData.fact?.count || 0;
-      const forecastTotal = Math.abs(expenseData.forecast?.total || 0);
-      const forecastCount = expenseData.forecast?.count || 0;
-
-      const lines = [];
-      lines.push(`Фактические расходы с ${periodStart} по ${todayStr} составили:`);
-      lines.push(`- ${_t(factTotal)} (${factCount} операций).`);
-      lines.push('');
-      lines.push('Из них:');
-
-      if (wantsContractor) {
-        const contrFact = (dbData.contractorSummary || [])
-          .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseFact || 0) }))
-          .filter(c => c.amount > 0)
-          .sort((a, b) => b.amount - a.amount);
-
-        if (!contrFact.length) lines.push('- нет расходов по контрагентам');
-        else {
-          contrFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
-          if (contrFact.length > 5) lines.push(`... и ещё ${contrFact.length - 5}`);
-        }
-      } else {
-        const catsFact = (dbData.categorySummary || [])
-          .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseFact || 0) }))
-          .filter(c => c.amount > 0)
-          .sort((a, b) => b.amount - a.amount);
-
-        if (!catsFact.length) lines.push('- нет расходов по категориям');
-        else {
-          catsFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
-          if (catsFact.length > 5) lines.push(`... и ещё ${catsFact.length - 5}`);
-        }
-      }
-
-      lines.push('');
-      lines.push(`С ${todayStr} до конца месяца запланированы расходы на сумму:`);
-      lines.push(`- ${_t(forecastTotal)} (${forecastCount} операций).`);
-
-      if (forecastTotal > 0) {
-        lines.push('');
-        lines.push('Из них:');
-
-        if (wantsContractor) {
-          const contrForecast = (dbData.contractorSummary || [])
-            .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseForecast || 0) }))
-            .filter(c => c.amount > 0)
-            .sort((a, b) => b.amount - a.amount);
-
-          if (!contrForecast.length) lines.push('- нет запланированных расходов по контрагентам');
-          else {
-            contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
-            if (contrForecast.length > 5) lines.push(`... и ещё ${contrForecast.length - 5}`);
-          }
-        } else {
-          const catsForecast = (dbData.categorySummary || [])
-            .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseForecast || 0) }))
-            .filter(c => c.amount > 0)
-            .sort((a, b) => b.amount - a.amount);
-
-          if (!catsForecast.length) lines.push('- нет запланированных расходов по категориям');
-          else {
-            catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_t(Math.abs(c.amount))}`));
-            if (catsForecast.length > 5) lines.push(`... и ещё ${catsForecast.length - 5}`);
-          }
-        }
-      } else {
-        lines.push('Прогнозируемых расходов нет.');
-      }
-
-      return lines.join('\n');
-    }
-
-    // TRANSFERS
-    if (/(перевод[а-я]*|трансфер|transfer)/.test(qLower)) {
-      const maskId = (id) => {
-        const s = String(id || '').trim();
-        return s ? `…${s.slice(-4)}` : '?';
-      };
-      const pickName = (...candidates) => {
-        const hit = candidates.find(v => v && String(v).trim());
-        return hit ? String(hit).trim() : null;
-      };
-      const fmtAmount = (n) => _t(Math.abs(Number(n || 0))).replace(' ₸', ' т');
-
-      const allTransfers = (dbData.operations || []).filter(op => {
-        const isTransferKind = op.kind === 'transfer';
-        const looksLikeTransfer = op.fromAccountId && op.toAccountId;
-        return (isTransferKind || looksLikeTransfer);
-      });
-      const factTransfers = allTransfers.filter(op => op.isFact);
-      const forecastTransfers = allTransfers.filter(op => !op.isFact);
-      const transfers = factTransfers.length ? factTransfers : forecastTransfers;
-
-      const lines = ['ПЕРЕВОДЫ'];
-      if (!transfers.length) {
-        lines.push('- нет фактических переводов за период');
-      } else {
-        transfers.slice(0, 5).forEach(tr => {
-          const amountStr = fmtAmount(tr.amount || tr.rawAmount || 0);
-          const fromName = pickName(
-            tr.fromAccountName,
-            tr.fromCompanyName,
-            tr.companyName,
-            tr.accountName
-          ) || maskId(tr.fromAccountId);
-          const toName = pickName(
-            tr.toAccountName,
-            tr.toCompanyName,
-            tr.companyName,
-            tr.accountName
-          ) || maskId(tr.toAccountId);
-          lines.push(`${amountStr}: ${fromName} → ${toName}`);
-        });
-        if (transfers.length > 5) lines.push(`... и ещё ${transfers.length - 5}`);
-      }
-
-      return lines.join('\n');
-    }
-
-    // PROJECTS
-    if (/проект/.test(qLower)) {
-      const projectMatch = findProject(qLower);
-      return projectMatch ? buildProjectReport(projectMatch) : buildProjectsReportAll();
-    }
-
-    // COMPANИИ
-    if (/(компан|организаци|company|фирм)/.test(qLower)) {
-      // Суммируем балансы связанных счетов по companyId
-      const companyNameById = new Map((dbData.catalogs?.companies || []).map(c => [String(c.id || c._id), c.name || `Компания ${String(c.id || c._id).slice(-4)}`]));
-      // Попробуем угадать companyId счета по операциям, если оно пустое
-      const accountCompanyGuess = new Map();
-      (dbData.operations || []).forEach(op => {
-        const accIds = [
-          op.accountId ? String(op.accountId) : null,
-          op.fromAccountId ? String(op.fromAccountId) : null,
-          op.toAccountId ? String(op.toAccountId) : null,
-        ].filter(Boolean);
-        const compIds = [
-          op.companyId ? String(op.companyId) : null,
-          op.fromCompanyId ? String(op.fromCompanyId) : null,
-          op.toCompanyId ? String(op.toCompanyId) : null,
-        ].filter(Boolean);
-        if (!compIds.length) return;
-        accIds.forEach(aid => {
-          if (!accountCompanyGuess.has(aid)) accountCompanyGuess.set(aid, compIds[0]);
-        });
-      });
-
-      const buckets = new Map(); // key -> {name, balance}
-      const addBalance = (companyId, balance) => {
-        const key = companyId || 'none';
-        if (!buckets.has(key)) {
-          const name = companyId ? (companyNameById.get(companyId) || `Компания ${companyId.slice(-4)}`) : 'Без компании';
-          buckets.set(key, { name, balance: 0 });
-        }
-        buckets.get(key).balance += balance;
-      };
-
-      (dbData.accounts || []).forEach(acc => {
-        const accId = acc._id ? String(acc._id) : null;
-        const compId = acc.companyId
-          ? String(acc.companyId)
-          : (accId && accountCompanyGuess.get(accId)) || null;
-        const bal = acc.futureBalance !== undefined ? Number(acc.futureBalance || 0) : Number(acc.currentBalance || 0);
-        addBalance(compId, bal);
-      });
-
-      const rows = Array.from(buckets.values()).sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
-      const lines = ['Компании (баланс счетов):'];
-      if (!rows.length) {
-        lines.push('- нет счетов');
-      } else {
-        rows.forEach(r => {
-          lines.push(`- ${r.name}: ${_t(r.balance)}`);
-        });
-      }
-      return lines.join('\n');
-    }
-
-    const _simpleList = (title, arr) => {
-      const lines = [title];
-      if (Array.isArray(arr) && arr.length) {
-        lines.push(...arr.map((x, i) => {
-          const name = (x && typeof x === 'object' && x.name) ? x.name : x;
-          return `${i + 1}. ${name || '-'}`;
-        }));
-      } else {
-        lines.push('- нет');
-      }
-      lines.push(`Всего: ${Array.isArray(arr) ? arr.length : 0}`);
-      return lines.join('\n');
-    };
-
-    if (/(контраг|поставщик|партнер|партнёр)/.test(qLower)) return _simpleList('Контрагенты:', dbData.catalogs?.contractors || []);
-    if (/(физ|индивид|person)/.test(qLower)) return _simpleList('Физлица:', dbData.catalogs?.individuals || []);
-    if (/(категор|category)/.test(qLower)) return _simpleList('Категории:', dbData.catalogs?.categories || []);
-    if (/проекты?/.test(qLower)) return _simpleList('Проекты:', dbData.catalogs?.projects || []);
-
-    return 'Кнопка пока не поддержана. Уточните запрос текстом.';
-  };
-
   const _isAiAllowed = (req) => {
-    try {
-      if ((process.env.AI_ALLOW_ALL || '').toLowerCase() === 'true') return true;
-      if (!req.user || !req.user.email) return false;
+    const AI_ALLOW_ALL = process.env.AI_ALLOW_ALL === 'true';
+    if (AI_ALLOW_ALL) return true;
 
-      const allowEmails = (process.env.AI_ALLOW_EMAILS || '')
-        .split(',')
-        .map(s => s.trim().toLowerCase())
-        .filter(Boolean);
-
-      if (!allowEmails.length && (FRONTEND_URL || '').includes('localhost')) return true;
-      return allowEmails.includes(String(req.user.email).toLowerCase());
-    } catch (_) {
-      return false;
-    }
+    const allowedEmails = (process.env.AI_ALLOW_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
+    const userEmail = req.user?.email || '';
+    return allowedEmails.includes(userEmail);
   };
 
   // =========================
-  // Routes
+  // DIAGNOSTICS COMMAND
   // =========================
-  router.get('/ping', (req, res) => {
-    res.json({
-      ok: true,
-      ts: new Date().toISOString(),
-      version: AIROUTES_VERSION,
-      mode: 'PURE_DATABASE',
-      isAuthenticated: (typeof req.isAuthenticated === 'function') ? req.isAuthenticated() : false,
-      email: req.user?.email || null,
-    });
-  });
+  const _isDiagnosticsQuery = (s) => {
+    const t = String(s || '').toLowerCase();
+    if (!t) return false;
+    if (t.includes('диагност') || t.includes('diagnostic')) return true;
+    return /(^|[^a-z])diag([^a-z]|$)/i.test(t);
+  };
 
+  const _isFullDiagnosticsQuery = (s) => {
+    const t = String(s || '').toLowerCase();
+    // Специальный триггер с опечаткой "дикагностика"
+    return t.includes('дикагност');
+  };
+
+  // =========================
+  // MAIN AI QUERY ENDPOINT
+  // =========================
   router.post('/query', isAuthenticated, async (req, res) => {
     try {
-      if (!_isAiAllowed(req)) return res.status(402).json({ message: 'AI not activated' });
+      const userId = req.user?._id || req.user?.id;
+      const userIdStr = String(userId || '');
 
-      const userId = req.user?.id || req.user?._id;
-      const userIdStr = String(userId);
+      if (!userIdStr) {
+        return res.status(401).json({ error: 'Пользователь не найден' });
+      }
 
-      const qRaw = (req.body && req.body.message) ? String(req.body.message) : '';
-      const q = qRaw.trim();
-      if (!q) return res.status(400).json({ message: 'Empty message' });
+      // Check access
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      const q = String(req.body?.message || '').trim();
+      if (!q) {
+        return res.status(400).json({ error: 'Пустой запрос' });
+      }
 
       const qLower = q.toLowerCase();
-      const source = req.body?.source || 'freeform';
-      const quickKey = req.body?.quickKey || null;
+      const isDeep = req.body?.mode === 'deep';
+      const source = req.body?.source || 'ui';
 
-      // QUICK buttons must always stay deterministic and must NOT be treated as DEEP
-      const isQuick = source === 'quick_button' || !!quickKey;
-      const isDeep = ((req.body?.mode || '').toLowerCase() === 'deep') && !isQuick;
+      const AI_DEBUG = process.env.AI_DEBUG === 'true';
+      let debugInfo = null;
 
-      const isCommand = !isDeep && (isQuick || /(^|\s)(покажи|список|выведи|сколько)\b/i.test(qLower));
-
-      if (process.env.AI_DEBUG === '1') {
+      if (AI_DEBUG) {
         console.log('[AI_DEBUG] query:', qLower, 'deep=', isDeep, 'source=', source);
       }
 
       // =========================
-      // SNAPSHOT SHORTCUT для счетов/компаний (любой source/mode)
-      // =========================
-      const snapshot = req.body?.snapshot;
-      const hasSnapshotAccounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts.length > 0
-        : Array.isArray(snapshot?.currentAccountBalances) ? snapshot.currentAccountBalances.length > 0
-          : false;
-      const isAccountsQuery = /сч[её]т|счета|касс|баланс/.test(qLower);
-      const isCompaniesQuery = /компан/i.test(qLower);
-      if (snapshot && hasSnapshotAccounts && (isAccountsQuery || isCompaniesQuery)) {
-        return quickHandler.handleSnapshot({ req, res, formatTenge: _formatTenge });
-      }
-
-      // =========================
-      // 🔥 PURE DATABASE MODE
+      // Get composite user ID for shared workspaces
       // =========================
       let effectiveUserId = userId;
       if (typeof getCompositeUserId === 'function') {
@@ -782,8 +309,11 @@ module.exports = function createAiRouter(deps) {
         new Set([effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String))
       );
 
+      // =========================
+      // Build data packet (hybrid mode: snapshot + MongoDB)
+      // =========================
       const isProjectIntent = /проект/i.test(qLower);
-      const forceAllAccounts = isProjectIntent || isDeep; // deep и проекты — без фильтра счетов
+      const forceAllAccounts = isProjectIntent || isDeep;
 
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
         includeHidden: forceAllAccounts ? true : !!req?.body?.includeHidden,
@@ -794,195 +324,9 @@ module.exports = function createAiRouter(deps) {
         snapshot: req?.body?.snapshot || null, // 🔥 HYBRID: accounts/companies from snapshot, operations from MongoDB
       });
 
-      // -------------------------
-      // Helpers tied to dbData
-      // -------------------------
-      const findProject = (textLower) => {
-        const projects = dbData.catalogs?.projects || [];
-        let hit = null;
-        projects.forEach(p => {
-          const name = String(p?.name || '').trim();
-          if (!name) return;
-          if (textLower.includes(name.toLowerCase())) {
-            hit = { id: String(p.id || p._id), name };
-          }
-        });
-        return hit;
-      };
-
-      const buildProjectReport = (project) => {
-        const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === project.id);
-        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-
-        let factIncome = 0, factExpense = 0, forecastIncome = 0, forecastExpense = 0;
-        let factCount = 0, forecastCount = 0;
-
-        ops.forEach(op => {
-          if (op.kind === 'income') {
-            if (op.isFact) { factIncome += op.amount || 0; factCount += 1; }
-            else { forecastIncome += op.amount || 0; forecastCount += 1; }
-          } else if (op.kind === 'expense') {
-            if (op.isFact) { factExpense += op.amount || 0; factCount += 1; }
-            else { forecastExpense += op.amount || 0; forecastCount += 1; }
-          }
-        });
-
-        const factNet = factIncome - factExpense;
-        const forecastNet = forecastIncome - forecastExpense;
-
-        const lines = [];
-        lines.push(`Проект: ${project.name}`);
-        lines.push(`Период: ${periodStart} — ${periodEnd}`);
-        lines.push('');
-        lines.push(`Прибыль (факт): ${_formatTenge(factNet)} (${factCount} операций)`);
-        lines.push(`Прибыль (прогноз): ${_formatTenge(forecastNet)} (${forecastCount} операций)`);
-        if (!ops.length) lines.push('Операции по проекту в выбранном периоде не найдены.');
-        return lines.join('\n');
-      };
-
-      const buildProjectsReportAll = () => {
-        const ops = dbData.operations || [];
-        const projectStats = new Map();
-        const getName = (id) => {
-          const p = (dbData.catalogs?.projects || []).find(x => String(x.id || x._id) === id);
-          return p?.name || 'Без проекта';
-        };
-        const add = (id, isFact, kind, amount, nameHint) => {
-          const key = id || 'none';
-          if (!projectStats.has(key)) {
-            projectStats.set(key, {
-              id: id || null,
-              name: nameHint || getName(id) || 'Без проекта',
-              incFact: 0, expFact: 0, incForecast: 0, expForecast: 0,
-              countFact: 0, countForecast: 0,
-            });
-          }
-          const rec = projectStats.get(key);
-          if (kind === 'income') {
-            if (isFact) { rec.incFact += amount; rec.countFact++; }
-            else { rec.incForecast += amount; rec.countForecast++; }
-          } else if (kind === 'expense') {
-            if (isFact) { rec.expFact += amount; rec.countFact++; }
-            else { rec.expForecast += amount; rec.countForecast++; }
-          }
-        };
-        ops.forEach(op => {
-          const id = op.projectId ? String(op.projectId) : null;
-          add(id, op.isFact, op.kind, op.amount || 0, op.projectName);
-        });
-        const rows = Array.from(projectStats.values()).sort((a, b) => {
-          const aVol = a.incFact + a.incForecast + a.expFact + a.expForecast;
-          const bVol = b.incFact + b.incForecast + b.expFact + b.expForecast;
-          return bVol - aVol;
-        });
-        const periodStart = dbData.meta?.periodStart || dbData.meta?.today || '?';
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || '?';
-        const totalFactProfit = rows.reduce((s, r) => s + (r.incFact - r.expFact), 0);
-        const totalFcProfit = rows.reduce((s, r) => s + (r.incForecast - r.expForecast), 0);
-
-        const lines = [];
-        lines.push(`С ${periodStart} до ${periodEnd}`);
-        lines.push(`Прибыль по проектам: ${_formatTenge(totalFactProfit)}`);
-        lines.push('Из них:');
-        if (!rows.length) {
-          lines.push('- нет операций по проектам');
-        } else {
-          rows.forEach(r => {
-            const factNet = r.incFact - r.expFact;
-            lines.push(`- ${r.name}: ${_formatTenge(factNet)}`);
-          });
-        }
-
-        lines.push('');
-        lines.push(`Прогнозируемая прибыль по проектам: ${_formatTenge(totalFcProfit)} (до ${periodEnd})`);
-        lines.push('Из них:');
-        const forecastRows = rows.filter(r => (r.incForecast - r.expForecast) !== 0);
-        if (!forecastRows.length) {
-          lines.push('- нет прогнозируемых операций по проектам');
-        } else {
-          forecastRows.forEach(r => {
-            const fcNet = r.incForecast - r.expForecast;
-            lines.push(`- ${r.name}: ${_formatTenge(fcNet)} (до ${periodEnd})`);
-          });
-        }
-        return lines.join('\n');
-      };
-
-      const debugRequested = process.env.AI_DEBUG === '1' || req?.body?.debugAi === true;
-      let debugInfo = null;
-
-      if (debugRequested || req?.body?.includeHidden) {
-        const hiddenAccs = (dbData.accounts || []).filter(a => a.isHidden);
-        const totalAccs = (dbData.accounts || []).length;
-        debugInfo = {
-          totalAccounts: totalAccs,
-          hiddenCount: hiddenAccs.length,
-          hiddenNames: hiddenAccs.map(a => a.name),
-          catalogs: {
-            companies: dbData.catalogs?.companies?.length || 0,
-            projects: dbData.catalogs?.projects?.length || 0,
-            categories: dbData.catalogs?.categories?.length || 0,
-            contractors: dbData.catalogs?.contractors?.length || 0,
-            individuals: dbData.catalogs?.individuals?.length || 0,
-          }
-        };
-      }
-
-      // write user message to history once
-      _pushHistory(userIdStr, 'user', q);
-
-      // QUICK BUTTONS → детерминированный ответ, без LLM
-      if (isQuick) {
-        const answer = _handleQuick(qLower, dbData, {
-          formatTenge: _formatTenge,
-          fmtDateKZ: _fmtDateKZ,
-          endOfToday: _endOfToday,
-          buildProjectsReportAll,
-          buildProjectReport,
-          findProject,
-        }, { includeHidden: !!req?.body?.includeHidden });
-        _pushHistory(userIdStr, 'assistant', answer);
-        if (debugRequested) return res.json({ text: answer, debug: debugInfo || {} });
-        return res.json({ text: answer });
-      }
-
       // =========================
-      // PROJECTS: приоритетная ветка (выше всех остальных)
+      // DIAGNOSTICS COMMAND
       // =========================
-      if (!isDeep && /проект/i.test(qLower)) {
-        const projectMatch = findProject(qLower);
-        const answer = projectMatch
-          ? buildProjectReport(projectMatch)
-          : buildProjectsReportAll();
-        _pushHistory(userIdStr, 'assistant', answer);
-        if (debugRequested) {
-          debugInfo = debugInfo || {};
-          debugInfo.opsSummary = dbData.operationsSummary || {};
-          debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
-          debugInfo.modelUsed = process.env.OPENAI_MODEL || 'gpt-4o';
-          debugInfo.modelDeep = process.env.OPENAI_MODEL_DEEP || null;
-          return res.json({ text: answer, debug: debugInfo });
-        }
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // DIAGNOSTICS COMMANDS
-      // =========================
-      const _isDiagnosticsQuery = (s) => {
-        const t = String(s || '').toLowerCase();
-        if (!t) return false;
-        if (t.includes('диагност') || t.includes('diagnostic')) return true;
-        return /(^|[^a-z])diag([^a-z]|$)/i.test(t);
-      };
-
-      const _isFullDiagnosticsQuery = (s) => {
-        const t = String(s || '').toLowerCase();
-        // Специальный триггер с опечаткой "дикагностика"
-        return t.includes('дикагност');
-      };
-
       if (_isFullDiagnosticsQuery(qLower)) {
         const lines = [];
         const meta = dbData.meta || {};
@@ -1013,733 +357,120 @@ module.exports = function createAiRouter(deps) {
         // Категории
         const categories = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
         lines.push(`Категории (${categories.length}):`);
-        categories.forEach(c => lines.push(`- ${c.name || c} | type=${c.type || ''} | id=${c.id || c._id || '?'}`));
-        lines.push('');
-
-        // Контрагенты
-        const contractors = Array.isArray(dbData.catalogs?.contractors) ? dbData.catalogs.contractors : [];
-        lines.push(`Контрагенты (${contractors.length}):`);
-        contractors.forEach(c => lines.push(`- ${c.name || c} | id=${c.id || c._id || '?'}`));
-        lines.push('');
-
-        // Физлица
-        const individuals = Array.isArray(dbData.catalogs?.individuals) ? dbData.catalogs.individuals : [];
-        lines.push(`Физлица (${individuals.length}):`);
-        individuals.forEach(i => lines.push(`- ${i.name || i} | id=${i.id || i._id || '?'}`));
+        categories.forEach(cat => lines.push(`- ${cat.name || cat} | id=${cat.id || cat._id || '?'}`));
         lines.push('');
 
         // Операции
         const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-        lines.push(`Операции (${ops.length}):`);
-        ops.forEach(op => {
-          const dir = op.kind === 'expense' ? '-' : op.kind === 'income' ? '+' : '';
-          const amt = _formatTenge(dir === '-' ? -Math.abs(op.amount || 0) : Math.abs(op.amount || 0));
-          const acc = op.accountName || op.fromAccountName || op.toAccountName || '';
-          const proj = op.projectId ? `proj=${op.projectId}` : '';
-          const cat = op.categoryId ? `cat=${op.categoryId}` : '';
-          const contr = op.contractorId ? `ctr=${op.contractorId}` : '';
-          const fact = op.isFact ? 'fact' : 'forecast';
-          lines.push(`- ${op.date || op.dateIso}: ${op.kind || op.type} ${amt} ${fact} ${acc} ${proj} ${cat} ${contr} ${op.description || ''}`);
-        });
+        lines.push(`Операций: ${ops.length}`);
 
         const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // Targeted diagnostics: "Диагностика + <entity>"
-      const hasDiag = _isDiagnosticsQuery(qLower) || _isFullDiagnosticsQuery(qLower);
-      const wants = (word) => qLower.includes(word);
-      const diagLines = [];
-
-      const pushEntityList = (title, items, mapper) => {
-        diagLines.push(`${title} (${items.length}):`);
-        items.forEach(it => diagLines.push(mapper(it)));
-        diagLines.push('');
-      };
-
-      if (hasDiag && (
-        wants('проект') || wants('расход') || wants('доход') || wants('контраг') ||
-        wants('перевод') || wants('физ') || wants('счет') || wants('категор') || wants('категор')
-      )) {
-        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-
-        if (wants('проект')) {
-          const projects = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
-          pushEntityList('Проекты', projects, p => `- id=${p.id || p._id || '?'} | name=${p.name || p}`);
-        }
-
-        if (wants('расход')) {
-          const exp = ops.filter(o => o.kind === 'expense');
-          pushEntityList('Расходы', exp, o =>
-            `- op=${o._id || '?'} | ${o.date || o.dateIso || ''} | amt=${o.amount} | acc=${o.accountId || o.fromAccountId || '?'} | cat=${o.categoryId || '?'} | proj=${o.projectId || '?'} | ctr=${o.contractorId || '?'}`
-          );
-        }
-
-        if (wants('доход')) {
-          const inc = ops.filter(o => o.kind === 'income');
-          pushEntityList('Доходы', inc, o =>
-            `- op=${o._id || '?'} | ${o.date || o.dateIso || ''} | amt=${o.amount} | acc=${o.accountId || '?'} | cat=${o.categoryId || '?'} | proj=${o.projectId || '?'} | ctr=${o.contractorId || '?'}`
-          );
-        }
-
-        if (wants('контраг')) {
-          const contractors = Array.isArray(dbData.catalogs?.contractors) ? dbData.catalogs.contractors : [];
-          pushEntityList('Контрагенты', contractors, c => `- id=${c.id || c._id || '?'} | name=${c.name || c}`);
-        }
-
-        if (wants('перевод')) {
-          const trs = ops.filter(o => o.kind === 'transfer' || (o.fromAccountId && o.toAccountId));
-          pushEntityList('Переводы', trs, o =>
-            `- op=${o._id || '?'} | ${o.date || o.dateIso || ''} | amt=${o.amount} | fromAcc=${o.fromAccountId || '?'} | toAcc=${o.toAccountId || '?'} | fromComp=${o.fromCompanyId || '?'} | toComp=${o.toCompanyId || '?'}`
-          );
-        }
-
-        if (wants('физ')) {
-          const individuals = Array.isArray(dbData.catalogs?.individuals) ? dbData.catalogs.individuals : [];
-          pushEntityList('Физлица', individuals, i => `- id=${i.id || i._id || '?'} | name=${i.name || i}`);
-        }
-
-        if (wants('счет')) {
-          const accounts = Array.isArray(dbData.accounts) ? dbData.accounts : [];
-          pushEntityList('Счета', accounts, a => `- id=${a._id || '?'} | name=${a.name || 'Счет'} | hidden=${a.isHidden ? 'yes' : 'no'}`);
-        }
-
-        if (wants('категор')) {
-          const categories = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
-          pushEntityList('Категории', categories, c => `- id=${c.id || c._id || '?'} | name=${c.name || c} | type=${c.type || ''}`);
-        }
-
-        const answer = diagLines.join('\n');
+        _pushHistory(userIdStr, 'user', q);
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
       if (_isDiagnosticsQuery(qLower)) {
-        const diag = [
-          `Диагностика AI (версия: ${AIROUTES_VERSION})`,
-          `Chat tag: ${CHAT_VERSION_TAG}`,
-          `Режим: PURE DATABASE (MongoDB)`,
-          '',
-          `Пользователь: ${effectiveUserId}`,
-          `Счета: ${dbData.accounts?.length || 0}`,
-          `Операции: ${dbData.operations?.length || 0}`,
-          '',
-          `Доходы (факт): ${_formatTenge(dbData.operationsSummary?.income?.fact?.total || 0)}`,
-          `Расходы (факт): ${_formatTenge(dbData.operationsSummary?.expense?.fact?.total || 0)}`,
-          '',
-          `Проекты: ${dbData.catalogs?.projects?.length || 0}`,
-          `Контрагенты: ${dbData.catalogs?.contractors?.length || 0}`,
-          `Категории: ${dbData.catalogs?.categories?.length || 0}`,
-          `Физлица: ${dbData.catalogs?.individuals?.length || 0}`,
-          `Компании: ${dbData.catalogs?.companies?.length || 0}`,
-        ];
-        const answer = diag.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // QUICK MODE: deterministic endpoints
-      // =========================
-      if (!isDeep && /\b(сч[её]т|счета|касс[аы]|баланс)\b/i.test(qLower)) {
         const lines = [];
-        const accounts = dbData.accounts || [];
-        const totals = dbData.totals || {};
+        const meta = dbData.meta || {};
+        const opsSummary = dbData.operationsSummary || {};
 
-        const periodStart = dbData.meta?.periodStart || '';
-        const periodEnd = dbData.meta?.periodEnd || dbData.meta?.today || _fmtDateKZ(_endOfToday());
-        const periodLabel = periodStart ? `с ${periodStart} по ${periodEnd}` : `на ${periodEnd}`;
-
-        lines.push(`Счета (${periodLabel})`);
+        lines.push('ДИАГНОСТИКА');
+        lines.push(`Период: ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
+        lines.push(`Сегодня: ${meta.today || '?'}`);
         lines.push('');
-
-        if (!accounts.length) {
-          lines.push('Счета не найдены.');
-        } else {
-          const openAccs = accounts.filter(a => !a.isHidden);
-          const hiddenAccs = accounts.filter(a => a.isHidden);
-
-          lines.push('Открытые:');
-          if (openAccs.length) {
-            for (const acc of openAccs) lines.push(`${acc.name || 'Счет'}: ${_formatTenge(acc.currentBalance || 0)}`);
-          } else lines.push('- нет');
-
-          lines.push('');
-          lines.push('Скрытые:');
-          if (hiddenAccs.length) {
-            for (const acc of hiddenAccs) lines.push(`${acc.name || 'Счет'} (скрыт): ${_formatTenge(acc.currentBalance || 0)}`);
-          } else lines.push('- нет');
-
-          lines.push('');
-          const totalOpen = totals.open?.current ?? 0;
-          const totalHidden = totals.hidden?.current ?? 0;
-          const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
-          lines.push(`Итого открытые: ${_formatTenge(totalOpen)}`);
-          lines.push(`Итого скрытые: ${_formatTenge(totalHidden)}`);
-          lines.push(`Итого все: ${_formatTenge(totalAll)}`);
-        }
+        lines.push(`Счетов: ${(dbData.accounts || []).length}`);
+        lines.push(`Операций: ${(dbData.operations || []).length}`);
+        lines.push(`Доходов (факт): ${_formatTenge(opsSummary.income?.fact?.total || 0)} (${opsSummary.income?.fact?.count || 0})`);
+        lines.push(`Расходов (факт): ${_formatTenge(opsSummary.expense?.fact?.total || 0)} (${opsSummary.expense?.fact?.count || 0})`);
 
         const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\bрасход\b/i.test(qLower) && !/\b(перевод|трансфер)\b/i.test(qLower))) {
-        const summary = dbData.operationsSummary || {};
-        const incomeData = summary.income || {};
-
-        const todayStr = dbData.meta?.today || _fmtDateKZ(_endOfToday());
-        const periodStart = dbData.meta?.periodStart || todayStr;
-        const periodEndMonth = dbData.meta?.periodEnd || todayStr;
-
-        const factTotal = incomeData.fact?.total || 0;
-        const factCount = incomeData.fact?.count || 0;
-        const forecastTotal = incomeData.forecast?.total || 0;
-        const forecastCount = incomeData.forecast?.count || 0;
-
-        const lines = [];
-        lines.push(`Фактические доходы с ${periodStart} по ${todayStr}:`);
-        lines.push(`- ${_formatTenge(factTotal)} (${factCount} операций).`);
-        lines.push('');
-        lines.push(`Прогнозные доходы с ${todayStr} по ${periodEndMonth}:`);
-        lines.push(`- ${_formatTenge(forecastTotal)} (${forecastCount} операций).`);
-        if (!forecastTotal) lines.push('Прогнозируемых доходов нет.');
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && (/\b(расход|трат|затрат)\b/i.test(qLower)) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
-        const summary = dbData.operationsSummary || {};
-        const expenseData = summary.expense || {};
-
-        const todayStr = dbData.meta?.today || _fmtDateKZ(_endOfToday());
-        const periodStart = dbData.meta?.periodStart || todayStr;
-        const periodEndMonth = dbData.meta?.periodEnd || todayStr;
-
-        const wantsContractor = /\b(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)\b/i.test(qLower);
-        const cleanName = (name) => String(name || '').replace(/\s*\[[^\]]+\]\s*$/, '').trim() || 'Без названия';
-
-        const factTotal = Math.abs(expenseData.fact?.total || 0);
-        const factCount = expenseData.fact?.count || 0;
-        const forecastTotal = Math.abs(expenseData.forecast?.total || 0);
-        const forecastCount = expenseData.forecast?.count || 0;
-
-        const lines = [];
-        lines.push(`Фактические расходы с ${periodStart} по ${todayStr} составили:`);
-        lines.push(`- ${_formatTenge(factTotal)} (${factCount} операций).`);
-        lines.push('');
-        lines.push('Из них:');
-
-        if (wantsContractor) {
-          const contrFact = (dbData.contractorSummary || [])
-            .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseFact || 0) }))
-            .filter(c => c.amount > 0)
-            .sort((a, b) => b.amount - a.amount);
-
-          if (!contrFact.length) lines.push('- нет расходов по контрагентам');
-          else {
-            contrFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
-            if (contrFact.length > 5) lines.push(`... и ещё ${contrFact.length - 5}`);
-          }
-        } else {
-          const catsFact = (dbData.categorySummary || [])
-            .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseFact || 0) }))
-            .filter(c => c.amount > 0)
-            .sort((a, b) => b.amount - a.amount);
-
-          if (!catsFact.length) lines.push('- нет расходов по категориям');
-          else {
-            catsFact.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
-            if (catsFact.length > 5) lines.push(`... и ещё ${catsFact.length - 5}`);
-          }
-        }
-
-        lines.push('');
-        lines.push(`С ${todayStr} до конца месяца запланированы расходы на сумму:`);
-        lines.push(`- ${_formatTenge(forecastTotal)} (${forecastCount} операций).`);
-
-        if (forecastTotal > 0) {
-          lines.push('');
-          lines.push('Из них:');
-
-          if (wantsContractor) {
-            const contrForecast = (dbData.contractorSummary || [])
-              .map(c => ({ name: cleanName(c.name || 'Без контрагента'), amount: Number(c.expenseForecast || 0) }))
-              .filter(c => c.amount > 0)
-              .sort((a, b) => b.amount - a.amount);
-
-            if (!contrForecast.length) lines.push('- нет запланированных расходов по контрагентам');
-            else {
-              contrForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
-              if (contrForecast.length > 5) lines.push(`... и ещё ${contrForecast.length - 5}`);
-            }
-          } else {
-            const catsForecast = (dbData.categorySummary || [])
-              .map(c => ({ name: cleanName(c.name || 'Без категории'), amount: Number(c.expenseForecast || 0) }))
-              .filter(c => c.amount > 0)
-              .sort((a, b) => b.amount - a.amount);
-
-            if (!catsForecast.length) lines.push('- нет запланированных расходов по категориям');
-            else {
-              catsForecast.slice(0, 5).forEach(c => lines.push(`- ${c.name} - ${_formatTenge(Math.abs(c.amount))}`));
-              if (catsForecast.length > 5) lines.push(`... и ещё ${catsForecast.length - 5}`);
-            }
-          }
-        } else {
-          lines.push('Прогнозируемых расходов нет.');
-        }
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && /\b(перевод(ы|ов)?|трансфер|transfer)\b/i.test(qLower)) {
-        const maskId = (id) => {
-          const s = String(id || '').trim();
-          return s ? `…${s.slice(-4)}` : '?';
-        };
-        const pickName = (...candidates) => {
-          const hit = candidates.find(v => v && String(v).trim());
-          return hit ? String(hit).trim() : null;
-        };
-        const fmtAmount = (n) => _formatTenge(Math.abs(Number(n || 0))).replace(' ₸', ' т');
-
-        const allTransfers = (dbData.operations || []).filter(op => {
-          const isTransferKind = op.kind === 'transfer';
-          const looksLikeTransfer = op.fromAccountId && op.toAccountId;
-          return (isTransferKind || looksLikeTransfer);
-        });
-        const factTransfers = allTransfers.filter(op => op.isFact);
-        const forecastTransfers = allTransfers.filter(op => !op.isFact);
-        const transfers = factTransfers.length ? factTransfers : forecastTransfers;
-
-        const lines = ['ПЕРЕВОДЫ'];
-        if (!transfers.length) {
-          lines.push('- нет фактических переводов за период');
-        } else {
-          transfers.slice(0, 5).forEach(tr => {
-            const amountStr = fmtAmount(tr.amount || tr.rawAmount || 0);
-            const fromName = pickName(
-              tr.fromAccountName,
-              tr.fromCompanyName,
-              tr.companyName,
-              tr.accountName
-            ) || maskId(tr.fromAccountId);
-            const toName = pickName(
-              tr.toAccountName,
-              tr.toCompanyName,
-              tr.companyName,
-              tr.accountName
-            ) || maskId(tr.toAccountId);
-            lines.push(`${amountStr}: ${fromName} → ${toName}`);
-          });
-          if (transfers.length > 5) lines.push(`... и ещё ${transfers.length - 5}`);
-        }
-
-        const answer = lines.join('\n');
+        _pushHistory(userIdStr, 'user', q);
         _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
       // =========================
-      // CATALOGS (quick)
+      // TRY QUICK MODE FIRST (deterministic, fast)
       // =========================
-      const _simpleList = (title, arr) => {
-        const lines = [title];
-        if (Array.isArray(arr) && arr.length) {
-          lines.push(...arr.map((x, i) => {
-            const name = (x && typeof x === 'object' && x.name) ? x.name : x;
-            return `${i + 1}. ${name || '-'}`;
-          }));
-        } else {
-          lines.push('- нет');
-        }
-        lines.push(`Всего: ${Array.isArray(arr) ? arr.length : 0}`);
-        return lines.join('\n');
-      };
-
-      if (!isDeep && isCommand && (qLower.includes('контраг') || qLower.includes('поставщик') || qLower.includes('партнер') || qLower.includes('партнёр'))) {
-        const answer = _simpleList('Контрагенты:', dbData.catalogs?.contractors || []);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && isCommand && (qLower.includes('физ') || qLower.includes('индивид') || qLower.includes('person'))) {
-        const answer = _simpleList('Физлица:', dbData.catalogs?.individuals || []);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && isCommand && (qLower.includes('категор') || qLower.includes('category'))) {
-        const answer = _simpleList('Категории:', dbData.catalogs?.categories || []);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (!isDeep && isCommand && (qLower.includes('компан') || qLower.includes('организаци') || qLower.includes('company') || qLower.includes('фирм'))) {
-        // агрегируем по companyId/fromCompanyId/toCompanyId
-        const stats = new Map();
-        const add = (name, isFact, kind, amount) => {
-          const key = name || 'Без компании';
-          if (!stats.has(key)) stats.set(key, {
-            name: key,
-            incFact: 0, incForecast: 0,
-            expFact: 0, expForecast: 0,
-          });
-          const rec = stats.get(key);
-          if (kind === 'income') {
-            if (isFact) rec.incFact += amount; else rec.incForecast += amount;
-          } else if (kind === 'expense') {
-            if (isFact) rec.expFact += amount; else rec.expForecast += amount;
-          }
-        };
-
-        (dbData.operations || []).forEach(op => {
-          const name = op.companyName || op.fromCompanyName || op.toCompanyName || 'Без компании';
-          if (op.kind === 'income' || op.kind === 'expense') add(name, !!op.isFact, op.kind, op.amount || 0);
-        });
-
-        const rows = Array.from(stats.values()).sort((a, b) => {
-          const av = Math.abs(a.incFact + a.incForecast + a.expFact + a.expForecast);
-          const bv = Math.abs(b.incFact + b.incForecast + b.expFact + b.expForecast);
-          return bv - av;
-        });
-
-        const lines = [];
-        lines.push('Компании (факт):');
-        if (!rows.length) {
-          lines.push('- нет операций');
-        } else {
-          rows.forEach(r => {
-            const net = r.incFact - r.expFact;
-            lines.push(`- ${r.name}: доход +${_formatTenge(r.incFact)}, расход -${_formatTenge(r.expFact)}, итог ${_formatTenge(net)}`);
-          });
-        }
-        const hasForecast = rows.some(r => r.incForecast || r.expForecast);
-        if (hasForecast) {
-          lines.push('');
-          lines.push('Прогноз (до конца месяца):');
-          rows.forEach(r => {
-            if (!(r.incForecast || r.expForecast)) return;
-            const net = r.incForecast - r.expForecast;
-            lines.push(`- ${r.name}: доход +${_formatTenge(r.incForecast)}, расход -${_formatTenge(r.expForecast)}, итог ${_formatTenge(net)}`);
-          });
-        }
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // NON-DEEP "Что по деньгам" (deterministic, no LLM)
-      // =========================
-      if (!isDeep && /ситуац|картина|финанс|что\s+у\s+нас\s+там\s+по\s+деньгам|что\s+по\s+деньгам|по\s+деньгам|прибыл|марж/i.test(qLower)) {
-        const m = _calcCoreMetrics(dbData);
-        const lines = [];
-        lines.push(`Прибыль: +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`);
-        lines.push(`Доход: +${_formatTenge(m.incFact)} | Расход: -${_formatTenge(m.expFact)}`);
-        lines.push(`Открытые: ${_formatTenge(m.openCash)} | Скрытые: ${_formatTenge(m.hiddenCash)} | Всего: ${_formatTenge(m.totalCash)}`);
-        if (m.runwayDaysOpen !== null) lines.push(`Открытая ликвидность: ~${m.runwayDaysOpen} дней`);
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // DEEP (DIP) CFO MODE (deterministic)
-      // =========================
-      if (isDeep) {
-        const s = _getChatSession(userIdStr);
-        const m = _calcCoreMetrics(dbData);
-
-        const wantsInvest = /инвест|влож|инвестици/i.test(qLower);
-        const wantsFinance = /ситуац|картина|финанс|прибыл|марж|как дела|что по деньг/i.test(qLower);
-        const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
-        const wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
-        const wantsProjectExpenses = /расход.*проект|проект.*расход|статьи.*расход.*проект|проект.*статьи/i.test(qLower);
-
-        let justSetLiving = false;
-
-        // If awaiting living monthly input
-        const maybeMoney = _parseMoneyKzt(q);
-        if (s && s.pending && s.pending.type === 'ask_living' && maybeMoney) {
-          s.prefs.livingMonthly = maybeMoney;
-          s.pending = null;
-          justSetLiving = true;
-        }
-
-        // Handle project expenses breakdown
-        if (wantsProjectExpenses) {
-          const ops = dbData.operations || [];
-          const projectStats = new Map();
-
-          // Aggregate expenses by project and category
-          ops.forEach(op => {
-            if (op.kind !== 'expense' || !op.projectId) return;
-            if (!op.isFact) return; // Only fact expenses
-
-            const projId = String(op.projectId);
-            const catName = op.categoryName || 'Без категории';
-            const amount = Math.abs(op.amount || 0);
-
-            if (!projectStats.has(projId)) {
-              const proj = (dbData.catalogs?.projects || []).find(p => String(p.id || p._id) === projId);
-              projectStats.set(projId, {
-                name: proj?.name || `Проект ${projId.slice(-4)}`,
-                total: 0,
-                categories: new Map()
-              });
-            }
-
-            const stat = projectStats.get(projId);
-            stat.total += amount;
-            stat.categories.set(catName, (stat.categories.get(catName) || 0) + amount);
-          });
-
-          const lines = [];
-          lines.push('Расходы по проектам (факт):');
-          lines.push('');
-
-          if (projectStats.size === 0) {
-            lines.push('Расходы по проектам не найдены в выбранном периоде.');
-          } else {
-            // Sort projects by total expense
-            const projects = Array.from(projectStats.values()).sort((a, b) => b.total - a.total);
-
-            projects.forEach(proj => {
-              lines.push(`📊 ${proj.name}: ${_formatTenge(proj.total)}`);
-
-              // Sort categories by amount
-              const cats = Array.from(proj.categories.entries())
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 5); // Top 5 categories
-
-              cats.forEach(([catName, amt]) => {
-                const pct = Math.round((amt / proj.total) * 100);
-                lines.push(`   • ${catName}: ${_formatTenge(amt)} (${pct}%)`);
-              });
-
-              lines.push('');
-            });
-
-            // Total across all projects
-            const grandTotal = Array.from(projectStats.values()).reduce((s, p) => s + p.total, 0);
-            lines.push(`ИТОГО по проектам: ${_formatTenge(grandTotal)}`);
-          }
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        if (wantsFinance) {
-          const lines = [];
-          lines.push(`Прибыль (факт): +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`);
-          lines.push(`Доход: +${_formatTenge(m.incFact)} | Расход: -${_formatTenge(m.expFact)}`);
-
-          if (m.runwayDaysOpen !== null) {
-            lines.push(`Открытая ликвидность: ~${m.runwayDaysOpen} дней`);
-          }
-
-          if (m.topExpCat) {
-            lines.push(`Самый тяжелый расход: ${m.topExpCat.name} (~${m.topExpCatSharePct}%)`);
-          }
-
-          // quick risk flags
-          if (m.profitFact < 0) lines.push(`Риск: период убыточный → инвестиции только из резерва.`);
-          else if (m.runwayDaysOpen !== null && m.runwayDaysOpen < 7) lines.push(`Риск: на открытых мало денег → возможен кассовый разрыв.`);
-
-          lines.push('');
-          lines.push('Дальше: прибыль по проектам или кассовые риски по дням?');
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        if (wantsLosses) {
-          // Not TOP. It's classification: structural vs controllable.
-          const cats = Array.isArray(dbData.categorySummary) ? dbData.categorySummary : [];
-          const expCats = cats.map(c => ({ name: c.name || 'Без категории', expFact: Number(c.expenseFact || 0) })).filter(x => x.expFact > 0);
-
-          const classify = (name) => {
-            const n = String(name || '').toLowerCase();
-            if (/(коммун|ккх|жкх|свет|вода|отоп|газ|электро)/i.test(n)) return 'structural';
-            if (/(налог|кпн|ндс|осмс|енпф|соц|пенс|штраф)/i.test(n)) return 'structural';
-            if (/(фот|зарплат|оклад|аванс)/i.test(n)) return 'structural';
-            if (/(процент|дивиденд|владельц|эрнест\s*5|комисси)/i.test(n)) return 'structural';
-            if (/(ремонт|хоз|канцел|маркет|реклам|достав|транспорт|услуг|подряд|материал|закуп|проч)/i.test(n)) return 'controllable';
-            return 'check';
-          };
-
-          let structural = 0, controllable = 0, check = 0;
-          for (const c of expCats) {
-            const cls = classify(c.name);
-            if (cls === 'structural') structural += c.expFact;
-            else if (cls === 'controllable') controllable += c.expFact;
-            else check += c.expFact;
-          }
-
-          const pct = (v) => (m.expFact > 0 ? Math.round((v / m.expFact) * 1000) / 10 : 0);
-
-          const lines = [];
-          lines.push(`Расходы: -${_formatTenge(m.expFact)} | Прибыль: +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`);
-          lines.push(`Структурно: ${pct(structural)}% | Управляемо: ${pct(controllable)}% | Проверить: ${pct(check)}%`);
-          lines.push(pct(controllable) >= 25
-            ? 'Вывод: утечки чаще сидят в управляемых расходах (ремонты/услуги/прочее).'
-            : 'Вывод: расходы в основном структурные → работаем доходом/арендой/долгами.'
-          );
-          lines.push('');
-          lines.push('Дальше: разложить управляемые по контрагентам или по проектам?');
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        if (wantsTellUnknown) {
-          const lines = [];
-          // "unknown": open liquidity risk + profit margin + hidden share
-          const hiddenShare = m.totalCash > 0 ? Math.round((m.hiddenCash / m.totalCash) * 1000) / 10 : 0;
-          lines.push(`Факт-прибыль: +${_formatTenge(m.profitFact)} (маржа ${m.marginPct}%)`);
-          lines.push(`Скрытые деньги: ${_formatTenge(m.hiddenCash)} (${hiddenShare}%)`);
-          if (m.runwayDaysOpen !== null) {
-            lines.push(`Открытые держат ~${m.runwayDaysOpen} дней расходов — это твой реальный риск кассы.`);
-          } else {
-            lines.push('По расходам нет достаточно данных, чтобы оценить кассовый риск.');
-          }
-          lines.push('');
-          lines.push('Дальше: усиливаем прибыль или закрываем кассовые риски?');
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        if (wantsInvest || justSetLiving) {
-          const living = s?.prefs?.livingMonthly;
-          if (!living) {
-            if (s) s.pending = { type: 'ask_living', ts: Date.now() };
-            const answer = 'Сколько уходит на жили-были в месяц? (пример: 3 млн)';
-            _pushHistory(userIdStr, 'assistant', answer);
-            return res.json({ text: answer });
-          }
-
-          // investment math:
-          // if profit covers living -> invest = 50% of free cashflow
-          // else invest from hidden reserves = 0.6%/month (≈ 7.2% годовых из резерва)
-          const freeMonthly = Math.max(0, m.profitFact - living);
-
-          const lines = [];
-          lines.push(`Прибыль: +${_formatTenge(m.profitFact)} /мес`);
-          lines.push(`Жили-были: -${_formatTenge(living)} /мес`);
-
-          if (freeMonthly > 0) {
-            const invest = Math.round(freeMonthly * 0.5);
-            lines.push(`Свободно: +${_formatTenge(freeMonthly)} → инвест ${_formatTenge(invest)} /мес (0.5×)`);
-            lines.push('');
-            lines.push('Дальше: из потока (безопасно) или из резерва (агрессивно)?');
-          } else {
-            const invest = Math.round(m.hiddenCash * 0.006);
-            lines.push('Поток не покрывает жили-были → инвест только из резерва (скрытые).');
-            lines.push(`Ритм: ${_formatTenge(invest)} /мес (~0.6% скрытых)`);
-            lines.push('');
-            lines.push('Дальше: цель доходности и срок инвестиций?');
-          }
-
-          const answer = lines.join('\n');
-          _pushHistory(userIdStr, 'assistant', answer);
-          return res.json({ text: answer });
-        }
-
-        // DIP default if message unknown: profit snapshot + next question
-        const lines = [
-          `Прибыль: +${_formatTenge(m.profitFact)} | Маржа: ${m.marginPct}%`,
-          `Открытые: ${_formatTenge(m.openCash)} | Скрытые: ${_formatTenge(m.hiddenCash)}`,
-          '',
-          'Что делаем: прибыль по проектам, расходы-утечки или инвестиции?'
-        ];
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
-      // AI GENERATION (OpenAI) - fallback
-      // =========================
-      const systemPrompt = (() => {
-        if (isDeep) {
-          return [
-            'Ты CFO-агент INDEX12. Диалог, коротко.',
-            'НЕ повторяй интерфейс (списки счетов/топы) без прямого запроса пользователя.',
-            'Всегда начинай с: прибыль/маржа/риски/следующий шаг.',
-            'Один следующий вопрос в конце.'
-          ].join('\n');
-        }
-        return [
-          'Ты финансовый аналитик INDEX12.',
-          'Отвечай строго по данным. 3–4 строки. Без воды.',
-          'Не придумывай имена. Если нет — пиши "Без контрагента".'
-        ].join('\n');
-      })();
-
-      const dataContext = _formatDbDataForAi(dbData);
-      if (isDeep) {
-        const handleDeep = require('./deepHandler');
-        const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-3o';
-        const aiResponse = await handleDeep({
-          qLower,
-          dbData,
-          history: _getHistoryMessages(userIdStr),
-          modelDeep,
-          openAiChat: _openAiChat,
-          dataContext,
-        });
-
-        _pushHistory(userIdStr, 'assistant', aiResponse);
-
-        if (debugRequested) {
-          debugInfo = debugInfo || {};
-          debugInfo.opsSummary = dbData.operationsSummary || {};
-          debugInfo.sampleOps = (dbData.operations || []).slice(0, 5);
-          debugInfo.modelUsed = modelDeep;
-          debugInfo.modelDeep = modelDeep;
-          return res.json({ text: aiResponse, debug: debugInfo });
-        }
-        return res.json({ text: aiResponse });
-      }
-
-      // === Non-deep path ===
-      const modelOverride = process.env.OPENAI_MODEL || 'gpt-4o';
-      return handleChat({
-        dataContext,
-        history: _getHistoryMessages(userIdStr),
-        openAiChat: _openAiChat,
-        modelChat: modelOverride,
+      const quickResponse = quickMode.handleQuickQuery({
+        query: qLower,
         dbData,
-        debugRequested,
-        res,
-        userIdStr,
-        pushHistory: _pushHistory,
+        snapshot: req?.body?.snapshot || null,
+        formatTenge: _formatTenge
       });
 
-    } catch (err) {
-      console.error('[AI ERROR]', err);
-      return res.status(500).json({ text: `Ошибка AI: ${err.message}` });
+      if (quickResponse) {
+        _pushHistory(userIdStr, 'user', q);
+        _pushHistory(userIdStr, 'assistant', quickResponse);
+        return res.json({ text: quickResponse });
+      }
+
+      // =========================
+      // DEEP MODE (CFO-level analysis)
+      // =========================
+      if (isDeep) {
+        const session = _getChatSession(userIdStr);
+        const history = _getHistoryMessages(userIdStr);
+        const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
+
+        const { answer, shouldSaveToHistory } = await deepMode.handleDeepQuery({
+          query: q,
+          dbData,
+          session,
+          history,
+          openAiChat: _openAiChat,
+          formatDbDataForAi: _formatDbDataForAi,
+          formatTenge: _formatTenge,
+          modelDeep
+        });
+
+        if (shouldSaveToHistory) {
+          _pushHistory(userIdStr, 'user', q);
+          _pushHistory(userIdStr, 'assistant', answer);
+        }
+
+        return res.json({ text: answer });
+      }
+
+      // =========================
+      // CHAT MODE (GPT-4o fallback for general queries)
+      // =========================
+      const history = _getHistoryMessages(userIdStr);
+      const modelChat = process.env.OPENAI_MODEL || 'gpt-4o';
+
+      const response = await chatMode.handleChatQuery({
+        query: q,
+        dbData,
+        history,
+        openAiChat: _openAiChat,
+        formatDbDataForAi: _formatDbDataForAi,
+        modelChat
+      });
+
+      _pushHistory(userIdStr, 'user', q);
+      _pushHistory(userIdStr, 'assistant', response);
+      return res.json({ text: response });
+
+    } catch (error) {
+      console.error('AI Query Error:', error);
+      return res.status(500).json({ error: 'Ошибка обработки запроса' });
     }
   });
 
   // =========================
+  // VERSION ROUTE
   // =========================
-  // SNAPSHOT-ONLY TEST ROUTE (не трогаем основную логику)
-  // =========================
-  router.post('/query_snapshot', isAuthenticated, async (req, res) => {
-    return quickHandler.handleSnapshot({ req, res, formatTenge: _formatTenge });
+  router.get('/version', (req, res) => {
+    res.json({
+      version: AIROUTES_VERSION,
+      tag: CHAT_VERSION_TAG,
+      modes: {
+        quick: 'modes/quickMode.js',
+        chat: 'modes/chatMode.js',
+        deep: 'modes/deepMode.js'
+      }
+    });
   });
 
   return router;
