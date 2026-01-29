@@ -751,6 +751,19 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
+      // SNAPSHOT SHORTCUT для счетов/компаний (любой source/mode)
+      // =========================
+      const snapshot = req.body?.snapshot;
+      const hasSnapshotAccounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts.length > 0
+        : Array.isArray(snapshot?.currentAccountBalances) ? snapshot.currentAccountBalances.length > 0
+        : false;
+      const isAccountsQuery = /сч[её]т|счета|касс|баланс/.test(qLower);
+      const isCompaniesQuery = /компан/i.test(qLower);
+      if (snapshot && hasSnapshotAccounts && (isAccountsQuery || isCompaniesQuery)) {
+        return quickHandler.handleSnapshot({ req, res, formatTenge: _formatTenge });
+      }
+
+      // =========================
       // 🔥 PURE DATABASE MODE
       // =========================
       let effectiveUserId = userId;

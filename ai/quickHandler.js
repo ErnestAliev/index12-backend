@@ -22,7 +22,12 @@ module.exports.handleSnapshot = function handleSnapshot({ req, res, formatTenge 
       return res.json({ text: 'Этот тестовый маршрут поддерживает пока запросы про счета и компании.' });
     }
 
-    const rawAccs = snap.accounts || snap.currentAccountBalances || [];
+    const rawAccs = Array.isArray(snap?.accounts)
+      ? snap.accounts
+      : (Array.isArray(snap?.currentAccountBalances) ? snap.currentAccountBalances : []);
+    if (!Array.isArray(rawAccs) || !rawAccs.length) {
+      return res.status(400).json({ text: 'В snapshot нет счетов.' });
+    }
     const accounts = rawAccs.map(a => {
       const hiddenFlag = !!(
         a.isHidden ||
