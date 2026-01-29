@@ -400,6 +400,10 @@ module.exports = function createAiRouter(deps) {
         formatTenge: _formatTenge
       });
 
+      console.log('[aiRoutes] quickMode returned:', quickResponse ? 'RESPONSE' : 'NULL');
+      console.log('[aiRoutes] dbData.operations count:', (dbData.operations || []).length);
+      console.log('[aiRoutes] transfers count:', (dbData.operations || []).filter(op => op.kind === 'transfer').length);
+
       if (quickResponse) {
         _pushHistory(userIdStr, 'user', q);
         _pushHistory(userIdStr, 'assistant', quickResponse);
