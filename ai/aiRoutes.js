@@ -1462,6 +1462,7 @@ module.exports = function createAiRouter(deps) {
         const wantsFinance = /ситуац|картина|финанс|прибыл|марж|как дела|что по деньг/i.test(qLower);
         const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
         const wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
+        const wantsProjectExpenses = /расход.*проект|проект.*расход|статьи.*расход.*проект|проект.*статьи/i.test(qLower);
 
         let justSetLiving = false;
 
@@ -1471,6 +1472,70 @@ module.exports = function createAiRouter(deps) {
           s.prefs.livingMonthly = maybeMoney;
           s.pending = null;
           justSetLiving = true;
+        }
+
+        // Handle project expenses breakdown
+        if (wantsProjectExpenses) {
+          const ops = dbData.operations || [];
+          const projectStats = new Map();
+
+          // Aggregate expenses by project and category
+          ops.forEach(op => {
+            if (op.kind !== 'expense' || !op.projectId) return;
+            if (!op.isFact) return; // Only fact expenses
+
+            const projId = String(op.projectId);
+            const catName = op.categoryName || 'Без категории';
+            const amount = Math.abs(op.amount || 0);
+
+            if (!projectStats.has(projId)) {
+              const proj = (dbData.catalogs?.projects || []).find(p => String(p.id || p._id) === projId);
+              projectStats.set(projId, {
+                name: proj?.name || `Проект ${projId.slice(-4)}`,
+                total: 0,
+                categories: new Map()
+              });
+            }
+
+            const stat = projectStats.get(projId);
+            stat.total += amount;
+            stat.categories.set(catName, (stat.categories.get(catName) || 0) + amount);
+          });
+
+          const lines = [];
+          lines.push('Расходы по проектам (факт):');
+          lines.push('');
+
+          if (projectStats.size === 0) {
+            lines.push('Расходы по проектам не найдены в выбранном периоде.');
+          } else {
+            // Sort projects by total expense
+            const projects = Array.from(projectStats.values()).sort((a, b) => b.total - a.total);
+
+            projects.forEach(proj => {
+              lines.push(`📊 ${proj.name}: ${_formatTenge(proj.total)}`);
+
+              // Sort categories by amount
+              const cats = Array.from(proj.categories.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5); // Top 5 categories
+
+              cats.forEach(([catName, amt]) => {
+                const pct = Math.round((amt / proj.total) * 100);
+                lines.push(`   • ${catName}: ${_formatTenge(amt)} (${pct}%)`);
+              });
+
+              lines.push('');
+            });
+
+            // Total across all projects
+            const grandTotal = Array.from(projectStats.values()).reduce((s, p) => s + p.total, 0);
+            lines.push(`ИТОГО по проектам: ${_formatTenge(grandTotal)}`);
+          }
+
+          const answer = lines.join('\n');
+          _pushHistory(userIdStr, 'assistant', answer);
+          return res.json({ text: answer });
         }
 
         if (wantsFinance) {
