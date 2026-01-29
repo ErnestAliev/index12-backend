@@ -99,6 +99,7 @@ module.exports.handleSnapshot = function handleSnapshot({ req, res, formatTenge 
     return res.json({ text: lines.join('\n') });
   } catch (err) {
     console.error('[AI SNAPSHOT ERROR]', err);
-    return res.status(500).json({ text: `Ошибка snapshot: ${err.message}` });
+    // Возвращаем 200 с текстом ошибки, чтобы фронт не падал 500
+    return res.json({ text: `Ошибка snapshot: ${err.message || err}` });
   }
 };
