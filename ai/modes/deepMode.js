@@ -111,11 +111,15 @@ async function handleDeepQuery({
     const metrics = calcCoreMetrics(dbData);
 
     // Detect user intent
-    const wantsInvest = /инвест|влож|инвестици/i.test(qLower);
+    const wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
     const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
     const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
     const wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
     const wantsProjectExpenses = /расход.*проект|проект.*расход|статьи.*расход.*проект|проект.*статьи/i.test(qLower);
+    const wantsScaling = /масштаб|рост|расшир|экспанс|новый.*рынок|новый.*продукт/i.test(qLower);
+    const wantsHiring = /наня|найм|команд|c-level|cfo|cmo|cto|сотрудник/i.test(qLower);
+    const wantsTaxOptimization = /налог|опн|сн|кпн|упрощ[её]нк|оптимизац.*налог/i.test(qLower);
+    const wantsExit = /продать.*бизнес|продажа.*бизнес|exit|выход|оценка.*бизнес/i.test(qLower);
 
     let justSetLiving = false;
 
@@ -250,39 +254,36 @@ async function handleDeepQuery({
     }
 
     // =====================
-    // INVESTMENT
+    // INVESTMENT & BUSINESS STRATEGY → GPT Expert
     // =====================
     if (wantsInvest || justSetLiving) {
-        const living = session?.prefs?.livingMonthly;
+        const dataContext = formatDbDataForAi(dbData);
 
-        if (!living) {
-            if (session) session.pending = { type: 'ask_living', ts: Date.now() };
-            return {
-                answer: 'Сколько уходит на жили-были в месяц? (пример: 3 млн)',
-                shouldSaveToHistory: true
-            };
-        }
+        // Add investment context
+        const investContext = `
+Контекст для инвестиций:
+- Прибыль за период: ${formatTenge(metrics.profitFact)}
+- Маржа: ${metrics.marginPct}%
+- Открытые счета: ${formatTenge(metrics.openCash)}
+- Скрытые счета (резервы): ${formatTenge(metrics.hiddenCash)}
+- Burn rate: ${formatTenge(metrics.avgDailyExp)}/день
+${session?.prefs?.livingMonthly ? `- Жили-были (указано пользователем): ${formatTenge(session.prefs.livingMonthly)}/мес` : '- Жили-были: не указано (спроси)'}
+`;
 
-        const freeMonthly = Math.max(0, metrics.profitFact - living);
-        const lines = [];
+        const messages = [
+            { role: 'system', content: deepPrompt },
+            { role: 'system', content: dataContext },
+            { role: 'system', content: investContext },
+            ...history,
+            { role: 'user', content: query }
+        ];
 
-        lines.push(`Прибыль: +${formatTenge(metrics.profitFact)} /мес`);
-        lines.push(`Жили-были: -${formatTenge(living)} /мес`);
-
-        if (freeMonthly > 0) {
-            const invest = Math.round(freeMonthly * 0.5);
-            lines.push(`Свободно: +${formatTenge(freeMonthly)} → инвест ${formatTenge(invest)} /мес (0.5×)`);
-            lines.push('');
-            lines.push('Дальше: из потока (безопасно) или из резерва (агрессивно)?');
-        } else {
-            const invest = Math.round(metrics.hiddenCash * 0.006);
-            lines.push('Поток не покрывает жили-были → инвест только из резерва (скрытые).');
-            lines.push(`Ритм: ${formatTenge(invest)} /мес (~0.6% скрытых)`);
-            lines.push('');
-            lines.push('Дальше: цель доходности и срок инвестиций?');
-        }
-
-        return { answer: lines.join('\n'), shouldSaveToHistory: true };
+        const aiResponse = await openAiChat(messages, {
+            modelOverride: modelDeep,
+            maxTokens: 4000,
+            timeout: 120000
+        });
+        return { answer: aiResponse, shouldSaveToHistory: true };
     }
 
     // =====================
@@ -308,6 +309,42 @@ async function handleDeepQuery({
         }
 
         return { answer: lines.join('\n'), shouldSaveToHistory: true };
+    }
+
+    // =====================
+    // BUSINESS STRATEGY (Scaling, Hiring, Tax, Exit) → GPT Expert
+    // =====================
+    if (wantsScaling || wantsHiring || wantsTaxOptimization || wantsExit) {
+        const dataContext = formatDbDataForAi(dbData);
+
+        let strategyContext = `
+Бизнес-контекст:
+- Прибыль за период: ${formatTenge(metrics.profitFact)}
+- Маржа: ${metrics.marginPct}%
+- Burn rate: ${formatTenge(metrics.avgDailyExp)}/день
+- Runway (открытые): ${metrics.runwayDaysOpen !== null ? `${metrics.runwayDaysOpen} дней` : 'не рассчитан'}
+- Резервы (скрытые): ${formatTenge(metrics.hiddenCash)}
+`;
+
+        if (wantsScaling) strategyContext += '\nТема: масштабирование бизнеса';
+        if (wantsHiring) strategyContext += '\nТема: найм и управление командой';
+        if (wantsTaxOptimization) strategyContext += '\nТема: налоговая оптимизация';
+        if (wantsExit) strategyContext += '\nТема: exit strategy / продажа бизнеса';
+
+        const messages = [
+            { role: 'system', content: deepPrompt },
+            { role: 'system', content: dataContext },
+            { role: 'system', content: strategyContext },
+            ...history,
+            { role: 'user', content: query }
+        ];
+
+        const aiResponse = await openAiChat(messages, {
+            modelOverride: modelDeep,
+            maxTokens: 4000,
+            timeout: 120000
+        });
+        return { answer: aiResponse, shouldSaveToHistory: true };
     }
 
     // =====================
