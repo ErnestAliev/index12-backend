@@ -179,36 +179,43 @@ function handleExpenseQuery({ dbData, formatTenge }) {
     const periodEnd = dbData.meta?.periodEnd || '?';
 
     lines.push(`Расходы (${periodStart} — ${periodEnd})`);
+    lines.push('==============');
     lines.push('');
 
-    // Show fact expenses
+    // Show fact expenses grouped by category
     if (exp.fact && exp.fact.total) {
         const count = exp.fact.count || 0;
-        lines.push(`Факт: ${formatTenge(Math.abs(exp.fact.total))} (${count} операций)`);
 
-        // Show top categories
+        // Get all categories with expenses
         const catSum = dbData.categorySummary || [];
-        const topCats = catSum
+        const categories = catSum
             .filter(c => c.expense && c.expense.fact && c.expense.fact.total)
-            .sort((a, b) => Math.abs(b.expense.fact.total) - Math.abs(a.expense.fact.total))
-            .slice(0, 5);
+            .sort((a, b) => Math.abs(b.expense.fact.total) - Math.abs(a.expense.fact.total));
 
-        if (topCats.length) {
-            lines.push('');
-            lines.push('Топ категории:');
-            topCats.forEach(c => {
+        if (categories.length) {
+            categories.forEach(c => {
                 const amt = Math.abs(c.expense.fact.total);
-                lines.push(`• ${c.name}: ${formatTenge(amt)}`);
+                lines.push(`${c.name}: ${formatTenge(amt)}`);
             });
+            lines.push('');
+            lines.push('==============');
+            lines.push('');
+            lines.push(`Итого: ${formatTenge(Math.abs(exp.fact.total))} (${count} операций)`);
+        } else {
+            lines.push(`Итого: ${formatTenge(Math.abs(exp.fact.total))} (${count} операций)`);
+            lines.push('');
+            lines.push('Категории не указаны');
         }
     } else {
-        lines.push('Факт: 0 ₸');
+        lines.push('Расходы не найдены');
     }
 
     if (exp.forecast && exp.forecast.total) {
         const count = exp.forecast.count || 0;
         lines.push('');
-        lines.push(`Прогноз: ${formatTenge(Math.abs(exp.forecast.total))} (${count} операций)`);
+        lines.push('==============');
+        lines.push('');
+        lines.push(`Прогноз расходов: ${formatTenge(Math.abs(exp.forecast.total))} (${count} операций)`);
     }
 
     return lines.join('\n');
