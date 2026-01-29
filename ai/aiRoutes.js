@@ -135,7 +135,7 @@ module.exports = function createAiRouter(deps) {
   // =========================
   // OpenAI caller (supports model override)
   // =========================
-  const _openAiChat = async (messages, { temperature = 0, maxTokens = 550, modelOverride = null } = {}) => {
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 2000, modelOverride = null } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn('OPENAI_API_KEY is missing');
@@ -158,6 +158,12 @@ module.exports = function createAiRouter(deps) {
     const payload = JSON.stringify(payloadObj);
 
     return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        console.error('[OpenAI] Request timeout (60s)');
+        gptReq.destroy();
+        resolve('Ошибка: timeout при запросе к AI.');
+      }, 60000); // 60 seconds timeout
+
       const gptReq = https.request(
         {
           hostname: 'api.openai.com',
@@ -173,6 +179,7 @@ module.exports = function createAiRouter(deps) {
           let data = '';
           resp.on('data', (chunk) => { data += chunk; });
           resp.on('end', () => {
+            clearTimeout(timeout);
             try {
               if (resp.statusCode < 200 || resp.statusCode >= 300) {
                 console.error(`OpenAI Error ${resp.statusCode}:`, data);
@@ -189,6 +196,7 @@ module.exports = function createAiRouter(deps) {
         }
       );
       gptReq.on('error', (e) => {
+        clearTimeout(timeout);
         console.error('Request Error:', e);
         resolve('Ошибка связи с AI.');
       });
