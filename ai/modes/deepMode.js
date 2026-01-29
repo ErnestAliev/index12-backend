@@ -112,7 +112,7 @@ async function handleDeepQuery({
 
     // Detect user intent
     const wantsInvest = /инвест|влож|инвестици/i.test(qLower);
-    const wantsFinance = /ситуац|картина|финанс|прибыл|марж|как дела|что по деньг/i.test(qLower);
+    const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
     const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
     const wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
     const wantsProjectExpenses = /расход.*проект|проект.*расход|статьи.*расход.*проект|проект.*статьи/i.test(qLower);
