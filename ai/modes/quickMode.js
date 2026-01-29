@@ -49,14 +49,6 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     }
 
     // =====================
-    // FINANCIAL ANALYSIS
-    // =====================
-    if (/(анализ|ситуац|картина|как дела|финанс|отч[её]т)/i.test(qLower) && !/(проект)/i.test(qLower)) {
-        console.log('[quickMode] Matched: ANALYSIS');
-        return handleAnalysisQuery({ dbData, formatTenge });
-    }
-
-    // =====================
     // COMPANIES QUERY
     // =====================
     if (/компани/i.test(qLower)) {
