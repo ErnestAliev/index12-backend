@@ -654,7 +654,7 @@ module.exports = function createDataProvider(deps) {
                 accounts: snapshot.accounts.map(a => ({
                     _id: String(a._id || a.id || a.accountId || ''),
                     name: a.name || a.accountName || 'Счет',
-                    currentBalance: Math.round(Number(a.currentBalance ?? a.balance ?? 0)),
+                    currentBalance: Math.round(Number(a.balance ?? a.currentBalance ?? 0)),
                     futureBalance: Math.round(Number(a.futureBalance ?? a.balance ?? 0)),
                     companyId: a.companyId ? String(a.companyId) : null,
                     isHidden: !!(a.isHidden || a.hidden || a.isExcluded || a.excluded || a.excludeFromTotal),
