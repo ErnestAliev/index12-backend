@@ -791,6 +791,7 @@ module.exports = function createAiRouter(deps) {
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
         now: req?.body?.asOf || null,
+        snapshot: req?.body?.snapshot || null, // 🔥 HYBRID: accounts/companies from snapshot, operations from MongoDB
       });
 
       // -------------------------

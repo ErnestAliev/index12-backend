@@ -172,11 +172,11 @@ module.exports = function createDataProvider(deps) {
                 ]
             };
 
-        const allOps = await Event.find(opsQuery).lean();
+            const allOps = await Event.find(opsQuery).lean();
 
-        // Calculate current balance (up to nowRef)
-        const currentOps = allOps.filter(op => new Date(op.date) <= nowRef);
-        let currentBalance = acc.initialBalance || 0;
+            // Calculate current balance (up to nowRef)
+            const currentOps = allOps.filter(op => new Date(op.date) <= nowRef);
+            let currentBalance = acc.initialBalance || 0;
             for (const op of currentOps) {
                 if (String(op.accountId) === String(acc._id)) {
                     // Regular operation on this account
@@ -190,16 +190,16 @@ module.exports = function createDataProvider(deps) {
                 }
             }
 
-        // Calculate future balance (operations up to endRef)
-        const futureOps = allOps.filter(op => new Date(op.date) <= endRef);
+            // Calculate future balance (operations up to endRef)
+            const futureOps = allOps.filter(op => new Date(op.date) <= endRef);
 
-        let futureBalance = acc.initialBalance || 0;
-        for (const op of futureOps) {
-            if (String(op.accountId) === String(acc._id)) {
-                futureBalance += (op.amount || 0);
-            } else if (String(op.toAccountId) === String(acc._id)) {
-                futureBalance += Math.abs(op.amount || 0);
-            } else if (String(op.fromAccountId) === String(acc._id)) {
+            let futureBalance = acc.initialBalance || 0;
+            for (const op of futureOps) {
+                if (String(op.accountId) === String(acc._id)) {
+                    futureBalance += (op.amount || 0);
+                } else if (String(op.toAccountId) === String(acc._id)) {
+                    futureBalance += Math.abs(op.amount || 0);
+                } else if (String(op.fromAccountId) === String(acc._id)) {
                     futureBalance -= Math.abs(op.amount || 0);
                 }
             }
@@ -605,11 +605,11 @@ module.exports = function createDataProvider(deps) {
     /**
      * Build complete data packet for AI from database
      * @param {string} userId - User ID
-     * @param {Object} options - Options { dateRange, includeHidden, visibleAccountIds }
+     * @param {Object} options - Options { dateRange, includeHidden, visibleAccountIds, snapshot }
      * @returns {Promise<Object>} Data packet for AI
      */
     async function buildDataPacket(userId, options = {}) {
-        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null } = options;
+        const { dateRange: periodFilter, includeHidden = false, visibleAccountIds = null, workspaceId = null, now = null, snapshot = null } = options;
         const nowRef = _resolveNow(now);
 
         // ✅ Parse dateRange from periodFilter
@@ -634,16 +634,89 @@ module.exports = function createDataProvider(deps) {
             end = _localEndOfDay(new Date(nowLocal.getFullYear(), nowLocal.getMonth() + 1, 0));
         }
 
-        const [accountsData, operationsData, companies, projects, categories, contractors, individuals] =
-            await Promise.all([
-                getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId, now: nowRef }),
-                getOperations(userId, { start, end }, { workspaceId, includeHidden, now: nowRef }),
-                getCompanies(userId, workspaceId),
-                getProjects(userId, workspaceId),
-                getCategories(userId, workspaceId),
-                getContractors(userId, workspaceId),
-                getIndividuals(userId, workspaceId)
-            ]);
+        // 🔥 HYBRID MODE: Use snapshot for accounts/companies if available, MongoDB for everything else
+        const useSnapshotAccounts = snapshot && Array.isArray(snapshot.accounts) && snapshot.accounts.length > 0;
+        const useSnapshotCompanies = snapshot && Array.isArray(snapshot.companies) && snapshot.companies.length > 0;
+
+        if (useSnapshotAccounts) {
+            console.log(`[dataProvider] 🔥 Using SNAPSHOT for accounts (${snapshot.accounts.length} accounts)`);
+        }
+        if (useSnapshotCompanies) {
+            console.log(`[dataProvider] 🔥 Using SNAPSHOT for companies (${snapshot.companies.length} companies)`);
+        }
+
+        // Build promises array conditionally
+        const promises = [];
+
+        // Accounts: snapshot priority, fallback to MongoDB
+        if (useSnapshotAccounts) {
+            promises.push(Promise.resolve({
+                accounts: snapshot.accounts.map(a => ({
+                    _id: String(a._id || a.id || a.accountId || ''),
+                    name: a.name || a.accountName || 'Счет',
+                    currentBalance: Math.round(Number(a.currentBalance ?? a.balance ?? 0)),
+                    futureBalance: Math.round(Number(a.futureBalance ?? a.balance ?? 0)),
+                    companyId: a.companyId ? String(a.companyId) : null,
+                    isHidden: !!(a.isHidden || a.hidden || a.isExcluded || a.excluded || a.excludeFromTotal),
+                    isExcluded: !!(a.isExcluded || a.excluded || a.excludeFromTotal)
+                })).filter(a => a._id),
+                openAccounts: [],
+                hiddenAccounts: [],
+                totals: {
+                    open: { current: 0, future: 0 },
+                    hidden: { current: 0, future: 0 },
+                    all: { current: 0, future: 0 }
+                },
+                meta: { today: _fmtDateDDMMYY(nowRef), count: 0, openCount: 0, hiddenCount: 0 }
+            }));
+        } else {
+            promises.push(getAccounts(userId, { includeHidden, visibleAccountIds, workspaceId, now: nowRef }));
+        }
+
+        // Operations: always from MongoDB
+        promises.push(getOperations(userId, { start, end }, { workspaceId, includeHidden, now: nowRef }));
+
+        // Companies: snapshot priority, fallback to MongoDB
+        if (useSnapshotCompanies) {
+            promises.push(Promise.resolve(snapshot.companies.map(c => ({
+                id: String(c._id || c.id || ''),
+                name: c.name || `Компания ${String(c._id || c.id || '').slice(-4)}`
+            })).filter(c => c.id && c.name)));
+        } else {
+            promises.push(getCompanies(userId, workspaceId));
+        }
+
+        // Projects, Categories, Contractors, Individuals: always from MongoDB
+        promises.push(getProjects(userId, workspaceId));
+        promises.push(getCategories(userId, workspaceId));
+        promises.push(getContractors(userId, workspaceId));
+        promises.push(getIndividuals(userId, workspaceId));
+
+        const [accountsData, operationsData, companies, projects, categories, contractors, individuals] = await Promise.all(promises);
+
+        // Recalculate totals if using snapshot accounts
+        if (useSnapshotAccounts && accountsData.accounts) {
+            const openAccs = accountsData.accounts.filter(a => !a.isHidden);
+            const hiddenAccs = accountsData.accounts.filter(a => a.isHidden);
+            const openCurrent = openAccs.reduce((s, a) => s + (a.currentBalance || 0), 0);
+            const openFuture = openAccs.reduce((s, a) => s + (a.futureBalance || 0), 0);
+            const hiddenCurrent = hiddenAccs.reduce((s, a) => s + (a.currentBalance || 0), 0);
+            const hiddenFuture = hiddenAccs.reduce((s, a) => s + (a.futureBalance || 0), 0);
+
+            accountsData.openAccounts = openAccs;
+            accountsData.hiddenAccounts = hiddenAccs;
+            accountsData.totals = {
+                open: { current: openCurrent, future: openFuture },
+                hidden: { current: hiddenCurrent, future: hiddenFuture },
+                all: { current: openCurrent + hiddenCurrent, future: openFuture + hiddenFuture }
+            };
+            accountsData.meta = {
+                today: _fmtDateDDMMYY(nowRef),
+                count: accountsData.accounts.length,
+                openCount: openAccs.length,
+                hiddenCount: hiddenAccs.length
+            };
+        }
 
         // Обогатим операции человекочитаемыми названиями (категория/контрагент/физлицо/счета/компании)
         if (Array.isArray(operationsData.operations)) {
