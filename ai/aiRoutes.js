@@ -397,23 +397,26 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // TRY QUICK MODE FIRST (deterministic, fast)
+      // TRY QUICK MODE (deterministic, fast)
+      // Skip if user explicitly chose Deep Mode (preserves conversation context)
       // =========================
-      const quickResponse = quickMode.handleQuickQuery({
-        query: qLower,
-        dbData,
-        snapshot: req?.body?.snapshot || null,
-        formatTenge: _formatTenge
-      });
+      if (!isDeep) {
+        const quickResponse = quickMode.handleQuickQuery({
+          query: qLower,
+          dbData,
+          snapshot: req?.body?.snapshot || null,
+          formatTenge: _formatTenge
+        });
 
-      console.log('[aiRoutes] quickMode returned:', quickResponse ? 'RESPONSE' : 'NULL');
-      console.log('[aiRoutes] dbData.operations count:', (dbData.operations || []).length);
-      console.log('[aiRoutes] transfers count:', (dbData.operations || []).filter(op => op.kind === 'transfer').length);
+        console.log('[aiRoutes] quickMode returned:', quickResponse ? 'RESPONSE' : 'NULL');
+        console.log('[aiRoutes] dbData.operations count:', (dbData.operations || []).length);
+        console.log('[aiRoutes] transfers count:', (dbData.operations || []).filter(op => op.kind === 'transfer').length);
 
-      if (quickResponse) {
-        _pushHistory(userIdStr, 'user', q);
-        _pushHistory(userIdStr, 'assistant', quickResponse);
-        return res.json({ text: quickResponse });
+        if (quickResponse) {
+          _pushHistory(userIdStr, 'user', q);
+          _pushHistory(userIdStr, 'assistant', quickResponse);
+          return res.json({ text: quickResponse });
+        }
       }
 
       // =========================
