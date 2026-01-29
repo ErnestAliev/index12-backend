@@ -86,6 +86,9 @@ module.exports = function createAiRouter(deps) {
   const createDataProvider = require('./dataProvider');
   const dataProvider = createDataProvider({ ...models, mongoose });
 
+  // Import quick handler for snapshot-based responses
+  const quickHandler = require('./quickHandler');
+
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
@@ -756,7 +759,7 @@ module.exports = function createAiRouter(deps) {
       const snapshot = req.body?.snapshot;
       const hasSnapshotAccounts = Array.isArray(snapshot?.accounts) ? snapshot.accounts.length > 0
         : Array.isArray(snapshot?.currentAccountBalances) ? snapshot.currentAccountBalances.length > 0
-        : false;
+          : false;
       const isAccountsQuery = /сч[её]т|счета|касс|баланс/.test(qLower);
       const isCompaniesQuery = /компан/i.test(qLower);
       if (snapshot && hasSnapshotAccounts && (isAccountsQuery || isCompaniesQuery)) {
@@ -1216,7 +1219,7 @@ module.exports = function createAiRouter(deps) {
         const periodEndMonth = dbData.meta?.periodEnd || todayStr;
 
         const wantsContractor = /\b(контраг|кому|на кого|у кого|поставщ|partner|партнер|партнёр)\b/i.test(qLower);
-        const cleanName = (name) => String(name || '').replace(/\s*\[[^\]]+\]\s*$/,'').trim() || 'Без названия';
+        const cleanName = (name) => String(name || '').replace(/\s*\[[^\]]+\]\s*$/, '').trim() || 'Без названия';
 
         const factTotal = Math.abs(expenseData.fact?.total || 0);
         const factCount = expenseData.fact?.count || 0;
