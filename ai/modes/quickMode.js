@@ -526,16 +526,18 @@ function buildAllProjectsReport(projects, dbData, formatTenge) {
 
     // PROFIT SECTION
     lines.push('Прибыль:');
-    let totalProfitFact = 0;
+    let totalProfitFact = 0, totalProfitForecast = 0;
     sorted.forEach(s => {
         const profitFact = s.factIncome - s.factExpense;
+        const profitForecast = s.forecastIncome - s.forecastExpense;
         totalProfitFact += profitFact;
-        lines.push(`${s.name}: ${formatTenge(profitFact)}`);
+        totalProfitForecast += profitForecast;
+        lines.push(`${s.name}: ${formatTenge(profitFact)} / ${formatTenge(profitForecast)}`);
     });
     lines.push('');
     lines.push('==============');
     lines.push('');
-    lines.push(`Итого прибыль: ${formatTenge(totalProfitFact)}`);
+    lines.push(`Итого прибыль: ${formatTenge(totalProfitFact)} / ${formatTenge(totalProfitForecast)}`);
 
     return lines.join('\n');
 }
