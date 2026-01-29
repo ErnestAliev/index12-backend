@@ -189,12 +189,12 @@ function handleExpenseQuery({ dbData, formatTenge }) {
         // Get all categories with expenses
         const catSum = dbData.categorySummary || [];
         const categories = catSum
-            .filter(c => c.expense && c.expense.fact && c.expense.fact.total)
-            .sort((a, b) => Math.abs(b.expense.fact.total) - Math.abs(a.expense.fact.total));
+            .filter(c => c.expenseFact && c.expenseFact !== 0)
+            .sort((a, b) => Math.abs(b.expenseFact) - Math.abs(a.expenseFact));
 
         if (categories.length) {
             categories.forEach(c => {
-                const amt = Math.abs(c.expense.fact.total);
+                const amt = Math.abs(c.expenseFact);
                 lines.push(`${c.name}: ${formatTenge(amt)}`);
             });
             lines.push('');
