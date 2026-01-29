@@ -1,6 +1,6 @@
 // Deep (investment/CFO) handler isolated from aiRoutes
 // Accepts already-built dbData and user query, returns text or throws error
-const deepPrompt = require('./deepPrompt');
+const deepPrompt = require('./prompts/deepPrompt');
 
 module.exports = async function handleDeepQuery({
   qLower,
