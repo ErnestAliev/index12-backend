@@ -14,10 +14,13 @@
 function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     const qLower = String(query || '').toLowerCase().trim();
 
+    console.log('[quickMode] query:', qLower);
+
     // =====================
     // ACCOUNTS QUERY
     // =====================
     if (/\bсч[её]т|счета|касс[аы]|баланс\b/i.test(qLower)) {
+        console.log('[quickMode] Matched: ACCOUNTS');
         return handleAccountsQuery({ dbData, formatTenge });
     }
 
@@ -25,6 +28,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // INCOME QUERY
     // =====================
     if (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
+        console.log('[quickMode] Matched: INCOME');
         return handleIncomeQuery({ dbData, formatTenge });
     }
 
@@ -32,6 +36,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // EXPENSE QUERY
     // =====================
     if (/\b(расход|трат|затрат)\b/i.test(qLower) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
+        console.log('[quickMode] Matched: EXPENSE');
         return handleExpenseQuery({ dbData, formatTenge });
     }
 
@@ -39,6 +44,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // TRANSFERS QUERY
     // =====================
     if (/\b(перевод(ы|ов)?|трансфер|transfer)\b/i.test(qLower)) {
+        console.log('[quickMode] Matched: TRANSFERS');
         return handleTransfersQuery({ dbData, formatTenge });
     }
 
@@ -46,6 +52,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // COMPANIES QUERY
     // =====================
     if (/компани/i.test(qLower)) {
+        console.log('[quickMode] Matched: COMPANIES');
         return handleCompaniesQuery({ dbData, formatTenge });
     }
 
@@ -53,6 +60,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // PROJECTS QUERY
     // =====================
     if (/проект/i.test(qLower)) {
+        console.log('[quickMode] Matched: PROJECTS');
         return handleProjectsQuery({ dbData, formatTenge, query: qLower });
     }
 
@@ -60,17 +68,21 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // CATALOGS (contractors, individuals, categories)
     // =====================
     if (/контраг/i.test(qLower)) {
+        console.log('[quickMode] Matched: CONTRACTORS');
         return handleContractorsQuery({ dbData });
     }
 
     if (/физ|фл\b/i.test(qLower)) {
+        console.log('[quickMode] Matched: INDIVIDUALS');
         return handleIndividualsQuery({ dbData });
     }
 
     if (/категор/i.test(qLower)) {
+        console.log('[quickMode] Matched: CATEGORIES');
         return handleCategoriesQuery({ dbData });
     }
 
+    console.log('[quickMode] No match - returning null');
     // Not handled by quick mode
     return null;
 }
