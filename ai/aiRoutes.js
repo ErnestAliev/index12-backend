@@ -312,12 +312,10 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // Build data packet (hybrid mode: snapshot + MongoDB)
       // =========================
-      const isProjectIntent = /проект/i.test(qLower);
-      const forceAllAccounts = isProjectIntent || isDeep;
-
+      // AI always sees ALL accounts (including hidden) for proper analysis
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: forceAllAccounts ? true : !!req?.body?.includeHidden,
-        visibleAccountIds: forceAllAccounts ? null : (req?.body?.visibleAccountIds || null),
+        includeHidden: true, // 🔥 AI always needs full context
+        visibleAccountIds: null, // No filtering for AI
         dateRange: req?.body?.periodFilter || null,
         workspaceId: req.user?.currentWorkspaceId || null,
         now: req?.body?.asOf || null,
