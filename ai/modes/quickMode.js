@@ -473,7 +473,11 @@ function buildAllProjectsReport(projects, dbData, formatTenge) {
     });
 
     const lines = [];
-    lines.push('Проекты:');
+    const periodStart = dbData.meta?.periodStart || '?';
+    const periodEnd = dbData.meta?.periodEnd || '?';
+
+    lines.push(`Операции по проектам (${periodStart} — ${periodEnd})`);
+    lines.push('==============');
     lines.push('');
 
     if (!projectStats.size) {
@@ -488,11 +492,50 @@ function buildAllProjectsReport(projects, dbData, formatTenge) {
             return bNet - aNet;
         });
 
+    // INCOME SECTION
+    lines.push('Доходы:');
+    let totalIncFact = 0, totalIncForecast = 0;
     sorted.forEach(s => {
-        const factNet = s.factIncome - s.factExpense;
-        const forecastNet = s.forecastIncome - s.forecastExpense;
-        lines.push(`${s.name}: факт ${formatTenge(factNet)}, прогноз ${formatTenge(forecastNet)}`);
+        totalIncFact += s.factIncome;
+        totalIncForecast += s.forecastIncome;
+        lines.push(`${s.name}: ${formatTenge(s.factIncome)} / ${formatTenge(s.forecastIncome)}`);
     });
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+    lines.push(`Итого доходы: ${formatTenge(totalIncFact)} / ${formatTenge(totalIncForecast)}`);
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+
+    // EXPENSE SECTION
+    lines.push('Расходы:');
+    let totalExpFact = 0, totalExpForecast = 0;
+    sorted.forEach(s => {
+        totalExpFact += s.factExpense;
+        totalExpForecast += s.forecastExpense;
+        lines.push(`${s.name}: ${formatTenge(Math.abs(s.factExpense))} / ${formatTenge(Math.abs(s.forecastExpense))}`);
+    });
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+    lines.push(`Итого расходы: ${formatTenge(Math.abs(totalExpFact))} / ${formatTenge(Math.abs(totalExpForecast))}`);
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+
+    // PROFIT SECTION
+    lines.push('Прибыль:');
+    let totalProfitFact = 0;
+    sorted.forEach(s => {
+        const profitFact = s.factIncome - s.factExpense;
+        totalProfitFact += profitFact;
+        lines.push(`${s.name}: ${formatTenge(profitFact)}`);
+    });
+    lines.push('');
+    lines.push('==============');
+    lines.push('');
+    lines.push(`Итого прибыль: ${formatTenge(totalProfitFact)}`);
 
     return lines.join('\n');
 }
