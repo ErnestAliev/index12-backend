@@ -149,20 +149,43 @@ function handleIncomeQuery({ dbData, formatTenge }) {
     const periodEnd = dbData.meta?.periodEnd || '?';
 
     lines.push(`Доходы (${periodStart} — ${periodEnd})`);
+    lines.push('==============');
     lines.push('');
 
+    // Show fact income grouped by category
     if (inc.fact && inc.fact.total) {
         const count = inc.fact.count || 0;
-        lines.push(`Факт: ${formatTenge(inc.fact.total)} (${count} операций)`);
+
+        // Get all categories with income
+        const catSum = dbData.categorySummary || [];
+        const categories = catSum
+            .filter(c => c.incomeFact && c.incomeFact !== 0)
+            .sort((a, b) => Math.abs(b.incomeFact) - Math.abs(a.incomeFact));
+
+        if (categories.length) {
+            categories.forEach(c => {
+                const amt = Math.abs(c.incomeFact);
+                lines.push(`${c.name}: ${formatTenge(amt)}`);
+            });
+            lines.push('');
+            lines.push('==============');
+            lines.push('');
+            lines.push(`Итого: ${formatTenge(inc.fact.total)} (${count} операций)`);
+        } else {
+            lines.push(`Итого: ${formatTenge(inc.fact.total)} (${count} операций)`);
+            lines.push('');
+            lines.push('Категории не указаны');
+        }
     } else {
-        lines.push('Факт: 0 ₸');
+        lines.push('Доходы не найдены');
     }
 
     if (inc.forecast && inc.forecast.total) {
         const count = inc.forecast.count || 0;
-        lines.push(`Прогноз: ${formatTenge(inc.forecast.total)} (${count} операций)`);
-    } else {
-        lines.push('Прогноз: 0 ₸');
+        lines.push('');
+        lines.push('==============');
+        lines.push('');
+        lines.push(`Прогноз доходов: ${formatTenge(inc.forecast.total)} (${count} операций)`);
     }
 
     return lines.join('\n');
