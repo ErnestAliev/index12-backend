@@ -19,7 +19,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // ACCOUNTS QUERY
     // =====================
-    if (/\bсч[её]т|счета|касс[аы]|баланс\b/i.test(qLower)) {
+    if (/(сч[её]т|счета|касс|баланс)/i.test(qLower)) {
         console.log('[quickMode] Matched: ACCOUNTS');
         return handleAccountsQuery({ dbData, formatTenge });
     }
@@ -27,7 +27,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // INCOME QUERY
     // =====================
-    if (/\b(доход|поступлен|приход)\b/i.test(qLower) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
+    if (/(доход|поступлен|приход)/i.test(qLower) && !/(перевод|трансфер)/i.test(qLower)) {
         console.log('[quickMode] Matched: INCOME');
         return handleIncomeQuery({ dbData, formatTenge });
     }
@@ -35,7 +35,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // EXPENSE QUERY
     // =====================
-    if (/\b(расход|трат|затрат)\b/i.test(qLower) && !/\b(перевод|трансфер)\b/i.test(qLower)) {
+    if (/(расход|трат|затрат)/i.test(qLower) && !/(перевод|трансфер)/i.test(qLower)) {
         console.log('[quickMode] Matched: EXPENSE');
         return handleExpenseQuery({ dbData, formatTenge });
     }
@@ -43,7 +43,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // TRANSFERS QUERY
     // =====================
-    if (/\b(перевод(ы|ов)?|трансфер|transfer)\b/i.test(qLower)) {
+    if (/(перевод|трансфер|transfer)/i.test(qLower)) {
         console.log('[quickMode] Matched: TRANSFERS');
         return handleTransfersQuery({ dbData, formatTenge });
     }
