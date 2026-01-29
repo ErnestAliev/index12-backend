@@ -360,19 +360,33 @@ ${session?.prefs?.livingMonthly ? `- Жили-были (указано поль�
         'Что делаем: прибыль по проектам, расходы-утечки или инвестиции?'
     ];
 
-    // Option 2: Call LLM for unknown queries (uncomment to enable)
-    /*
-    const dataContext = formatDbDataForAi(dbData);
-    const messages = [
-      { role: 'system', content: deepPrompt },
-      { role: 'system', content: dataContext },
-      ...history,
-      { role: 'user', content: query }
-    ];
-    const aiResponse = await openAiChat(messages, { modelOverride: modelDeep });
-    return { answer: aiResponse, shouldSaveToHistory: true };
-    */
+    // =====================
+    // FALLBACK: Continue GPT conversation if dialogue is active
+    // =====================
+    // If history contains assistant messages, it means we're in an active conversation
+    // User's message might be an answer to our question, not a new intent
+    // → Continue GPT dialogue instead of falling back to deterministic response
+    const hasActiveDialogue = history.some(msg => msg.role === 'assistant');
 
+    if (hasActiveDialogue || wantsInvest) {
+        // User is answering our questions OR wants to talk about investments
+        // → Continue conversational flow with GPT
+        const dataContext = formatDbDataForAi(dbData);
+        const messages = [
+            { role: 'system', content: deepPrompt },
+            { role: 'system', content: dataContext },
+            ...history,
+            { role: 'user', content: query }
+        ];
+        const aiResponse = await openAiChat(messages, {
+            modelOverride: modelDeep,
+            maxTokens: 4000,
+            timeout: 120000
+        });
+        return { answer: aiResponse, shouldSaveToHistory: true };
+    }
+
+    // If no active dialogue and no specific intent → show menu
     return { answer: lines.join('\n'), shouldSaveToHistory: true };
 }
 
