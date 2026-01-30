@@ -237,6 +237,38 @@ module.exports = function createAiRouter(deps) {
     lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
     lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
 
+    // Category breakdown (TOP categories for business identification)
+    const catSum = data.categorySummary || [];
+    if (catSum.length > 0) {
+      const incomeCategories = catSum
+        .filter(c => c.income?.fact?.total && c.income.fact.total > 0)
+        .sort((a, b) => (b.income?.fact?.total || 0) - (a.income?.fact?.total || 0))
+        .slice(0, 10);
+
+      const expenseCategories = catSum
+        .filter(c => c.expense?.fact?.total && c.expense.fact.total < 0)
+        .sort((a, b) => Math.abs(b.expense?.fact?.total || 0) - Math.abs(a.expense?.fact?.total || 0))
+        .slice(0, 10);
+
+      if (incomeCategories.length > 0) {
+        lines.push('Топ категории доходов:');
+        incomeCategories.forEach(c => {
+          const amt = _formatTenge(c.income.fact.total);
+          const count = c.income.fact.count || 0;
+          lines.push(`- ${c.name}: ${amt} (${count} оп.)`);
+        });
+      }
+
+      if (expenseCategories.length > 0) {
+        lines.push('Топ категории расходов:');
+        expenseCategories.forEach(c => {
+          const amt = _formatTenge(Math.abs(c.expense.fact.total));
+          const count = c.expense.fact.count || 0;
+          lines.push(`- ${c.name}: ${amt} (${count} оп.)`);
+        });
+      }
+    }
+
     return lines.join('\n');
   };
 
