@@ -801,6 +801,7 @@ app.get('/api/auth/me', async (req, res) => {
 
         res.json({
             ...baseUser,
+            id: userId, // 🔥 FIX: Add id field for frontend (baseUser has _id from MongoDB)
             effectiveUserId: effectiveUserId,
             minEventDate: firstEvent ? firstEvent.date : null,
             workspaceRole,
