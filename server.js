@@ -367,10 +367,27 @@ passport.deserializeUser(async (id, done) => {
 app.use(async (req, res, next) => {
     if (req.isAuthenticated() && req.user?.currentWorkspaceId) {
         try {
+            console.log('💾 [Workspace Cache] Caching workspace for user:', {
+                userId: req.user.id,
+                currentWorkspaceId: req.user.currentWorkspaceId,
+                path: req.path
+            });
+
             req.cachedWorkspace = await Workspace.findById(req.user.currentWorkspaceId).lean();
-            // console.log('[PERF] Workspace cached for request:', req.user.currentWorkspaceId);
+
+            if (!req.cachedWorkspace) {
+                console.log('⚠️ [Workspace Cache] Workspace not found in DB:', req.user.currentWorkspaceId);
+            } else {
+                console.log('✅ [Workspace Cache] Workspace cached:', {
+                    workspaceId: req.cachedWorkspace._id,
+                    name: req.cachedWorkspace.name,
+                    isDefault: req.cachedWorkspace.isDefault
+                });
+            }
         } catch (err) {
-            console.error('[PERF] Workspace cache error:', err);
+            console.error('❌ [Workspace Cache] Error caching workspace:', err);
+            // IMPORTANT: Don't break the request if caching fails
+            req.cachedWorkspace = null;
         }
     }
     next();
@@ -467,32 +484,53 @@ function getEffectiveUserId(req) {
 // - New owned workspaces = composite ID (isolated data)
 async function getCompositeUserId(req) {
     const realUserId = getEffectiveUserId(req);
-    if (!realUserId) return null;
+    if (!realUserId) {
+        console.log('🔍 [getCompositeUserId] No realUserId found');
+        return null;
+    }
 
     const currentWorkspaceId = req.user?.currentWorkspaceId;
 
-    if (!currentWorkspaceId) return realUserId;
+    if (!currentWorkspaceId) {
+        console.log('🔍 [getCompositeUserId] No workspace, returning realUserId:', realUserId);
+        return realUserId;
+    }
 
     try {
         // 🚀 PERFORMANCE: Use cached workspace from middleware (eliminates DB query!)
         const workspace = req.cachedWorkspace;
-        if (!workspace) return realUserId;
+        if (!workspace) {
+            console.log('🔍 [getCompositeUserId] No cached workspace, returning realUserId:', realUserId);
+            return realUserId;
+        }
+
+        console.log('🔍 [getCompositeUserId] Workspace data:', {
+            workspaceId: currentWorkspaceId,
+            workspaceUserId: workspace.userId,
+            realUserId,
+            isDefault: workspace.isDefault,
+            workspaceName: workspace.name
+        });
 
         // 🔥 Check SHARED workspace FIRST (before isDefault)
         // Critical: shared workspace might also be marked as default
         if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
+            console.log('✅ [getCompositeUserId] SHARED workspace detected, using owner ID:', workspace.userId);
             return String(workspace.userId); // Return owner's ID for shared workspace
         }
 
         // User's own default workspace
         if (workspace.isDefault) {
+            console.log('✅ [getCompositeUserId] DEFAULT workspace, using realUserId:', realUserId);
             return realUserId; // Original data preserved
         }
 
         // New owned non-default workspace - use composite ID for isolation
-        return `${realUserId}_ws_${currentWorkspaceId}`;
+        const compositeId = `${realUserId}_ws_${currentWorkspaceId}`;
+        console.log('✅ [getCompositeUserId] NON-DEFAULT owned workspace, using composite ID:', compositeId);
+        return compositeId;
     } catch (err) {
-        console.error('Error in getCompositeUserId:', err);
+        console.error('❌ [getCompositeUserId] Error:', err);
         return realUserId;
     }
 }
@@ -527,20 +565,36 @@ app.get('/auth/google', (req, res, next) => {
 app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }), (req, res) => { res.redirect(FRONTEND_URL); });
 app.get('/api/auth/me', async (req, res) => {
     try {
+        console.log('🔐 [GET /api/auth/me] Authentication check started');
+        console.log('🔐 [GET /api/auth/me] Is authenticated:', req.isAuthenticated());
+        console.log('🔐 [GET /api/auth/me] Session ID:', req.sessionID?.substring(0, 12) + '...');
+
         if (!req.isAuthenticated()) {
+            console.log('❌ [GET /api/auth/me] No user authenticated');
             return res.status(401).json({ message: 'No user authenticated' });
         }
 
         const userId = req.user.id;
+        console.log('🔐 [GET /api/auth/me] User authenticated:', {
+            userId,
+            email: req.user.email,
+            name: req.user.name,
+            currentWorkspaceId: req.user.currentWorkspaceId
+        });
         const effectiveUserId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID so admin sees owner's data
-        const userObjId = new mongoose.Types.ObjectId(effectiveUserId);
+        // ❌ REMOVED: const userObjId = new mongoose.Types.ObjectId(effectiveUserId);
+        // Composite IDs like "696d554bff8f70383f56896e_ws_697e1729b9464ba0db2b91a3" are NOT valid ObjectIds!
+
+        console.log('🔐 [GET /api/auth/me] Composite user ID:', effectiveUserId);
 
         // 🟢 NEW: Auto-migration - create default workspace on first login
         let needsDefaultWorkspace = false;
 
         if (!req.user.currentWorkspaceId) {
+            console.log('⚠️ [GET /api/auth/me] No currentWorkspaceId, will create default');
             needsDefaultWorkspace = true;
         } else {
+            console.log('🔐 [GET /api/auth/me] Checking workspace access:', req.user.currentWorkspaceId);
             // Check if current workspace exists AND user has access to it
             const currentWorkspace = await Workspace.findOne({
                 _id: req.user.currentWorkspaceId,
@@ -550,8 +604,14 @@ app.get('/api/auth/me', async (req, res) => {
                 ]
             });
             if (!currentWorkspace) {
-                console.log('⚠️ Current workspace not found or no access, will create default');
+                console.log('⚠️ [GET /api/auth/me] Current workspace not found or no access, will create default');
                 needsDefaultWorkspace = true;
+            } else {
+                console.log('✅ [GET /api/auth/me] Current workspace found:', {
+                    workspaceId: currentWorkspace._id,
+                    name: currentWorkspace.name,
+                    isDefault: currentWorkspace.isDefault
+                });
             }
         }
 
@@ -613,6 +673,14 @@ app.get('/api/auth/me', async (req, res) => {
             }
         }
 
+        console.log('✅ [GET /api/auth/me] Returning user data:', {
+            userId,
+            effectiveUserId,
+            currentWorkspaceId: req.user.currentWorkspaceId,
+            workspaceRole,
+            isWorkspaceOwner
+        });
+
         res.json({
             ...baseUser,
             effectiveUserId: effectiveUserId,
@@ -621,6 +689,7 @@ app.get('/api/auth/me', async (req, res) => {
             isWorkspaceOwner
         });
     } catch (err) {
+        console.error('❌ [GET /api/auth/me] Error:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -822,23 +891,38 @@ async function getWorkspaceId(req) {
 const checkWorkspacePermission = (allowedRoles) => {
     return async (req, res, next) => {
         try {
+            console.log('🔐 [checkWorkspacePermission] Starting permission check, allowedRoles:', allowedRoles);
+
             if (!req.user) {
+                console.log('❌ [checkWorkspacePermission] No user authenticated');
                 return res.status(401).json({ message: 'Unauthorized' });
             }
 
             const workspaceId = await getWorkspaceId(req);
             if (!workspaceId) {
+                console.log('❌ [checkWorkspacePermission] No workspace found');
                 return res.status(404).json({ message: 'Workspace not found' });
             }
 
+            console.log('🔐 [checkWorkspacePermission] Checking workspace:', workspaceId, 'for user:', req.user.id);
+
             const workspace = await Workspace.findById(workspaceId);
             if (!workspace) {
+                console.log('❌ [checkWorkspacePermission] Workspace not found in DB:', workspaceId);
                 return res.status(404).json({ message: 'Workspace not found' });
             }
+
+            console.log('🔐 [checkWorkspacePermission] Workspace data:', {
+                name: workspace.name,
+                ownerId: workspace.userId,
+                currentUserId: req.user.id,
+                sharedWith: workspace.sharedWith?.map(s => ({ userId: s.userId, role: s.role }))
+            });
 
             // Owner always has full access (effectively 'admin')
             // Using strict string comparison and ensuring both are strings
             if (String(workspace.userId) === String(req.user.id)) {
+                console.log('✅ [checkWorkspacePermission] User is OWNER, granting admin access');
                 req.workspaceRole = 'admin'; // Owner is admin
                 return next();
             }
@@ -846,17 +930,22 @@ const checkWorkspacePermission = (allowedRoles) => {
             // Check if user is in sharedWith
             const sharedUser = workspace.sharedWith?.find(s => String(s.userId) === String(req.user.id));
             if (!sharedUser) {
+                console.log('❌ [checkWorkspacePermission] User not in sharedWith list');
                 return res.status(403).json({ message: 'Access denied: not shared with you' });
             }
 
+            console.log('🔐 [checkWorkspacePermission] User found in sharedWith, role:', sharedUser.role);
+
             if (!allowedRoles.includes(sharedUser.role)) {
+                console.log('❌ [checkWorkspacePermission] User role not in allowedRoles:', sharedUser.role, 'vs', allowedRoles);
                 return res.status(403).json({ message: `Access denied: role '${sharedUser.role}' required one of [${allowedRoles.join(', ')}]` });
             }
 
+            console.log('✅ [checkWorkspacePermission] Permission granted, role:', sharedUser.role);
             req.workspaceRole = sharedUser.role;
             next();
         } catch (err) {
-            console.error('Permission check error:', err);
+            console.error('❌ [checkWorkspacePermission] Error:', err);
             res.status(500).json({ message: 'Internal Server Error' });
         }
     };
@@ -951,7 +1040,10 @@ app.post('/api/workspaces', isAuthenticated, async (req, res) => {
         const userId = req.user.id;
         const { name } = req.body;
 
+        console.log('🆕 [POST /api/workspaces] Creating workspace:', { userId, name });
+
         if (!name || name.trim() === '') {
+            console.log('❌ [POST /api/workspaces] No name provided');
             return res.status(400).json({ message: 'Workspace name is required' });
         }
 
@@ -962,8 +1054,17 @@ app.post('/api/workspaces', isAuthenticated, async (req, res) => {
         });
 
         await workspace.save();
+
+        console.log('✅ [POST /api/workspaces] Workspace created:', {
+            workspaceId: workspace._id,
+            name: workspace.name,
+            userId: workspace.userId,
+            isDefault: workspace.isDefault
+        });
+
         res.status(201).json(workspace);
     } catch (err) {
+        console.error('❌ [POST /api/workspaces] Error:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -1017,6 +1118,8 @@ app.post('/api/workspaces/:id/switch', isAuthenticated, async (req, res) => {
         const userId = req.user.id;
         const { id } = req.params;
 
+        console.log('🔄 [POST /api/workspaces/:id/switch] Switching workspace:', { userId, targetWorkspaceId: id });
+
         // Check if user owns workspace OR has access via sharing
         const workspace = await Workspace.findOne({
             $or: [
@@ -1026,12 +1129,28 @@ app.post('/api/workspaces/:id/switch', isAuthenticated, async (req, res) => {
         });
 
         if (!workspace) {
+            console.log('❌ [POST /api/workspaces/:id/switch] Workspace not found or access denied');
             return res.status(404).json({ message: 'Workspace not found or access denied' });
         }
 
+        const isOwner = String(workspace.userId) === String(userId);
+        const sharedRole = workspace.sharedWith?.find(s => String(s.userId) === String(userId))?.role;
+
+        console.log('✅ [POST /api/workspaces/:id/switch] Workspace found:', {
+            workspaceId: workspace._id,
+            name: workspace.name,
+            isOwner,
+            sharedRole: sharedRole || 'N/A',
+            isDefault: workspace.isDefault
+        });
+
         await User.updateOne({ _id: userId }, { $set: { currentWorkspaceId: id } });
+
+        console.log('✅ [POST /api/workspaces/:id/switch] User currentWorkspaceId updated to:', id);
+
         res.json({ success: true, workspace });
     } catch (err) {
+        console.error('❌ [POST /api/workspaces/:id/switch] Error:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -1218,31 +1337,43 @@ app.post('/api/workspace-invite/:token/accept', isAuthenticated, async (req, res
         const userId = req.user.id;
         const { token } = req.params;
 
+        console.log('📨 [POST /api/workspace-invite/:token/accept] Accepting invite:', { userId, token: token.substring(0, 12) + '...' });
+
         const invite = await WorkspaceInvite.findOne({
             token,
             status: 'pending'
         });
 
         if (!invite) {
+            console.log('❌ [POST /api/workspace-invite/:token/accept] Invalid invite');
             return res.status(404).json({ message: 'Invalid invite' });
         }
 
         if (new Date() > invite.expiresAt) {
+            console.log('❌ [POST /api/workspace-invite/:token/accept] Invite expired');
             invite.status = 'expired';
             await invite.save();
             return res.status(400).json({ message: 'Invite has expired' });
         }
 
+        console.log('📨 [POST /api/workspace-invite/:token/accept] Invite details:', {
+            workspaceId: invite.workspaceId,
+            role: invite.role,
+            invitedBy: invite.invitedBy
+        });
+
         // Add user to workspace.sharedWith
         const workspace = await Workspace.findById(invite.workspaceId);
 
         if (!workspace) {
+            console.log('❌ [POST /api/workspace-invite/:token/accept] Workspace not found');
             return res.status(404).json({ message: 'Workspace not found' });
         }
 
         // Check if already shared
         const alreadyShared = workspace.sharedWith?.some(s => s.userId === userId);
         if (!alreadyShared) {
+            console.log('📨 [POST /api/workspace-invite/:token/accept] Adding user to workspace.sharedWith');
             workspace.sharedWith = workspace.sharedWith || [];
             workspace.sharedWith.push({
                 userId,
@@ -1252,6 +1383,9 @@ app.post('/api/workspace-invite/:token/accept', isAuthenticated, async (req, res
             });
             workspace.isShared = true;
             await workspace.save();
+            console.log('✅ [POST /api/workspace-invite/:token/accept] User added to workspace');
+        } else {
+            console.log('ℹ️ [POST /api/workspace-invite/:token/accept] User already has access');
         }
 
         // Mark invite as accepted
@@ -1263,13 +1397,14 @@ app.post('/api/workspace-invite/:token/accept', isAuthenticated, async (req, res
             { _id: userId },
             { $set: { currentWorkspaceId: workspace._id } }
         );
+        console.log('✅ [POST /api/workspace-invite/:token/accept] User switched to workspace:', workspace._id);
 
         res.json({
             success: true,
             workspace
         });
     } catch (err) {
-        console.error('Accept invite error:', err);
+        console.error('❌ [POST /api/workspace-invite/:token/accept] Error:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -1881,15 +2016,15 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             createdBy: req.user.id, // Track real user who created this operation
             workspaceId: req.user.currentWorkspaceId // 🟢 NEW
         });
-                await newEvent.save();
+        await newEvent.save();
 
-                await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
-                emitToUser(req, userId, 'operation_added', newEvent);
+        emitToUser(req, userId, 'operation_added', newEvent);
 
-                res.status(201).json(newEvent);
-            } catch (err) { res.status(400).json({ message: err.message }); }
-        });
+        res.status(201).json(newEvent);
+    } catch (err) { res.status(400).json({ message: err.message }); }
+});
 
 // 🟢 UPDATED: Use canEdit middleware
 app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, async (req, res) => {
