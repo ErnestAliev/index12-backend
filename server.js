@@ -485,17 +485,83 @@ const findCategoryByName = async (name, userId) => {
 function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return next(); res.status(401).json({ message: 'Unauthorized' }); }
 
 // 🟢 NEW: Role-based permission middleware
-function canDelete(req, res, next) {
+async function canDelete(req, res, next) {
     if (!req.isAuthenticated()) return res.status(401).json({ message: 'Unauthorized' });
+
     const userRole = req.user.role || 'admin';
+    const userId = req.user.id;
+
+    // Admin and full_access can delete everything
     if (userRole === 'admin' || userRole === 'full_access') return next();
+
+    // Manager can only delete operations they created
+    if (userRole === 'manager') {
+        const operationId = req.params.id;
+        if (!operationId) {
+            return res.status(400).json({ message: 'Operation ID required' });
+        }
+
+        try {
+            const operation = await Event.findById(operationId);
+            if (!operation) {
+                return res.status(404).json({ message: 'Operation not found' });
+            }
+
+            // Check if this manager created this operation
+            if (String(operation.createdBy) === String(userId)) {
+                return next(); // Manager owns this operation, allow delete
+            }
+
+            return res.status(403).json({
+                message: 'Вы можете удалять только свои собственные операции'
+            });
+        } catch (err) {
+            console.error('[canDelete] Error checking operation ownership:', err);
+            return res.status(500).json({ message: 'Error checking permissions' });
+        }
+    }
+
+    // Analysts and other roles cannot delete
     res.status(403).json({ message: 'У вас нет прав на удаление операций' });
 }
 
-function canEdit(req, res, next) {
+async function canEdit(req, res, next) {
     if (!req.isAuthenticated()) return res.status(401).json({ message: 'Unauthorized' });
+
     const userRole = req.user.role || 'admin';
+    const userId = req.user.id;
+
+    // Admin and full_access can edit everything
     if (userRole === 'admin' || userRole === 'full_access') return next();
+
+    // Manager can only edit operations they created
+    if (userRole === 'manager') {
+        const operationId = req.params.id;
+        if (!operationId) {
+            return res.status(400).json({ message: 'Operation ID required' });
+        }
+
+        try {
+            const operation = await Event.findById(operationId);
+            if (!operation) {
+                return res.status(404).json({ message: 'Operation not found' });
+            }
+
+            // Check if this manager created this operation
+            if (String(operation.createdBy) === String(userId)) {
+                return next(); // Manager owns this operation, allow edit
+            }
+
+            return res.status(403).json({
+                message: 'Вы можете редактировать только свои собственные операции'
+            });
+        } catch (err) {
+            console.error('[canEdit] Error checking operation ownership:', err);
+            return res.status(500).json({ message: 'Error checking permissions' });
+        }
+    }
+
+    // Analysts and other roles cannot edit
     res.status(403).json({ message: 'У вас нет прав на редактирование операций' });
 }
 
