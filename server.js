@@ -488,11 +488,13 @@ function isAuthenticated(req, res, next) { if (req.isAuthenticated()) return nex
 async function canDelete(req, res, next) {
     if (!req.isAuthenticated()) return res.status(401).json({ message: 'Unauthorized' });
 
-    const userRole = req.user.role || 'admin';
+    // 🔥 FIX: Use req.workspaceRole instead of req.user.role
+    // workspaceRole is set by checkWorkspacePermission middleware
+    const userRole = req.workspaceRole || req.user.role || 'analyst';
     const userId = req.user.id;
 
-    // Admin and full_access can delete everything
-    if (userRole === 'admin' || userRole === 'full_access') return next();
+    // Admin can delete everything
+    if (userRole === 'admin') return next();
 
     // Manager can only delete operations they created
     if (userRole === 'manager') {
@@ -528,40 +530,59 @@ async function canDelete(req, res, next) {
 async function canEdit(req, res, next) {
     if (!req.isAuthenticated()) return res.status(401).json({ message: 'Unauthorized' });
 
-    const userRole = req.user.role || 'admin';
+    // 🔥 FIX: Use req.workspaceRole instead of req.user.role
+    // workspaceRole is set by checkWorkspacePermission middleware
+    const userRole = req.workspaceRole || req.user.role || 'analyst';
     const userId = req.user.id;
 
-    // Admin and full_access can edit everything
-    if (userRole === 'admin' || userRole === 'full_access') return next();
+    console.log('🔐 [canEdit] Check:', { userRole, userId, opId: req.params.id });
+
+    // Admin can edit everything
+    if (userRole === 'admin') {
+        console.log('✅ [canEdit] Admin - allowed');
+        return next();
+    }
 
     // Manager can only edit operations they created
     if (userRole === 'manager') {
         const operationId = req.params.id;
         if (!operationId) {
+            console.log('❌ [canEdit] No operation ID');
             return res.status(400).json({ message: 'Operation ID required' });
         }
 
         try {
             const operation = await Event.findById(operationId);
             if (!operation) {
+                console.log('❌ [canEdit] Operation not found:', operationId);
                 return res.status(404).json({ message: 'Operation not found' });
             }
 
+            console.log('🔍 [canEdit] Ownership:', {
+                opId: operation._id,
+                createdBy: operation.createdBy,
+                userId: userId,
+                match: String(operation.createdBy) === String(userId)
+            });
+
             // Check if this manager created this operation
             if (String(operation.createdBy) === String(userId)) {
-                return next(); // Manager owns this operation, allow edit
+                console.log('✅ [canEdit] Manager owns operation - allowed');
+                return next();
             }
 
+            console.log('❌ [canEdit] Manager does NOT own operation - denied');
             return res.status(403).json({
                 message: 'Вы можете редактировать только свои собственные операции'
             });
         } catch (err) {
-            console.error('[canEdit] Error checking operation ownership:', err);
+            console.error('❌ [canEdit] Error:', err);
             return res.status(500).json({ message: 'Error checking permissions' });
         }
     }
 
     // Analysts and other roles cannot edit
+    console.log('❌ [canEdit] Analyst/other role - denied');
     res.status(403).json({ message: 'У вас нет прав на редактирование операций' });
 }
 
@@ -2114,6 +2135,14 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             createdBy: req.user.id, // Track real user who created this operation
             workspaceId: req.user.currentWorkspaceId // 🟢 NEW
         });
+
+        console.log('📝 [POST /api/events] Creating operation:', {
+            userId,
+            createdBy: req.user.id,
+            workspaceId: req.user.currentWorkspaceId,
+            userRole: req.user.role
+        });
+
         await newEvent.save();
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
