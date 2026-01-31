@@ -58,12 +58,26 @@ const io = socketIo(server, {
     }
 });
 
-// 🟢 Логика Socket.io
+// 🟢 Логика Socket.io - UPDATED: Use workspace rooms for shared collaboration
 io.on('connection', (socket) => {
-    socket.on('join', (userId) => {
-        if (userId) {
-            socket.join(userId);
+    console.log('🔌 [Socket.io] New connection:', socket.id);
+
+    socket.on('join', (workspaceId) => {
+        if (workspaceId) {
+            socket.join(workspaceId);
+            console.log('✅ [Socket.io] User joined workspace room:', workspaceId, 'Socket:', socket.id);
         }
+    });
+
+    socket.on('leave', (workspaceId) => {
+        if (workspaceId) {
+            socket.leave(workspaceId);
+            console.log('👋 [Socket.io] User left workspace room:', workspaceId, 'Socket:', socket.id);
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('🔌 [Socket.io] Disconnected:', socket.id);
     });
 });
 
@@ -105,6 +119,23 @@ const emitToAll = (req, userId, event, data) => {
     if (!req.io) return;
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
     req.io.to(userId).emit(event, payload);
+};
+
+// 🟢 NEW: Emit to workspace room (all members receive update)
+const emitToWorkspace = (req, workspaceId, event, data) => {
+    if (!req.io || !workspaceId) return;
+
+    const socketId = req.headers['x-socket-id'];
+    const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
+
+    console.log(`📡 [Socket.io] Emitting '${event}' to workspace:`, workspaceId);
+
+    if (socketId) {
+        // Exclude sender to prevent duplication on their end
+        req.io.to(String(workspaceId)).except(socketId).emit(event, payload);
+    } else {
+        req.io.to(String(workspaceId)).emit(event, payload);
+    }
 };
 
 // --- СХЕМЫ (ВОССТАНОВЛЕНЫ ВСЕ) ---
@@ -1595,8 +1626,8 @@ app.post('/api/projects', isAuthenticated, async (req, res) => {
         await newProject.save();
 
         // Emit socket event to other clients
-        emitToUser(req, userId, 'entity:added', {
-            type: 'project',
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'entity:added', {
+            entityType: 'project',
             data: newProject
         });
 
@@ -1642,8 +1673,9 @@ app.put('/api/projects/:id', isAuthenticated, async (req, res) => {
         await project.save();
 
         // Emit socket event to other clients
-        emitToUser(req, userId, 'entity:updated', {
-            type: 'project',
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'entity:updated', {
+            entityType: 'project',
+            id,
             data: project
         });
 
@@ -1683,9 +1715,9 @@ app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
         await Project.deleteOne({ _id: id, userId });
 
         // Emit socket event to other clients
-        emitToUser(req, userId, 'entity:deleted', {
-            type: 'project',
-            id: id
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'entity:deleted', {
+            entityType: 'project',
+            id
         });
 
         res.json({ success: true, message: 'Project deleted' });
@@ -2020,7 +2052,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
-        emitToUser(req, userId, 'operation_added', newEvent);
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', newEvent);
 
         res.status(201).json(newEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
@@ -2083,7 +2115,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
         await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
-        emitToUser(req, userId, 'operation_updated', updatedEvent);
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', updatedEvent);
 
         res.status(200).json(updatedEvent);
     } catch (err) { res.status(400).json({ message: err.message }); }
@@ -2130,7 +2162,7 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
             await Event.deleteMany({ parentOpId: eventToDelete._id });
         }
 
-        emitToUser(req, userId, 'operation_deleted', id);
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', id);
 
         res.status(200).json(eventToDelete);
     } catch (err) { res.status(500).json({ message: err.message }); }
@@ -2182,7 +2214,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             await withdrawalEvent.save();
             await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
 
-            emitToUser(req, userId, 'operation_added', withdrawalEvent);
+            emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', withdrawalEvent);
 
             return res.status(201).json(withdrawalEvent);
         }
@@ -2227,8 +2259,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
             await expenseOp.populate(popFields); await incomeOp.populate(popFields);
 
-            emitToUser(req, userId, 'operation_added', expenseOp);
-            emitToUser(req, userId, 'operation_added', incomeOp);
+            emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', expenseOp);
+            emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', incomeOp);
 
             return res.status(201).json([expenseOp, incomeOp]);
         }
@@ -2255,7 +2287,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
         await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
 
-        emitToUser(req, userId, 'operation_added', transferEvent);
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', transferEvent);
 
         res.status(201).json(transferEvent);
 
@@ -2291,7 +2323,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         }
         if (createdOps.length > 0) {
             const insertedDocs = await Event.insertMany(createdOps);
-            emitToUser(req, userId, 'operations_imported', insertedDocs.length);
+            emitToWorkspace(req, req.user.currentWorkspaceId, 'operations_imported', insertedDocs.length);
             res.status(201).json(insertedDocs);
         }
         else { res.status(200).json([]); }
