@@ -205,6 +205,7 @@ const accountSchema = new mongoose.Schema({
     order: { type: Number, default: 0 },
     initialBalance: { type: Number, default: 0 },
     isExcluded: { type: Boolean, default: false },
+    isCashRegister: { type: Boolean, default: false },
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
@@ -2473,6 +2474,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
                 createData.companyId = req.body.companyId || null;
                 createData.individualId = req.body.individualId || null;
                 createData.isExcluded = req.body.isExcluded || false; // 🟢 Added isExcluded
+                createData.isCashRegister = req.body.isCashRegister || false; // 🟢 Added isCashRegister
             }
 
             if (path === 'contractors' || path === 'individuals') {
