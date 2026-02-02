@@ -337,7 +337,7 @@ async function handleDeepQuery({
 
         const lines = [];
         lines.push(`Если период: ${dbData.meta?.periodStart || '?'} — ${dbData.meta?.periodEnd || '?'}`);
-        lines.push(`Если мин. баланс: ${formatTenge(Math.max(0, minBalance))}`);
+        lines.push(`Если мин. баланс: ${formatTenge(minBalance)}`);
         lines.push(`Если макс. баланс: ${formatTenge(maxBalance)}`);
         lines.push(`Если ср. дневной баланс: ${formatTenge(avgBalance)}`);
         lines.push(`Если тренд: ${trendSlope !== null ? (trendSlope >= 0 ? 'рост' : 'снижение') + ` ~${formatTenge(Math.abs(Math.round(trendSlope)))} в день` : 'нет данных'}`);
@@ -345,8 +345,7 @@ async function handleDeepQuery({
         if (maxOutflowDay) lines.push(`Если макс. расход был ${formatTenge(maxOutAmount)} на ${_fmtDateKZ(maxOutflowDay)}`);
         if (maxIncomeAmount !== null && maxIncomeDay) lines.push(`Если макс. доход был ${formatTenge(maxIncomeAmount)} на ${_fmtDateKZ(maxIncomeDay)}`);
         lines.push('');
-        lines.push(`Тогда лимит без подушки: ${formatTenge(baseForLimit)}.`);
-        lines.push(`Тогда лимит с подушкой: ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)}.`);
+        lines.push(`Тогда лимит с подушкой: ${formatTenge(limitSafe)} (подушка учтена).`);
 
         return { answer: lines.join('\n'), shouldSaveToHistory: true };
     }
