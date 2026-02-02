@@ -300,6 +300,16 @@ async function handleDeepQuery({
         if (!Number.isFinite(avgOutflow)) avgOutflow = 0;
         if (!Number.isFinite(maxOutAmount)) maxOutAmount = 0;
         if (!Number.isFinite(p95Out)) p95Out = maxOutAmount;
+        // Макс доход
+        const incomes = timeline
+            ? timeline.map(t => Number(t?.income) || 0)
+            : [];
+        const maxIncomeAmount = incomes.length ? Math.max(...incomes) : null;
+        const maxIncomeIdx = incomes.length ? incomes.findIndex(v => v === maxIncomeAmount) : -1;
+        const maxIncomeDayLocal = maxIncomeIdx >= 0 && timeline ? timeline[maxIncomeIdx].date : null;
+        if (maxIncomeDayLocal && (!maxIncomeDay || !maxIncomeAmount)) {
+            maxIncomeDay = new Date(maxIncomeDayLocal);
+        }
 
         // Если период в прошлом (последняя дата < сейчас) — ориентируемся на конечный баланс периода
         const now = new Date();
@@ -313,12 +323,13 @@ async function handleDeepQuery({
         const bufVol = volatility * 0.25;
         const bufMax = maxOutAmount;
         const bufP95 = p95Out;
-        const bufPct = baseBalance * 0.10;
-        const buffer = Math.min(baseBalance, Math.max(0, bufVol, bufMax, bufP95, bufPct));
+        const fcf = Number.isFinite(monthlyFCF) ? monthlyFCF : 0;
+        const available = Math.max(0, baseBalance + fcf);
+        const bufPct = available * 0.10;
+        const buffer = Math.min(available, Math.max(0, bufVol, bufMax, bufP95, bufPct));
 
         // Лимит на месяц: добавляем средний месячный FCF, если он посчитан
-        const fcf = Number.isFinite(monthlyFCF) ? monthlyFCF : 0;
-        const baseForLimit = Math.max(0, baseBalance + fcf);
+        const baseForLimit = available;
         const limitSafe = Math.max(0, baseForLimit - buffer);
 
         // Примеры: 100k и 300k — сколько это % от min и avg, и что останется
@@ -337,7 +348,7 @@ async function handleDeepQuery({
         lines.push(`Если тренд: ${trendSlope !== null ? (trendSlope >= 0 ? 'рост' : 'снижение') + ` ~${formatTenge(Math.abs(Math.round(trendSlope)))} в день` : 'нет данных'}`);
         if (Number.isFinite(monthlyFCF)) lines.push(`Если ср. месячный чистый поток (3м): ${formatTenge(monthlyFCF)}`);
         if (maxOutflowDay) lines.push(`Если макс. расход был ${formatTenge(maxOutAmount)} на ${_fmtDateKZ(maxOutflowDay)}`);
-        if (maxIncomeDay) lines.push(`Если макс. доход был на ${_fmtDateKZ(maxIncomeDay)}`);
+        if (maxIncomeAmount !== null && maxIncomeDay) lines.push(`Если макс. доход был ${formatTenge(maxIncomeAmount)} на ${_fmtDateKZ(maxIncomeDay)}`);
         lines.push('');
         lines.push(`Тогда лимит без подушки: ${formatTenge(baseForLimit)}.`);
         lines.push(`Тогда лимит с подушкой: ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)}.`);
