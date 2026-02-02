@@ -203,9 +203,6 @@ async function handleDeepQuery({
         let avgOutflow = null;
         let maxOutflowDay = null;
         let maxIncomeDay = null;
-        let maxOutAmount = null;
-        let p95Out = null;
-        let monthlyFCF = null;
         let trendSlope = null;
         let trendPctPerDay = null;
 
@@ -243,39 +240,14 @@ async function handleDeepQuery({
                 const outflows = rows.map(o => o.outflow);
                 const sumOut = outflows.reduce((s, v) => s + v, 0);
                 avgOutflow = rows.length ? sumOut / rows.length : 0;
-                maxOutAmount = Math.max(...outflows);
-                const maxOutIdx = outflows.findIndex(v => v === maxOutAmount);
+                const maxOutflow = Math.max(...outflows);
+                const maxOutIdx = outflows.findIndex(v => v === maxOutflow);
                 maxOutflowDay = maxOutIdx >= 0 ? rows[maxOutIdx].d : null;
-
-                // p95 outflow
-                const sortedOut = [...outflows].sort((a, b) => a - b);
-                if (sortedOut.length) {
-                    const idx = Math.min(sortedOut.length - 1, Math.floor(sortedOut.length * 0.95));
-                    p95Out = sortedOut[idx];
-                }
 
                 const incomes = rows.map(o => o.income);
                 const maxIncome = Math.max(...incomes);
                 const maxIncIdx = incomes.findIndex(v => v === maxIncome);
                 maxIncomeDay = maxIncIdx >= 0 ? rows[maxIncIdx].d : null;
-
-                // Месячный FCF по последним 3 месяцам: группируем по месяцу closingBalance
-                const byMonth = new Map();
-                rows.forEach(r => {
-                    const y = r.d.getFullYear();
-                    const m = r.d.getMonth();
-                    const key = `${y}-${m}`;
-                    if (!byMonth.has(key)) byMonth.set(key, { inc: 0, out: 0 });
-                    const rec = byMonth.get(key);
-                    rec.inc += r.income;
-                    rec.out += r.outflow;
-                    byMonth.set(key, rec);
-                });
-                const months = Array.from(byMonth.values()).slice(-3);
-                if (months.length) {
-                    const fcfSum = months.reduce((s, m) => s + (m.inc - m.out), 0);
-                    monthlyFCF = fcfSum / months.length;
-                }
             }
         }
 
@@ -284,8 +256,6 @@ async function handleDeepQuery({
         if (!Number.isFinite(maxBalance)) maxBalance = minBalance;
         if (!Number.isFinite(avgBalance)) avgBalance = minBalance;
         if (!Number.isFinite(avgOutflow)) avgOutflow = 0;
-        if (!Number.isFinite(maxOutAmount)) maxOutAmount = 0;
-        if (!Number.isFinite(p95Out)) p95Out = maxOutAmount;
 
         // Если период в прошлом (последняя дата < сейчас) — ориентируемся на конечный баланс периода
         const now = new Date();
@@ -293,25 +263,18 @@ async function handleDeepQuery({
             minBalance = lastBalance;
         }
 
-        // Подушка: max(25% волатильности, maxOut, p95Out, 10% от базового баланса)
+        // Подушка: max(25% волатильности, 10 дневных расходов, 10% от базового баланса)
         const volatility = maxBalance - minBalance;
-        const baseBalance = minBalance; // для лимита на период (или lastBalance, если период завершён, уже учтено выше)
         const bufVol = volatility * 0.25;
-        const bufMax = maxOutAmount;
-        const bufP95 = p95Out;
-        const bufPct = baseBalance * 0.10;
-        const buffer = Math.min(baseBalance, Math.max(0, bufVol, bufMax, bufP95, bufPct));
-
-        // Лимит на месяц: если есть monthlyFCF и период завершён, добавляем его
-        const baseForLimit = lastDate && lastDate.getTime() < now.getTime()
-            ? baseBalance + (Number.isFinite(monthlyFCF) ? monthlyFCF : 0)
-            : baseBalance;
-        const limitSafe = Math.max(0, baseForLimit - buffer);
+        const bufOp = avgOutflow * 10;
+        const bufPct = minBalance * 0.10;
+        const buffer = Math.min(minBalance, Math.max(0, bufVol, bufOp, bufPct));
+        const limitSafe = Math.max(0, minBalance - buffer);
 
         // Примеры: 100k и 300k — сколько это % от min и avg, и что останется
         const exampleSpends = [100_000, 300_000].map((s) => {
-            const remain = Math.max(0, baseForLimit - s);
-            const pctMin = baseForLimit > 0 ? Math.round((s / baseForLimit) * 1000) / 10 : null;
+            const remain = Math.max(0, minBalance - s);
+            const pctMin = minBalance > 0 ? Math.round((s / minBalance) * 1000) / 10 : null;
             const pctAvg = avgBalance > 0 ? Math.round((s / avgBalance) * 1000) / 10 : null;
             return { spend: s, remain, pctMin, pctAvg };
         });
@@ -326,12 +289,12 @@ async function handleDeepQuery({
                 (trendPctPerDay !== null ? ` (${trendPctPerDay > 0 ? '+' : ''}${trendPctPerDay}%/день)` : ''));
         }
         lines.push('');
-        lines.push(`✅ Без подушки: можно потратить ${formatTenge(baseForLimit)} и остаться ≥0.`);
-        lines.push(`🟢 С подушкой (волатильность/max/p95/10%): можно потратить ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)} остаётся на счетах.`);
-        if (Number.isFinite(monthlyFCF)) {
-            lines.push(`Средний месячный чистый поток (3 мес): ${formatTenge(monthlyFCF)}`);
-        }
+        lines.push(`✅ Без подушки: можно потратить ${formatTenge(minBalance)} и остаться ≥0.`);
+        lines.push(`🟢 С подушкой (волатильность/операционные/10%): можно потратить ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)} остаётся на счетах.`);
         if (maxOutflowDay) {
+            const maxOutAmount = timeline
+                .map(t => Number(t.expense || 0) + Number(t.withdrawal || 0))
+                .reduce((m, v) => Math.max(m, v), 0);
             lines.push(`День макс. расхода: ${formatTenge(maxOutAmount)} на ${_fmtDateKZ(maxOutflowDay)}`);
         }
         if (maxIncomeDay) {
