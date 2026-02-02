@@ -309,7 +309,7 @@ async function handleDeepQuery({
 
         // Подушка: max(25% волатильности, maxOut, p95Out, 10% от базового баланса)
         const volatility = maxBalance - minBalance;
-        const baseBalance = minBalance; // для лимита на период (или lastBalance, если период завершён, уже учтено выше)
+        const baseBalance = Math.max(0, minBalance); // не даём базе уйти в минус
         const bufVol = volatility * 0.25;
         const bufMax = maxOutAmount;
         const bufP95 = p95Out;
@@ -317,9 +317,10 @@ async function handleDeepQuery({
         const buffer = Math.min(baseBalance, Math.max(0, bufVol, bufMax, bufP95, bufPct));
 
         // Лимит на месяц: если есть monthlyFCF и период завершён, добавляем его
-        const baseForLimit = lastDate && lastDate.getTime() < now.getTime()
+        const baseForLimitRaw = (lastDate && lastDate.getTime() < now.getTime())
             ? baseBalance + (Number.isFinite(monthlyFCF) ? monthlyFCF : 0)
             : baseBalance;
+        const baseForLimit = Math.max(0, baseForLimitRaw);
         const limitSafe = Math.max(0, baseForLimit - buffer);
 
         // Примеры: 100k и 300k — сколько это % от min и avg, и что останется
@@ -331,30 +332,24 @@ async function handleDeepQuery({
         });
 
         const lines = [];
-        lines.push(`📊 Период: ${dbData.meta?.periodStart || '?'} — ${dbData.meta?.periodEnd || '?'}`);
-        lines.push(`Мин. баланс за период: ${formatTenge(minBalance)}`);
-        lines.push(`Баланс на конец периода: ${formatTenge(lastBalance)}`);
-        lines.push(`Средний дневной: ${formatTenge(avgBalance)} | Макс: ${formatTenge(maxBalance)}`);
-        if (trendSlope !== null) {
-            lines.push(`Тренд за период: ${trendSlope >= 0 ? 'рост' : 'снижение'} ~${formatTenge(Math.abs(Math.round(trendSlope)))} в день` +
-                (trendPctPerDay !== null ? ` (${trendPctPerDay > 0 ? '+' : ''}${trendPctPerDay}%/день)` : ''));
-        }
+        lines.push(`Если период: ${dbData.meta?.periodStart || '?'} — ${dbData.meta?.periodEnd || '?'}`);
+        lines.push(`Если мин. баланс: ${formatTenge(minBalance)}`);
+        lines.push(`Если макс. баланс: ${formatTenge(maxBalance)}`);
+        lines.push(`Если ср. дневной баланс: ${formatTenge(avgBalance)}`);
+        lines.push(`Если тренд: ${trendSlope !== null ? (trendSlope >= 0 ? 'рост' : 'снижение') + ` ~${formatTenge(Math.abs(Math.round(trendSlope)))} в день` : 'нет данных'}`);
+        if (Number.isFinite(monthlyFCF)) lines.push(`Если ср. месячный чистый поток (3м): ${formatTenge(monthlyFCF)}`);
+        if (maxOutflowDay) lines.push(`Если макс. расход был ${formatTenge(maxOutAmount)} на ${_fmtDateKZ(maxOutflowDay)}`);
+        if (maxIncomeDay) lines.push(`Если макс. доход был на ${_fmtDateKZ(maxIncomeDay)}`);
         lines.push('');
-        lines.push(`✅ Без подушки: можно потратить ${formatTenge(baseForLimit)} и остаться ≥0.`);
-        lines.push(`🟢 С подушкой (волатильность/max/p95/10%): можно потратить ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)} остаётся на счетах.`);
-        if (Number.isFinite(monthlyFCF)) {
-            lines.push(`Средний месячный чистый поток (3 мес): ${formatTenge(monthlyFCF)}`);
+        lines.push(`Тогда лимит без подушки: ${formatTenge(baseForLimit)}.`);
+        lines.push(`Тогда лимит с подушкой (волатильность/max/p95/10%): ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)}.`);
+
+        if (baseForLimit > 0) {
+            lines.push('');
+            exampleSpends.forEach(ex => {
+                lines.push(`Пример: потратить ${formatTenge(ex.spend)} → останется ${formatTenge(ex.remain)} (${ex.pctMin !== null ? `${ex.pctMin}% от базы` : '—'}; ${ex.pctAvg !== null ? `${ex.pctAvg}% от среднего` : '—'})`);
+            });
         }
-        if (maxOutflowDay) {
-            lines.push(`День макс. расхода: ${formatTenge(maxOutAmount)} на ${_fmtDateKZ(maxOutflowDay)}`);
-        }
-        if (maxIncomeDay) {
-            lines.push(`День макс. дохода: ${_fmtDateKZ(maxIncomeDay)}`);
-        }
-        lines.push('');
-        exampleSpends.forEach(ex => {
-            lines.push(`Пример: если потратить ${formatTenge(ex.spend)} → останется ${formatTenge(ex.remain)} (${ex.pctMin !== null ? `${ex.pctMin}% от минимума` : '—'}; ${ex.pctAvg !== null ? `${ex.pctAvg}% от среднего` : '—'})`);
-        });
 
         return { answer: lines.join('\n'), shouldSaveToHistory: true };
     }
