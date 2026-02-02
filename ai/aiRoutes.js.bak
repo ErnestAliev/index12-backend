@@ -325,7 +325,6 @@ module.exports = function createAiRouter(deps) {
       const qLower = q.toLowerCase();
       const isDeep = req.body?.mode === 'deep';
       const source = req.body?.source || 'ui';
-      const timeline = Array.isArray(req.body?.timeline) ? req.body.timeline : null;
 
       const AI_DEBUG = process.env.AI_DEBUG === 'true';
       let debugInfo = null;
@@ -362,11 +361,6 @@ module.exports = function createAiRouter(deps) {
         now: req?.body?.asOf || null,
         snapshot: req?.body?.snapshot || null, // 🔥 HYBRID: accounts/companies from snapshot, operations from MongoDB
       });
-
-      if (timeline) {
-        dbData.meta = dbData.meta || {};
-        dbData.meta.timeline = timeline;
-      }
 
       // =========================
       // DIAGNOSTICS COMMAND
