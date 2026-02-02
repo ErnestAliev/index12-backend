@@ -316,11 +316,9 @@ async function handleDeepQuery({
         const bufPct = baseBalance * 0.10;
         const buffer = Math.min(baseBalance, Math.max(0, bufVol, bufMax, bufP95, bufPct));
 
-        // Лимит на месяц: если есть monthlyFCF и период завершён, добавляем его
-        const baseForLimitRaw = (lastDate && lastDate.getTime() < now.getTime())
-            ? baseBalance + (Number.isFinite(monthlyFCF) ? monthlyFCF : 0)
-            : baseBalance;
-        const baseForLimit = Math.max(0, baseForLimitRaw);
+        // Лимит на месяц: добавляем средний месячный FCF, если он посчитан
+        const fcf = Number.isFinite(monthlyFCF) ? monthlyFCF : 0;
+        const baseForLimit = Math.max(0, baseBalance + fcf);
         const limitSafe = Math.max(0, baseForLimit - buffer);
 
         // Примеры: 100k и 300k — сколько это % от min и avg, и что останется
@@ -342,7 +340,7 @@ async function handleDeepQuery({
         if (maxIncomeDay) lines.push(`Если макс. доход был на ${_fmtDateKZ(maxIncomeDay)}`);
         lines.push('');
         lines.push(`Тогда лимит без подушки: ${formatTenge(baseForLimit)}.`);
-        lines.push(`Тогда лимит с подушкой (волатильность/max/p95/10%): ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)}.`);
+        lines.push(`Тогда лимит с подушкой: ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)}.`);
 
         if (baseForLimit > 0) {
             lines.push('');
