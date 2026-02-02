@@ -5,6 +5,20 @@
 
 const deepPrompt = require('../prompts/deepPrompt');
 
+// Local date formatter (dd.mm.yy) without relying on aiRoutes helpers
+function _fmtDateKZ(d) {
+    try {
+        const x = new Date(d);
+        if (Number.isNaN(x.getTime())) return String(d);
+        const dd = String(x.getDate()).padStart(2, '0');
+        const mm = String(x.getMonth() + 1).padStart(2, '0');
+        const yy = String(x.getFullYear() % 100).padStart(2, '0');
+        return `${dd}.${mm}.${yy}`;
+    } catch (_) {
+        return String(d);
+    }
+}
+
 /**
  * Calculate core financial metrics (deterministic)
  * @param {Object} dbData - Data packet
