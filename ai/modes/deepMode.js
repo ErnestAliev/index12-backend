@@ -120,6 +120,7 @@ async function handleDeepQuery({
     const wantsHiring = /наня|найм|команд|c-level|cfo|cmo|cto|сотрудник/i.test(qLower);
     const wantsTaxOptimization = /налог|опн|сн|кпн|упрощ[её]нк|оптимизац.*налог/i.test(qLower);
     const wantsExit = /продать.*бизнес|продажа.*бизнес|exit|выход|оценка.*бизнес/i.test(qLower);
+    const wantsSpendLimit = /(сколько .*тратить|лимит.*расход|безболезненн|ремонт|потратить.*остаться в плюсе)/i.test(qLower);
 
     let justSetLiving = false;
 
@@ -184,6 +185,43 @@ async function handleDeepQuery({
             const grandTotal = Array.from(projectStats.values()).reduce((s, p) => s + p.total, 0);
             lines.push(`ИТОГО по проектам: ${formatTenge(grandTotal)}`);
         }
+
+        return { answer: lines.join('\n'), shouldSaveToHistory: true };
+    }
+
+    // =====================
+    // SPENDING LIMIT (ремонт/безболезненно)
+    // =====================
+    if (wantsSpendLimit) {
+        const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : null;
+
+        let minBalance = null;
+        let lastBalance = null;
+
+        if (timeline && timeline.length) {
+            const closing = timeline
+                .map(t => Number(t?.closingBalance) || 0)
+                .filter(v => Number.isFinite(v));
+            if (closing.length) {
+                minBalance = Math.min(...closing);
+                lastBalance = closing[closing.length - 1];
+            }
+        }
+
+        if (!Number.isFinite(minBalance)) minBalance = metrics.openCash || 0;
+        if (!Number.isFinite(lastBalance)) lastBalance = minBalance;
+
+        // Подушка: 5% от minBalance, но не меньше 500k; не больше minBalance
+        const buffer = Math.min(minBalance, Math.max(Math.round(minBalance * 0.05), 500_000));
+        const limitSafe = Math.max(0, minBalance - buffer);
+
+        const lines = [];
+        lines.push(`📊 Период: ${dbData.meta?.periodStart || '?'} — ${dbData.meta?.periodEnd || '?'}`);
+        lines.push(`Мин. баланс за период: ${formatTenge(minBalance)}`);
+        lines.push(`Баланс на конец периода: ${formatTenge(lastBalance)}`);
+        lines.push('');
+        lines.push(`✅ Без подушки: можно потратить ${formatTenge(minBalance)} и остаться ≥0.`);
+        lines.push(`🟢 С подушкой (~5%, мин 500k): можно потратить ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)} остаётся на счетах.`);
 
         return { answer: lines.join('\n'), shouldSaveToHistory: true };
     }
