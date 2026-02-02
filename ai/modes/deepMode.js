@@ -222,6 +222,7 @@ async function handleDeepQuery({
         let monthlyFCF = null;
         let trendSlope = null;
         let trendPctPerDay = null;
+        let maxIncomeAmount = null;
 
         if (timeline && timeline.length) {
             const rows = timeline
@@ -269,8 +270,8 @@ async function handleDeepQuery({
                 }
 
                 const incomes = rows.map(o => o.income);
-                const maxIncome = Math.max(...incomes);
-                const maxIncIdx = incomes.findIndex(v => v === maxIncome);
+                maxIncomeAmount = Math.max(...incomes);
+                const maxIncIdx = incomes.findIndex(v => v === maxIncomeAmount);
                 maxIncomeDay = maxIncIdx >= 0 ? rows[maxIncIdx].d : null;
 
                 // Месячный FCF по последним 3 месяцам: группируем по месяцу closingBalance
@@ -304,7 +305,7 @@ async function handleDeepQuery({
         const incomes = timeline
             ? timeline.map(t => Number(t?.income) || 0)
             : [];
-        const maxIncomeAmount = incomes.length ? Math.max(...incomes) : null;
+        maxIncomeAmount = incomes.length ? Math.max(...incomes) : null;
         const maxIncomeIdx = incomes.length ? incomes.findIndex(v => v === maxIncomeAmount) : -1;
         const maxIncomeDayLocal = maxIncomeIdx >= 0 && timeline ? timeline[maxIncomeIdx].date : null;
         if (maxIncomeDayLocal) {
