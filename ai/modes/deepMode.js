@@ -335,9 +335,6 @@ async function handleDeepQuery({
         const baseForLimit = available;
         const limitSafe = Math.max(0, baseForLimit - buffer);
 
-        // Примеры: 100k и 300k — сколько это % от min и avg, и что останется
-        // Примеры убраны по просьбе пользователя (не захламлять ответ)
-
         const lines = [];
         lines.push(`Если период: ${dbData.meta?.periodStart || '?'} — ${dbData.meta?.periodEnd || '?'}`);
         lines.push(`Если мин. баланс: ${formatTenge(Math.max(0, minBalance))}`);
