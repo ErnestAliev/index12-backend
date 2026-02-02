@@ -963,17 +963,18 @@ module.exports = function createDataProvider(deps) {
             .sort((a, b) => b.amount - a.amount)
             .slice(0, 3);
 
-        return {
-            meta: {
-                today: _fmtDateDDMMYY(nowRef),
-                periodStart: _fmtDateDDMMYY(start),
-                periodEnd: _fmtDateDDMMYY(end),
+            return {
+                meta: {
+                    today: _fmtDateDDMMYY(nowRef),
+                    periodStart: _fmtDateDDMMYY(start),
+                    periodEnd: _fmtDateDDMMYY(end),
                 forecastUntil: operationsData.meta.rangeEnd,
                 todayTimestamp: nowRef.getTime(),
                 source: 'database'
             },
             totals: accountsData.totals,
             accounts: accountsData.accounts,
+            accountsData,
             operations: operationsData.operations,
             operationsSummary: operationsData.summary,
             catalogs: {
