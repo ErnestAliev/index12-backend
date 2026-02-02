@@ -348,13 +348,6 @@ async function handleDeepQuery({
         lines.push(`Тогда лимит без подушки: ${formatTenge(baseForLimit)}.`);
         lines.push(`Тогда лимит с подушкой: ${formatTenge(limitSafe)}; подушка ${formatTenge(buffer)}.`);
 
-        if (baseForLimit > 0) {
-            lines.push('');
-            exampleSpends.forEach(ex => {
-                lines.push(`Пример: потратить ${formatTenge(ex.spend)} → останется ${formatTenge(ex.remain)} (${ex.pctMin !== null ? `${ex.pctMin}% от базы` : '—'}; ${ex.pctAvg !== null ? `${ex.pctAvg}% от среднего` : '—'})`);
-            });
-        }
-
         return { answer: lines.join('\n'), shouldSaveToHistory: true };
     }
 
