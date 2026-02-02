@@ -307,7 +307,7 @@ async function handleDeepQuery({
         const maxIncomeAmount = incomes.length ? Math.max(...incomes) : null;
         const maxIncomeIdx = incomes.length ? incomes.findIndex(v => v === maxIncomeAmount) : -1;
         const maxIncomeDayLocal = maxIncomeIdx >= 0 && timeline ? timeline[maxIncomeIdx].date : null;
-        if (maxIncomeDayLocal && (!maxIncomeDay || !maxIncomeAmount)) {
+        if (maxIncomeDayLocal) {
             maxIncomeDay = new Date(maxIncomeDayLocal);
         }
 
@@ -326,23 +326,20 @@ async function handleDeepQuery({
         const fcf = Number.isFinite(monthlyFCF) ? monthlyFCF : 0;
         const available = Math.max(0, baseBalance + fcf);
         const bufPct = available * 0.10;
-        const buffer = Math.min(available, Math.max(0, bufVol, bufMax, bufP95, bufPct));
+        let buffer = Math.max(0, bufVol, bufMax, bufP95, bufPct);
+        // Не даём подушке съесть весь баланс: максимум 50% доступного
+        buffer = Math.min(buffer, available * 0.5);
 
         // Лимит на месяц: добавляем средний месячный FCF, если он посчитан
         const baseForLimit = available;
         const limitSafe = Math.max(0, baseForLimit - buffer);
 
         // Примеры: 100k и 300k — сколько это % от min и avg, и что останется
-        const exampleSpends = [100_000, 300_000].map((s) => {
-            const remain = Math.max(0, baseForLimit - s);
-            const pctMin = baseForLimit > 0 ? Math.round((s / baseForLimit) * 1000) / 10 : null;
-            const pctAvg = avgBalance > 0 ? Math.round((s / avgBalance) * 1000) / 10 : null;
-            return { spend: s, remain, pctMin, pctAvg };
-        });
+        // Примеры убраны по просьбе пользователя (не захламлять ответ)
 
         const lines = [];
         lines.push(`Если период: ${dbData.meta?.periodStart || '?'} — ${dbData.meta?.periodEnd || '?'}`);
-        lines.push(`Если мин. баланс: ${formatTenge(minBalance)}`);
+        lines.push(`Если мин. баланс: ${formatTenge(Math.max(0, minBalance))}`);
         lines.push(`Если макс. баланс: ${formatTenge(maxBalance)}`);
         lines.push(`Если ср. дневной баланс: ${formatTenge(avgBalance)}`);
         lines.push(`Если тренд: ${trendSlope !== null ? (trendSlope >= 0 ? 'рост' : 'снижение') + ` ~${formatTenge(Math.abs(Math.round(trendSlope)))} в день` : 'нет данных'}`);
