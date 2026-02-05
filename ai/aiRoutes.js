@@ -16,7 +16,8 @@ const https = require('https');
 // =========================
 // Chat session state (in-memory, TTL)
 // =========================
-const SESSION_TTL_MS = 30 * 60 * 1000;
+// 24h rolling TTL: хранит дневную переписку для «сквозного» дня
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const _chatSessions = new Map();
 
 const _getChatSession = (userId) => {
@@ -43,7 +44,7 @@ const _getChatSession = (userId) => {
 // =========================
 // CHAT HISTORY HELPERS
 // =========================
-const HISTORY_MAX_MESSAGES = 40;
+const HISTORY_MAX_MESSAGES = 200;
 
 const _pushHistory = (userId, role, content) => {
   const s = _getChatSession(userId);
@@ -68,6 +69,12 @@ const _getHistoryMessages = (userId) => {
   const s = _getChatSession(userId);
   if (!s || !Array.isArray(s.history) || !s.history.length) return [];
   return s.history.slice(-HISTORY_MAX_MESSAGES);
+};
+
+const _clearHistory = (userId) => {
+  const key = String(userId || '');
+  if (!key) return;
+  _chatSessions.delete(key);
 };
 
 module.exports = function createAiRouter(deps) {
@@ -507,6 +514,24 @@ module.exports = function createAiRouter(deps) {
       console.error('AI Query Error:', error);
       return res.status(500).json({ error: 'Ошибка обработки запроса' });
     }
+  });
+
+  // =========================
+  // HISTORY ROUTES (24h TTL)
+  // =========================
+  router.get('/history', isAuthenticated, (req, res) => {
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
+    const limit = Math.max(1, Math.min(Number(req.query?.limit) || HISTORY_MAX_MESSAGES, HISTORY_MAX_MESSAGES));
+    const hist = _getHistoryMessages(userId).slice(-limit);
+    return res.json({ history: hist });
+  });
+
+  router.delete('/history', isAuthenticated, (req, res) => {
+    const userId = req.user?._id || req.user?.id;
+    if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
+    _clearHistory(userId);
+    return res.json({ ok: true });
   });
 
   // =========================
