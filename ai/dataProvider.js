@@ -348,8 +348,9 @@ module.exports = function createDataProvider(deps) {
         const normalized = [];
 
         for (const op of operations) {
-            // Управленческие родители и исключенные из итогов не должны попадать в расчеты AI
-            if (op.excludeFromTotals) continue;
+            // Управленческие родители и исключенные из итогов не должны попадать в расчеты AI,
+            // НО взаимозачетные расходы (offsetIncomeId) нужно учитывать как расходы.
+            if (op.excludeFromTotals && !op.offsetIncomeId) continue;
             if (op.isSplitParent) continue;
 
             // Skip inter-company transfers if requested

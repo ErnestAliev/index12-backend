@@ -304,6 +304,8 @@ const eventSchema = new mongoose.Schema({
     fromIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     toIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     excludeFromTotals: { type: Boolean, default: false },
+    offsetIncomeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null }, // Взаимозачет: ссылка на доход
+    categoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
     // Управленческие разбиения по проектам
     parentOpId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null },
     isSplitChild: { type: Boolean, default: false },
@@ -2147,7 +2149,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 
         await newEvent.save();
 
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', newEvent);
 
@@ -2210,7 +2212,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
 
         const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userIdQuery }, updatedData, { new: true });
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
-        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', updatedEvent);
 
