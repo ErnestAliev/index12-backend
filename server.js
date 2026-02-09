@@ -401,25 +401,10 @@ passport.deserializeUser(async (id, done) => {
 app.use(async (req, res, next) => {
     if (req.isAuthenticated() && req.user?.currentWorkspaceId) {
         try {
-            console.log('💾 [Workspace Cache] Caching workspace for user:', {
-                userId: req.user.id,
-                currentWorkspaceId: req.user.currentWorkspaceId,
-                path: req.path
-            });
-
-            req.cachedWorkspace = await Workspace.findById(req.user.currentWorkspaceId).lean();
-
-            if (!req.cachedWorkspace) {
-                console.log('⚠️ [Workspace Cache] Workspace not found in DB:', req.user.currentWorkspaceId);
-            } else {
-                console.log('✅ [Workspace Cache] Workspace cached:', {
-                    workspaceId: req.cachedWorkspace._id,
-                    name: req.cachedWorkspace.name,
-                    isDefault: req.cachedWorkspace.isDefault
-                });
-            }
+            req.cachedWorkspace = await Workspace.findById(req.user.currentWorkspaceId)
+                .select('userId isDefault')
+                .lean();
         } catch (err) {
-            console.error('❌ [Workspace Cache] Error caching workspace:', err);
             // IMPORTANT: Don't break the request if caching fails
             req.cachedWorkspace = null;
         }
@@ -605,53 +590,32 @@ function getEffectiveUserId(req) {
 // - New owned workspaces = composite ID (isolated data)
 async function getCompositeUserId(req) {
     const realUserId = getEffectiveUserId(req);
-    if (!realUserId) {
-        console.log('🔍 [getCompositeUserId] No realUserId found');
-        return null;
-    }
+    if (!realUserId) return null;
 
     const currentWorkspaceId = req.user?.currentWorkspaceId;
 
-    if (!currentWorkspaceId) {
-        console.log('🔍 [getCompositeUserId] No workspace, returning realUserId:', realUserId);
-        return realUserId;
-    }
+    if (!currentWorkspaceId) return realUserId;
 
     try {
         // 🚀 PERFORMANCE: Use cached workspace from middleware (eliminates DB query!)
         const workspace = req.cachedWorkspace;
-        if (!workspace) {
-            console.log('🔍 [getCompositeUserId] No cached workspace, returning realUserId:', realUserId);
-            return realUserId;
-        }
-
-        console.log('🔍 [getCompositeUserId] Workspace data:', {
-            workspaceId: currentWorkspaceId,
-            workspaceUserId: workspace.userId,
-            realUserId,
-            isDefault: workspace.isDefault,
-            workspaceName: workspace.name
-        });
+        if (!workspace) return realUserId;
 
         // 🔥 Check SHARED workspace FIRST (before isDefault)
         // Critical: shared workspace might also be marked as default
         if (workspace.userId && String(workspace.userId) !== String(realUserId)) {
-            console.log('✅ [getCompositeUserId] SHARED workspace detected, using owner ID:', workspace.userId);
             return String(workspace.userId); // Return owner's ID for shared workspace
         }
 
         // User's own default workspace
         if (workspace.isDefault) {
-            console.log('✅ [getCompositeUserId] DEFAULT workspace, using realUserId:', realUserId);
             return realUserId; // Original data preserved
         }
 
         // New owned non-default workspace - use composite ID for isolation
         const compositeId = `${realUserId}_ws_${currentWorkspaceId}`;
-        console.log('✅ [getCompositeUserId] NON-DEFAULT owned workspace, using composite ID:', compositeId);
         return compositeId;
     } catch (err) {
-        console.error('❌ [getCompositeUserId] Error:', err);
         return realUserId;
     }
 }
@@ -2051,7 +2015,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 
 app.get('/api/events', isAuthenticated, async (req, res) => {
     try {
-        const { dateKey, day, startDate, endDate } = req.query;
+        const { dateKey, day, startDate, endDate, lite } = req.query;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
 
         // 🔥 CRITICAL: Support both ObjectId and String for userId (legacy data)
@@ -2082,11 +2046,18 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameter: dateKey, day, or startDate/endDate' });
         }
 
-        // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
-        const events = await Event.find(query)
+        // Lite mode is used for heavy range preloads where frontend enriches refs from local entities.
+        const useLite = String(lite || '') === '1';
+
+        let eventsQuery = Event.find(query)
             .lean()
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
+
+        if (!useLite) {
+            eventsQuery = eventsQuery.populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
+        }
+
+        const events = await eventsQuery;
 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
