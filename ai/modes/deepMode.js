@@ -99,6 +99,150 @@ function parseMoneyKzt(text) {
 }
 
 /**
+ * Build deterministic operations list by account scope.
+ * IMPORTANT: no LLM usage here to avoid hallucinated categories/operations.
+ * @param {Object} params
+ * @param {Object} params.dbData
+ * @param {Function} params.formatTenge
+ * @param {'open'|'hidden'|'all'} params.scope
+ * @returns {string}
+ */
+function buildOperationsListReport({ dbData, formatTenge, scope = 'all' }) {
+    const allAccounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
+    const allOps = Array.isArray(dbData?.operations) ? dbData.operations : [];
+
+    const isHiddenAccount = (a) => !!(a?.isHidden || a?.isExcluded);
+    const scopeAccounts = allAccounts.filter((a) => {
+        if (scope === 'open') return !isHiddenAccount(a);
+        if (scope === 'hidden') return isHiddenAccount(a);
+        return true;
+    });
+    const scopeAccountIds = new Set(scopeAccounts.map(a => String(a._id || a.id || '')));
+
+    const opsInScope = allOps
+        .filter((op) => {
+            if (scope === 'all') return true;
+            const accId = op.accountId ? String(op.accountId) : null;
+            const fromAccId = op.fromAccountId ? String(op.fromAccountId) : null;
+            const toAccId = op.toAccountId ? String(op.toAccountId) : null;
+            return (accId && scopeAccountIds.has(accId))
+                || (fromAccId && scopeAccountIds.has(fromAccId))
+                || (toAccId && scopeAccountIds.has(toAccId));
+        })
+        .sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+
+    const incomeOps = opsInScope.filter(op => op.kind === 'income');
+    const expenseOps = opsInScope.filter(op => op.kind === 'expense');
+    const transferOps = opsInScope.filter(op => op.kind === 'transfer');
+    const factCount = opsInScope.filter(op => !!op.isFact).length;
+    const forecastCount = opsInScope.length - factCount;
+
+    const incomeTotal = incomeOps.reduce((s, op) => s + Math.abs(Number(op.amount) || 0), 0);
+    const expenseTotal = expenseOps.reduce((s, op) => s + Math.abs(Number(op.amount) || 0), 0);
+    const transferTotal = transferOps.reduce((s, op) => s + Math.abs(Number(op.amount) || 0), 0);
+
+    const scopeLabel = scope === 'open' ? 'открытым' : (scope === 'hidden' ? 'скрытым' : 'всем');
+    const periodStart = dbData?.meta?.periodStart || '?';
+    const periodEnd = dbData?.meta?.periodEnd || '?';
+
+    const lines = [];
+    lines.push(`Операции по ${scopeLabel} счетам`);
+    lines.push(`Период: ${periodStart} — ${periodEnd}`);
+    lines.push(`Счетов в выборке: ${scopeAccounts.length}`);
+
+    if (scope !== 'all' && scopeAccounts.length) {
+        lines.push(`Счета: ${scopeAccounts.map(a => a.name || 'Счет').join(', ')}`);
+    }
+
+    lines.push('');
+    lines.push(`Операций: ${opsInScope.length} (факт: ${factCount}, прогноз: ${forecastCount})`);
+    lines.push(`Доходы: ${formatTenge(incomeTotal)} (${incomeOps.length})`);
+    lines.push(`Расходы: ${formatTenge(-expenseTotal)} (${expenseOps.length})`);
+    if (transferOps.length) {
+        lines.push(`Переводы (объем): ${formatTenge(transferTotal)} (${transferOps.length})`);
+    }
+
+    if (!opsInScope.length) {
+        const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
+        const timelineRows = timeline
+            .map((row) => {
+                const income = Number(row?.income) || 0;
+                const expense = Number(row?.expense) || 0;
+                const withdrawal = Number(row?.withdrawal) || 0;
+                return {
+                    date: row?.date ? _fmtDateKZ(row.date) : '?',
+                    income,
+                    expense,
+                    withdrawal
+                };
+            })
+            .filter((row) => row.income !== 0 || row.expense !== 0 || row.withdrawal !== 0);
+
+        lines.push('');
+        if (!timelineRows.length) {
+            lines.push('Операции в выбранной выборке не найдены.');
+            return lines.join('\n');
+        }
+
+        lines.push('Детальные операции поштучно не переданы в контексте.');
+        lines.push('Доступны только агрегированные движения по дням (timeline):');
+
+        const MAX_TIMELINE_ROWS = 120;
+        timelineRows.slice(0, MAX_TIMELINE_ROWS).forEach((row) => {
+            lines.push(
+                `• ${row.date} | Доход ${formatTenge(row.income)} | Расход ${formatTenge(-Math.abs(row.expense))} | Вывод ${formatTenge(-Math.abs(row.withdrawal))}`
+            );
+        });
+
+        if (timelineRows.length > MAX_TIMELINE_ROWS) {
+            lines.push('');
+            lines.push(`Показаны первые ${MAX_TIMELINE_ROWS} дней из ${timelineRows.length}.`);
+        }
+
+        return lines.join('\n');
+    }
+
+    lines.push('');
+    lines.push('Список операций:');
+
+    const MAX_ITEMS = 200;
+    const shown = opsInScope.slice(0, MAX_ITEMS);
+
+    shown.forEach((op) => {
+        const date = op.date || op.dateIso || '?';
+        const phase = op.isFact ? 'факт' : 'прогноз';
+        const kind = op.kind === 'income' ? 'Доход'
+            : op.kind === 'expense' ? 'Расход'
+                : op.kind === 'transfer' ? 'Перевод'
+                    : 'Операция';
+
+        const amount = op.kind === 'expense'
+            ? formatTenge(-Math.abs(Number(op.amount) || 0))
+            : formatTenge(Math.abs(Number(op.amount) || 0));
+
+        if (op.kind === 'transfer') {
+            const from = op.fromAccountName || 'Без счета';
+            const to = op.toAccountName || 'Без счета';
+            const desc = op.description ? ` | ${op.description}` : '';
+            lines.push(`• ${date} | ${phase} | ${kind} ${amount} | ${from} → ${to}${desc}`);
+            return;
+        }
+
+        const account = op.accountName || op.toAccountName || op.fromAccountName || 'Без счета';
+        const category = op.categoryName || 'Без категории';
+        const desc = op.description ? ` | ${op.description}` : '';
+        lines.push(`• ${date} | ${phase} | ${kind} ${amount} | ${account} | ${category}${desc}`);
+    });
+
+    if (opsInScope.length > shown.length) {
+        lines.push('');
+        lines.push(`Показаны первые ${shown.length} операций из ${opsInScope.length}.`);
+    }
+
+    return lines.join('\n');
+}
+
+/**
  * Handle Deep Mode queries (CFO analysis)
  * @param {Object} params
  * @param {string} params.query - User query
@@ -125,6 +269,12 @@ async function handleDeepQuery({
     const metrics = calcCoreMetrics(dbData);
 
     // Detect user intent
+    const mentionsOperations = /(операц|транзакц|движен)/i.test(qLower);
+    const asksOperationsList = mentionsOperations && /(все|список|покаж|посмотр|выведи|выгруз|какие)/i.test(qLower);
+    const asksOpenScope = /(открыт.*счет|по открытым|открытые счета)/i.test(qLower);
+    const asksHiddenScope = /(скрыт.*счет|по скрытым|скрытые счета)/i.test(qLower);
+    const wantsOperationsList = mentionsOperations && (asksOperationsList || asksOpenScope || asksHiddenScope);
+
     const wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
     const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
     const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
@@ -144,6 +294,15 @@ async function handleDeepQuery({
         session.prefs.livingMonthly = maybeMoney;
         session.pending = null;
         justSetLiving = true;
+    }
+
+    // =====================
+    // OPERATIONS LIST (deterministic, no LLM)
+    // =====================
+    if (wantsOperationsList) {
+        const scope = asksHiddenScope ? 'hidden' : (asksOpenScope ? 'open' : 'all');
+        const answer = buildOperationsListReport({ dbData, formatTenge, scope });
+        return { answer, shouldSaveToHistory: true };
     }
 
     // =====================
@@ -518,6 +677,7 @@ Fallback-контекст Deep Mode:
 - Regex-интент не распознан, но ответ обязателен.
 - Отвечай как CFO + Стратегический советник (Consigliere), без "сухого меню".
 - Если запрос короткий/размытый (например "привет", "обсудим цифры"), начни с мини-аудита и задай 1 уточняющий вопрос.
+- Никогда не придумывай операции, категории, даты, контрагентов и суммы. Если данных недостаточно — скажи это явно.
 `;
 
     const messages = [
