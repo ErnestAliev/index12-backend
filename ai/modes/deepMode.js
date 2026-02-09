@@ -510,46 +510,29 @@ ${session?.prefs?.livingMonthly ? `- Жили-были (указано поль�
     }
 
     // =====================
-    // DEFAULT / FALLBACK → LLM
+    // DEFAULT / FALLBACK → ALWAYS LLM (no silent menu)
     // =====================
-    // If no specific intent, show summary or call GPT-3o for analysis
+    const dataContext = formatDbDataForAi(dbData);
+    const fallbackContext = `
+Fallback-контекст Deep Mode:
+- Regex-интент не распознан, но ответ обязателен.
+- Отвечай как CFO + Стратегический советник (Consigliere), без "сухого меню".
+- Если запрос короткий/размытый (например "привет", "обсудим цифры"), начни с мини-аудита и задай 1 уточняющий вопрос.
+`;
 
-    // Option 1: Deterministic fallback
-    const lines = [
-        `Прибыль: +${formatTenge(metrics.profitFact)} | Маржа: ${metrics.marginPct}%`,
-        `Открытые: ${formatTenge(metrics.openCash)} | Скрытые: ${formatTenge(metrics.hiddenCash)}`,
-        '',
-        'Что делаем: прибыль по проектам, расходы-утечки или инвестиции?'
+    const messages = [
+        { role: 'system', content: deepPrompt },
+        { role: 'system', content: dataContext },
+        { role: 'system', content: fallbackContext },
+        ...history,
+        { role: 'user', content: query }
     ];
-
-    // =====================
-    // FALLBACK: Continue GPT conversation if dialogue is active
-    // =====================
-    // If history contains assistant messages, it means we're in an active conversation
-    // User's message might be an answer to our question, not a new intent
-    // → Continue GPT dialogue instead of falling back to deterministic response
-    const hasActiveDialogue = history.some(msg => msg.role === 'assistant');
-
-    if (hasActiveDialogue || wantsInvest) {
-        // User is answering our questions OR wants to talk about investments
-        // → Continue conversational flow with GPT
-        const dataContext = formatDbDataForAi(dbData);
-        const messages = [
-            { role: 'system', content: deepPrompt },
-            { role: 'system', content: dataContext },
-            ...history,
-            { role: 'user', content: query }
-        ];
-        const aiResponse = await openAiChat(messages, {
-            modelOverride: modelDeep,
-            maxTokens: 4000,
-            timeout: 120000
-        });
-        return { answer: aiResponse, shouldSaveToHistory: true };
-    }
-
-    // If no active dialogue and no specific intent → show menu
-    return { answer: lines.join('\n'), shouldSaveToHistory: true };
+    const aiResponse = await openAiChat(messages, {
+        modelOverride: modelDeep,
+        maxTokens: 4000,
+        timeout: 120000
+    });
+    return { answer: aiResponse, shouldSaveToHistory: true };
 }
 
 module.exports = {
