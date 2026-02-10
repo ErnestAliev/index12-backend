@@ -98,6 +98,60 @@ function parseMoneyKzt(text) {
     return val > 0 ? Math.round(val) : null;
 }
 
+function _parseLocaleAmount(numText) {
+    const raw = String(numText || '')
+        .replace(/\u00A0/g, ' ')
+        .replace(/\s+/g, '')
+        .trim();
+    if (!raw) return NaN;
+
+    const hasComma = raw.includes(',');
+    const hasDot = raw.includes('.');
+
+    let normalized = raw;
+    if (hasComma && hasDot) {
+        // Use the latest separator as decimal and treat the other as thousands separator.
+        if (raw.lastIndexOf(',') > raw.lastIndexOf('.')) {
+            normalized = raw.replace(/\./g, '').replace(',', '.');
+        } else {
+            normalized = raw.replace(/,/g, '');
+        }
+    } else if (hasComma) {
+        normalized = raw.replace(',', '.');
+    }
+
+    return Number(normalized);
+}
+
+function normalizeShortMoneyInText(text, formatTenge) {
+    const source = String(text || '');
+    if (!source) return source;
+
+    const unitToMultiplier = {
+        'млрд': 1_000_000_000,
+        'млн': 1_000_000,
+        'тыс': 1_000,
+        'k': 1_000,
+        'm': 1_000_000,
+        'b': 1_000_000_000
+    };
+
+    // Normalize only explicit money expressions (short unit + currency marker).
+    const rx = /(-?\d[\d\s\u00A0]*(?:[.,]\d+)?)\s*(млрд|млн|тыс|k|m|b)\s*(₸|тенге|kzt)\b/gi;
+
+    return source.replace(rx, (full, numPart, unitRaw) => {
+        const unit = String(unitRaw || '').toLowerCase();
+        const mult = unitToMultiplier[unit];
+        if (!mult) return full;
+
+        const base = _parseLocaleAmount(numPart);
+        if (!Number.isFinite(base)) return full;
+
+        const amount = Math.round(base * mult);
+        return formatTenge(amount);
+    });
+}
+
 /**
  * Build deterministic operations list by account scope.
  * IMPORTANT: no LLM usage here to avoid hallucinated categories/operations.
@@ -526,7 +580,7 @@ async function handleDeepQuery({
             maxTokens: 4000,
             timeout: 120000  // 2 minutes for thorough analysis
         });
-        return { answer: aiResponse, shouldSaveToHistory: true };
+        return { answer: normalizeShortMoneyInText(aiResponse, formatTenge), shouldSaveToHistory: true };
     }
 
     // =====================
@@ -604,7 +658,7 @@ ${session?.prefs?.livingMonthly ? `- Жили-были (указано поль�
             maxTokens: 4000,
             timeout: 120000
         });
-        return { answer: aiResponse, shouldSaveToHistory: true };
+        return { answer: normalizeShortMoneyInText(aiResponse, formatTenge), shouldSaveToHistory: true };
     }
 
     // =====================
@@ -665,7 +719,7 @@ ${session?.prefs?.livingMonthly ? `- Жили-были (указано поль�
             maxTokens: 4000,
             timeout: 120000
         });
-        return { answer: aiResponse, shouldSaveToHistory: true };
+        return { answer: normalizeShortMoneyInText(aiResponse, formatTenge), shouldSaveToHistory: true };
     }
 
     // =====================
@@ -692,7 +746,7 @@ Fallback-контекст Deep Mode:
         maxTokens: 4000,
         timeout: 120000
     });
-    return { answer: aiResponse, shouldSaveToHistory: true };
+    return { answer: normalizeShortMoneyInText(aiResponse, formatTenge), shouldSaveToHistory: true };
 }
 
 module.exports = {
