@@ -300,6 +300,7 @@ const eventSchema = new mongoose.Schema({
     counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     isTransfer: { type: Boolean, default: false },
+    isWithdrawal: { type: Boolean, default: false },
     isClosed: { type: Boolean, default: false },
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
     destination: String,
@@ -1957,11 +1958,19 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             {
                 $project: {
                     type: 1, amount: 1, isTransfer: 1,
+                    transferPurpose: 1, transferReason: 1,
                     categoryId: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
                     companyId: 1, fromCompanyId: 1, toCompanyId: 1,
                     individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
                     contractorId: 1, projectId: 1,
                     absAmount: { $abs: "$amount" },
+                    isSystemWithdrawalTransfer: {
+                        $and: [
+                            { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
+                            { $eq: ["$transferPurpose", "personal"] },
+                            { $eq: ["$transferReason", "personal_use"] }
+                        ]
+                    },
                     isWorkAct: { $ifNull: ["$isWorkAct", false] },
                     isWriteOff: { $and: [{ $eq: ["$type", "expense"] }, { $not: ["$accountId"] }, { $eq: ["$counterpartyIndividualId", retailIdObj] }] }
                 }
@@ -1974,7 +1983,13 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                 impacts: {
                                     $cond: {
                                         if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                                        then: [{ id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toAccountId", val: "$absAmount" }],
+                                        then: {
+                                            $cond: {
+                                                if: "$isSystemWithdrawalTransfer",
+                                                then: [{ id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } }],
+                                                else: [{ id: "$fromAccountId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toAccountId", val: "$absAmount" }]
+                                            }
+                                        },
                                         else: { $cond: { if: { $and: ["$accountId", { $eq: ["$isWorkAct", false] }] }, then: [{ id: "$accountId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }], else: [] } }
                                     }
                                 }
@@ -1988,7 +2003,13 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                 impacts: {
                                     $cond: {
                                         if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                                        then: [{ id: "$fromCompanyId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toCompanyId", val: "$absAmount" }],
+                                        then: {
+                                            $cond: {
+                                                if: "$isSystemWithdrawalTransfer",
+                                                then: [{ id: "$fromCompanyId", val: { $multiply: ["$absAmount", -1] } }],
+                                                else: [{ id: "$fromCompanyId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toCompanyId", val: "$absAmount" }]
+                                            }
+                                        },
                                         else: { $cond: { if: { $or: ["$isWriteOff", "$isWorkAct"] }, then: [], else: [{ id: "$companyId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }] } }
                                     }
                                 }
@@ -2002,7 +2023,13 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                 impacts: {
                                     $cond: {
                                         if: { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                                        then: [{ id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toIndividualId", val: "$absAmount" }],
+                                        then: {
+                                            $cond: {
+                                                if: "$isSystemWithdrawalTransfer",
+                                                then: [{ id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } }],
+                                                else: [{ id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toIndividualId", val: "$absAmount" }]
+                                            }
+                                        },
                                         else: { $cond: { if: "$isWriteOff", then: [], else: [{ id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }, { id: "$counterpartyIndividualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }] } }
                                     }
                                 }
@@ -2395,16 +2422,31 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         if (transferPurpose === 'personal' && transferReason === 'personal_use') {
             const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
             const withdrawalEvent = new Event({
-                type: 'expense', amount: -Math.abs(amount),
+                type: 'transfer', amount: Math.abs(amount),
+                isTransfer: true,
+                isWithdrawal: true,
                 accountId: safeId(fromAccountId),
                 companyId: safeId(fromCompanyId),
                 individualId: safeId(fromIndividualId),
-                categoryId: null, isWithdrawal: true,
+                fromAccountId: safeId(fromAccountId),
+                toAccountId: safeId(toAccountId),
+                fromCompanyId: safeId(fromCompanyId),
+                toCompanyId: safeId(toCompanyId),
+                fromIndividualId: safeId(fromIndividualId),
+                toIndividualId: safeId(toIndividualId),
+                transferPurpose: 'personal',
+                transferReason: 'personal_use',
+                categoryId: null,
                 destination: 'Личные нужды', description: 'Вывод на личные цели',
                 date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
             });
             await withdrawalEvent.save();
-            await withdrawalEvent.populate(['accountId', 'companyId', 'individualId']);
+            await withdrawalEvent.populate([
+                'accountId', 'companyId', 'individualId',
+                'fromAccountId', 'toAccountId',
+                'fromCompanyId', 'toCompanyId',
+                'fromIndividualId', 'toIndividualId'
+            ]);
 
             emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', withdrawalEvent);
 
