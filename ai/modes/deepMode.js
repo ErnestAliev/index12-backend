@@ -188,6 +188,12 @@ function buildOperationsListReport({ dbData, formatTenge, scope = 'all' }) {
     const incomeOps = opsInScope.filter(op => op.kind === 'income');
     const expenseOps = opsInScope.filter(op => op.kind === 'expense');
     const transferOps = opsInScope.filter(op => op.kind === 'transfer');
+    const isWithdrawalTransfer = (op) => !!(
+        op?.isPersonalTransferWithdrawal ||
+        (op?.transferPurpose === 'personal' && op?.transferReason === 'personal_use') ||
+        (op?.isWithdrawal === true && op?.kind === 'transfer')
+    );
+    const withdrawalTransferOps = transferOps.filter(isWithdrawalTransfer);
     const factCount = opsInScope.filter(op => !!op.isFact).length;
     const forecastCount = opsInScope.length - factCount;
 
@@ -214,6 +220,10 @@ function buildOperationsListReport({ dbData, formatTenge, scope = 'all' }) {
     lines.push(`Расходы: ${formatTenge(-expenseTotal)} (${expenseOps.length})`);
     if (transferOps.length) {
         lines.push(`Переводы (объем): ${formatTenge(transferTotal)} (${transferOps.length})`);
+        if (withdrawalTransferOps.length) {
+            const withdrawalTotal = withdrawalTransferOps.reduce((s, op) => s + Math.abs(Number(op.amount) || 0), 0);
+            lines.push(`Вывод средств (подтип перевода): ${formatTenge(withdrawalTotal)} (${withdrawalTransferOps.length})`);
+        }
     }
 
     if (!opsInScope.length) {
@@ -265,9 +275,10 @@ function buildOperationsListReport({ dbData, formatTenge, scope = 'all' }) {
     shown.forEach((op) => {
         const date = op.date || op.dateIso || '?';
         const phase = op.isFact ? 'факт' : 'прогноз';
+        const isWithdrawal = isWithdrawalTransfer(op);
         const kind = op.kind === 'income' ? 'Доход'
             : op.kind === 'expense' ? 'Расход'
-                : op.kind === 'transfer' ? 'Перевод'
+                : op.kind === 'transfer' ? (isWithdrawal ? 'Вывод средств' : 'Перевод')
                     : 'Операция';
 
         const amount = op.kind === 'expense'
@@ -275,8 +286,10 @@ function buildOperationsListReport({ dbData, formatTenge, scope = 'all' }) {
             : formatTenge(Math.abs(Number(op.amount) || 0));
 
         if (op.kind === 'transfer') {
-            const from = op.fromAccountName || 'Без счета';
-            const to = op.toAccountName || 'Без счета';
+            const from = op.fromAccountName || op.fromCompanyName || op.fromIndividualName || 'Без счета';
+            const to = isWithdrawal
+                ? (op.toAccountName || op.toIndividualName || 'Личные нужды')
+                : (op.toAccountName || op.toCompanyName || op.toIndividualName || 'Без счета');
             const desc = op.description ? ` | ${op.description}` : '';
             lines.push(`• ${date} | ${phase} | ${kind} ${amount} | ${from} → ${to}${desc}`);
             return;

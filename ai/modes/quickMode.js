@@ -13,6 +13,8 @@
  */
 function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     const qLower = String(query || '').toLowerCase().trim();
+    const asksTransfers = /(перевод|трансфер|transfer)/i.test(qLower);
+    const asksWithdrawals = /(вывод\s+средств|сняти[ея]|личн(ая|ый|ую)\s+(карт|счет))/i.test(qLower);
 
     console.log('[quickMode] query:', qLower);
 
@@ -27,7 +29,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // INCOME QUERY
     // =====================
-    if (/(доход|поступлен|приход)/i.test(qLower) && !/(перевод|трансфер)/i.test(qLower)) {
+    if (/(доход|поступлен|приход)/i.test(qLower) && !asksTransfers && !asksWithdrawals) {
         console.log('[quickMode] Matched: INCOME');
         return handleIncomeQuery({ dbData, formatTenge });
     }
@@ -35,7 +37,7 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // EXPENSE QUERY
     // =====================
-    if (/(расход|трат|затрат)/i.test(qLower) && !/(перевод|трансфер)/i.test(qLower)) {
+    if (/(расход|трат|затрат)/i.test(qLower) && !asksTransfers && !asksWithdrawals) {
         console.log('[quickMode] Matched: EXPENSE');
         return handleExpenseQuery({ dbData, formatTenge });
     }
@@ -43,9 +45,13 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     // =====================
     // TRANSFERS QUERY
     // =====================
-    if (/(перевод|трансфер|transfer)/i.test(qLower)) {
+    if (asksTransfers || asksWithdrawals) {
         console.log('[quickMode] Matched: TRANSFERS');
-        return handleTransfersQuery({ dbData, formatTenge });
+        return handleTransfersQuery({
+            dbData,
+            formatTenge,
+            withdrawalsOnly: asksWithdrawals && !asksTransfers
+        });
     }
 
     // =====================
@@ -317,15 +323,21 @@ function handleAnalysisQuery({ dbData, formatTenge }) {
 // =====================
 // TRANSFERS
 // =====================
-function handleTransfersQuery({ dbData, formatTenge }) {
+function handleTransfersQuery({ dbData, formatTenge, withdrawalsOnly = false }) {
     const lines = [];
-    const transfers = (dbData.operations || []).filter(op => op.kind === 'transfer');
+    const isWithdrawalTransfer = (op) => !!(
+        op?.isPersonalTransferWithdrawal ||
+        (op?.transferPurpose === 'personal' && op?.transferReason === 'personal_use') ||
+        (op?.isWithdrawal === true && op?.kind === 'transfer')
+    );
+    const allTransfers = (dbData.operations || []).filter(op => op.kind === 'transfer');
+    const transfers = withdrawalsOnly ? allTransfers.filter(isWithdrawalTransfer) : allTransfers;
 
-    lines.push('Переводы:');
+    lines.push(withdrawalsOnly ? 'Вывод средств (переводы на личные цели):' : 'Переводы:');
     lines.push('');
 
     if (!transfers.length) {
-        lines.push('Переводы не найдены');
+        lines.push(withdrawalsOnly ? 'Вывод средств не найден' : 'Переводы не найдены');
         return lines.join('\n');
     }
 
@@ -336,9 +348,14 @@ function handleTransfersQuery({ dbData, formatTenge }) {
     if (fact.length) {
         lines.push('Факт:');
         fact.slice(0, 10).forEach(t => {
-            const from = t.fromAccountName || '?';
-            const to = t.toAccountName || '?';
+            const from = t.fromAccountName || t.fromCompanyName || t.fromIndividualName || '?';
+            const to = t.toAccountName || t.toCompanyName || t.toIndividualName || '?';
             const amt = Math.abs(t.amount || 0);
+            if (isWithdrawalTransfer(t)) {
+                const toLabel = t.toAccountName || t.toIndividualName || 'Личные нужды';
+                lines.push(`• ${formatTenge(amt)}: ${from} → ${toLabel} (вывод средств)`);
+                return;
+            }
             lines.push(`• ${formatTenge(amt)}: ${from} → ${to}`);
         });
     }
@@ -347,9 +364,14 @@ function handleTransfersQuery({ dbData, formatTenge }) {
         lines.push('');
         lines.push('Прогноз:');
         forecast.slice(0, 10).forEach(t => {
-            const from = t.fromAccountName || '?';
-            const to = t.toAccountName || '?';
+            const from = t.fromAccountName || t.fromCompanyName || t.fromIndividualName || '?';
+            const to = t.toAccountName || t.toCompanyName || t.toIndividualName || '?';
             const amt = Math.abs(t.amount || 0);
+            if (isWithdrawalTransfer(t)) {
+                const toLabel = t.toAccountName || t.toIndividualName || 'Личные нужды';
+                lines.push(`• ${formatTenge(amt)}: ${from} → ${toLabel} (вывод средств)`);
+                return;
+            }
             lines.push(`• ${formatTenge(amt)}: ${from} → ${to}`);
         });
     }

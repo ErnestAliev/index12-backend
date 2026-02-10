@@ -240,9 +240,13 @@ module.exports = function createAiRouter(deps) {
     // Operations summary
     const inc = opsSummary.income || {};
     const exp = opsSummary.expense || {};
+    const tr = opsSummary.transfer || {};
+    const trOut = tr.withdrawalOut || {};
     lines.push('Сводка операций:');
     lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
     lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
+    lines.push(`- Переводы: факт ${_formatTenge(tr.fact?.total || 0)} (${tr.fact?.count || 0}), прогноз ${_formatTenge(tr.forecast?.total || 0)} (${tr.forecast?.count || 0})`);
+    lines.push(`- Вывод средств (подтип перевода): факт ${_formatTenge(trOut.fact?.total || 0)} (${trOut.fact?.count || 0}), прогноз ${_formatTenge(trOut.forecast?.total || 0)} (${trOut.forecast?.count || 0})`);
 
     // Category breakdown (TOP categories for business identification)
     const catSum = data.categorySummary || [];
@@ -434,6 +438,8 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Операций: ${(dbData.operations || []).length}`);
         lines.push(`Доходов (факт): ${_formatTenge(opsSummary.income?.fact?.total || 0)} (${opsSummary.income?.fact?.count || 0})`);
         lines.push(`Расходов (факт): ${_formatTenge(opsSummary.expense?.fact?.total || 0)} (${opsSummary.expense?.fact?.count || 0})`);
+        lines.push(`Переводов (факт): ${_formatTenge(opsSummary.transfer?.fact?.total || 0)} (${opsSummary.transfer?.fact?.count || 0})`);
+        lines.push(`Вывод средств (факт): ${_formatTenge(opsSummary.transfer?.withdrawalOut?.fact?.total || 0)} (${opsSummary.transfer?.withdrawalOut?.fact?.count || 0})`);
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'user', q);

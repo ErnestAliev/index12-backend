@@ -376,11 +376,15 @@ module.exports = function createDataProvider(deps) {
                 : (typeof op.sum === 'number' ? op.sum : 0);
             const absAmount = Math.abs(rawAmount || 0);
 
+            const isPersonalTransferWithdrawal =
+                String(op.transferPurpose || '').toLowerCase() === 'personal' &&
+                String(op.transferReason || '').toLowerCase() === 'personal_use';
+
             // Determine operation kind - ONLY income, expense, or transfer
             let kind = 'unknown';
             const type = String(op.type || '').toLowerCase();
 
-            if (op.isTransfer || type === 'transfer') {
+            if (op.isTransfer || type === 'transfer' || isPersonalTransferWithdrawal) {
                 kind = 'transfer';
                 if (excludeTransfers) continue;
             } else if (type === 'income' || (rawAmount > 0 && !op.isTransfer)) {
@@ -403,6 +407,11 @@ module.exports = function createDataProvider(deps) {
                 isFact,
                 amount: absAmount,
                 rawAmount,
+                isTransfer: kind === 'transfer',
+                isWithdrawal: op.isWithdrawal === true,
+                isPersonalTransferWithdrawal,
+                transferPurpose: op.transferPurpose || null,
+                transferReason: op.transferReason || null,
                 description: op.description || null,
                 accountId: op.accountId?._id ? String(op.accountId._id) : (op.accountId ? String(op.accountId) : null),
                 fromAccountId: op.fromAccountId?._id ? String(op.fromAccountId._id) : (op.fromAccountId ? String(op.fromAccountId) : null),
@@ -431,10 +440,16 @@ module.exports = function createDataProvider(deps) {
         // Calculate summary
         const incomeOps = normalized.filter(o => o.kind === 'income');
         const expenseOps = normalized.filter(o => o.kind === 'expense');
+        const transferOps = normalized.filter(o => o.kind === 'transfer');
         const factIncomeOps = incomeOps.filter(o => o.isFact);
         const forecastIncomeOps = incomeOps.filter(o => !o.isFact);
         const factExpenseOps = expenseOps.filter(o => o.isFact);
         const forecastExpenseOps = expenseOps.filter(o => !o.isFact);
+        const factTransferOps = transferOps.filter(o => o.isFact);
+        const forecastTransferOps = transferOps.filter(o => !o.isFact);
+        const withdrawalTransferOps = transferOps.filter(o => o.isPersonalTransferWithdrawal);
+        const factWithdrawalTransferOps = withdrawalTransferOps.filter(o => o.isFact);
+        const forecastWithdrawalTransferOps = withdrawalTransferOps.filter(o => !o.isFact);
 
         // Пересчёт по датам (для поиска напряжённых дней)
         const dayMap = new Map(); // dateIso -> aggregate
@@ -494,6 +509,30 @@ module.exports = function createDataProvider(deps) {
                     forecast: {
                         count: forecastExpenseOps.length,
                         total: forecastExpenseOps.reduce((s, o) => s + o.amount, 0)
+                    }
+                },
+                transfer: {
+                    count: transferOps.length,
+                    total: transferOps.reduce((s, o) => s + o.amount, 0),
+                    fact: {
+                        count: factTransferOps.length,
+                        total: factTransferOps.reduce((s, o) => s + o.amount, 0)
+                    },
+                    forecast: {
+                        count: forecastTransferOps.length,
+                        total: forecastTransferOps.reduce((s, o) => s + o.amount, 0)
+                    },
+                    withdrawalOut: {
+                        count: withdrawalTransferOps.length,
+                        total: withdrawalTransferOps.reduce((s, o) => s + o.amount, 0),
+                        fact: {
+                            count: factWithdrawalTransferOps.length,
+                            total: factWithdrawalTransferOps.reduce((s, o) => s + o.amount, 0)
+                        },
+                        forecast: {
+                            count: forecastWithdrawalTransferOps.length,
+                            total: forecastWithdrawalTransferOps.reduce((s, o) => s + o.amount, 0)
+                        }
                     }
                 }
             },
