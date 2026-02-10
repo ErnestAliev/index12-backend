@@ -217,6 +217,7 @@ const Account = mongoose.model('Account', accountSchema);
 const companySchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
+    legalForm: { type: String, default: null },          // too | ip | individual | other
     taxRegime: { type: String, default: 'simplified' },
     taxPercent: { type: Number, default: 3 },
     identificationNumber: { type: String, default: null },  // ИИН/БИН
@@ -228,6 +229,10 @@ const Company = mongoose.model('Company', companySchema);
 const individualSchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
+    identificationNumber: { type: String, default: null },  // ИИН
+    legalForm: { type: String, default: 'individual' },      // individual | ip | too | other
+    taxRegime: { type: String, default: 'none' },            // none | our | simplified
+    taxPercent: { type: Number, default: 0 },
     defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
     defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }],
@@ -297,6 +302,8 @@ const eventSchema = new mongoose.Schema({
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
     destination: String,
     transferGroupId: String,
+    transferPurpose: { type: String, default: null },
+    transferReason: { type: String, default: null },
     fromAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     toAccountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
     fromCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company' },
@@ -2032,6 +2039,91 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
 });
 
 // --- EVENTS ROUTES ---
+const mergeLegacyInterCompanyTransfers = (events = []) => {
+    const passthrough = [];
+    const groupedLegacy = new Map();
+
+    events.forEach((event) => {
+        const hasGroup = !!event?.transferGroupId;
+        const isModernTransfer = event?.isTransfer === true || event?.type === 'transfer';
+
+        if (!hasGroup || isModernTransfer) {
+            passthrough.push(event);
+            return;
+        }
+
+        if (!groupedLegacy.has(event.transferGroupId)) {
+            groupedLegacy.set(event.transferGroupId, []);
+        }
+        groupedLegacy.get(event.transferGroupId).push(event);
+    });
+
+    groupedLegacy.forEach((items, groupId) => {
+        if (!Array.isArray(items) || items.length !== 2) {
+            passthrough.push(...items);
+            return;
+        }
+
+        const outgoing = items.find(item => Number(item?.amount) < 0 || item?.type === 'expense');
+        const incoming = items.find(item => Number(item?.amount) > 0 || item?.type === 'income');
+
+        if (!outgoing || !incoming) {
+            passthrough.push(...items);
+            return;
+        }
+
+        const absAmount = Math.max(
+            Math.abs(Number(outgoing.amount) || 0),
+            Math.abs(Number(incoming.amount) || 0)
+        );
+
+        passthrough.push({
+            ...incoming,
+            _id: incoming._id,
+            _id2: outgoing._id,
+            type: 'transfer',
+            isTransfer: true,
+            transferPurpose: incoming.transferPurpose || outgoing.transferPurpose || 'inter_company',
+            amount: absAmount,
+            fromAccountId: outgoing.accountId || outgoing.fromAccountId || null,
+            toAccountId: incoming.accountId || incoming.toAccountId || null,
+            fromCompanyId: outgoing.companyId || outgoing.fromCompanyId || null,
+            toCompanyId: incoming.companyId || incoming.toCompanyId || null,
+            fromIndividualId: outgoing.individualId || outgoing.fromIndividualId || null,
+            toIndividualId: incoming.individualId || incoming.toIndividualId || null,
+            categoryId: incoming.categoryId || outgoing.categoryId || null,
+            accountId: null,
+            companyId: null,
+            individualId: null,
+            description: incoming.description || outgoing.description || 'Межкомпанийский перевод',
+            transferGroupId: groupId,
+            cellIndex: Math.min(
+                Number.isFinite(Number(outgoing.cellIndex)) ? Number(outgoing.cellIndex) : 0,
+                Number.isFinite(Number(incoming.cellIndex)) ? Number(incoming.cellIndex) : 0
+            ),
+            date: incoming.date || outgoing.date,
+            dateKey: incoming.dateKey || outgoing.dateKey,
+            dayOfYear: incoming.dayOfYear || outgoing.dayOfYear
+        });
+    });
+
+    passthrough.sort((a, b) => {
+        const dateA = new Date(a?.date || 0).getTime();
+        const dateB = new Date(b?.date || 0).getTime();
+        if (dateA !== dateB) return dateA - dateB;
+
+        const cellA = Number.isFinite(Number(a?.cellIndex)) ? Number(a.cellIndex) : 0;
+        const cellB = Number.isFinite(Number(b?.cellIndex)) ? Number(b.cellIndex) : 0;
+        if (cellA !== cellB) return cellA - cellB;
+
+        const createdA = new Date(a?.createdAt || 0).getTime();
+        const createdB = new Date(b?.createdAt || 0).getTime();
+        return createdA - createdB;
+    });
+
+    return passthrough;
+};
+
 app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
     try {
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID
@@ -2040,7 +2132,7 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
             .lean()
             .sort({ date: 1 })
             .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
-        res.json(events);
+        res.json(mergeLegacyInterCompanyTransfers(events));
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -2274,8 +2366,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         fromCompanyId, toCompanyId,
         fromIndividualId, toIndividualId,
         categoryId,
-        transferPurpose, transferReason,
-        expenseContractorId, incomeContractorId
+        transferPurpose, transferReason
     } = req.body;
 
     const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID
@@ -2318,55 +2409,14 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             return res.status(201).json(withdrawalEvent);
         }
 
-        if (transferPurpose === 'inter_company') {
-            const groupId = `inter_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            let interCatId = safeId(categoryId);
-            if (!interCatId) interCatId = await findCategoryByName('Меж.комп', userId);
-            const idx1 = await getFirstFreeCellIndex(finalDateKey, userId);
-
-            let outDesc = 'Перевод между компаниями (Исходящий)';
-            let inDesc = 'Перевод между компаниями (Входящий)';
-
-            if (fromIndividualId) {
-                outDesc = 'Вложение средств (Личные -> Бизнес)';
-                inDesc = 'Поступление вложений (Личные -> Бизнес)';
-            }
-
-            const expenseOp = new Event({
-                type: 'expense', amount: -Math.abs(amount),
-                accountId: safeId(fromAccountId),
-                companyId: safeId(fromCompanyId),
-                individualId: safeId(fromIndividualId),
-                categoryId: interCatId,
-                contractorId: safeId(expenseContractorId),
-                description: outDesc,
-                transferGroupId: groupId,
-                date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1 + 1, userId
-            });
-            const incomeOp = new Event({
-                type: 'income', amount: Math.abs(amount),
-                accountId: safeId(toAccountId),
-                companyId: safeId(toCompanyId),
-                individualId: safeId(toIndividualId),
-                categoryId: interCatId,
-                contractorId: safeId(incomeContractorId),
-                description: inDesc,
-                transferGroupId: groupId,
-                date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex: idx1, userId
-            });
-            await Promise.all([expenseOp.save(), incomeOp.save()]);
-            const popFields = ['accountId', 'companyId', 'contractorId', 'individualId', 'categoryId'];
-            await expenseOp.populate(popFields); await incomeOp.populate(popFields);
-
-            emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', expenseOp);
-            emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', incomeOp);
-
-            return res.status(201).json([expenseOp, incomeOp]);
-        }
-
         const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
-        const desc = (transferPurpose === 'personal') ? 'Перевод на личную карту (Развитие бизнеса)' : 'Внутренний перевод';
+        let desc = 'Внутренний перевод';
+        if (transferPurpose === 'personal') {
+            desc = 'Перевод на личную карту (Развитие бизнеса)';
+        } else if (transferPurpose === 'inter_company') {
+            desc = fromIndividualId ? 'Вложение средств (Личные -> Бизнес)' : 'Межкомпанийский перевод';
+        }
 
         const transferEvent = new Event({
             type: 'transfer', amount: Math.abs(amount),
@@ -2378,6 +2428,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             toIndividualId: safeId(toIndividualId),
             categoryId: safeId(categoryId),
             isTransfer: true,
+            transferPurpose: transferPurpose || 'internal',
+            transferReason: transferReason || null,
             transferGroupId: groupId, description: desc,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
         });
@@ -2453,6 +2505,37 @@ const generateCRUD = (model, path, emitEventName = null) => {
         } catch (err) { res.status(500).json({ message: err.message }); }
     });
 
+    const TOO_PATTERN = /(^|[^a-zA-Zа-яА-Я0-9])т\.?\s*о\.?\s*о([^a-zA-Zа-яА-Я0-9]|$)/i;
+    const IP_PATTERN = /(^|[^a-zA-Zа-яА-Я0-9])и\.?\s*п([^a-zA-Zа-яА-Я0-9]|$)/i;
+    const normalizeCompanyTaxRegime = (value) => (value === 'our' ? 'our' : 'simplified');
+    const normalizeIndividualTaxRegime = (value) => {
+        if (value === 'our') return 'our';
+        if (value === 'simplified') return 'simplified';
+        return 'none';
+    };
+    const detectCompanyLegalForm = (name) => {
+        const sourceName = String(name || '').trim();
+        if (IP_PATTERN.test(sourceName)) return 'ip';
+        if (TOO_PATTERN.test(sourceName)) return 'too';
+        return 'other';
+    };
+    const getDefaultCompanyTaxPercent = (name, regime) => {
+        const normalizedRegime = normalizeCompanyTaxRegime(regime);
+        if (normalizedRegime === 'our') {
+            const sourceName = String(name || '').trim();
+            if (IP_PATTERN.test(sourceName)) return 10;
+            if (TOO_PATTERN.test(sourceName)) return 20;
+            return 20;
+        }
+        return 3;
+    };
+    const getDefaultIndividualTaxPercent = (regime) => {
+        const normalizedRegime = normalizeIndividualTaxRegime(regime);
+        if (normalizedRegime === 'our') return 10;
+        if (normalizedRegime === 'simplified') return 3;
+        return 0;
+    };
+
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
             const userId = req.user.id;
@@ -2482,6 +2565,41 @@ const generateCRUD = (model, path, emitEventName = null) => {
             if (path === 'contractors' || path === 'individuals') {
                 createData.defaultProjectId = req.body.defaultProjectId || null;
                 createData.defaultCategoryId = req.body.defaultCategoryId || null;
+            }
+
+            if (path === 'companies') {
+                const normalizedName = String(req.body.name || '').trim();
+                const normalizedRegime = normalizeCompanyTaxRegime(req.body.taxRegime);
+                createData.name = normalizedName;
+                createData.legalForm = req.body.legalForm || detectCompanyLegalForm(normalizedName);
+                createData.taxRegime = normalizedRegime;
+
+                if (req.body.taxPercent != null && req.body.taxPercent !== '') {
+                    const parsedPercent = Number(req.body.taxPercent);
+                    createData.taxPercent = Number.isFinite(parsedPercent)
+                        ? parsedPercent
+                        : getDefaultCompanyTaxPercent(normalizedName, normalizedRegime);
+                } else {
+                    createData.taxPercent = getDefaultCompanyTaxPercent(normalizedName, normalizedRegime);
+                }
+            }
+
+            if (path === 'individuals') {
+                const normalizedName = String(req.body.name || '').trim();
+                const normalizedRegime = normalizeIndividualTaxRegime(req.body.taxRegime);
+                createData.name = normalizedName;
+                createData.identificationNumber = req.body.identificationNumber || null;
+                createData.legalForm = req.body.legalForm || 'individual';
+                createData.taxRegime = normalizedRegime;
+
+                if (req.body.taxPercent != null && req.body.taxPercent !== '') {
+                    const parsedPercent = Number(req.body.taxPercent);
+                    createData.taxPercent = Number.isFinite(parsedPercent)
+                        ? parsedPercent
+                        : getDefaultIndividualTaxPercent(normalizedRegime);
+                } else {
+                    createData.taxPercent = getDefaultIndividualTaxPercent(normalizedRegime);
+                }
             }
 
             const newItem = new model(createData);
