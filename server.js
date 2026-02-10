@@ -206,6 +206,8 @@ const accountSchema = new mongoose.Schema({
     initialBalance: { type: Number, default: 0 },
     isExcluded: { type: Boolean, default: false },
     isCashRegister: { type: Boolean, default: false },
+    taxRegime: { type: String, default: null }, // none | our | simplified (used for cash registers)
+    taxPercent: { type: Number, default: null },
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
@@ -2560,6 +2562,14 @@ const generateCRUD = (model, path, emitEventName = null) => {
                 createData.individualId = req.body.individualId || null;
                 createData.isExcluded = req.body.isExcluded || false; // 🟢 Added isExcluded
                 createData.isCashRegister = req.body.isCashRegister || false; // 🟢 Added isCashRegister
+                createData.taxRegime = req.body.taxRegime || null;
+                createData.taxPercent = (req.body.taxPercent != null && req.body.taxPercent !== '')
+                    ? Number(req.body.taxPercent)
+                    : null;
+
+                if (!Number.isFinite(createData.taxPercent)) {
+                    createData.taxPercent = null;
+                }
             }
 
             if (path === 'contractors' || path === 'individuals') {
