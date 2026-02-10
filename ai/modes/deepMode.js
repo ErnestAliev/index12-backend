@@ -137,10 +137,10 @@ function normalizeShortMoneyInText(text, formatTenge) {
     };
 
     // Normalize only explicit money expressions (short unit + currency marker).
-    const rx = /(-?\d[\d\s\u00A0]*(?:[.,]\d+)?)\s*(млрд|млн|тыс|k|m|b)\s*(₸|тенге|kzt)\b/gi;
+    const rx = /(-?\d[\d\s\u00A0]*(?:[.,]\d+)?)\s*(млрд\.?|млн\.?|тыс\.?|k|m|b)\s*(₸|тенге|kzt)/gi;
 
     return source.replace(rx, (full, numPart, unitRaw) => {
-        const unit = String(unitRaw || '').toLowerCase();
+        const unit = String(unitRaw || '').toLowerCase().replace(/\./g, '');
         const mult = unitToMultiplier[unit];
         if (!mult) return full;
 
