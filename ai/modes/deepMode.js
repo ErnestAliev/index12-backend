@@ -152,6 +152,225 @@ function normalizeShortMoneyInText(text, formatTenge) {
     });
 }
 
+function _normalizeForMatch(text) {
+    return String(text || '')
+        .toLowerCase()
+        .replace(/[^a-zа-яё0-9]+/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function _extractMoneyCandidates(text) {
+    const source = String(text || '').replace(/\u00A0/g, ' ');
+    const out = [];
+    const seen = new Set();
+
+    const push = (token, { force = false } = {}) => {
+        if (!token) return;
+        const n = _parseLocaleAmount(token);
+        if (!Number.isFinite(n)) return;
+
+        const rounded = Math.round(n);
+        const abs = Math.abs(rounded);
+        const digitCount = String(abs).length;
+        const hasSeparator = /[\s,.]/.test(String(token));
+
+        // Filter out short IDs (e.g. account suffixes) unless explicitly money-like.
+        if (!force && !hasSeparator && digitCount < 5) return;
+        if (abs === 0) return;
+
+        const key = String(rounded);
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(rounded);
+    };
+
+    const moneyRx = /(-?\d[\d\s\u00A0]*(?:[.,]\d+)?)\s*(?:₸|тенге|kzt)\b/gi;
+    let m = null;
+    while ((m = moneyRx.exec(source)) !== null) {
+        push(m[1], { force: true });
+    }
+
+    const genericRx = /-?\d(?:[\d\s\u00A0]{2,}\d|\d{4,})(?:[.,]\d+)?/g;
+    while ((m = genericRx.exec(source)) !== null) {
+        push(m[0], { force: false });
+    }
+
+    return out;
+}
+
+function _extractAmountAfterKeywords(text, keywords) {
+    const source = String(text || '').replace(/\u00A0/g, ' ');
+    for (const keyword of keywords) {
+        const rx = new RegExp(
+            `(?:${keyword})[\\s\\S]{0,80}?(-?\\d(?:[\\d\\s\\u00A0]{2,}\\d|\\d{4,})(?:[.,]\\d+)?)`,
+            'i'
+        );
+        const match = source.match(rx);
+        if (!match || !match[1]) continue;
+        const n = _parseLocaleAmount(match[1]);
+        if (Number.isFinite(n)) return Math.round(n);
+    }
+    return null;
+}
+
+function _pickOtherAmount(list, excludeValue) {
+    if (!Array.isArray(list)) return null;
+    for (const n of list) {
+        if (!Number.isFinite(n)) continue;
+        if (excludeValue === null || excludeValue === undefined || n !== excludeValue) {
+            return n;
+        }
+    }
+    return null;
+}
+
+function _describeAccountOp(op, formatTenge) {
+    const amount = Math.abs(Number(op?.amount) || 0);
+    const date = op?.date || op?.dateIso || '?';
+    const desc = op?.description ? ` | ${op.description}` : '';
+
+    if (op?.kind === 'income') return `${date} | Доход ${formatTenge(amount)}${desc}`;
+    if (op?.kind === 'expense') return `${date} | Расход ${formatTenge(amount)}${desc}`;
+
+    const from = op?.fromAccountName || op?.fromCompanyName || op?.fromIndividualName || 'Без счета';
+    const to = op?.toAccountName || op?.toCompanyName || op?.toIndividualName || 'Без счета';
+    const moveLabel = op?.isPersonalTransferWithdrawal ? 'Вывод средств' : 'Перевод';
+    return `${date} | ${moveLabel} ${formatTenge(amount)} | ${from} → ${to}${desc}`;
+}
+
+function buildBalanceReconciliationReport({ query, dbData, formatTenge, amounts = null }) {
+    const question = String(query || '');
+    const candidates = Array.isArray(amounts) ? amounts : _extractMoneyCandidates(question);
+    const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
+    const qNorm = _normalizeForMatch(question);
+
+    let matchedAccount = null;
+    let bestScore = 0;
+    accounts.forEach((acc) => {
+        const name = String(acc?.name || '').trim();
+        if (!name) return;
+        const normalized = _normalizeForMatch(name);
+        if (!normalized) return;
+
+        let score = 0;
+        if (qNorm.includes(normalized)) {
+            score = normalized.length + 1000;
+        } else {
+            const tokens = normalized.split(' ').filter(t => t.length >= 3);
+            if (!tokens.length) return;
+            const matched = tokens.filter(t => qNorm.includes(t));
+            if (!matched.length) return;
+            score = matched.join('').length;
+            if (matched.length === tokens.length) score += 200;
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            matchedAccount = acc;
+        }
+    });
+
+    const accountBalance = matchedAccount
+        ? Math.round(Number(matchedAccount.currentBalance ?? matchedAccount.balance ?? 0))
+        : null;
+
+    const systemKeywords = [
+        'в\\s+систем[еы]',
+        'систем[ае]\\s+показыва',
+        'в\\s+индексе',
+        'по\\s+системе'
+    ];
+    const bankKeywords = [
+        'банкинг',
+        'в\\s+банке',
+        'из\\s+банка',
+        'из\\s+реальн\\w*\\s+банк\\w*',
+        'по\\s+банку'
+    ];
+
+    let systemAmount = _extractAmountAfterKeywords(question, systemKeywords);
+    let bankAmount = _extractAmountAfterKeywords(question, bankKeywords);
+
+    if ((systemAmount === null || systemAmount === undefined) && Number.isFinite(accountBalance)) {
+        systemAmount = accountBalance;
+    }
+
+    if ((systemAmount === null || systemAmount === undefined) && candidates.length >= 2) {
+        systemAmount = candidates[0];
+    }
+
+    if ((bankAmount === null || bankAmount === undefined) && candidates.length >= 2) {
+        bankAmount = _pickOtherAmount(candidates, systemAmount);
+    }
+
+    if ((bankAmount === null || bankAmount === undefined) && candidates.length === 1 && Number.isFinite(accountBalance)) {
+        const only = candidates[0];
+        if (only !== accountBalance) {
+            bankAmount = only;
+            systemAmount = accountBalance;
+        }
+    }
+
+    if (!Number.isFinite(systemAmount) || !Number.isFinite(bankAmount)) {
+        return null;
+    }
+
+    const diff = Math.round(bankAmount - systemAmount);
+    const diffAbs = Math.abs(diff);
+
+    const lines = [];
+    const accountLabel = matchedAccount?.name ? ` по счету ${String(matchedAccount.name).trim()}` : '';
+    lines.push(`Сверка${accountLabel}:`);
+    lines.push(`• В системе: ${formatTenge(systemAmount)}`);
+    lines.push(`• В банкинге: ${formatTenge(bankAmount)}`);
+
+    if (diff === 0) {
+        lines.push('• Разница: 0 ₸ (остатки сходятся).');
+        return lines.join('\n');
+    }
+
+    lines.push(`• Разница: ${formatTenge(diffAbs)} (${diff > 0 ? 'в системе меньше' : 'в системе больше'}).`);
+    lines.push('');
+
+    const periodStart = dbData?.meta?.periodStart || '?';
+    const periodEnd = dbData?.meta?.periodEnd || '?';
+
+    if (!matchedAccount?._id) {
+        lines.push(`Где потеряли: нужен конкретный счет. Сейчас могу подтвердить только сумму расхождения ${formatTenge(diffAbs)}.`);
+        return lines.join('\n');
+    }
+
+    const accountId = String(matchedAccount._id);
+    const allOps = Array.isArray(dbData?.operations) ? dbData.operations : [];
+    const accountOpsFact = allOps.filter((op) => {
+        if (!op?.isFact) return false;
+        const opAcc = op.accountId ? String(op.accountId) : null;
+        const opFrom = op.fromAccountId ? String(op.fromAccountId) : null;
+        const opTo = op.toAccountId ? String(op.toAccountId) : null;
+        return opAcc === accountId || opFrom === accountId || opTo === accountId;
+    });
+
+    const exactDiffOps = accountOpsFact
+        .filter(op => Math.round(Math.abs(Number(op?.amount) || 0)) === diffAbs)
+        .sort((a, b) => (Number(b?.ts) || 0) - (Number(a?.ts) || 0));
+
+    if (exactDiffOps.length) {
+        lines.push(`Где потеряли: в периоде ${periodStart} — ${periodEnd} есть операции по счету ровно на ${formatTenge(diffAbs)}:`);
+        exactDiffOps.slice(0, 3).forEach((op) => {
+            lines.push(`• ${_describeAccountOp(op, formatTenge)}`);
+        });
+        if (exactDiffOps.length > 3) {
+            lines.push(`• Еще операций с этой суммой: ${exactDiffOps.length - 3}`);
+        }
+        return lines.join('\n');
+    }
+
+    lines.push(`Где потеряли: в периоде ${periodStart} — ${periodEnd} нет однозначной операции по счету на ${formatTenge(diffAbs)}.`);
+    lines.push('Проверьте операции вне периода, банковские комиссии и ручные корректировки, которые могли не попасть в систему.');
+    return lines.join('\n');
+}
+
 /**
  * Build deterministic operations list by account scope.
  * IMPORTANT: no LLM usage here to avoid hallucinated categories/operations.
@@ -335,12 +554,18 @@ async function handleDeepQuery({
     const qLower = String(query || '').toLowerCase();
     const metrics = calcCoreMetrics(dbData);
 
+    const moneyCandidates = _extractMoneyCandidates(query);
+
     // Detect user intent
     const mentionsOperations = /(операц|транзакц|движен)/i.test(qLower);
     const asksOperationsList = mentionsOperations && /(все|список|покаж|посмотр|выведи|выгруз|какие)/i.test(qLower);
     const asksOpenScope = /(открыт.*счет|по открытым|открытые счета)/i.test(qLower);
     const asksHiddenScope = /(скрыт.*счет|по скрытым|скрытые счета)/i.test(qLower);
     const wantsOperationsList = mentionsOperations && (asksOperationsList || asksOpenScope || asksHiddenScope);
+    const hasReconciliationKeywords = /(разниц|не\s*сход|не\s*бь[её]тся|сверк|банкинг|в\s*систем[еы]|по\s*системе|из\s*банка|в\s*банке|реальн.*банк)/i.test(qLower);
+    const hasWhereLostPhrase = /где\s+потерял|где\s+потеряли|куда\s+дел/.test(qLower);
+    const wantsBalanceReconciliation = (moneyCandidates.length >= 2 && hasReconciliationKeywords)
+        || (moneyCandidates.length >= 2 && hasWhereLostPhrase && /(счет|счёт|баланс)/i.test(qLower));
 
     const wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
     const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
@@ -370,6 +595,21 @@ async function handleDeepQuery({
         const scope = asksHiddenScope ? 'hidden' : (asksOpenScope ? 'open' : 'all');
         const answer = buildOperationsListReport({ dbData, formatTenge, scope });
         return { answer, shouldSaveToHistory: true };
+    }
+
+    // =====================
+    // BALANCE RECONCILIATION (system vs bank)
+    // =====================
+    if (wantsBalanceReconciliation) {
+        const answer = buildBalanceReconciliationReport({
+            query,
+            dbData,
+            formatTenge,
+            amounts: moneyCandidates
+        });
+        if (answer) {
+            return { answer, shouldSaveToHistory: true };
+        }
     }
 
     // =====================
