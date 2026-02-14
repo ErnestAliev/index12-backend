@@ -743,7 +743,8 @@ module.exports = function createAiRouter(deps) {
             '- Используй минимум 2 факта в facts_used.',
             '- path должен указывать на реальные поля context_packet_json.',
             '- value должен совпадать с данными по path.',
-            '- В answer используй только подтверждаемые факты из facts_used.'
+            '- В answer используй только подтверждаемые факты из facts_used.',
+            '- Все суммы в формате "3 272 059 ₸" (пробелы между тысячами, без запятых).'
           ].join('\n')
         },
         { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
