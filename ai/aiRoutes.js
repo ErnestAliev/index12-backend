@@ -4,7 +4,7 @@
 // ✅ Features:
 // - QUICK mode: deterministic lists → modes/quickMode.js
 // - CHAT mode: general conversation → modes/chatMode.js  
-// - DEEP mode: CFO analysis → modes/deepMode.js
+// - DEEP mode: unified prompt + context packet JSON
 // - DIAG command: diagnostics
 // - Hybrid data: snapshot (accounts/companies) + MongoDB (operations)
 
@@ -100,7 +100,6 @@ module.exports = function createAiRouter(deps) {
   // Import mode handlers
   const quickMode = require('./modes/quickMode');
   const chatMode = require('./modes/chatMode');
-  const deepMode = require('./modes/deepMode');
 
   const router = express.Router();
 
@@ -591,26 +590,56 @@ module.exports = function createAiRouter(deps) {
       // DEEP MODE (CFO-level analysis)
       // =========================
       if (isDeep) {
-        const session = _getChatSession(userIdStr);
         const history = _getHistoryMessages(userIdStr);
         const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
-        const { answer, shouldSaveToHistory } = await deepMode.handleDeepQuery({
-          query: q,
-          dbData,
-          session,
-          history,
-          openAiChat: _openAiChat,
-          formatDbDataForAi: _formatDbDataForAi,
-          formatTenge: _formatTenge,
-          modelDeep
-        });
+        const nowRef = _safeDate(req?.body?.asOf) || new Date();
+        const periodFilter = req?.body?.periodFilter || {};
+        const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
+        const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
+        const workspaceId = req.user?.currentWorkspaceId || null;
+        const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
+        const packetUserId = String(effectiveUserId || userIdStr);
 
-        if (shouldSaveToHistory) {
-          _pushHistory(userIdStr, 'user', q);
-          _pushHistory(userIdStr, 'assistant', answer);
+        let packet = null;
+        if (contextPacketsEnabled && periodKey) {
+          packet = await contextPacketService.getMonthlyPacket({
+            workspaceId,
+            userId: packetUserId,
+            periodKey
+          });
         }
 
+        if (!packet) {
+          packet = {
+            periodKey: periodKey || null,
+            periodStart,
+            periodEnd,
+            timezone: 'Asia/Almaty',
+            ...buildContextPacketPayload({
+              dbData,
+              promptText: deepPrompt,
+              templateVersion: 'deep-v1',
+              dictionaryVersion: 'dict-v1'
+            })
+          };
+        }
+
+        const messages = [
+          { role: 'system', content: deepPrompt },
+          { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
+          ...history,
+          { role: 'user', content: q }
+        ];
+
+        const answer = await _openAiChat(messages, {
+          modelOverride: modelDeep,
+          maxTokens: 4000,
+          timeout: 120000
+        });
+
+        _pushHistory(userIdStr, 'user', q);
+        _pushHistory(userIdStr, 'assistant', answer);
         return res.json({ text: answer });
       }
 
@@ -723,7 +752,7 @@ module.exports = function createAiRouter(deps) {
       modes: {
         quick: 'modes/quickMode.js',
         chat: 'modes/chatMode.js',
-        deep: 'modes/deepMode.js'
+        deep: 'unified-context-packet'
       }
     });
   });
