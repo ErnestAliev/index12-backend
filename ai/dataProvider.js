@@ -106,6 +106,7 @@ module.exports = function createDataProvider(deps) {
     function buildDataQualityReport({
         operations = [],
         accounts = [],
+        systemAccounts = [],
         categories = [],
         projects = [],
         contractors = [],
@@ -114,6 +115,17 @@ module.exports = function createDataProvider(deps) {
         end = null
     }) {
         const accountIds = _idSet(accounts);
+        const systemAccountIds = _idSet((Array.isArray(systemAccounts) && systemAccounts.length) ? systemAccounts : accounts);
+        const systemHiddenAccountIds = new Set(
+            (Array.isArray(systemAccounts) ? systemAccounts : [])
+                .filter((a) => {
+                    const isExcluded = !!(a?.isExcluded || a?.excluded || a?.excludeFromTotal || a?.excludedFromTotal);
+                    const isHiddenFlag = !!(a?.hidden || a?.isHidden);
+                    return isExcluded || isHiddenFlag;
+                })
+                .map((a) => String(a?._id || a?.id || ''))
+                .filter(Boolean)
+        );
         const categoryIds = _idSet(categories);
         const projectIds = _idSet(projects);
         const contractorIds = _idSet(contractors);
@@ -130,10 +142,69 @@ module.exports = function createDataProvider(deps) {
             zeroAmountCount: 0,
             missingMonetaryAccountCount: 0,
             unresolvedAccountRefCount: 0,
+            unresolvedAccountRefMissingCount: 0,
+            unresolvedAccountRefOutOfScopeCount: 0,
+            unresolvedHiddenAccountRefCount: 0,
             brokenTransferCount: 0,
             unresolvedCategoryRefCount: 0,
             unresolvedProjectRefCount: 0,
             unresolvedCounterpartyRefCount: 0
+        };
+
+        const diagnostics = {
+            missingMonetaryAccountOps: [],
+            unresolvedAccountMissingOps: [],
+            unresolvedAccountOutOfScopeOps: [],
+            unresolvedHiddenAccountOps: []
+        };
+        const diagnosticsTotals = {
+            missingMonetaryAccountOps: { income: 0, expense: 0, transfer: 0 },
+            unresolvedAccountMissingOps: { income: 0, expense: 0, transfer: 0 },
+            unresolvedAccountOutOfScopeOps: { income: 0, expense: 0, transfer: 0 },
+            unresolvedHiddenAccountOps: { income: 0, expense: 0, transfer: 0 }
+        };
+
+        const _opDiagPayload = (op) => ({
+            id: String(op?._id || ''),
+            date: op?.date || op?.dateIso || null,
+            amount: Math.abs(Number(op?.amount) || 0),
+            kind: String(op?.kind || ''),
+            category: op?.categoryName || null,
+            project: op?.projectName || null,
+            contractor: op?.contractorName || null,
+            accountId: op?.accountId ? String(op.accountId) : null,
+            fromAccountId: op?.fromAccountId ? String(op.fromAccountId) : null,
+            toAccountId: op?.toAccountId ? String(op.toAccountId) : null
+        });
+
+        const _accDiagTotal = (bucket, op) => {
+            const kind = String(op?.kind || '');
+            const amt = Math.abs(Number(op?.amount) || 0);
+            if (!diagnosticsTotals[bucket]) return;
+            if (kind === 'income') diagnosticsTotals[bucket].income += amt;
+            else if (kind === 'expense') diagnosticsTotals[bucket].expense += amt;
+            else diagnosticsTotals[bucket].transfer += amt;
+        };
+
+        const _pushDiagOp = (bucket, op) => {
+            const list = diagnostics[bucket];
+            if (!Array.isArray(list)) return;
+            const opId = String(op?._id || '');
+            if (opId && list.some(x => x.id === opId)) return;
+            if (list.length >= 200) return;
+            list.push(_opDiagPayload(op));
+            _accDiagTotal(bucket, op);
+        };
+
+        const _classifyAccountRef = (accountId) => {
+            if (!accountId) return 'none';
+            const id = String(accountId);
+            if (accountIds.has(id)) return 'ok';
+            if (systemAccountIds.has(id)) {
+                if (systemHiddenAccountIds.has(id)) return 'hidden_out_of_scope';
+                return 'out_of_scope';
+            }
+            return 'missing_in_system';
         };
 
         operations.forEach((op) => {
@@ -163,8 +234,23 @@ module.exports = function createDataProvider(deps) {
                 const accountId = op?.accountId ? String(op.accountId) : null;
                 if (!accountId) {
                     counters.missingMonetaryAccountCount += 1;
-                } else if (!accountIds.has(accountId)) {
-                    counters.unresolvedAccountRefCount += 1;
+                    _pushDiagOp('missingMonetaryAccountOps', op);
+                } else {
+                    const cls = _classifyAccountRef(accountId);
+                    if (cls !== 'ok' && cls !== 'none') {
+                        counters.unresolvedAccountRefCount += 1;
+                        if (cls === 'missing_in_system') {
+                            counters.unresolvedAccountRefMissingCount += 1;
+                            _pushDiagOp('unresolvedAccountMissingOps', op);
+                        } else {
+                            counters.unresolvedAccountRefOutOfScopeCount += 1;
+                            _pushDiagOp('unresolvedAccountOutOfScopeOps', op);
+                            if (cls === 'hidden_out_of_scope') {
+                                counters.unresolvedHiddenAccountRefCount += 1;
+                                _pushDiagOp('unresolvedHiddenAccountOps', op);
+                            }
+                        }
+                    }
                 }
 
                 const categoryId = op?.categoryId ? String(op.categoryId) : null;
@@ -185,14 +271,25 @@ module.exports = function createDataProvider(deps) {
                 if (!fromAccountId && !toAccountId && !accountId) {
                     counters.brokenTransferCount += 1;
                 }
-                if (fromAccountId && !accountIds.has(fromAccountId)) {
+                const transferRefClasses = [
+                    _classifyAccountRef(fromAccountId),
+                    _classifyAccountRef(toAccountId),
+                    _classifyAccountRef(accountId)
+                ];
+                if (transferRefClasses.some((cls) => cls !== 'ok' && cls !== 'none')) {
                     counters.unresolvedAccountRefCount += 1;
-                }
-                if (toAccountId && !accountIds.has(toAccountId)) {
-                    counters.unresolvedAccountRefCount += 1;
-                }
-                if (accountId && !accountIds.has(accountId)) {
-                    counters.unresolvedAccountRefCount += 1;
+                    if (transferRefClasses.includes('missing_in_system')) {
+                        counters.unresolvedAccountRefMissingCount += 1;
+                        _pushDiagOp('unresolvedAccountMissingOps', op);
+                    }
+                    if (transferRefClasses.includes('out_of_scope') || transferRefClasses.includes('hidden_out_of_scope')) {
+                        counters.unresolvedAccountRefOutOfScopeCount += 1;
+                        _pushDiagOp('unresolvedAccountOutOfScopeOps', op);
+                    }
+                    if (transferRefClasses.includes('hidden_out_of_scope')) {
+                        counters.unresolvedHiddenAccountRefCount += 1;
+                        _pushDiagOp('unresolvedHiddenAccountOps', op);
+                    }
                 }
             }
 
@@ -211,7 +308,9 @@ module.exports = function createDataProvider(deps) {
         _pushIssue(issues, 'invalid_date', counters.invalidDateCount, 'Есть операции с некорректной датой.', 'critical');
         _pushIssue(issues, 'out_of_range_date', counters.outOfRangeDateCount, 'Есть операции вне выбранного периода.', 'warn');
         _pushIssue(issues, 'missing_monetary_account', counters.missingMonetaryAccountCount, 'Есть доходы/расходы без accountId.', 'critical');
-        _pushIssue(issues, 'unresolved_account_ref', counters.unresolvedAccountRefCount, 'Есть операции со ссылками на неизвестные счета.', 'critical');
+        _pushIssue(issues, 'unresolved_account_ref_missing', counters.unresolvedAccountRefMissingCount, 'Есть операции со ссылками на счета, которых нет в системе.', 'critical');
+        _pushIssue(issues, 'unresolved_account_ref_out_of_scope', counters.unresolvedAccountRefOutOfScopeCount, 'Есть операции по счетам вне текущего набора анализа (скрытые/исключенные/не загруженные в снэпшот).', 'warn');
+        _pushIssue(issues, 'unresolved_hidden_account_ref', counters.unresolvedHiddenAccountRefCount, 'Есть операции по скрытым/исключенным счетам.', 'warn');
         _pushIssue(issues, 'broken_transfer', counters.brokenTransferCount, 'Есть переводы без from/to счета.', 'critical');
         _pushIssue(issues, 'unresolved_category_ref', counters.unresolvedCategoryRefCount, 'Есть операции со ссылками на неизвестные категории.', 'warn');
         _pushIssue(issues, 'unresolved_project_ref', counters.unresolvedProjectRefCount, 'Есть операции со ссылками на неизвестные проекты.', 'warn');
@@ -222,7 +321,8 @@ module.exports = function createDataProvider(deps) {
         score -= counters.unknownKindCount * 8;
         score -= counters.invalidDateCount * 8;
         score -= counters.missingMonetaryAccountCount * 6;
-        score -= counters.unresolvedAccountRefCount * 4;
+        score -= counters.unresolvedAccountRefMissingCount * 5;
+        score -= counters.unresolvedAccountRefOutOfScopeCount * 2;
         score -= counters.brokenTransferCount * 6;
         score -= counters.outOfRangeDateCount * 2;
         score -= counters.unresolvedCategoryRefCount * 2;
@@ -239,7 +339,31 @@ module.exports = function createDataProvider(deps) {
             status,
             score,
             counters,
-            issues
+            issues,
+            diagnostics: {
+                accountRefs: {
+                    missingMonetaryAccount: {
+                        count: diagnostics.missingMonetaryAccountOps.length,
+                        totals: diagnosticsTotals.missingMonetaryAccountOps,
+                        operations: diagnostics.missingMonetaryAccountOps
+                    },
+                    missingInSystem: {
+                        count: diagnostics.unresolvedAccountMissingOps.length,
+                        totals: diagnosticsTotals.unresolvedAccountMissingOps,
+                        operations: diagnostics.unresolvedAccountMissingOps
+                    },
+                    outOfScope: {
+                        count: diagnostics.unresolvedAccountOutOfScopeOps.length,
+                        totals: diagnosticsTotals.unresolvedAccountOutOfScopeOps,
+                        operations: diagnostics.unresolvedAccountOutOfScopeOps
+                    },
+                    hiddenOutOfScope: {
+                        count: diagnostics.unresolvedHiddenAccountOps.length,
+                        totals: diagnosticsTotals.unresolvedHiddenAccountOps,
+                        operations: diagnostics.unresolvedHiddenAccountOps
+                    }
+                }
+            }
         };
     }
 
@@ -904,6 +1028,22 @@ module.exports = function createDataProvider(deps) {
 
         const [accountsData, operationsData, companies, projects, categories, contractors, individuals] = await Promise.all(promises);
 
+        // Account directory from MongoDB (full user scope) for precise data-quality classification.
+        let systemAccounts = [];
+        try {
+            const docs = await Account.find({ userId: _uQuery(userId) })
+                .select('_id name isExcluded excluded excludeFromTotal excludedFromTotal hidden isHidden')
+                .lean();
+            systemAccounts = (docs || []).map((a) => ({
+                _id: String(a._id),
+                name: a.name || `Счет ${String(a._id).slice(-4)}`,
+                isHidden: !!(a.hidden || a.isHidden),
+                isExcluded: !!(a.isExcluded || a.excluded || a.excludeFromTotal || a.excludedFromTotal)
+            }));
+        } catch (_) {
+            systemAccounts = [];
+        }
+
         // Recalculate totals if using snapshot accounts
         if (useSnapshotAccounts && accountsData.accounts) {
             const openAccs = accountsData.accounts.filter(a => !a.isHidden);
@@ -934,6 +1074,13 @@ module.exports = function createDataProvider(deps) {
             accountsData.accounts.forEach(a => {
                 if (!a || !a._id) return;
                 accountNameById.set(String(a._id), a.name || `Счет ${String(a._id).slice(-4)}`);
+            });
+            // Fallback names for refs that are outside packet (e.g. hidden/excluded not present in snapshot).
+            systemAccounts.forEach((a) => {
+                if (!a || !a._id) return;
+                if (!accountNameById.has(String(a._id))) {
+                    accountNameById.set(String(a._id), a.name || `Счет ${String(a._id).slice(-4)}`);
+                }
             });
 
             const projectNameById = new Map();
@@ -1013,6 +1160,7 @@ module.exports = function createDataProvider(deps) {
         const dataQualityReport = buildDataQualityReport({
             operations: operationsData.operations || [],
             accounts: accountsData.accounts || [],
+            systemAccounts,
             categories: categories || [],
             projects: projects || [],
             contractors: contractors || [],
