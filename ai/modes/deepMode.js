@@ -3,7 +3,8 @@
 // Model: gpt-3o (configured via OPENAI_MODEL_DEEP env var)
 // Focus: Deterministic financial metrics + LLM insights
 
-const deepPrompt = require('../prompts/deepPrompt');
+const deepInvestmentPrompt = require('../prompts/deepPrompt');
+const deepGeneralPrompt = require('../prompts/deepGeneralPrompt');
 
 // Local date formatter (dd.mm.yy) without relying on aiRoutes helpers
 function _fmtDateKZ(d) {
@@ -357,6 +358,105 @@ function buildCategoryIncomePercentReport({ query, dbData, formatTenge }) {
     } else if (total === 0 && Array.isArray(dbData?.meta?.timeline) && dbData.meta.timeline.length) {
         lines.push('');
         lines.push('По категории в операциях нет данных. Timeline содержит только дневные суммы без разбивки по категориям.');
+    }
+
+    return lines.join('\n');
+}
+
+function buildMonthAssessmentReport({ dbData, formatTenge, explicitExpensesStatus = null }) {
+    const periodStart = dbData?.meta?.periodStart || '?';
+    const periodEnd = dbData?.meta?.periodEnd || '?';
+    const summary = dbData?.operationsSummary || {};
+
+    const incFact = _toFiniteNumber(summary?.income?.fact?.total);
+    const incForecast = _toFiniteNumber(summary?.income?.forecast?.total);
+    const expFact = _toFiniteNumber(summary?.expense?.fact?.total);
+    const expForecast = _toFiniteNumber(summary?.expense?.forecast?.total);
+    const transferFact = _toFiniteNumber(summary?.transfer?.fact?.total);
+    const transferForecast = _toFiniteNumber(summary?.transfer?.forecast?.total);
+    const withdrawalFact = _toFiniteNumber(summary?.transfer?.withdrawalOut?.fact?.total);
+    const withdrawalForecast = _toFiniteNumber(summary?.transfer?.withdrawalOut?.forecast?.total);
+
+    const profitFact = incFact - expFact;
+    const profitForecast = incForecast - expForecast;
+    const profitMonth = profitFact + profitForecast;
+
+    const totals = dbData?.accountsData?.totals || {};
+    const openCash = _toFiniteNumber(totals?.open?.current);
+    const hiddenCash = _toFiniteNumber(totals?.hidden?.current);
+    const totalCash = _toFiniteNumber(totals?.all?.current);
+
+    const nowTs = Number.isFinite(Number(dbData?.meta?.todayTimestamp))
+        ? Number(dbData.meta.todayTimestamp)
+        : Date.now();
+    const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
+
+    const futureRows = timeline
+        .map((t) => {
+            const date = t?.date ? new Date(t.date) : null;
+            const ts = date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
+            const income = _toFiniteNumber(t?.income);
+            const expense = _toFiniteNumber(t?.expense);
+            const offsetExpense = _toFiniteNumber(t?.offsetExpense);
+            const withdrawal = _toFiniteNumber(t?.withdrawal);
+            const effectiveExpense = Math.max(0, expense - offsetExpense);
+            const outflow = effectiveExpense + withdrawal;
+            const net = income - outflow;
+            return { ts, date, income, outflow, net };
+        })
+        .filter((r) => Number.isFinite(r.ts) && r.ts > nowTs);
+
+    const futureIncomeTotal = futureRows.reduce((s, r) => s + r.income, 0);
+    const futureOutflowTotal = futureRows.reduce((s, r) => s + r.outflow, 0);
+    const futureNet = futureIncomeTotal - futureOutflowTotal;
+    const worstFutureDay = futureRows.length
+        ? futureRows.reduce((min, r) => (r.net < min.net ? r : min), futureRows[0])
+        : null;
+    const bestFutureDay = futureRows.length
+        ? futureRows.reduce((max, r) => (r.net > max.net ? r : max), futureRows[0])
+        : null;
+
+    let monthStatus = 'стабильный плюс';
+    if (profitMonth < 0) {
+        monthStatus = 'под риском кассового разрыва';
+    } else if (profitFact >= 0 && profitForecast < 0) {
+        monthStatus = 'плюс на сейчас, но конец месяца съедает маржу';
+    } else if (profitMonth <= expFact * 0.15) {
+        monthStatus = 'низкий запас прочности';
+    }
+
+    const lines = [];
+    lines.push(`Оценка месяца (${periodStart} — ${periodEnd})`);
+    lines.push(`• Доходы: факт ${formatTenge(incFact)}, прогноз ${formatTenge(incForecast)}`);
+    lines.push(`• Расходы: факт ${formatTenge(expFact)}, прогноз ${formatTenge(expForecast)}`);
+    lines.push(`• Переводы: факт ${formatTenge(transferFact)}, прогноз ${formatTenge(transferForecast)} (в прибыль не включены)`);
+    if (withdrawalFact > 0 || withdrawalForecast > 0) {
+        lines.push(`• Вывод средств (подтип переводов): факт ${formatTenge(withdrawalFact)}, прогноз ${formatTenge(withdrawalForecast)}`);
+    }
+    lines.push(`• Чистая прибыль: на сегодня ${formatTenge(profitFact)}, до конца периода ${formatTenge(profitForecast)}, итог месяца ${formatTenge(profitMonth)}`);
+    lines.push(`• Остатки: открытые ${formatTenge(openCash)}, скрытые ${formatTenge(hiddenCash)}, все ${formatTenge(totalCash)}`);
+
+    if (futureRows.length) {
+        lines.push(`• Будущее движение по timeline: приток ${formatTenge(futureIncomeTotal)}, отток ${formatTenge(futureOutflowTotal)}, сальдо ${formatTenge(futureNet)}`);
+        if (worstFutureDay && worstFutureDay.net < 0) {
+            lines.push(`• День наибольшего давления: ${_fmtDateKZ(worstFutureDay.date)} (${formatTenge(worstFutureDay.net)})`);
+        }
+        if (bestFutureDay && bestFutureDay.net > 0) {
+            lines.push(`• День наибольшего притока: ${_fmtDateKZ(bestFutureDay.date)} (+${formatTenge(bestFutureDay.net)})`);
+        }
+    }
+
+    lines.push(`• Оценка: ${monthStatus}.`);
+    lines.push('');
+
+    if (explicitExpensesStatus === 'more') {
+        lines.push('Вопрос: какие 1-2 будущих расхода обязательные, а какие можно сдвинуть без ущерба?');
+    } else if (explicitExpensesStatus === 'none') {
+        lines.push('Вопрос: фокус до конца месяца на марже или на ускорении поступлений?');
+    } else if (futureOutflowTotal > futureIncomeTotal) {
+        lines.push('Вопрос: все запланированные будущие расходы обязательные, или часть можно перенести?');
+    } else {
+        lines.push('Вопрос: какие из запланированных поступлений самые надежные по сроку?');
     }
 
     return lines.join('\n');
@@ -763,6 +863,26 @@ async function handleDeepQuery({
 }) {
     const qLower = String(query || '').toLowerCase();
     const metrics = calcCoreMetrics(dbData);
+    const answersMoreExpenses = /(расходы?.*(ещ[её]|еще).*будут|будут.*расход|еще будут|ещё будут)/i.test(qLower);
+    const answersNoMoreExpenses = /(расходов?.*(больше\s+)?не\s+будет|все\s+расходы\s+оплачены|всё\s+расходы\s+оплачены|все\s+оплачено|всё\s+оплачено)/i.test(qLower);
+
+    if (session?.pending?.type === 'month_assessment_expenses_status') {
+        if (answersMoreExpenses || answersNoMoreExpenses) {
+            session.pending = null;
+            const explicitExpensesStatus = answersMoreExpenses ? 'more' : 'none';
+            const answer = buildMonthAssessmentReport({
+                dbData,
+                formatTenge,
+                explicitExpensesStatus
+            });
+            return { answer, shouldSaveToHistory: true };
+        }
+
+        const switchedTopic = /(доход|расход|перевод|сч[её]т|баланс|проект|категор|инвест|налог|месяц|разниц|почему|как|что|\?)/i.test(qLower);
+        if (switchedTopic) {
+            session.pending = null;
+        }
+    }
 
     const moneyCandidates = _extractMoneyCandidates(query);
 
@@ -780,6 +900,7 @@ async function handleDeepQuery({
         /(доход|поступлен|приход)/i.test(qLower)
         && /(категор|аренд|по\s+[«"']?[a-zа-яё])/i.test(qLower)
         && /(текущ|будущ|прогноз|факт|%|процент|собери|рассч|посчит|сумм)/i.test(qLower);
+    const wantsMonthAssessment = /(изучи.*доход.*расход.*перевод|доход.*расход.*перевод.*месяц|как.*оцен.*месяц|оценк.*месяц|оцени.*месяц|картин.*месяц|месяц.*как)/i.test(qLower);
 
     const wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
     const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
@@ -834,6 +955,17 @@ async function handleDeepQuery({
         if (answer) {
             return { answer, shouldSaveToHistory: true };
         }
+    }
+
+    // =====================
+    // MONTH ASSESSMENT (deterministic, non-invest)
+    // =====================
+    if (wantsMonthAssessment) {
+        if (session) {
+            session.pending = { type: 'month_assessment_expenses_status' };
+        }
+        const answer = buildMonthAssessmentReport({ dbData, formatTenge });
+        return { answer, shouldSaveToHistory: true };
     }
 
     // =====================
@@ -1046,7 +1178,7 @@ async function handleDeepQuery({
     if (wantsFinance) {
         const dataContext = formatDbDataForAi(dbData);
         const messages = [
-            { role: 'system', content: deepPrompt },
+            { role: 'system', content: deepGeneralPrompt },
             { role: 'system', content: dataContext },
             ...history,
             { role: 'user', content: query }
@@ -1124,7 +1256,7 @@ ${session?.prefs?.livingMonthly ? `- Жили-были (указано поль�
 `;
 
         const messages = [
-            { role: 'system', content: deepPrompt },
+            { role: 'system', content: deepInvestmentPrompt },
             { role: 'system', content: dataContext },
             { role: 'system', content: investContext },
             ...history,
@@ -1185,7 +1317,7 @@ ${session?.prefs?.livingMonthly ? `- Жили-были (указано поль�
         if (wantsExit) strategyContext += '\nТема: exit strategy / продажа бизнеса';
 
         const messages = [
-            { role: 'system', content: deepPrompt },
+            { role: 'system', content: deepGeneralPrompt },
             { role: 'system', content: dataContext },
             { role: 'system', content: strategyContext },
             ...history,
@@ -1213,7 +1345,7 @@ Fallback-контекст Deep Mode:
 `;
 
     const messages = [
-        { role: 'system', content: deepPrompt },
+        { role: 'system', content: deepGeneralPrompt },
         { role: 'system', content: dataContext },
         { role: 'system', content: fallbackContext },
         ...history,
