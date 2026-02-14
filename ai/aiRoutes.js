@@ -723,6 +723,48 @@ module.exports = function createAiRouter(deps) {
     return Array.from(new Set(tokens));
   };
 
+  const _inferStandardIncomeTagFromQuery = (query) => {
+    const q = _normalizeRu(query);
+    if (!q) return null;
+    const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
+    if (!tokens.length) return null;
+
+    const hasAny = (roots = [], canon = null, minScore = 0.74) => {
+      return tokens.some((token) => {
+        if (roots.some((root) => token.includes(root))) return true;
+        if (canon && _similarity(token, canon) >= minScore) return true;
+        return false;
+      });
+    };
+
+    if (hasAny(['аренд', 'rent', 'lease'], 'аренда')) {
+      return { tag: 'rent', label: 'аренда' };
+    }
+    if (hasAny(['фот', 'зарплат', 'salary', 'payroll'], 'зарплата')) {
+      return { tag: 'payroll', label: 'фот/зарплата' };
+    }
+    if (hasAny(['налог', 'ндс', 'ипн'], 'налог')) {
+      return { tag: 'tax', label: 'налоги' };
+    }
+    if (hasAny(['коммун', 'комун', 'газ', 'свет', 'вода', 'электр', 'utility'], 'коммуналка')) {
+      return { tag: 'utility', label: 'коммуналка' };
+    }
+    return null;
+  };
+
+  const _readIncomeByTag = ({ packet, tag }) => {
+    if (!tag) return null;
+    const rows = Array.isArray(packet?.derived?.tagSummary) ? packet.derived.tagSummary : [];
+    if (!rows.length) return null;
+    const row = rows.find((item) => String(item?.tag || '').toLowerCase() === String(tag).toLowerCase());
+    if (!row) return null;
+    return {
+      fact: Math.max(0, Number(row?.incomeFact) || 0),
+      plan: Math.max(0, Number(row?.incomeForecast) || 0),
+      categories: Array.isArray(row?.categories) ? row.categories.filter(Boolean) : []
+    };
+  };
+
   const _collectPacketCategories = (packet) => {
     const out = [];
     const seen = new Set();
@@ -928,6 +970,36 @@ module.exports = function createAiRouter(deps) {
             question: `Показать найденные операции по "${phraseLabel}" по датам?`
           }
         });
+      }
+
+      const tagHint = _inferStandardIncomeTagFromQuery(query);
+      if (tagHint) {
+        const tagIncome = _readIncomeByTag({ packet, tag: tagHint.tag });
+        if (tagIncome) {
+          const factTag = Number(tagIncome.fact) || 0;
+          const planTag = Number(tagIncome.plan) || 0;
+          const totalTag = factTag + planTag;
+          const dateStartTag = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+          const dateEndTag = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+          const dateTextTag = (dateStartTag && dateEndTag && dateStartTag !== 'Invalid Date' && dateEndTag !== 'Invalid Date')
+            ? `${dateStartTag} - ${dateEndTag}`
+            : (dateStartTag || dateEndTag || 'Период не задан');
+          const topCategories = tagIncome.categories.slice(0, 3).join(', ');
+          const questionText = topCategories
+            ? `Показать детализацию по категориям: ${topCategories}?`
+            : `Показать детализацию по "${tagHint.label}" по операциям?`;
+
+          return _applyAutoRiskToStructured({
+            packet,
+            structured: {
+              date: dateTextTag,
+              fact: `доходы по "${tagHint.label}": ${_formatTenge(factTag)}`,
+              plan: `поступления по "${tagHint.label}": ${_formatTenge(planTag)}`,
+              total: `по "${tagHint.label}" всего: ${_formatTenge(totalTag)}`,
+              question: questionText
+            }
+          });
+        }
       }
 
       const hints = _pickCategoryHints({ query, packet, limit: 3 });
