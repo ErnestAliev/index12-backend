@@ -494,10 +494,18 @@ module.exports = function createAiRouter(deps) {
   const _extractCategoryPhrase = (query) => {
     const q = _normalizeRu(query);
     if (!q) return '';
-    const byPo = q.match(/(?:^|\s)по\s+([a-zа-я0-9\s]{2,80})$/i);
-    if (byPo && byPo[1]) return _normalizeRu(byPo[1]);
-    const byCategory = q.match(/(?:^|\s)категор(?:ия|ии)?\s+([a-zа-я0-9\s]{2,80})$/i);
-    if (byCategory && byCategory[1]) return _normalizeRu(byCategory[1]);
+    const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
+    if (!tokens.length) return '';
+
+    const byPoIdx = tokens.lastIndexOf('по');
+    if (byPoIdx >= 0 && byPoIdx < tokens.length - 1) {
+      return tokens.slice(byPoIdx + 1).join(' ');
+    }
+
+    const categoryIdx = tokens.findIndex((t) => t.startsWith('категор'));
+    if (categoryIdx >= 0 && categoryIdx < tokens.length - 1) {
+      return tokens.slice(categoryIdx + 1).join(' ');
+    }
     return q;
   };
 
@@ -601,18 +609,86 @@ module.exports = function createAiRouter(deps) {
   const _inferTagFromQuery = (query) => {
     const q = _normalizeRu(query);
     if (!q) return null;
-    if (/(аренд|rent|lease)/i.test(q)) return 'rent';
-    if (/(фот|зарплат|salary|payroll)/i.test(q)) return 'payroll';
-    if (/(налог|ндс|ипн|tax)/i.test(q)) return 'tax';
-    if (/(коммун|комунал|utility|газ|свет|вода|тепл)/i.test(q)) return 'utility';
+    const hasAny = (stems) => stems.some((stem) => q.includes(stem));
+    if (hasAny(['аренд', 'rent', 'lease'])) return 'rent';
+    if (hasAny(['фот', 'зарплат', 'salary', 'payroll'])) return 'payroll';
+    if (hasAny(['налог', 'ндс', 'ипн', 'tax'])) return 'tax';
+    if (hasAny(['коммун', 'комунал', 'utility', 'газ', 'свет', 'вода', 'тепл'])) return 'utility';
     return null;
+  };
+
+  const _buildKeywordTokens = (query) => {
+    const phrase = _extractCategoryPhrase(query);
+    const base = _normalizeRu(phrase || query);
+    if (!base) return [];
+
+    const stop = new Set([
+      'посчитай', 'рассчитай', 'считай', 'покажи', 'только', 'по', 'доход', 'доходы',
+      'поступление', 'поступления', 'и', 'все', 'весь', 'за', 'период', 'мне', 'категория', 'категории'
+    ]);
+    const tokens = base
+      .split(' ')
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .filter((t) => !stop.has(t))
+      .filter((t) => t.length >= 3);
+
+    const inferredTag = _inferTagFromQuery(query);
+    if (inferredTag === 'rent') tokens.push('аренд', 'rent', 'lease');
+    if (inferredTag === 'payroll') tokens.push('фот', 'зарплат', 'salary', 'payroll');
+    if (inferredTag === 'tax') tokens.push('налог', 'ндс', 'ипн', 'tax');
+    if (inferredTag === 'utility') tokens.push('коммун', 'комунал', 'газ', 'свет', 'вода', 'тепл', 'utility');
+
+    return Array.from(new Set(tokens));
+  };
+
+  const _readKeywordIncomeFromEvents = ({ query, packet }) => {
+    const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+    if (!events.length) return null;
+
+    const tokens = _buildKeywordTokens(query);
+    if (!tokens.length) return null;
+
+    let fact = 0;
+    let plan = 0;
+    let matched = 0;
+    for (const op of events) {
+      if (String(op?.kind || op?.type || '').toLowerCase() !== 'income') continue;
+      const text = _normalizeRu([
+        op?.categoryName,
+        op?.description,
+        op?.projectName,
+        op?.contractorName
+      ].filter(Boolean).join(' '));
+      if (!text) continue;
+      if (!tokens.some((t) => text.includes(t))) continue;
+      const amount = Number(op?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      if (op?.isFact) fact += amount;
+      else plan += amount;
+      matched += 1;
+    }
+
+    if (matched <= 0) return null;
+    return {
+      fact: Math.max(0, fact),
+      plan: Math.max(0, plan),
+      matched
+    };
   };
 
   const _maybeBuildCategoryIncomeStructured = ({ query, packet }) => {
     const q = _normalizeRu(query);
-    const asksIncome = /(доход|доходы|поступлен|выручк|приход)/i.test(q);
+    const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
+    const asksIncome = tokens.some((token) => (
+      token.includes('доход')
+      || token.includes('поступлен')
+      || token.includes('выручк')
+      || token.includes('приход')
+    ));
     if (!asksIncome) return null;
-    if (!/(?:^|\s)по(?:\s|$)/i.test(q) && !/категор/i.test(q)) return null;
+    const scopedByCategory = tokens.includes('по') || tokens.some((token) => token.startsWith('категор'));
+    if (!scopedByCategory) return null;
 
     const matched = _pickBestCategoryMatch({ query, packet });
     if (!matched) {
@@ -639,6 +715,29 @@ module.exports = function createAiRouter(deps) {
             plan: `поступления по "${title}": ${_formatTenge(planTag)}`,
             total: `по "${title}" всего: ${_formatTenge(totalTag)}`,
             question: `Показать операции по "${title}" по датам?`
+          }
+        });
+      }
+
+      const keywordIncome = _readKeywordIncomeFromEvents({ query, packet });
+      if (keywordIncome) {
+        const factKw = Number(keywordIncome.fact) || 0;
+        const planKw = Number(keywordIncome.plan) || 0;
+        const totalKw = factKw + planKw;
+        const dateStartKw = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+        const dateEndKw = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+        const dateTextKw = (dateStartKw && dateEndKw && dateStartKw !== 'Invalid Date' && dateEndKw !== 'Invalid Date')
+          ? `${dateStartKw} - ${dateEndKw}`
+          : (dateStartKw || dateEndKw || 'Период не задан');
+        const phraseLabel = _extractCategoryPhrase(query) || 'категория';
+        return _applyAutoRiskToStructured({
+          packet,
+          structured: {
+            date: dateTextKw,
+            fact: `доходы по "${phraseLabel}": ${_formatTenge(factKw)}`,
+            plan: `поступления по "${phraseLabel}": ${_formatTenge(planKw)}`,
+            total: `по "${phraseLabel}" всего: ${_formatTenge(totalKw)}`,
+            question: `Показать найденные операции по "${phraseLabel}" по датам?`
           }
         });
       }
@@ -1039,6 +1138,9 @@ module.exports = function createAiRouter(deps) {
         const packetEarly = {
           periodStart: periodStartEarly,
           periodEnd: periodEndEarly,
+          normalized: {
+            events: Array.isArray(dbData?.operations) ? dbData.operations : []
+          },
           derived: {
             categorySummary: Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [],
             tagSummary: Array.isArray(dbData?.tagSummary) ? dbData.tagSummary : []
