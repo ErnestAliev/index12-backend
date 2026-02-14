@@ -456,6 +456,20 @@ module.exports = function createAiRouter(deps) {
     .replace(/\s+/g, ' ')
     .trim();
 
+  const _looksLikeDefinitionAnswer = (value) => {
+    const q = _normalizeRu(value);
+    if (!q) return false;
+    if (q.includes('?')) return false;
+    if (q.length > 220) return false;
+
+    const financeIntentTokens = [
+      'посчитай', 'покажи', 'сколько', 'доход', 'расход', 'поступлен',
+      'выручк', 'прибыл', 'убыт', 'остаток', 'кассов', 'разрыв'
+    ];
+    if (financeIntentTokens.some((token) => q.includes(token))) return false;
+    return true;
+  };
+
   const _levenshtein = (aRaw, bRaw) => {
     const a = String(aRaw || '');
     const b = String(bRaw || '');
@@ -507,6 +521,90 @@ module.exports = function createAiRouter(deps) {
       return tokens.slice(categoryIdx + 1).join(' ');
     }
     return q;
+  };
+
+  const _pickProjectFromQuery = ({ query, projects }) => {
+    const q = _normalizeRu(query);
+    if (!q) return null;
+    const list = Array.isArray(projects) ? projects : [];
+    if (!list.length) return null;
+
+    let best = null;
+    for (const project of list) {
+      const id = String(project?.id || project?._id || '').trim();
+      const name = String(project?.name || '').trim();
+      const norm = _normalizeRu(name);
+      if (!id || !norm) continue;
+
+      let score = 0;
+      if (q.includes(norm)) {
+        score = 100 + norm.length;
+      } else {
+        const tokens = norm.split(' ').filter((t) => t.length >= 3);
+        const tokenHits = tokens.filter((token) => q.includes(token)).length;
+        score = tokenHits * 10;
+      }
+
+      if (score <= 0) continue;
+      if (!best || score > best.score) {
+        best = { id, name, score };
+      }
+    }
+
+    return best ? { id: best.id, name: best.name } : null;
+  };
+
+  const _extractUnknownAbbreviationFromQuery = ({
+    query,
+    glossaryEntries,
+    categories,
+    projects,
+    isWellKnownTerm
+  }) => {
+    const q = _normalizeRu(query);
+    if (!q) return null;
+    const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
+    if (!tokens.length) return null;
+
+    const stop = new Set([
+      'посчитай', 'рассчитай', 'считай', 'покажи', 'доход', 'доходы', 'расход', 'расходы',
+      'поступление', 'поступления', 'прибыль', 'убыток', 'только', 'по', 'и', 'или', 'за',
+      'период', 'месяц', 'год', 'вопрос', 'факт', 'план', 'итого', 'как', 'дела', 'у', 'нас',
+      'что', 'это', 'значит'
+    ]);
+
+    const knownTerms = new Set(
+      (Array.isArray(glossaryEntries) ? glossaryEntries : [])
+        .map((entry) => _normalizeRu(entry?.term || ''))
+        .filter(Boolean)
+    );
+
+    const domainTokens = new Set();
+    const labels = [
+      ...(Array.isArray(categories) ? categories.map((x) => x?.name) : []),
+      ...(Array.isArray(projects) ? projects.map((x) => x?.name) : [])
+    ];
+    labels.forEach((label) => {
+      const norm = _normalizeRu(label);
+      if (!norm) return;
+      norm.split(' ').forEach((token) => {
+        if (token.length >= 2) domainTokens.add(token);
+      });
+    });
+
+    for (const token of tokens) {
+      if (stop.has(token)) continue;
+      if (knownTerms.has(token)) continue;
+      if (typeof isWellKnownTerm === 'function' && isWellKnownTerm(token)) continue;
+      if (token.length < 3 || token.length > 8) continue;
+      if (!/^[a-zа-я0-9]+$/i.test(token)) continue;
+
+      const isAbbrevLike = token.length <= 4 || /^[a-z]{3,8}$/i.test(token) || /^[а-я]{3,8}$/i.test(token);
+      if (!isAbbrevLike) continue;
+      if (!domainTokens.has(token)) continue;
+      return token;
+    }
+    return null;
   };
 
   const _pickBestCategoryMatch = ({ query, packet }) => {
@@ -1154,6 +1252,42 @@ module.exports = function createAiRouter(deps) {
       const source = req.body?.source || 'ui';
       const timeline = Array.isArray(req.body?.timeline) ? req.body.timeline : null;
       const requestDebug = req.body?.debugAi === true || String(req.body?.debugAi || '').toLowerCase() === 'true';
+      const currentSession = _getChatSession(userIdStr, workspaceId);
+
+      const pendingTerm = (currentSession && currentSession.pending && currentSession.pending.type === 'glossary_term')
+        ? currentSession.pending
+        : null;
+      if (pendingTerm) {
+        const cancelPending = /(отмена|отменить|неважно|пропусти|забудь)/i.test(qLower);
+        if (cancelPending) {
+          currentSession.pending = null;
+          const cancelText = 'Ок, запись термина отменил.';
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', cancelText);
+          return res.json({ text: cancelText });
+        }
+
+        if (_looksLikeDefinitionAnswer(q)) {
+          const saved = await glossaryService.addTerm(userId, {
+            workspaceId,
+            projectId: pendingTerm.projectId || null,
+            term: pendingTerm.term,
+            meaning: q,
+            source: 'user',
+            confidence: 1.0
+          });
+          currentSession.pending = null;
+
+          const projectSuffix = pendingTerm.projectName
+            ? ` для проекта "${pendingTerm.projectName}"`
+            : '';
+          const normalizedMeaning = String(saved?.meaning || q).trim();
+          const ack = `Принял. Записал: ${pendingTerm.term} = ${normalizedMeaning}${projectSuffix}.`;
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', ack);
+          return res.json({ text: ack });
+        }
+      }
 
       const aiDebugRaw = String(process.env.AI_DEBUG || '').trim().toLowerCase();
       const AI_DEBUG = aiDebugRaw === 'true' || aiDebugRaw === '1';
@@ -1329,6 +1463,11 @@ module.exports = function createAiRouter(deps) {
         } catch (_) { }
       }
 
+      const projectHint = _pickProjectFromQuery({
+        query: q,
+        projects: dbData?.catalogs?.projects || []
+      });
+
       const teachMatch = q.match(/^(.{1,30})\s*[-—=:]\s*(.+)$/i);
       if (teachMatch && String(teachMatch[1] || '').trim().length <= 20) {
         const term = String(teachMatch[1] || '').trim();
@@ -1336,25 +1475,35 @@ module.exports = function createAiRouter(deps) {
         if (term && meaning) {
           await glossaryService.addTerm(memoryUserId, {
             workspaceId: memoryWorkspaceId,
+            projectId: projectHint?.id || null,
             term,
             meaning,
             source: 'user',
             confidence: 1.0
           });
           await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
-          const ack = `Записал в шпаргалку: ${term} = ${meaning}`;
+          const scopeSuffix = projectHint?.name ? ` (проект: ${projectHint.name})` : '';
+          const ack = `Записал в шпаргалку: ${term} = ${meaning}${scopeSuffix}`;
           _pushHistory(userIdStr, workspaceId, 'user', q);
           _pushHistory(userIdStr, workspaceId, 'assistant', ack);
           return res.json({ text: ack });
         }
       }
 
+      try {
+        await glossaryService.ensureSystemGlossary(memoryUserId, { workspaceId: memoryWorkspaceId });
+      } catch (_) { }
+
       const [profile, glossaryEntries] = await Promise.all([
         profileService.getProfile(memoryUserId, { workspaceId: memoryWorkspaceId }),
         glossaryService.getGlossary(memoryUserId, { workspaceId: memoryWorkspaceId }),
       ]);
 
-      const unknownTerms = glossaryService.findUnknownTerms(glossaryEntries, dbData?.catalogs?.categories || []);
+      const unknownTerms = glossaryService.findUnknownTerms(
+        glossaryEntries,
+        dbData?.catalogs?.categories || [],
+        dbData?.catalogs?.projects || []
+      );
       if (!profile?.onboardingComplete && unknownTerms.length > 0) {
         const onboardingText = buildOnboardingMessage({
           dataPacket: dbData,
@@ -1374,8 +1523,26 @@ module.exports = function createAiRouter(deps) {
         const key = String(term?.name || '').trim().toLowerCase();
         return key && qLower.includes(key);
       });
-      if (unknownMention) {
-        const askMeaning = `Уточни, что означает "${unknownMention.name}" в твоих данных? Я запомню это для следующих ответов.`;
+      const unknownAbbreviation = _extractUnknownAbbreviationFromQuery({
+        query: q,
+        glossaryEntries,
+        categories: dbData?.catalogs?.categories || [],
+        projects: dbData?.catalogs?.projects || [],
+        isWellKnownTerm: glossaryService.isWellKnownTerm
+      });
+      const termToClarify = unknownMention?.name || unknownAbbreviation;
+      if (termToClarify) {
+        if (currentSession) {
+          currentSession.pending = {
+            type: 'glossary_term',
+            term: termToClarify,
+            projectId: projectHint?.id || null,
+            projectName: projectHint?.name || null,
+            createdAt: Date.now()
+          };
+        }
+        const projectSuffix = projectHint?.name ? ` в проекте "${projectHint.name}"` : '';
+        const askMeaning = `Уточни, что означает "${termToClarify}"${projectSuffix}. Я запомню и дальше буду считать автоматически.`;
         _pushHistory(userIdStr, workspaceId, 'user', q);
         _pushHistory(userIdStr, workspaceId, 'assistant', askMeaning);
         return res.json({ text: askMeaning });
