@@ -332,6 +332,36 @@ eventSchema.index({ userId: 1, dateKey: 1 });
 
 const Event = mongoose.model('Event', eventSchema);
 
+const aiContextPacketSchema = new mongoose.Schema({
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', default: null, index: true },
+    userId: { type: String, required: true, index: true },
+    periodKey: { type: String, required: true, index: true }, // YYYY-MM
+    periodStart: { type: Date, required: true },
+    periodEnd: { type: Date, required: true },
+    timezone: { type: String, default: 'Asia/Almaty' },
+    version: { type: Number, default: 1 },
+    prompt: {
+        templateVersion: { type: String, default: 'deep-v1' },
+        dictionaryVersion: { type: String, default: 'dict-v1' },
+        text: { type: String, default: '' }
+    },
+    dictionary: { type: mongoose.Schema.Types.Mixed, default: {} },
+    normalized: { type: mongoose.Schema.Types.Mixed, default: {} },
+    derived: { type: mongoose.Schema.Types.Mixed, default: {} },
+    dataQuality: { type: mongoose.Schema.Types.Mixed, default: {} },
+    stats: {
+        operationsCount: { type: Number, default: 0 },
+        accountsCount: { type: Number, default: 0 }
+    }
+}, {
+    collection: 'ai_context_packets',
+    minimize: false,
+    timestamps: true
+});
+aiContextPacketSchema.index({ workspaceId: 1, userId: 1, periodKey: 1 }, { unique: true });
+aiContextPacketSchema.index({ workspaceId: 1, userId: 1, updatedAt: -1 });
+const AiContextPacket = mongoose.model('AiContextPacket', aiContextPacketSchema);
+
 
 // --- CONFIG ---
 app.use(session({
@@ -1901,7 +1931,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // =================================================================
 app.use('/api/ai', createAiRouter({
     mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category },
+    models: { Event, Account, Company, Contractor, Individual, Project, Category, AiContextPacket },
     FRONTEND_URL,
     isAuthenticated,
     getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation

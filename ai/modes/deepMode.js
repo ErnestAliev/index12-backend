@@ -1795,6 +1795,39 @@ async function _classifyDeepIntentLLM({ query, openAiChat, modelDeep }) {
     }
 }
 
+function _pickPrimaryIntent({ flags = {}, llmIntent = null }) {
+    const scored = [
+        { intent: 'stress_test', active: !!flags.wantsStressTest, score: 120 },
+        { intent: 'operations_list', active: !!flags.wantsOperationsList, score: 110 },
+        { intent: 'balance_reconciliation', active: !!flags.wantsBalanceReconciliation, score: 100 },
+        { intent: 'category_income_math', active: !!flags.wantsCategoryIncomeMath, score: 95 },
+        { intent: 'month_assessment', active: !!flags.wantsMonthAssessment, score: 90 },
+        { intent: 'project_expenses', active: !!flags.wantsProjectExpenses, score: 80 },
+        { intent: 'spend_limit', active: !!flags.wantsSpendLimit, score: 75 },
+        { intent: 'losses', active: !!flags.wantsLosses, score: 65 },
+        { intent: 'finance', active: !!flags.wantsFinance, score: 55 },
+        { intent: 'invest', active: !!flags.wantsInvest, score: 45 },
+        { intent: 'tell_unknown', active: !!flags.wantsTellUnknown, score: 35 },
+        { intent: 'strategy', active: !!flags.wantsStrategy, score: 30 }
+    ].filter(x => x.active).sort((a, b) => b.score - a.score);
+
+    const topRegex = scored.length ? scored[0].intent : null;
+
+    if (llmIntent && llmIntent.intent && llmIntent.intent !== 'unknown' && llmIntent.confidence >= 0.7) {
+        const llmResolved = String(llmIntent.intent);
+        const llmIsBroad = llmResolved === 'finance' || llmResolved === 'invest';
+        if (!llmIsBroad) {
+            return llmResolved;
+        }
+        if (topRegex && !['finance', 'invest', 'tell_unknown', 'strategy'].includes(topRegex)) {
+            return topRegex;
+        }
+        return llmResolved;
+    }
+
+    return topRegex;
+}
+
 async function _humanizeDeterministicAnswer({
     query,
     rawAnswer,

@@ -9,6 +9,7 @@
 // - Hybrid data: snapshot (accounts/companies) + MongoDB (operations)
 
 const express = require('express');
+const deepPrompt = require('./prompts/deepPrompt');
 
 const AIROUTES_VERSION = 'modular-v8.0';
 const https = require('https');
@@ -86,11 +87,14 @@ module.exports = function createAiRouter(deps) {
     getCompositeUserId,
   } = deps;
 
-  const { Event, Account, Company, Contractor, Individual, Project, Category } = models;
+  const { Event, Account, Company, Contractor, Individual, Project, Category, AiContextPacket } = models;
 
   // Create data provider for direct database access
   const createDataProvider = require('./dataProvider');
   const dataProvider = createDataProvider({ ...models, mongoose });
+  const createContextPacketService = require('./contextPacketService');
+  const contextPacketService = createContextPacketService({ AiContextPacket });
+  const contextPacketsEnabled = !!contextPacketService?.enabled;
 
   // Import mode handlers
   const quickMode = require('./modes/quickMode');
@@ -138,6 +142,15 @@ module.exports = function createAiRouter(deps) {
       return sign + String(Math.round(Math.abs(num))) + ' ₸';
     }
   };
+
+  const _safeDate = (v) => {
+    if (!v) return null;
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const _monthStartUtc = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
+  const _monthEndUtc = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 23, 59, 59, 999));
 
   // =========================
   // OpenAI caller (supports model override)
@@ -421,6 +434,70 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
+      // CONTEXT PACKET UPSERT (monthly, for DEEP mode)
+      // =========================
+      if (isDeep && contextPacketsEnabled) {
+        try {
+          const nowRef = _safeDate(req?.body?.asOf) || new Date();
+          const periodFilter = req?.body?.periodFilter || {};
+          const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
+          const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
+          const workspaceId = req.user?.currentWorkspaceId || null;
+
+          await contextPacketService.upsertMonthlyPacket({
+            workspaceId,
+            userId: String(effectiveUserId || userIdStr),
+            periodStart,
+            periodEnd,
+            timezone: 'Asia/Almaty',
+            prompt: {
+              templateVersion: 'deep-v1',
+              dictionaryVersion: 'dict-v1',
+              text: deepPrompt
+            },
+            dictionary: {
+              entities: {
+                account: 'Счет движения денег',
+                event: 'Операция (income/expense/transfer, факт/прогноз, дата, сумма)',
+                category: 'Категория операции',
+                project: 'Проект/филиал',
+                owner: 'Владелец счета (юрлицо/физлицо)'
+              },
+              rules: [
+                'Внутренний transfer между своими счетами не считать прибылью',
+                'Если запрошены только открытые счета — скрытые исключать',
+                'При конфликте источников явно показывать расхождение'
+              ]
+            },
+            normalized: {
+              accounts: dbData.accounts || [],
+              events: dbData.operations || [],
+              categories: dbData.catalogs?.categories || [],
+              projects: dbData.catalogs?.projects || [],
+              companies: dbData.catalogs?.companies || [],
+              contractors: dbData.catalogs?.contractors || [],
+              individuals: dbData.catalogs?.individuals || []
+            },
+            derived: {
+              meta: dbData.meta || {},
+              totals: dbData.totals || {},
+              accountsData: dbData.accountsData || {},
+              operationsSummary: dbData.operationsSummary || {},
+              categorySummary: dbData.categorySummary || [],
+              tagSummary: dbData.tagSummary || []
+            },
+            dataQuality: dbData.dataQualityReport || {},
+            stats: {
+              operationsCount: Array.isArray(dbData.operations) ? dbData.operations.length : 0,
+              accountsCount: Array.isArray(dbData.accounts) ? dbData.accounts.length : 0
+            }
+          });
+        } catch (packetErr) {
+          console.error('[AI][context-packet] upsert failed:', packetErr?.message || packetErr);
+        }
+      }
+
+      // =========================
       // DIAGNOSTICS COMMAND
       // =========================
       if (_isFullDiagnosticsQuery(qLower)) {
@@ -601,6 +678,7 @@ module.exports = function createAiRouter(deps) {
     res.json({
       version: AIROUTES_VERSION,
       tag: CHAT_VERSION_TAG,
+      contextPackets: contextPacketsEnabled,
       modes: {
         quick: 'modes/quickMode.js',
         chat: 'modes/chatMode.js',
