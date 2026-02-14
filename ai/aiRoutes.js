@@ -704,6 +704,41 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _readCategoryIncomeFromEventsStrict = ({ packet, categoryId = null, categoryName = null }) => {
+    const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+    if (!events.length) return null;
+
+    const targetId = String(categoryId || '').trim();
+    const targetName = _normalizeRu(categoryName || '');
+    if (!targetId && !targetName) return null;
+
+    let fact = 0;
+    let plan = 0;
+    let matched = 0;
+
+    for (const op of events) {
+      if (String(op?.kind || op?.type || '').toLowerCase() !== 'income') continue;
+      const opCategoryId = String(op?.categoryId || '').trim();
+      const opCategoryName = _normalizeRu(op?.categoryName || '');
+      const hitById = targetId && opCategoryId && opCategoryId === targetId;
+      const hitByName = !hitById && targetName && opCategoryName && opCategoryName === targetName;
+      if (!hitById && !hitByName) continue;
+
+      const amount = Number(op?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      if (op?.isFact) fact += amount;
+      else plan += amount;
+      matched += 1;
+    }
+
+    if (matched <= 0) return null;
+    return {
+      fact: Math.max(0, fact),
+      plan: Math.max(0, plan),
+      matched
+    };
+  };
+
   const _buildKeywordTokens = (query) => {
     const phrase = _extractCategoryPhrase(query);
     const base = _normalizeRu(phrase || query);
@@ -1021,7 +1056,14 @@ module.exports = function createAiRouter(deps) {
       };
     }
 
-    const { fact, plan } = _readCategoryIncome(matched);
+    const strictIncome = _readCategoryIncomeFromEventsStrict({
+      packet,
+      categoryId: matched?.id || matched?._id || null,
+      categoryName: matched?.name || null
+    });
+    const summaryIncome = _readCategoryIncome(matched);
+    const fact = Number(strictIncome?.fact ?? summaryIncome?.fact ?? 0) || 0;
+    const plan = Number(strictIncome?.plan ?? summaryIncome?.plan ?? 0) || 0;
     const total = fact + plan;
     const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
     const dateEnd = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
@@ -1034,7 +1076,9 @@ module.exports = function createAiRouter(deps) {
       fact: `доходы по "${matched.name}": ${_formatTenge(fact)}`,
       plan: `поступления по "${matched.name}": ${_formatTenge(plan)}`,
       total: `по "${matched.name}" всего: ${_formatTenge(total)}`,
-      question: `Показать операции по "${matched.name}" по датам?`
+      question: strictIncome?.matched
+        ? `Показать ${strictIncome.matched} операций по "${matched.name}" по датам?`
+        : `Показать операции по "${matched.name}" по датам?`
     };
     return _applyAutoRiskToStructured({ packet, structured });
   };
@@ -1403,10 +1447,13 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // Build data packet (hybrid mode: snapshot + MongoDB)
       // =========================
-      // AI always sees ALL accounts (including hidden) for proper analysis
+      const requestIncludeHidden = req?.body?.includeHidden === true;
+      const requestVisibleAccountIds = Array.isArray(req?.body?.visibleAccountIds)
+        ? req.body.visibleAccountIds
+        : null;
       const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: true, // 🔥 AI always needs full context
-        visibleAccountIds: null, // No filtering for AI
+        includeHidden: requestIncludeHidden,
+        visibleAccountIds: requestVisibleAccountIds,
         dateRange: req?.body?.periodFilter || null,
         workspaceId,
         now: req?.body?.asOf || null,

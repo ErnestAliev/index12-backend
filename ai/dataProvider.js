@@ -567,7 +567,14 @@ module.exports = function createDataProvider(deps) {
      * @returns {Promise<Array>} Normalized operations
      */
     async function getOperations(userId, dateRange = {}, options = {}) {
-        const { excludeTransfers = false, excludeInterCompany = true, workspaceId = null, includeHidden = false, now = null } = options;
+        const {
+            excludeTransfers = false,
+            excludeInterCompany = true,
+            workspaceId = null,
+            includeHidden = false,
+            visibleAccountIds = null,
+            now = null
+        } = options;
         const nowRef = _resolveNow(now);
         const nowTs = nowRef.getTime();
 
@@ -599,6 +606,23 @@ module.exports = function createDataProvider(deps) {
                 .filter(a => a.individualId)
                 .map(a => String(a.individualId))
         );
+        const isHiddenAccount = (acc) => !!(
+            acc?.isExcluded
+            || acc?.excluded
+            || acc?.excludeFromTotal
+            || acc?.excludedFromTotal
+            || acc?.hidden
+            || acc?.isHidden
+        );
+        const hiddenAccountIds = new Set(
+            accounts.filter(isHiddenAccount).map((a) => String(a._id))
+        );
+        const openAccountIds = new Set(
+            accounts.filter((a) => !isHiddenAccount(a)).map((a) => String(a._id))
+        );
+        const visibleAccountSet = Array.isArray(visibleAccountIds) && visibleAccountIds.length
+            ? new Set(visibleAccountIds.map((id) => String(id)))
+            : null;
 
         // Companies & individuals maps for transfers
         let companies = [];
@@ -612,6 +636,26 @@ module.exports = function createDataProvider(deps) {
             individuals = await Individual.find(_withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId)).lean();
         } catch (_) { individuals = []; }
         const individualNameById = new Map(individuals.map(i => [String(i._id), i.name || 'Физлицо']));
+
+        if (!includeHidden) {
+            operations = operations.filter((op) => {
+                const refIds = [
+                    op?.accountId,
+                    op?.fromAccountId,
+                    op?.toAccountId
+                ].map((id) => (id ? String(id) : null)).filter(Boolean);
+
+                if (!refIds.length) return true;
+
+                if (visibleAccountSet) {
+                    return refIds.some((id) => visibleAccountSet.has(id));
+                }
+
+                if (!openAccountIds.size) return true;
+                if (refIds.some((id) => hiddenAccountIds.has(id))) return false;
+                return true;
+            });
+        }
 
         // Filter and normalize operations
         const normalized = [];
@@ -1050,7 +1094,12 @@ module.exports = function createDataProvider(deps) {
         }
 
         // Operations: always from MongoDB
-        promises.push(getOperations(userId, { start, end }, { workspaceId, includeHidden, now: nowRef }));
+        promises.push(getOperations(userId, { start, end }, {
+            workspaceId,
+            includeHidden,
+            visibleAccountIds,
+            now: nowRef
+        }));
 
         // Companies: snapshot priority, fallback to MongoDB
         if (useSnapshotCompanies) {
