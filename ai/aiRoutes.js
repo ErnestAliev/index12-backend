@@ -2341,6 +2341,14 @@ module.exports = function createAiRouter(deps) {
           branch: 'fallback',
           reason: _isNoAiAnswerText(rawAnswer) ? 'no_ai_answer' : (!groundedValidation?.ok ? 'grounding_failed' : 'no_structured')
         }));
+        const deterministicRecovery = _maybeBuildCategoryIncomeStructured({
+          query: qResolved,
+          packet
+        });
+        if (deterministicRecovery) {
+          structuredAnswer = deterministicRecovery;
+          console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'fallback_deterministic_category', question: qResolved }));
+        } else {
         const dateStartFail = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
         const dateEndFail = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
         const dateTextFail = (dateStartFail && dateEndFail && dateStartFail !== 'Invalid Date' && dateEndFail !== 'Invalid Date')
@@ -2353,6 +2361,7 @@ module.exports = function createAiRouter(deps) {
           total: 'ответ не сформирован',
           question: 'Повторить запрос точнее по периоду или категории?'
         };
+        }
       } else {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'grounded' }));
       }
