@@ -12,7 +12,6 @@ const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketB
 const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
-const { tryQuickRegex } = require('./engine/intentClassifier');
 
 const AIROUTES_VERSION = 'quick-deep-v9.3';
 const https = require('https');
@@ -448,6 +447,200 @@ module.exports = function createAiRouter(deps) {
         : `Разобрать дни риска и что перенести первым?`;
     }
     return out;
+  };
+
+  const _normalizeRu = (value) => String(value || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^a-zа-я0-9\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const _levenshtein = (aRaw, bRaw) => {
+    const a = String(aRaw || '');
+    const b = String(bRaw || '');
+    const m = a.length;
+    const n = b.length;
+    if (!m) return n;
+    if (!n) return m;
+
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i += 1) dp[i][0] = i;
+    for (let j = 0; j <= n; j += 1) dp[0][j] = j;
+    for (let i = 1; i <= m; i += 1) {
+      for (let j = 1; j <= n; j += 1) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(
+          dp[i - 1][j] + 1,
+          dp[i][j - 1] + 1,
+          dp[i - 1][j - 1] + cost
+        );
+      }
+    }
+    return dp[m][n];
+  };
+
+  const _similarity = (aRaw, bRaw) => {
+    const a = _normalizeRu(aRaw);
+    const b = _normalizeRu(bRaw);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    if (a.includes(b) || b.includes(a)) return 0.92;
+    const dist = _levenshtein(a, b);
+    const maxLen = Math.max(a.length, b.length) || 1;
+    return Math.max(0, 1 - (dist / maxLen));
+  };
+
+  const _extractCategoryPhrase = (query) => {
+    const q = _normalizeRu(query);
+    if (!q) return '';
+    const byPo = q.match(/\bпо\s+([a-zа-я0-9\s]{2,80})$/i);
+    if (byPo && byPo[1]) return _normalizeRu(byPo[1]);
+    const byCategory = q.match(/\bкатегор(?:ия|ии)?\s+([a-zа-я0-9\s]{2,80})$/i);
+    if (byCategory && byCategory[1]) return _normalizeRu(byCategory[1]);
+    return q;
+  };
+
+  const _pickBestCategoryMatch = ({ query, packet }) => {
+    const categorySummary = Array.isArray(packet?.derived?.categorySummary)
+      ? packet.derived.categorySummary
+      : [];
+    if (!categorySummary.length) return null;
+
+    const stopWords = new Set([
+      'посчитай', 'рассчитай', 'считай', 'покажи', 'только', 'по', 'доход', 'доходы',
+      'поступление', 'поступления', 'и', 'все', 'весь', 'за', 'период', 'мне'
+    ]);
+    const phrase = _extractCategoryPhrase(query);
+    const phraseTokens = phrase.split(' ').map((t) => t.trim()).filter(Boolean).filter((t) => !stopWords.has(t));
+    const compactPhrase = phraseTokens.join(' ') || phrase;
+    if (!compactPhrase) return null;
+
+    let best = null;
+    for (const cat of categorySummary) {
+      const catName = String(cat?.name || '').trim();
+      if (!catName) continue;
+      const catNorm = _normalizeRu(catName);
+      const catTokens = catNorm
+        .split(' ')
+        .map((t) => t.trim())
+        .filter(Boolean)
+        .filter((t) => !stopWords.has(t));
+      const directInside = compactPhrase.includes(catNorm);
+      const directContain = catNorm.includes(compactPhrase);
+      let tokenScore = 0;
+      if (phraseTokens.length) {
+        if (catTokens.length) {
+          tokenScore = Math.max(
+            ...phraseTokens.map((qt) => Math.max(...catTokens.map((ct) => _similarity(qt, ct))))
+          );
+        } else {
+          tokenScore = Math.max(...phraseTokens.map((qt) => _similarity(qt, catNorm)));
+        }
+      }
+      const phraseScore = _similarity(compactPhrase, catNorm);
+      let score = Math.max(tokenScore, phraseScore);
+      if (directContain || directInside) {
+        // Prefer categories that fully contain the requested phrase (more specific).
+        score = 1
+          + (directContain ? 0.04 : 0)
+          + (directInside ? 0.01 : 0)
+          + (phraseScore * 0.001);
+      }
+      if (!best || score > best.score) {
+        best = { score, cat };
+      }
+    }
+
+    if (!best || best.score < 0.62) return null;
+    return best.cat;
+  };
+
+  const _pickCategoryHints = ({ query, packet, limit = 3 }) => {
+    const categorySummary = Array.isArray(packet?.derived?.categorySummary)
+      ? packet.derived.categorySummary
+      : [];
+    if (!categorySummary.length) return [];
+    const phrase = _extractCategoryPhrase(query);
+    const scored = categorySummary
+      .map((cat) => {
+        const name = String(cat?.name || '').trim();
+        return {
+          name,
+          score: _similarity(phrase, name)
+        };
+      })
+      .filter((row) => row.name)
+      .sort((a, b) => b.score - a.score);
+    return scored
+      .filter((row) => row.score >= 0.35)
+      .slice(0, Math.max(1, Math.min(Number(limit) || 3, 5)))
+      .map((row) => row.name);
+  };
+
+  const _readCategoryIncome = (categoryRow) => {
+    if (!categoryRow || typeof categoryRow !== 'object') {
+      return { fact: 0, plan: 0 };
+    }
+    const fact = Number(
+      categoryRow?.incomeFact
+      ?? categoryRow?.income?.fact?.total
+      ?? 0
+    ) || 0;
+    const plan = Number(
+      categoryRow?.incomeForecast
+      ?? categoryRow?.income?.forecast?.total
+      ?? 0
+    ) || 0;
+    return {
+      fact: Math.max(0, fact),
+      plan: Math.max(0, plan)
+    };
+  };
+
+  const _maybeBuildCategoryIncomeStructured = ({ query, packet }) => {
+    const q = _normalizeRu(query);
+    const asksIncome = /(доход|доходы|поступлен|выручк|приход)/i.test(q);
+    if (!asksIncome) return null;
+    if (!/\bпо\b/i.test(q) && !/\bкатегор/i.test(q)) return null;
+
+    const matched = _pickBestCategoryMatch({ query, packet });
+    if (!matched) {
+      const hints = _pickCategoryHints({ query, packet, limit: 3 });
+      const rawPhrase = _extractCategoryPhrase(query);
+      const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+      const dateEnd = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+      const dateText = (dateStart && dateEnd && dateStart !== 'Invalid Date' && dateEnd !== 'Invalid Date')
+        ? `${dateStart} - ${dateEnd}`
+        : (dateStart || dateEnd || 'Период не задан');
+      const hintText = hints.length ? hints.join(', ') : 'подсказок пока нет';
+      return {
+        date: dateText,
+        fact: `не нашел точную категорию для "${rawPhrase || query}"`,
+        plan: `ближайшие варианты: ${hintText}`,
+        total: 'доход по категории посчитаю после уточнения',
+        question: hints.length
+          ? `Выбери категорию: ${hintText}?`
+          : 'Как точно называется нужная категория?'
+      };
+    }
+
+    const { fact, plan } = _readCategoryIncome(matched);
+    const total = fact + plan;
+    const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+    const dateEnd = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+    const dateText = (dateStart && dateEnd && dateStart !== 'Invalid Date' && dateEnd !== 'Invalid Date')
+      ? `${dateStart} - ${dateEnd}`
+      : (dateStart || dateEnd || 'Период не задан');
+
+    const structured = {
+      date: dateText,
+      fact: `доходы по "${matched.name}": ${_formatTenge(fact)}`,
+      plan: `поступления по "${matched.name}": ${_formatTenge(plan)}`,
+      total: `по "${matched.name}" всего: ${_formatTenge(total)}`,
+      question: `Показать операции по "${matched.name}" по датам?`
+    };
+    return _applyAutoRiskToStructured({ packet, structured });
   };
 
   const _buildDeterministicDeepStructuredFallback = ({ packet }) => {
@@ -892,23 +1085,18 @@ module.exports = function createAiRouter(deps) {
       ]);
 
       const unknownTerms = glossaryService.findUnknownTerms(glossaryEntries, dbData?.catalogs?.categories || []);
-      const regexIntent = tryQuickRegex(q);
-      if (!profile?.onboardingComplete && (!regexIntent || !regexIntent.needsData)) {
+      if (!profile?.onboardingComplete && unknownTerms.length > 0) {
         const onboardingText = buildOnboardingMessage({
           dataPacket: dbData,
           unknownTerms,
           profile
         });
-        if (unknownTerms.length === 0) {
-          await profileService.completeOnboarding(memoryUserId, { workspaceId: memoryWorkspaceId });
-        } else {
-          await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
-        }
+        await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
         _pushHistory(userIdStr, workspaceId, 'user', q);
         _pushHistory(userIdStr, workspaceId, 'assistant', onboardingText);
         return res.json({ text: onboardingText });
       }
-      if (!profile?.onboardingComplete && regexIntent?.needsData) {
+      if (!profile?.onboardingComplete && unknownTerms.length === 0) {
         await profileService.completeOnboarding(memoryUserId, { workspaceId: memoryWorkspaceId });
       }
 
@@ -1048,6 +1236,18 @@ module.exports = function createAiRouter(deps) {
           ...analysisEnvelope,
           analysisFile
         }));
+      }
+
+      const deterministicCategoryStructured = _maybeBuildCategoryIncomeStructured({
+        query: q,
+        packet
+      });
+      if (deterministicCategoryStructured) {
+        const deterministicAnswer = _formatDeepStructuredText(deterministicCategoryStructured);
+        await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
+        _pushHistory(userIdStr, workspaceId, 'user', q);
+        _pushHistory(userIdStr, workspaceId, 'assistant', deterministicAnswer);
+        return res.json({ text: deterministicAnswer });
       }
 
       const groundedMessages = [

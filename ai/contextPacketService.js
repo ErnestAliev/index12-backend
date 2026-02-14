@@ -11,6 +11,30 @@ function _toObjectIdOrNull(raw, mongooseLike) {
     return raw;
 }
 
+function _workspaceVariants(rawWorkspaceId, mongooseLike) {
+    if (!rawWorkspaceId) return [null];
+    const wsStr = String(rawWorkspaceId).trim();
+    if (!wsStr) return [null];
+
+    const variants = [wsStr];
+    const wsObj = _toObjectIdOrNull(wsStr, mongooseLike);
+    if (wsObj && typeof wsObj === 'object') {
+        variants.push(wsObj);
+    }
+
+    const uniq = [];
+    const seen = new Set();
+    for (const v of variants) {
+        const key = (v && typeof v === 'object')
+            ? `obj:${String(v)}`
+            : `str:${String(v)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        uniq.push(v);
+    }
+    return uniq.length ? uniq : [null];
+}
+
 function _periodKeyFromDate(dateInput, timezone = 'Asia/Almaty') {
     const d = new Date(dateInput);
     if (Number.isNaN(d.getTime())) return null;
@@ -51,9 +75,9 @@ module.exports = function createContextPacketService(deps = {}) {
         periodKey
     }) {
         if (!userId || !periodKey) return null;
-        const ws = _toObjectIdOrNull(workspaceId, mongooseLike);
+        const wsVariants = _workspaceVariants(workspaceId, mongooseLike);
         return AiContextPacket.findOne({
-            workspaceId: ws || null,
+            workspaceId: { $in: wsVariants },
             userId: String(userId),
             periodKey: String(periodKey)
         }).lean();
@@ -65,10 +89,10 @@ module.exports = function createContextPacketService(deps = {}) {
         limit = 24
     }) {
         if (!userId) return [];
-        const ws = _toObjectIdOrNull(workspaceId, mongooseLike);
+        const wsVariants = _workspaceVariants(workspaceId, mongooseLike);
         const safeLimit = Math.max(1, Math.min(Number(limit) || 24, 120));
         return AiContextPacket.find({
-            workspaceId: ws || null,
+            workspaceId: { $in: wsVariants },
             userId: String(userId)
         })
             .select({ periodKey: 1, version: 1, updatedAt: 1, stats: 1, dataQuality: 1 })
@@ -96,16 +120,24 @@ module.exports = function createContextPacketService(deps = {}) {
         const resolvedPeriodKey = _normalizePeriodKey(periodKey, periodStart, timezone);
         if (!resolvedPeriodKey) return null;
 
-        const ws = _toObjectIdOrNull(workspaceId, mongooseLike);
+        const wsCanonical = _toObjectIdOrNull(workspaceId, mongooseLike) || null;
+        const wsVariants = _workspaceVariants(workspaceId, mongooseLike);
         const userIdStr = String(userId);
-        const filter = {
-            workspaceId: ws || null,
+        const readFilter = {
+            workspaceId: { $in: wsVariants },
             userId: userIdStr,
             periodKey: resolvedPeriodKey
         };
 
-        const existing = await AiContextPacket.findOne(filter).select({ version: 1 }).lean();
+        const existing = await AiContextPacket.findOne(readFilter).select({ _id: 1, version: 1 }).lean();
         const nextVersion = (Number(existing?.version) || 0) + 1;
+        const writeFilter = existing?._id
+            ? { _id: existing._id }
+            : {
+                workspaceId: wsCanonical,
+                userId: userIdStr,
+                periodKey: resolvedPeriodKey
+            };
 
         const safeNormalized = normalized && typeof normalized === 'object' ? normalized : {};
         const safeStats = {
@@ -115,9 +147,12 @@ module.exports = function createContextPacketService(deps = {}) {
         };
 
         await AiContextPacket.findOneAndUpdate(
-            filter,
+            writeFilter,
             {
                 $set: {
+                    workspaceId: wsCanonical,
+                    userId: userIdStr,
+                    periodKey: resolvedPeriodKey,
                     periodStart: new Date(periodStart),
                     periodEnd: new Date(periodEnd),
                     timezone,
@@ -133,7 +168,7 @@ module.exports = function createContextPacketService(deps = {}) {
             { upsert: true, new: true, setDefaultsOnInsert: true }
         );
 
-        return AiContextPacket.findOne(filter).lean();
+        return AiContextPacket.findOne(readFilter).lean();
     }
 
     return {

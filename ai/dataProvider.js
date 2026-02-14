@@ -952,12 +952,20 @@ module.exports = function createDataProvider(deps) {
 
         if (periodFilter && periodFilter.mode === 'custom') {
             if (periodFilter.customStart) {
-                const parsed = new Date(periodFilter.customStart);
-                start = _localStartOfDay(parsed);
+                const rawStart = String(periodFilter.customStart);
+                const parsed = new Date(rawStart);
+                if (!isNaN(parsed.getTime())) {
+                    const hasExplicitTime = /T\d{2}:\d{2}/.test(rawStart);
+                    start = hasExplicitTime ? parsed : _localStartOfDay(parsed);
+                }
             }
             if (periodFilter.customEnd) {
-                const parsed = new Date(periodFilter.customEnd);
-                end = _localEndOfDay(parsed);
+                const rawEnd = String(periodFilter.customEnd);
+                const parsed = new Date(rawEnd);
+                if (!isNaN(parsed.getTime())) {
+                    const hasExplicitTime = /T\d{2}:\d{2}/.test(rawEnd);
+                    end = hasExplicitTime ? parsed : _localEndOfDay(parsed);
+                }
             }
         }
 
@@ -968,15 +976,34 @@ module.exports = function createDataProvider(deps) {
             end = _localEndOfDay(new Date(nowLocal.getFullYear(), nowLocal.getMonth() + 1, 0));
         }
 
-        // 🔥 HYBRID MODE: Use snapshot for accounts/companies if available, MongoDB for everything else
-        const useSnapshotAccounts = snapshot && Array.isArray(snapshot.accounts) && snapshot.accounts.length > 0;
-        const useSnapshotCompanies = snapshot && Array.isArray(snapshot.companies) && snapshot.companies.length > 0;
+        // 🔥 HYBRID MODE: Use snapshot for accounts/companies if available, MongoDB for everything else.
+        // Scope snapshot entities to current workspace to avoid cross-workspace leakage.
+        const wsScope = workspaceId ? String(workspaceId) : null;
+        const snapshotAccountsScoped = (snapshot && Array.isArray(snapshot.accounts))
+            ? snapshot.accounts.filter((acc) => {
+                if (!wsScope) return true;
+                const accWs = acc?.workspaceId;
+                if (!accWs) return true; // legacy snapshot rows without workspaceId
+                return String(accWs) === wsScope;
+            })
+            : [];
+        const snapshotCompaniesScoped = (snapshot && Array.isArray(snapshot.companies))
+            ? snapshot.companies.filter((company) => {
+                if (!wsScope) return true;
+                const cWs = company?.workspaceId;
+                if (!cWs) return true; // legacy snapshot rows without workspaceId
+                return String(cWs) === wsScope;
+            })
+            : [];
+
+        const useSnapshotAccounts = snapshotAccountsScoped.length > 0;
+        const useSnapshotCompanies = snapshotCompaniesScoped.length > 0;
 
         if (useSnapshotAccounts && _isDebug()) {
-            console.log(`[dataProvider] 🔥 Using SNAPSHOT for accounts (${snapshot.accounts.length} accounts)`);
+            console.log(`[dataProvider] 🔥 Using SNAPSHOT for accounts (${snapshotAccountsScoped.length} accounts, workspace-scoped=${!!wsScope})`);
         }
         if (useSnapshotCompanies && _isDebug()) {
-            console.log(`[dataProvider] 🔥 Using SNAPSHOT for companies (${snapshot.companies.length} companies)`);
+            console.log(`[dataProvider] 🔥 Using SNAPSHOT for companies (${snapshotCompaniesScoped.length} companies, workspace-scoped=${!!wsScope})`);
         }
 
         // Build promises array conditionally
@@ -985,7 +1012,7 @@ module.exports = function createDataProvider(deps) {
         // Accounts: snapshot priority, fallback to MongoDB
         if (useSnapshotAccounts) {
             promises.push(Promise.resolve({
-                accounts: snapshot.accounts.map(a => ({
+                accounts: snapshotAccountsScoped.map(a => ({
                     _id: String(a._id || a.id || a.accountId || ''),
                     name: a.name || a.accountName || 'Счет',
                     currentBalance: Math.round(Number(a.balance ?? a.currentBalance ?? 0)),
@@ -1012,7 +1039,7 @@ module.exports = function createDataProvider(deps) {
 
         // Companies: snapshot priority, fallback to MongoDB
         if (useSnapshotCompanies) {
-            promises.push(Promise.resolve(snapshot.companies.map(c => ({
+            promises.push(Promise.resolve(snapshotCompaniesScoped.map(c => ({
                 id: String(c._id || c.id || ''),
                 name: c.name || `Компания ${String(c._id || c.id || '').slice(-4)}`
             })).filter(c => c.id && c.name)));
