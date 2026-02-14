@@ -462,6 +462,206 @@ function buildMonthAssessmentReport({ dbData, formatTenge, explicitExpensesStatu
     return lines.join('\n');
 }
 
+function _parseDateFromRuText(text) {
+    const source = String(text || '');
+    const m = source.match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
+    if (!m) return null;
+
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
+    const yyRaw = Number(m[3]);
+    const yyyy = yyRaw < 100 ? (2000 + yyRaw) : yyRaw;
+    if (!Number.isFinite(dd) || !Number.isFinite(mm) || !Number.isFinite(yyyy)) return null;
+    if (dd < 1 || dd > 31 || mm < 1 || mm > 12) return null;
+
+    const d = new Date(Date.UTC(yyyy, mm - 1, dd, 12, 0, 0, 0));
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function _extractDeferredDateFromText(text) {
+    const source = String(text || '');
+
+    const explicit = source.match(/перенос\w*[\s\S]{0,80}?на\s+(\d{1,2}\.\d{1,2}\.\d{2,4})/i);
+    if (explicit && explicit[1]) {
+        return _parseDateFromRuText(explicit[1]);
+    }
+
+    const allOnDates = Array.from(source.matchAll(/на\s+(\d{1,2}\.\d{1,2}\.\d{2,4})/gi));
+    if (allOnDates.length) {
+        const last = allOnDates[allOnDates.length - 1][1];
+        return _parseDateFromRuText(last);
+    }
+
+    return _parseDateFromRuText(source);
+}
+
+function _opTouchesOpenAccounts(op, openIds) {
+    const acc = op?.accountId ? String(op.accountId) : null;
+    const fromAcc = op?.fromAccountId ? String(op.fromAccountId) : null;
+    const toAcc = op?.toAccountId ? String(op.toAccountId) : null;
+    return (acc && openIds.has(acc))
+        || (fromAcc && openIds.has(fromAcc))
+        || (toAcc && openIds.has(toAcc));
+}
+
+function _opOpenDelta(op, openIds) {
+    const amount = Math.abs(_toFiniteNumber(op?.amount));
+    if (!amount) return 0;
+
+    if (op?.kind === 'income') {
+        const acc = op?.accountId ? String(op.accountId) : null;
+        return acc && openIds.has(acc) ? amount : 0;
+    }
+    if (op?.kind === 'expense') {
+        const acc = op?.accountId ? String(op.accountId) : null;
+        return acc && openIds.has(acc) ? -amount : 0;
+    }
+    if (op?.kind === 'transfer') {
+        const fromAcc = op?.fromAccountId ? String(op.fromAccountId) : null;
+        const toAcc = op?.toAccountId ? String(op.toAccountId) : null;
+        const fromOpen = !!(fromAcc && openIds.has(fromAcc));
+        const toOpen = !!(toAcc && openIds.has(toAcc));
+        if (fromOpen && !toOpen) return -amount;
+        if (!fromOpen && toOpen) return amount;
+        return 0;
+    }
+
+    return 0;
+}
+
+function _extractThresholdFromText(text) {
+    const threshold = _extractAmountAfterKeywords(text, ['не\\s+ниже', 'не\\s+меньше', 'порог', 'минимальн']);
+    if (Number.isFinite(threshold)) return Math.round(Math.abs(threshold));
+    return null;
+}
+
+function buildStressTestReport({ query, dbData, formatTenge }) {
+    const q = String(query || '');
+    const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
+    const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
+
+    const openAccounts = accounts.filter(a => !a?.isHidden && !a?.isExcluded);
+    const openIds = new Set(openAccounts.map(a => String(a?._id || a?.id || '')));
+    const startOpen = _toFiniteNumber(dbData?.accountsData?.totals?.open?.current);
+
+    if (!openAccounts.length) {
+        return 'Стресс-тест: открытые счета не найдены в текущем контексте.';
+    }
+
+    const periodEndRaw = dbData?.meta?.periodEnd || null;
+    const periodEnd = _parseDateFromRuText(periodEndRaw) || new Date(Date.now() + 30 * 86400000);
+
+    const deferAmount = _extractAmountAfterKeywords(q, ['поступлен', 'доход', 'аренд'])
+        || (_extractMoneyCandidates(q).sort((a, b) => Math.abs(b) - Math.abs(a))[0] ?? null);
+    const deferCategoryNeedle = _extractRequestedCategoryNeedle(q);
+    const deferDate = _extractDeferredDateFromText(q);
+    const threshold = _extractThresholdFromText(q) || 1_000_000;
+
+    const futureOpenOps = ops
+        .filter((op) => !op?.isFact && _opTouchesOpenAccounts(op, openIds))
+        .map((op, idx) => ({ ...op, _idx: idx }))
+        .filter((op) => {
+            const d = op?.ts ? new Date(op.ts) : (op?.dateIso ? new Date(op.dateIso) : null);
+            if (!d || Number.isNaN(d.getTime())) return false;
+            return d.getTime() <= periodEnd.getTime();
+        });
+
+    let deferredOpIdx = null;
+    if (Number.isFinite(deferAmount)) {
+        const categoryNeedleNorm = _normalizeForMatch(deferCategoryNeedle || '');
+        const categoryNeedleStem = _stemRuToken(deferCategoryNeedle || '');
+        const incomeCandidates = futureOpenOps
+            .filter(op => op?.kind === 'income')
+            .map((op) => {
+                const amount = Math.abs(_toFiniteNumber(op?.amount));
+                const diff = Math.abs(amount - Math.abs(deferAmount));
+                const categoryName = _normalizeForMatch(op?.categoryName || '');
+                const categoryStem = _stemRuToken(op?.categoryName || '');
+                const categoryMatches = !categoryNeedleNorm
+                    || (
+                        (categoryName && (categoryName.includes(categoryNeedleNorm) || categoryNeedleNorm.includes(categoryName)))
+                        || (categoryNeedleStem && categoryStem && (categoryStem.includes(categoryNeedleStem) || categoryNeedleStem.includes(categoryStem)))
+                    );
+                const catPenalty = categoryMatches ? 0 : Math.max(1, Math.round(Math.abs(deferAmount) * 0.001));
+                return { op, score: diff + catPenalty };
+            })
+            .sort((a, b) => a.score - b.score);
+
+        if (incomeCandidates.length && incomeCandidates[0].score <= Math.max(1000, Math.abs(deferAmount) * 0.01)) {
+            deferredOpIdx = incomeCandidates[0].op._idx;
+        }
+    }
+
+    const shouldExcludeDeferred = deferredOpIdx !== null
+        && deferDate
+        && deferDate.getTime() > periodEnd.getTime();
+
+    const scenarioOps = futureOpenOps.filter((op) => {
+        if (!shouldExcludeDeferred) return true;
+        return op._idx !== deferredOpIdx;
+    });
+
+    const dayNetMap = new Map(); // dd.mm.yy -> { net, ts }
+    scenarioOps.forEach((op) => {
+        const d = op?.ts ? new Date(op.ts) : (op?.dateIso ? new Date(op.dateIso) : null);
+        if (!d || Number.isNaN(d.getTime())) return;
+        const key = _fmtDateKZ(d);
+        const delta = _opOpenDelta(op, openIds);
+        if (!dayNetMap.has(key)) {
+            dayNetMap.set(key, { ts: d.getTime(), net: 0 });
+        }
+        const rec = dayNetMap.get(key);
+        rec.net += delta;
+        dayNetMap.set(key, rec);
+    });
+
+    const orderedDays = Array.from(dayNetMap.entries())
+        .map(([dateKey, rec]) => ({ dateKey, ts: rec.ts, net: rec.net }))
+        .sort((a, b) => a.ts - b.ts);
+
+    let running = startOpen;
+    let minBalance = startOpen;
+    let minDate = dbData?.meta?.today || periodEndRaw || '?';
+
+    orderedDays.forEach((day) => {
+        running += day.net;
+        if (running < minBalance) {
+            minBalance = running;
+            minDate = day.dateKey;
+        }
+    });
+
+    const endBalance = running;
+    const hasCashGap = minBalance < 0;
+    const bufferToThreshold = Math.max(0, threshold - minBalance);
+
+    const lines = [];
+    lines.push(`Стресс-тест (${dbData?.meta?.periodStart || '?'} — ${dbData?.meta?.periodEnd || '?'})`);
+    lines.push(`• Старт открытых счетов: ${formatTenge(startOpen)}`);
+    if (shouldExcludeDeferred && Number.isFinite(deferAmount)) {
+        const deferDateLabel = deferDate ? _fmtDateKZ(deferDate) : 'вне периода';
+        lines.push(`• Сценарий: поступление ${formatTenge(Math.abs(deferAmount))} перенесено на ${deferDateLabel} (исключено из февраля).`);
+    } else if (Number.isFinite(deferAmount)) {
+        lines.push(`• Сценарий: перенос поступления ${formatTenge(Math.abs(deferAmount))} не изменил период расчета.`);
+    }
+    lines.push('');
+    lines.push(`1) Кассовый разрыв на открытых счетах: ${hasCashGap ? 'ДА' : 'НЕТ'}.`);
+    lines.push(`2) Минимальный остаток: ${formatTenge(minBalance)} на ${minDate}.`);
+    lines.push(`3) Остаток на конец периода: ${formatTenge(endBalance)}.`);
+    lines.push(`4) Подушка до порога ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)}.`);
+
+    if (orderedDays.length) {
+        lines.push('');
+        lines.push('Ключевые будущие дни (чистый эффект по открытым счетам):');
+        orderedDays.slice(0, 6).forEach((d) => {
+            const sign = d.net >= 0 ? '+' : '';
+            lines.push(`• ${d.dateKey}: ${sign}${formatTenge(d.net)}`);
+        });
+    }
+
+    return lines.join('\n');
+}
+
 function _normalizeForMatch(text) {
     return String(text || '')
         .toLowerCase()
@@ -892,6 +1092,8 @@ async function handleDeepQuery({
     const asksOpenScope = /(открыт.*счет|по открытым|открытые счета)/i.test(qLower);
     const asksHiddenScope = /(скрыт.*счет|по скрытым|скрытые счета)/i.test(qLower);
     const wantsOperationsList = mentionsOperations && (asksOperationsList || asksOpenScope || asksHiddenScope);
+    const wantsStressTest = /(стресс|stress[-\s]*test|стресс[-\s]*тест)/i.test(qLower)
+        && /(перенос|перенест|сдвин|отлож|кассов|подушк|min|минимальн|конец.*месяц|конец.*феврал)/i.test(qLower);
     const hasReconciliationKeywords = /(разниц|не\s*сход|не\s*бь[её]тся|сверк|банкинг|в\s*систем[еы]|по\s*системе|из\s*банка|в\s*банке|реальн.*банк)/i.test(qLower);
     const hasWhereLostPhrase = /где\s+потерял|где\s+потеряли|куда\s+дел/.test(qLower);
     const wantsBalanceReconciliation = (moneyCandidates.length >= 2 && hasReconciliationKeywords)
@@ -921,6 +1123,14 @@ async function handleDeepQuery({
         session.prefs.livingMonthly = maybeMoney;
         session.pending = null;
         justSetLiving = true;
+    }
+
+    // =====================
+    // OPERATIONS LIST (deterministic, no LLM)
+    // =====================
+    if (wantsStressTest) {
+        const answer = buildStressTestReport({ query, dbData, formatTenge });
+        return { answer, shouldSaveToHistory: true };
     }
 
     // =====================
