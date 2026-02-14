@@ -470,6 +470,59 @@ function buildMonthAssessmentReport({ dbData, formatTenge, explicitExpensesStatu
     return lines.join('\n');
 }
 
+function buildEndOfMonthSurvivalReport({ dbData, formatTenge }) {
+    const periodStart = dbData?.meta?.periodStart || '?';
+    const periodEnd = dbData?.meta?.periodEnd || '?';
+    const nowTs = Number.isFinite(Number(dbData?.meta?.todayTimestamp))
+        ? Number(dbData.meta.todayTimestamp)
+        : Date.now();
+
+    const totals = dbData?.accountsData?.totals || {};
+    const openCash = _toFiniteNumber(totals?.open?.current);
+
+    const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
+    const futureRows = timeline
+        .map((t) => {
+            const date = t?.date ? new Date(t.date) : null;
+            const ts = date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
+            const income = _toFiniteNumber(t?.income);
+            const expense = _toFiniteNumber(t?.expense);
+            const offsetExpense = _toFiniteNumber(t?.offsetExpense);
+            const withdrawal = _toFiniteNumber(t?.withdrawal);
+            const outflow = Math.max(0, expense - offsetExpense) + withdrawal;
+            const net = income - outflow;
+            return { ts, date, income, outflow, net };
+        })
+        .filter((r) => Number.isFinite(r.ts) && r.ts > nowTs)
+        .sort((a, b) => a.ts - b.ts);
+
+    const futureIncome = futureRows.reduce((s, r) => s + r.income, 0);
+    const futureOutflow = futureRows.reduce((s, r) => s + r.outflow, 0);
+
+    let running = openCash;
+    let minBalance = openCash;
+    let minDate = null;
+    futureRows.forEach((r) => {
+        running += r.net;
+        if (running < minBalance) {
+            minBalance = running;
+            minDate = r.date;
+        }
+    });
+    const endBalance = running;
+    const hasGap = minBalance < 0;
+
+    const lines = [];
+    lines.push(`Итог: ${hasGap ? 'есть риск кассового разрыва' : 'до конца месяца доживаем без кассового разрыва'}.`);
+    lines.push(`Период: ${periodStart} — ${periodEnd}.`);
+    lines.push(`Сейчас на открытых счетах: ${formatTenge(openCash)}.`);
+    lines.push(`До конца периода: доходы ${formatTenge(futureIncome)}, расходы ${formatTenge(futureOutflow)}.`);
+    lines.push(`Минимум: ${formatTenge(minBalance)}${minDate ? ` (${_fmtDateKZ(minDate)})` : ''}.`);
+    lines.push(`Конец периода: ${formatTenge(endBalance)}.`);
+
+    return lines.join('\n');
+}
+
 function _parseDateFromRuText(text) {
     const source = String(text || '');
     const m = source.match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
@@ -1712,6 +1765,9 @@ function _applyDeepBehaviorProtocol({ query, dbData, answer, branch = 'general',
     const text = String(answer || '').trim();
     if (!text) return answer;
     if (keepRawDeterministic) return text;
+    if (/(коротк|кратк|без\s+воды|только\s+итог|просто\s+ответ|как\s+нам\s+дожить\s+до\s+конца\s+месяца)/i.test(String(query || '').toLowerCase())) {
+        return text;
+    }
     if (/\?/.test(text)) return text; // already asks follow-up
 
     const followUp = _suggestDeepFollowUpQuestion({ query, dbData, branch });
@@ -1963,6 +2019,7 @@ async function handleDeepQuery({
     const wantsTaxOptimization = /налог|опн|сн|кпн|упрощ[её]нк|оптимизац.*налог/i.test(qLower);
     const wantsExit = /продать.*бизнес|продажа.*бизнес|exit|выход|оценка.*бизнес/i.test(qLower);
     let wantsSpendLimit = /(сколько .*тратить|лимит.*расход|безболезненн|ремонт|потратить.*остаться в плюсе)/i.test(qLower);
+    let wantsSurviveToMonthEnd = /(как\s+нам\s+дожить\s+до\s+конца\s+месяца|дожить\s+до\s+конца\s+месяца|хватит.*до\s+конца\s+месяца|дотянем.*до\s+конца\s+месяца)/i.test(qLower);
 
     const llmIntent = await _classifyDeepIntentLLM({ query, openAiChat, modelDeep });
     const llmCanOverride = !!llmIntent && llmIntent.intent !== 'unknown' && llmIntent.confidence >= 0.7;
@@ -1978,6 +2035,11 @@ async function handleDeepQuery({
         wantsSpendLimit = wantsSpendLimit || force === 'spend_limit';
         wantsFinance = wantsFinance || force === 'finance';
         wantsInvest = wantsInvest || force === 'invest';
+    }
+
+    if (wantsSurviveToMonthEnd) {
+        const answer = buildEndOfMonthSurvivalReport({ dbData, formatTenge });
+        return { answer, shouldSaveToHistory: true };
     }
 
     let justSetLiving = false;
