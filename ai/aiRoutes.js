@@ -641,10 +641,10 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // 🧠 LIVING CFO: Conversation Engine (primary handler for ALL modes)
+      // 🧠 LIVING CFO: Conversation Engine (ONLY for deep mode)
       // =========================
-      {
-        // Lazy-init conversation engine (needs _openAiChat defined below)
+      if (isDeep) {
+        // Lazy-init conversation engine
         if (!conversationEngine) {
           conversationEngine = createConversationEngine({
             glossaryService,
@@ -661,7 +661,7 @@ module.exports = function createAiRouter(deps) {
           const result = await conversationEngine.processMessage({
             userId: userIdStr,
             message: q,
-            mode: isDeep ? 'deep' : 'freeform',
+            mode: 'deep',
             chatHistory,
             dataPacketOptions: {
               includeHidden: true,
@@ -697,7 +697,7 @@ module.exports = function createAiRouter(deps) {
           });
         } catch (engineErr) {
           console.error('[AI_LIVING_CFO_ERROR]', engineErr?.message || engineErr);
-          // Fall through to legacy quick+deep pipeline
+          // Fall through to legacy deep pipeline below
         }
       }
 
