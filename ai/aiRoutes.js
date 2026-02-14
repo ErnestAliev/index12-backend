@@ -97,6 +97,18 @@ module.exports = function createAiRouter(deps) {
   const contextPacketsEnabled = !!contextPacketService?.enabled;
   const quickMode = require('./modes/quickMode');
 
+  // 🧠 Living CFO: Memory + Intent + Conversation Engine
+  const { AiGlossary, AiUserProfile } = models;
+  const createGlossaryService = require('./memory/glossaryService');
+  const createUserProfileService = require('./memory/userProfileService');
+  const { createConversationEngine } = require('./engine/conversationEngine');
+
+  const glossaryService = createGlossaryService({ AiGlossary });
+  const profileService = createUserProfileService({ AiUserProfile });
+
+  // Conversation engine will be initialized after _openAiChat is defined
+  let conversationEngine = null;
+
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
@@ -343,7 +355,7 @@ module.exports = function createAiRouter(deps) {
 
       const hasExpected = Object.prototype.hasOwnProperty.call(item || {}, 'value');
       if (hasExpected && !_isExpectedMatch(resolved.value, item.value)) {
-        continue;
+        // keep the path as grounded proof; value mismatch should not discard a valid reference path
       }
 
       validatedFacts.push({
@@ -360,12 +372,13 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
-  const _buildDeterministicDeepFallback = ({ packet }) => {
+  const _buildDeterministicDeepFallback = ({ packet, query }) => {
     const n = (v) => {
       const x = Number(v);
       return Number.isFinite(x) ? x : 0;
     };
 
+    const qLower = String(query || '').toLowerCase();
     const d = packet?.derived || {};
     const totals = d?.totals || {};
     const ops = d?.operationsSummary || {};
@@ -378,10 +391,64 @@ module.exports = function createAiRouter(deps) {
     const hasLiq = !!liq?.available;
     const minDate = String(liq?.minClosingBalance?.date || '');
     const minAmount = n(liq?.minClosingBalance?.amount);
-    const minLabel = hasLiq
-      ? `${_formatTenge(minAmount)} на ${minDate || 'дате периода'}`
-      : 'н/д (нет timeline в контексте)';
-    return `Технический fallback по данным пакета: текущий остаток ${_formatTenge(current)}, минимум в периоде ${minLabel}, конец периода ${_formatTenge(forecast)}, плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
+    const minLabel = hasLiq ? `${_formatTenge(minAmount)} на ${minDate || 'дате периода'}` : null;
+
+    const asksOpenAccountsReport = /(открыт.*счет|открыт.*сч[её]т|только.*открыт|по открытым)/i.test(qLower)
+      && /(отчет|отч[её]т|покажи|сделай|сводк|баланс|сч[её]т)/i.test(qLower);
+
+    if (asksOpenAccountsReport) {
+      const accounts = Array.isArray(packet?.normalized?.accounts) ? packet.normalized.accounts : [];
+      const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+      const openAccounts = accounts.filter((a) => !a?.isHidden && !a?.isExcluded);
+      const openIds = new Set(openAccounts.map((a) => String(a?._id || a?.id || '')).filter(Boolean));
+
+      let factIncome = 0;
+      let factExpense = 0;
+      let planIncome = 0;
+      let planExpense = 0;
+
+      for (const ev of events) {
+        const kind = String(ev?.kind || ev?.type || '');
+        const isFact = !!ev?.isFact;
+        const amount = Math.abs(n(ev?.amount));
+        const accountId = ev?.accountId ? String(ev.accountId) : null;
+        if (!accountId || !openIds.has(accountId)) continue;
+        if (kind === 'income') {
+          if (isFact) factIncome += amount;
+          else planIncome += amount;
+        } else if (kind === 'expense') {
+          if (isFact) factExpense += amount;
+          else planExpense += amount;
+        }
+      }
+
+      const factNet = factIncome - factExpense;
+      const planNet = planIncome - planExpense;
+      const totalNet = factNet + planNet;
+
+      const lines = [];
+      lines.push('Итог: отчет по открытым счетам.');
+      lines.push('Открытые счета (остатки):');
+      if (!openAccounts.length) {
+        lines.push('- Нет открытых счетов в данных.');
+      } else {
+        for (const acc of openAccounts.slice(0, 20)) {
+          const bal = n(acc?.currentBalance ?? acc?.balance);
+          lines.push(`- ${String(acc?.name || 'Счет')}: ${_formatTenge(bal)}`);
+        }
+      }
+      lines.push(`Итого: ${_formatTenge(current)}`);
+      lines.push('Движение по открытым счетам (период):');
+      lines.push(`Факт: доходы ${_formatTenge(factIncome)}, расходы ${_formatTenge(factExpense)}, чистый поток ${_formatTenge(factNet)}`);
+      lines.push(`План: доходы ${_formatTenge(planIncome)}, расходы ${_formatTenge(planExpense)}, чистый поток ${_formatTenge(planNet)}`);
+      lines.push(`Итого: ${_formatTenge(totalNet)}`);
+      return lines.join('\n');
+    }
+
+    if (hasLiq) {
+      return `Итог: текущий остаток ${_formatTenge(current)}, к концу периода прогноз ${_formatTenge(forecast)}. Минимум ликвидности: ${minLabel}. Плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
+    }
+    return `Итог: текущий остаток ${_formatTenge(current)}, к концу периода прогноз ${_formatTenge(forecast)}. Плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
   };
 
   const _safeWriteAnalysisJson = ({ userId, payload }) => {
@@ -404,7 +471,7 @@ module.exports = function createAiRouter(deps) {
   // =========================
   // OpenAI caller (supports model override)
   // =========================
-  const _openAiChat = async (messages, { temperature = 0, maxTokens = 2000, modelOverride = null, timeout = 60000 } = {}) => {
+  const _openAiChat = async (messages, { temperature = 0, maxTokens = 2000, modelOverride = null, timeout = 60000, responseFormat = null } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn('OPENAI_API_KEY is missing');
@@ -424,6 +491,9 @@ module.exports = function createAiRouter(deps) {
       max_completion_tokens: maxTokens,
     };
     if (!isReasoningModel) payloadObj.temperature = temperature;
+    if (responseFormat && typeof responseFormat === 'object') {
+      payloadObj.response_format = responseFormat;
+    }
 
     const payload = JSON.stringify(payloadObj);
 
@@ -571,57 +641,68 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // CONTEXT PACKET UPSERT (monthly, for DEEP mode)
+      // 🧠 LIVING CFO: Conversation Engine (replaces raw quick+deep for non-deep mode)
       // =========================
-      if (isDeep && contextPacketsEnabled) {
+      if (!isDeep) {
+        // Lazy-init conversation engine (needs _openAiChat defined below)
+        if (!conversationEngine) {
+          conversationEngine = createConversationEngine({
+            glossaryService,
+            profileService,
+            openAiChat: _openAiChat,
+            buildDataPacket: async (uid, opts) => dataProvider.buildDataPacket(uid, opts),
+            quickMode,
+            formatTenge: _formatTenge
+          });
+        }
+
         try {
-          const nowRef = _safeDate(req?.body?.asOf) || new Date();
-          const periodFilter = req?.body?.periodFilter || {};
-          const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
-          const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
-          const workspaceId = req.user?.currentWorkspaceId || null;
-          const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
-          const packetUserId = String(effectiveUserId || userIdStr);
-          const packetPayload = buildContextPacketPayload({
-            dbData,
-            promptText: deepPrompt,
-            templateVersion: 'deep-v1',
-            dictionaryVersion: 'dict-v1'
+          const chatHistory = _getHistoryMessages(userIdStr);
+          const result = await conversationEngine.processMessage({
+            userId: userIdStr,
+            message: q,
+            mode: isDeep ? 'deep' : 'freeform',
+            chatHistory,
+            dataPacketOptions: {
+              includeHidden: true,
+              visibleAccountIds: null,
+              dateRange: req?.body?.periodFilter || null,
+              workspaceId: req.user?.currentWorkspaceId || null,
+              now: req?.body?.asOf || null,
+              snapshot: req?.body?.snapshot || null,
+            },
+            dbData  // Pass pre-built data to avoid double-fetch
           });
 
-          let shouldUpsertPacket = true;
-          if (periodKey) {
-            const existingPacket = await contextPacketService.getMonthlyPacket({
-              workspaceId,
-              userId: packetUserId,
-              periodKey
-            });
-            const existingHash = String(existingPacket?.stats?.sourceHash || '');
-            const nextHash = String(packetPayload?.stats?.sourceHash || '');
-            if (existingHash && nextHash && existingHash === nextHash) {
-              shouldUpsertPacket = false;
-            }
+          const answer = String(result?.text || '').trim() || 'Нет ответа.';
+
+          _pushHistory(userIdStr, 'user', q);
+          _pushHistory(userIdStr, 'assistant', answer);
+
+          if (shouldDebugLog) {
+            console.log('[AI_LIVING_CFO]', JSON.stringify({
+              intent: result?.intent?.intent || 'unknown',
+              source: result?.source || 'unknown',
+              answerLength: answer.length
+            }));
           }
 
-          if (shouldUpsertPacket) {
-            await contextPacketService.upsertMonthlyPacket({
-              workspaceId,
-              userId: packetUserId,
-              periodKey,
-              periodStart,
-              periodEnd,
-              timezone: 'Asia/Almaty',
-              ...packetPayload
-            });
-          }
-        } catch (packetErr) {
-          console.error('[AI][context-packet] upsert failed:', packetErr?.message || packetErr);
+          return res.json({
+            text: answer,
+            debug: shouldDebugLog ? {
+              intent: result?.intent,
+              source: result?.source,
+              engine: 'living_cfo'
+            } : undefined
+          });
+        } catch (engineErr) {
+          console.error('[AI_LIVING_CFO_ERROR]', engineErr?.message || engineErr);
+          // Fall through to legacy quick+deep pipeline
         }
       }
 
       // =========================
-      // TRY QUICK MODE (deterministic, fast)
-      // Skip if user explicitly chose Deep Mode (preserves conversation context)
+      // LEGACY QUICK MODE (fallback for deep mode or engine failure)
       // =========================
       if (!isDeep) {
         const quickResponse = quickMode.handleQuickQuery({
@@ -651,7 +732,56 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // DEEP MODE (CFO-level analysis)
       // =========================
-      const deepHistory = [];
+
+      // Context packet upsert (monthly, for DEEP mode)
+      if (contextPacketsEnabled) {
+        try {
+          const nowRefPkt = _safeDate(req?.body?.asOf) || new Date();
+          const periodFilterPkt = req?.body?.periodFilter || {};
+          const pStartPkt = _safeDate(periodFilterPkt?.customStart) || _monthStartUtc(nowRefPkt);
+          const pEndPkt = _safeDate(periodFilterPkt?.customEnd) || _monthEndUtc(nowRefPkt);
+          const wsPkt = req.user?.currentWorkspaceId || null;
+          const pKeyPkt = derivePeriodKey(pStartPkt, 'Asia/Almaty');
+          const pUserPkt = String(effectiveUserId || userIdStr);
+          const packetPayload = buildContextPacketPayload({
+            dbData,
+            promptText: deepPrompt,
+            templateVersion: 'deep-v1',
+            dictionaryVersion: 'dict-v1'
+          });
+
+          let shouldUpsertPacket = true;
+          if (pKeyPkt) {
+            const existingPacket = await contextPacketService.getMonthlyPacket({
+              workspaceId: wsPkt,
+              userId: pUserPkt,
+              periodKey: pKeyPkt
+            });
+            const existingHash = String(existingPacket?.stats?.sourceHash || '');
+            const nextHash = String(packetPayload?.stats?.sourceHash || '');
+            if (existingHash && nextHash && existingHash === nextHash) {
+              shouldUpsertPacket = false;
+            }
+          }
+
+          if (shouldUpsertPacket) {
+            await contextPacketService.upsertMonthlyPacket({
+              workspaceId: wsPkt,
+              userId: pUserPkt,
+              periodKey: pKeyPkt,
+              periodStart: pStartPkt,
+              periodEnd: pEndPkt,
+              timezone: 'Asia/Almaty',
+              ...packetPayload
+            });
+          }
+        } catch (packetErr) {
+          console.error('[AI][context-packet] upsert failed:', packetErr?.message || packetErr);
+        }
+      }
+
+      // 🔥 FIX: Use actual chat history instead of empty array
+      const deepHistory = _getHistoryMessages(userIdStr).slice(-6);
       const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
       const nowRef = _safeDate(req?.body?.asOf) || new Date();
@@ -752,10 +882,41 @@ module.exports = function createAiRouter(deps) {
         { role: 'user', content: q }
       ];
 
+      const groundedResponseFormat = {
+        type: 'json_schema',
+        json_schema: {
+          name: 'deep_grounded_answer',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              answer: { type: 'string' },
+              facts_used: {
+                type: 'array',
+                minItems: 2,
+                maxItems: 30,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    path: { type: 'string' },
+                    value: { type: 'string' }
+                  },
+                  required: ['path']
+                }
+              }
+            },
+            required: ['answer', 'facts_used']
+          }
+        }
+      };
+
       let rawAnswer = await _openAiChat(groundedMessages, {
         modelOverride: modelDeep,
         maxTokens: 1600,
-        timeout: 120000
+        timeout: 120000,
+        responseFormat: groundedResponseFormat
       });
       let groundedValidation = null;
 
@@ -782,7 +943,8 @@ module.exports = function createAiRouter(deps) {
         rawAnswer = await _openAiChat(groundedMessages, {
           modelOverride: fallbackModel,
           maxTokens: 1600,
-          timeout: 120000
+          timeout: 120000,
+          responseFormat: groundedResponseFormat
         });
         const groundedPayloadRetry = _extractFirstJsonObject(rawAnswer);
         if (groundedPayloadRetry && typeof groundedPayloadRetry === 'object') {
@@ -795,7 +957,7 @@ module.exports = function createAiRouter(deps) {
       }
 
       if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok) {
-        rawAnswer = _buildDeterministicDeepFallback({ packet });
+        rawAnswer = _buildDeterministicDeepFallback({ packet, query: q });
       }
       const answer = String(rawAnswer || '').trim() || 'Нет ответа от AI.';
 

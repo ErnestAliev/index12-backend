@@ -363,6 +363,41 @@ aiContextPacketSchema.index({ workspaceId: 1, userId: 1, periodKey: 1 }, { uniqu
 aiContextPacketSchema.index({ workspaceId: 1, userId: 1, updatedAt: -1 });
 const AiContextPacket = mongoose.model('AiContextPacket', aiContextPacketSchema);
 
+// 🧠 AI Memory: Шпаргалка терминов пользователя
+const aiGlossarySchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
+    term: { type: String, required: true },
+    meaning: { type: String, required: true },
+    source: { type: String, enum: ['user', 'ai_inferred', 'system'], default: 'user' },
+    confidence: { type: Number, default: 1.0 },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+}, { collection: 'ai_glossary' });
+aiGlossarySchema.index({ userId: 1, term: 1 }, { unique: true });
+const AiGlossary = mongoose.model('AiGlossary', aiGlossarySchema);
+
+// 🧠 AI Memory: Профиль пользователя (стиль общения, заметки агента)
+const aiUserProfileSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
+    displayName: { type: String, default: null },
+    communicationStyle: { type: String, enum: ['casual', 'formal', 'brief'], default: 'casual' },
+    detailLevel: { type: String, enum: ['minimal', 'normal', 'detailed'], default: 'normal' },
+    onboardingComplete: { type: Boolean, default: false },
+    knownPreferences: { type: mongoose.Schema.Types.Mixed, default: {} },
+    agentNotes: [{
+        note: String,
+        category: { type: String, enum: ['risk', 'pattern', 'preference', 'reminder'] },
+        createdAt: { type: Date, default: Date.now }
+    }],
+    lastInteraction: { type: Date, default: Date.now },
+    interactionCount: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+}, { collection: 'ai_user_profiles' });
+const AiUserProfile = mongoose.model('AiUserProfile', aiUserProfileSchema);
+
 
 // --- CONFIG ---
 app.use(session({
@@ -1932,7 +1967,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // =================================================================
 app.use('/api/ai', createAiRouter({
     mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category, AiContextPacket },
+    models: { Event, Account, Company, Contractor, Individual, Project, Category, AiContextPacket, AiGlossary, AiUserProfile },
     FRONTEND_URL,
     isAuthenticated,
     getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation
