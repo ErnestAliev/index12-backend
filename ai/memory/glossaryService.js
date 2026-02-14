@@ -12,12 +12,54 @@
 module.exports = function createGlossaryService({ AiGlossary }) {
     if (!AiGlossary) throw new Error('AiGlossary model is required');
 
+    function _workspaceWhere(workspaceId, { includeGlobal = true, exact = false } = {}) {
+        if (exact) {
+            return { workspaceId: workspaceId || null };
+        }
+        if (workspaceId && includeGlobal) {
+            return {
+                $or: [
+                    { workspaceId },
+                    { workspaceId: null },
+                    { workspaceId: { $exists: false } }
+                ]
+            };
+        }
+        return { workspaceId: workspaceId || null };
+    }
+
+    function _pickWorkspaceScoped(entries, workspaceId) {
+        if (!Array.isArray(entries) || !entries.length) return [];
+        if (!workspaceId) return entries;
+
+        const exact = [];
+        const global = [];
+        for (const entry of entries) {
+            const ws = entry?.workspaceId ? String(entry.workspaceId) : null;
+            if (ws && String(workspaceId) === ws) exact.push(entry);
+            else if (!ws) global.push(entry);
+        }
+        return exact.length ? exact : global;
+    }
+
     /**
      * Get all glossary terms for a user
      */
-    async function getGlossary(userId) {
+    async function getGlossary(userId, { workspaceId = null, includeGlobal = true } = {}) {
         try {
-            return await AiGlossary.find({ userId }).sort({ term: 1 }).lean();
+            const where = {
+                userId,
+                ..._workspaceWhere(workspaceId, { includeGlobal })
+            };
+            const rows = await AiGlossary.find(where).sort({ term: 1, updatedAt: -1 }).lean();
+            const scoped = _pickWorkspaceScoped(rows, workspaceId);
+            const byTerm = new Map();
+            scoped.forEach((row) => {
+                const key = String(row?.term || '').toLowerCase();
+                if (!key || byTerm.has(key)) return;
+                byTerm.set(key, row);
+            });
+            return Array.from(byTerm.values()).sort((a, b) => String(a.term || '').localeCompare(String(b.term || '')));
         } catch (err) {
             console.error('[glossaryService] getGlossary error:', err.message);
             return [];
@@ -27,13 +69,17 @@ module.exports = function createGlossaryService({ AiGlossary }) {
     /**
      * Look up a specific term
      */
-    async function lookupTerm(userId, term) {
+    async function lookupTerm(userId, term, { workspaceId = null, includeGlobal = true } = {}) {
         try {
             const normalized = String(term).trim().toLowerCase();
-            return await AiGlossary.findOne({
+            const where = {
                 userId,
-                term: { $regex: new RegExp(`^${_escapeRegex(normalized)}$`, 'i') }
-            }).lean();
+                term: { $regex: new RegExp(`^${_escapeRegex(normalized)}$`, 'i') },
+                ..._workspaceWhere(workspaceId, { includeGlobal })
+            };
+            const rows = await AiGlossary.find(where).sort({ updatedAt: -1 }).lean();
+            const scoped = _pickWorkspaceScoped(rows, workspaceId);
+            return scoped[0] || null;
         } catch (err) {
             console.error('[glossaryService] lookupTerm error:', err.message);
             return null;
@@ -50,7 +96,8 @@ module.exports = function createGlossaryService({ AiGlossary }) {
 
             const existing = await AiGlossary.findOne({
                 userId,
-                term: { $regex: new RegExp(`^${_escapeRegex(normalized)}$`, 'i') }
+                term: { $regex: new RegExp(`^${_escapeRegex(normalized)}$`, 'i') },
+                ..._workspaceWhere(workspaceId, { exact: true })
             });
 
             if (existing) {
@@ -68,7 +115,7 @@ module.exports = function createGlossaryService({ AiGlossary }) {
 
             const entry = new AiGlossary({
                 userId,
-                workspaceId,
+                workspaceId: workspaceId || null,
                 term: normalized,
                 meaning: String(meaning).trim(),
                 source,
@@ -79,7 +126,7 @@ module.exports = function createGlossaryService({ AiGlossary }) {
         } catch (err) {
             // Duplicate key — already exists
             if (err.code === 11000) {
-                return await lookupTerm(userId, term);
+                return await lookupTerm(userId, term, { workspaceId, includeGlobal: false });
             }
             console.error('[glossaryService] addTerm error:', err.message);
             return null;
@@ -89,13 +136,15 @@ module.exports = function createGlossaryService({ AiGlossary }) {
     /**
      * Remove a term from glossary
      */
-    async function removeTerm(userId, term) {
+    async function removeTerm(userId, term, { workspaceId = null, includeGlobal = false } = {}) {
         try {
             const normalized = String(term).trim();
-            await AiGlossary.deleteOne({
+            const where = {
                 userId,
-                term: { $regex: new RegExp(`^${_escapeRegex(normalized)}$`, 'i') }
-            });
+                term: { $regex: new RegExp(`^${_escapeRegex(normalized)}$`, 'i') },
+                ..._workspaceWhere(workspaceId, { includeGlobal, exact: !includeGlobal })
+            };
+            await AiGlossary.deleteOne(where);
             return true;
         } catch (err) {
             console.error('[glossaryService] removeTerm error:', err.message);

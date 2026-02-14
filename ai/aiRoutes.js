@@ -11,6 +11,8 @@ const deepPrompt = require('./prompts/deepPrompt');
 const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketBuilder');
 const fs = require('fs');
 const path = require('path');
+const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
+const { tryQuickRegex } = require('./engine/intentClassifier');
 
 const AIROUTES_VERSION = 'quick-deep-v9.3';
 const https = require('https');
@@ -22,8 +24,15 @@ const https = require('https');
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const _chatSessions = new Map();
 
-const _getChatSession = (userId) => {
-  const key = String(userId || '');
+const _sessionScopeKey = (userId, workspaceId = null) => {
+  const uid = String(userId || '').trim();
+  if (!uid) return '';
+  const ws = workspaceId ? String(workspaceId).trim() : 'default';
+  return `${uid}::${ws || 'default'}`;
+};
+
+const _getChatSession = (userId, workspaceId = null) => {
+  const key = _sessionScopeKey(userId, workspaceId);
   if (!key) return null;
 
   const now = Date.now();
@@ -48,8 +57,8 @@ const _getChatSession = (userId) => {
 // =========================
 const HISTORY_MAX_MESSAGES = 200;
 
-const _pushHistory = (userId, role, content) => {
-  const s = _getChatSession(userId);
+const _pushHistory = (userId, workspaceId, role, content) => {
+  const s = _getChatSession(userId, workspaceId);
   if (!s) return;
   if (!Array.isArray(s.history)) s.history = [];
 
@@ -67,14 +76,14 @@ const _pushHistory = (userId, role, content) => {
   s.expiresAt = Date.now() + SESSION_TTL_MS;
 };
 
-const _getHistoryMessages = (userId) => {
-  const s = _getChatSession(userId);
+const _getHistoryMessages = (userId, workspaceId = null) => {
+  const s = _getChatSession(userId, workspaceId);
   if (!s || !Array.isArray(s.history) || !s.history.length) return [];
   return s.history.slice(-HISTORY_MAX_MESSAGES);
 };
 
-const _clearHistory = (userId) => {
-  const key = String(userId || '');
+const _clearHistory = (userId, workspaceId = null) => {
+  const key = _sessionScopeKey(userId, workspaceId);
   if (!key) return;
   _chatSessions.delete(key);
 };
@@ -98,17 +107,13 @@ module.exports = function createAiRouter(deps) {
   const quickMode = require('./modes/quickMode');
   const chatMode = require('./modes/chatMode');
 
-  // 🧠 Living CFO: Memory + Intent + Conversation Engine
+  // 🧠 Living CFO memory services
   const { AiGlossary, AiUserProfile } = models;
   const createGlossaryService = require('./memory/glossaryService');
   const createUserProfileService = require('./memory/userProfileService');
-  const { createConversationEngine } = require('./engine/conversationEngine');
 
   const glossaryService = createGlossaryService({ AiGlossary });
   const profileService = createUserProfileService({ AiUserProfile });
-
-  // Conversation engine will be initialized after _openAiChat is defined
-  let conversationEngine = null;
 
   const router = express.Router();
 
@@ -342,9 +347,15 @@ module.exports = function createAiRouter(deps) {
   };
 
   const _validateGroundedPayload = ({ packet, payload }) => {
-    const answer = String(payload?.answer || '').trim();
+    const date = String(payload?.date || '').trim();
+    const fact = String(payload?.fact || '').trim();
+    const plan = String(payload?.plan || '').trim();
+    const total = String(payload?.total || '').trim();
+    const question = String(payload?.question || '').trim();
     const facts = Array.isArray(payload?.facts_used) ? payload.facts_used : [];
-    if (!answer) return { ok: false, reason: 'empty_answer' };
+    if (!date || !fact || !plan || !total || !question) {
+      return { ok: false, reason: 'missing_structured_fields' };
+    }
     if (!facts.length) return { ok: false, reason: 'no_facts_used' };
 
     const validatedFacts = [];
@@ -354,9 +365,11 @@ module.exports = function createAiRouter(deps) {
       const resolved = _resolvePath(packet, pathExpr);
       if (!resolved.ok) continue;
 
-      const hasExpected = Object.prototype.hasOwnProperty.call(item || {}, 'value');
-      if (hasExpected && !_isExpectedMatch(resolved.value, item.value)) {
-        // keep the path as grounded proof; value mismatch should not discard a valid reference path
+      if (!Object.prototype.hasOwnProperty.call(item || {}, 'value')) {
+        continue;
+      }
+      if (!_isExpectedMatch(resolved.value, item.value)) {
+        continue;
       }
 
       validatedFacts.push({
@@ -365,21 +378,84 @@ module.exports = function createAiRouter(deps) {
       });
     }
 
-    if (!validatedFacts.length) return { ok: false, reason: 'facts_not_verified' };
+    if (validatedFacts.length < 2) return { ok: false, reason: 'facts_not_verified' };
     return {
       ok: true,
-      answer,
+      structured: { date, fact, plan, total, question },
       validatedFacts
     };
   };
 
-  const _buildDeterministicDeepFallback = ({ packet, query }) => {
+  const _truncateLine = (text, maxLen = 220) => {
+    const src = String(text || '').replace(/\s+/g, ' ').trim();
+    if (src.length <= maxLen) return src;
+    return `${src.slice(0, Math.max(0, maxLen - 1)).trim()}…`;
+  };
+
+  const _formatDeepStructuredText = ({ date, fact, plan, total, question }) => {
+    return [
+      `Дата: ${_truncateLine(date, 100) || '-'}`,
+      `Факт: ${_truncateLine(fact, 220) || '-'}`,
+      `План: ${_truncateLine(plan, 220) || '-'}`,
+      `Итого: ${_truncateLine(total, 220) || '-'}`,
+      `Вопрос: ${_truncateLine(question, 180) || '-'}`,
+    ].join('\n');
+  };
+
+  const _extractAutoRisk = (packet) => {
+    const liq = packet?.derived?.liquiditySignals || {};
+    if (!liq?.available) return null;
+
+    const firstNegDate = String(liq?.firstNegativeDay?.date || '').trim();
+    const firstNegAmount = Number(liq?.firstNegativeDay?.amount);
+    if (firstNegDate && Number.isFinite(firstNegAmount) && firstNegAmount < 0) {
+      return {
+        level: 'critical',
+        text: `кассовый разрыв ${firstNegDate}: ${_formatTenge(Math.abs(firstNegAmount))}`
+      };
+    }
+
+    const lowCount = Number(liq?.lowCashDaysCount || 0);
+    const minDate = String(liq?.minClosingBalance?.date || '').trim();
+    const minAmount = Number(liq?.minClosingBalance?.amount);
+    if (lowCount > 0 && minDate && Number.isFinite(minAmount)) {
+      return {
+        level: 'warn',
+        text: `риск ликвидности ${minDate}: ${_formatTenge(minAmount)}`
+      };
+    }
+
+    return null;
+  };
+
+  const _applyAutoRiskToStructured = ({ packet, structured }) => {
+    const out = { ...(structured || {}) };
+    if (!out.question) {
+      out.question = 'Нужна детализация по датам и категориям?';
+    }
+    const risk = _extractAutoRisk(packet);
+    if (!risk) return out;
+
+    const totalText = String(out.total || '');
+    if (!totalText.toLowerCase().includes('риск')) {
+      out.total = `${totalText}${totalText ? '; ' : ''}⚠️ ${risk.text}`;
+    }
+
+    if (!String(out.question || '').toLowerCase().includes('дат')) {
+      const criticalDate = String(packet?.derived?.liquiditySignals?.firstNegativeDay?.date || '').trim();
+      out.question = risk.level === 'critical'
+        ? (criticalDate ? `Сдвинуть платежи до ${criticalDate} и проверить сценарий?` : 'Нужен сценарий сдвига платежей, чтобы убрать разрыв?')
+        : `Разобрать дни риска и что перенести первым?`;
+    }
+    return out;
+  };
+
+  const _buildDeterministicDeepStructuredFallback = ({ packet }) => {
     const n = (v) => {
       const x = Number(v);
       return Number.isFinite(x) ? x : 0;
     };
 
-    const qLower = String(query || '').toLowerCase();
     const d = packet?.derived || {};
     const totals = d?.totals || {};
     const ops = d?.operationsSummary || {};
@@ -387,69 +463,67 @@ module.exports = function createAiRouter(deps) {
 
     const current = n(totals?.open?.current ?? totals?.all?.current);
     const forecast = n(totals?.open?.future ?? totals?.all?.future);
+    const factIncome = n(ops?.income?.fact?.total);
+    const factExpense = Math.abs(n(ops?.expense?.fact?.total));
+    const factNet = factIncome - factExpense;
     const incForecast = n(ops?.income?.forecast?.total);
     const expForecast = Math.abs(n(ops?.expense?.forecast?.total));
-    const hasLiq = !!liq?.available;
-    const minDate = String(liq?.minClosingBalance?.date || '');
-    const minAmount = n(liq?.minClosingBalance?.amount);
-    const minLabel = hasLiq ? `${_formatTenge(minAmount)} на ${minDate || 'дате периода'}` : null;
+    const planNet = incForecast - expForecast;
+    const totalNet = factNet + planNet;
 
-    const asksOpenAccountsReport = /(открыт.*счет|открыт.*сч[её]т|только.*открыт|по открытым)/i.test(qLower)
-      && /(отчет|отч[её]т|покажи|сделай|сводк|баланс|сч[её]т)/i.test(qLower);
+    const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+    const dateEnd = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+    const dateText = (dateStart && dateEnd && dateStart !== 'Invalid Date' && dateEnd !== 'Invalid Date')
+      ? `${dateStart} - ${dateEnd}`
+      : (dateStart || dateEnd || 'Период не задан');
 
-    if (asksOpenAccountsReport) {
-      const accounts = Array.isArray(packet?.normalized?.accounts) ? packet.normalized.accounts : [];
-      const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
-      const openAccounts = accounts.filter((a) => !a?.isHidden && !a?.isExcluded);
-      const openIds = new Set(openAccounts.map((a) => String(a?._id || a?.id || '')).filter(Boolean));
-
-      let factIncome = 0;
-      let factExpense = 0;
-      let planIncome = 0;
-      let planExpense = 0;
-
-      for (const ev of events) {
-        const kind = String(ev?.kind || ev?.type || '');
-        const isFact = !!ev?.isFact;
-        const amount = Math.abs(n(ev?.amount));
-        const accountId = ev?.accountId ? String(ev.accountId) : null;
-        if (!accountId || !openIds.has(accountId)) continue;
-        if (kind === 'income') {
-          if (isFact) factIncome += amount;
-          else planIncome += amount;
-        } else if (kind === 'expense') {
-          if (isFact) factExpense += amount;
-          else planExpense += amount;
-        }
-      }
-
-      const factNet = factIncome - factExpense;
-      const planNet = planIncome - planExpense;
-      const totalNet = factNet + planNet;
-
-      const lines = [];
-      lines.push('Итог: отчет по открытым счетам.');
-      lines.push('Открытые счета (остатки):');
-      if (!openAccounts.length) {
-        lines.push('- Нет открытых счетов в данных.');
-      } else {
-        for (const acc of openAccounts.slice(0, 20)) {
-          const bal = n(acc?.currentBalance ?? acc?.balance);
-          lines.push(`- ${String(acc?.name || 'Счет')}: ${_formatTenge(bal)}`);
-        }
-      }
-      lines.push(`Итого: ${_formatTenge(current)}`);
-      lines.push('Движение по открытым счетам (период):');
-      lines.push(`Факт: доходы ${_formatTenge(factIncome)}, расходы ${_formatTenge(factExpense)}, чистый поток ${_formatTenge(factNet)}`);
-      lines.push(`План: доходы ${_formatTenge(planIncome)}, расходы ${_formatTenge(planExpense)}, чистый поток ${_formatTenge(planNet)}`);
-      lines.push(`Итого: ${_formatTenge(totalNet)}`);
-      return lines.join('\n');
+    let totalText = `остаток сейчас ${_formatTenge(current)}, конец периода ${_formatTenge(forecast)}, общий поток ${_formatTenge(totalNet)}`;
+    if (liq?.available && liq?.minClosingBalance?.date) {
+      const lowDate = String(liq.minClosingBalance.date);
+      const lowAmt = _formatTenge(n(liq?.minClosingBalance?.amount));
+      totalText = `${totalText}; минимум ${lowAmt} на ${lowDate}`;
     }
 
-    if (hasLiq) {
-      return `Итог: текущий остаток ${_formatTenge(current)}, к концу периода прогноз ${_formatTenge(forecast)}. Минимум ликвидности: ${minLabel}. Плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
+    const structured = {
+      date: dateText,
+      fact: `доходы ${_formatTenge(factIncome)}, расходы ${_formatTenge(factExpense)}, поток ${_formatTenge(factNet)}`,
+      plan: `поступления ${_formatTenge(incForecast)}, расходы ${_formatTenge(expForecast)}, поток ${_formatTenge(planNet)}`,
+      total: totalText,
+      question: 'Нужен разбор по датам, где риски выше всего?'
+    };
+    return _applyAutoRiskToStructured({ packet, structured });
+  };
+
+  const _sanitizeTimelinePayload = (timeline, { periodStart = null, periodEnd = null } = {}) => {
+    if (!Array.isArray(timeline)) return null;
+
+    const startTs = periodStart instanceof Date && !Number.isNaN(periodStart.getTime())
+      ? periodStart.getTime()
+      : null;
+    const endTs = periodEnd instanceof Date && !Number.isNaN(periodEnd.getTime())
+      ? periodEnd.getTime()
+      : null;
+
+    const safeRows = [];
+    for (const row of timeline) {
+      const d = row?.date ? new Date(row.date) : null;
+      if (!(d instanceof Date) || Number.isNaN(d.getTime())) continue;
+      const ts = d.getTime();
+      if (Number.isFinite(startTs) && ts < startTs) continue;
+      if (Number.isFinite(endTs) && ts > endTs) continue;
+      safeRows.push({
+        date: d.toISOString(),
+        income: Number(row?.income) || 0,
+        expense: Number(row?.expense) || 0,
+        offsetExpense: Number(row?.offsetExpense) || 0,
+        withdrawal: Number(row?.withdrawal) || 0,
+        closingBalance: Number(row?.closingBalance) || 0,
+      });
+      if (safeRows.length >= 180) break;
     }
-    return `Итог: текущий остаток ${_formatTenge(current)}, к концу периода прогноз ${_formatTenge(forecast)}. Плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
+
+    safeRows.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return safeRows.length ? safeRows : null;
   };
 
   const _safeWriteAnalysisJson = ({ userId, payload }) => {
@@ -639,6 +713,7 @@ module.exports = function createAiRouter(deps) {
     try {
       const userId = req.user?._id || req.user?.id;
       const userIdStr = String(userId || '');
+      const workspaceId = req.user?.currentWorkspaceId || null;
 
       if (!userIdStr) {
         return res.status(401).json({ error: 'Пользователь не найден' });
@@ -661,7 +736,8 @@ module.exports = function createAiRouter(deps) {
       const requestDebug = req.body?.debugAi === true || String(req.body?.debugAi || '').toLowerCase() === 'true';
 
       const AI_DEBUG = process.env.AI_DEBUG === 'true';
-      const shouldDebugLog = AI_DEBUG || requestDebug;
+      const allowClientDebug = process.env.AI_ALLOW_CLIENT_DEBUG === 'true';
+      const shouldDebugLog = AI_DEBUG || (allowClientDebug && requestDebug);
 
       if (shouldDebugLog) {
         console.log('[AI_QUERY_IN]', JSON.stringify({
@@ -698,76 +774,23 @@ module.exports = function createAiRouter(deps) {
         includeHidden: true, // 🔥 AI always needs full context
         visibleAccountIds: null, // No filtering for AI
         dateRange: req?.body?.periodFilter || null,
-        workspaceId: req.user?.currentWorkspaceId || null,
+        workspaceId,
         now: req?.body?.asOf || null,
         snapshot: req?.body?.snapshot || null, // 🔥 HYBRID: accounts/companies from snapshot, operations from MongoDB
       });
 
       if (timeline) {
-        dbData.meta = dbData.meta || {};
-        dbData.meta.timeline = timeline;
-      }
-
-      // =========================
-      // 🧠 LIVING CFO: Conversation Engine (ONLY for deep mode)
-      // =========================
-      if (isDeep) {
-        // Lazy-init conversation engine
-        if (!conversationEngine) {
-          conversationEngine = createConversationEngine({
-            glossaryService,
-            profileService,
-            openAiChat: _openAiChat,
-            buildDataPacket: async (uid, opts) => dataProvider.buildDataPacket(uid, opts),
-            quickMode,
-            formatTenge: _formatTenge
-          });
-        }
-
-        try {
-          const chatHistory = _getHistoryMessages(userIdStr);
-          const result = await conversationEngine.processMessage({
-            userId: userIdStr,
-            message: q,
-            mode: 'deep',
-            chatHistory,
-            dataPacketOptions: {
-              includeHidden: true,
-              visibleAccountIds: null,
-              dateRange: req?.body?.periodFilter || null,
-              workspaceId: req.user?.currentWorkspaceId || null,
-              now: req?.body?.asOf || null,
-              snapshot: req?.body?.snapshot || null,
-            },
-            dbData  // Pass pre-built data to avoid double-fetch
-          });
-
-          const answer = String(result?.text || '').trim() || 'Нет ответа.';
-
-          _pushHistory(userIdStr, 'user', q);
-          _pushHistory(userIdStr, 'assistant', answer);
-
-          if (shouldDebugLog) {
-            console.log('[AI_LIVING_CFO]', JSON.stringify({
-              intent: result?.intent?.intent || 'unknown',
-              source: result?.source || 'unknown',
-              answerLength: answer.length
-            }));
-          }
-
-          return res.json({
-            text: answer,
-            debug: shouldDebugLog ? {
-              intent: result?.intent,
-              source: result?.source,
-              engine: 'living_cfo'
-            } : undefined
-          });
-        } catch (engineErr) {
-          console.error('[AI_LIVING_CFO_ERROR]', engineErr?.message || engineErr);
-          // Fall through to legacy deep pipeline below
+        const periodFilterForTimeline = req?.body?.periodFilter || {};
+        const nowRefTimeline = _safeDate(req?.body?.asOf) || new Date();
+        const startTimeline = _safeDate(periodFilterForTimeline?.customStart) || _monthStartUtc(nowRefTimeline);
+        const endTimeline = _safeDate(periodFilterForTimeline?.customEnd) || _monthEndUtc(nowRefTimeline);
+        const safeTimeline = _sanitizeTimelinePayload(timeline, { periodStart: startTimeline, periodEnd: endTimeline });
+        if (safeTimeline) {
+          dbData.meta = dbData.meta || {};
+          dbData.meta.timeline = safeTimeline;
         }
       }
+
 
 
       // =========================
@@ -792,8 +815,8 @@ module.exports = function createAiRouter(deps) {
         }
 
         if (quickResponse) {
-          _pushHistory(userIdStr, 'user', q);
-          _pushHistory(userIdStr, 'assistant', quickResponse);
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', quickResponse);
           return res.json({ text: quickResponse });
         }
       }
@@ -802,7 +825,7 @@ module.exports = function createAiRouter(deps) {
       // CHAT MODE (GPT-4o fallback for non-deep, non-quick queries)
       // =========================
       if (!isDeep) {
-        const chatHistory = _getHistoryMessages(userIdStr);
+        const chatHistory = _getHistoryMessages(userIdStr, workspaceId);
         const modelChat = process.env.OPENAI_MODEL || 'gpt-4o';
 
         const chatResponse = await chatMode.handleChatQuery({
@@ -814,14 +837,94 @@ module.exports = function createAiRouter(deps) {
           modelChat
         });
 
-        _pushHistory(userIdStr, 'user', q);
-        _pushHistory(userIdStr, 'assistant', chatResponse);
+        _pushHistory(userIdStr, workspaceId, 'user', q);
+        _pushHistory(userIdStr, workspaceId, 'assistant', chatResponse);
         return res.json({ text: chatResponse });
       }
 
       // =========================
       // DEEP MODE (CFO-level analysis)
       // =========================
+      const memoryUserId = userId;
+      const memoryWorkspaceId = workspaceId || null;
+
+      // Lightweight style adaptation by user signals
+      const profileUpdates = {};
+      if (/(кратк|короче|в 3 строк|в три строк|без воды)/i.test(qLower)) {
+        profileUpdates.detailLevel = 'minimal';
+      } else if (/(подроб|детальн|разверн)/i.test(qLower)) {
+        profileUpdates.detailLevel = 'detailed';
+      }
+      if (/(формальн|официальн|делов)/i.test(qLower)) {
+        profileUpdates.communicationStyle = 'formal';
+      } else if (/(простым|по простому|живым|человеч)/i.test(qLower)) {
+        profileUpdates.communicationStyle = 'casual';
+      }
+      if (Object.keys(profileUpdates).length) {
+        try {
+          await profileService.updateProfile(memoryUserId, profileUpdates, { workspaceId: memoryWorkspaceId });
+        } catch (_) { }
+      }
+
+      const teachMatch = q.match(/^(.{1,30})\s*[-—=:]\s*(.+)$/i);
+      if (teachMatch && String(teachMatch[1] || '').trim().length <= 20) {
+        const term = String(teachMatch[1] || '').trim();
+        const meaning = String(teachMatch[2] || '').trim();
+        if (term && meaning) {
+          await glossaryService.addTerm(memoryUserId, {
+            workspaceId: memoryWorkspaceId,
+            term,
+            meaning,
+            source: 'user',
+            confidence: 1.0
+          });
+          await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
+          const ack = `Записал в шпаргалку: ${term} = ${meaning}`;
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', ack);
+          return res.json({ text: ack });
+        }
+      }
+
+      const [profile, glossaryEntries] = await Promise.all([
+        profileService.getProfile(memoryUserId, { workspaceId: memoryWorkspaceId }),
+        glossaryService.getGlossary(memoryUserId, { workspaceId: memoryWorkspaceId }),
+      ]);
+
+      const unknownTerms = glossaryService.findUnknownTerms(glossaryEntries, dbData?.catalogs?.categories || []);
+      const regexIntent = tryQuickRegex(q);
+      if (!profile?.onboardingComplete && (!regexIntent || !regexIntent.needsData)) {
+        const onboardingText = buildOnboardingMessage({
+          dataPacket: dbData,
+          unknownTerms,
+          profile
+        });
+        if (unknownTerms.length === 0) {
+          await profileService.completeOnboarding(memoryUserId, { workspaceId: memoryWorkspaceId });
+        } else {
+          await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
+        }
+        _pushHistory(userIdStr, workspaceId, 'user', q);
+        _pushHistory(userIdStr, workspaceId, 'assistant', onboardingText);
+        return res.json({ text: onboardingText });
+      }
+      if (!profile?.onboardingComplete && regexIntent?.needsData) {
+        await profileService.completeOnboarding(memoryUserId, { workspaceId: memoryWorkspaceId });
+      }
+
+      const unknownMention = unknownTerms.find((term) => {
+        const key = String(term?.name || '').trim().toLowerCase();
+        return key && qLower.includes(key);
+      });
+      if (unknownMention) {
+        const askMeaning = `Уточни, что означает "${unknownMention.name}" в твоих данных? Я запомню это для следующих ответов.`;
+        _pushHistory(userIdStr, workspaceId, 'user', q);
+        _pushHistory(userIdStr, workspaceId, 'assistant', askMeaning);
+        return res.json({ text: askMeaning });
+      }
+
+      const glossaryContext = glossaryService.buildGlossaryContext(glossaryEntries);
+      const profileContext = profileService.buildProfileContext(profile);
 
       // Context packet upsert (monthly, for DEEP mode)
       if (contextPacketsEnabled) {
@@ -871,14 +974,13 @@ module.exports = function createAiRouter(deps) {
       }
 
       // 🔥 FIX: Use actual chat history instead of empty array
-      const deepHistory = _getHistoryMessages(userIdStr).slice(-6);
+      const deepHistory = _getHistoryMessages(userIdStr, workspaceId).slice(-6);
       const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
       const nowRef = _safeDate(req?.body?.asOf) || new Date();
       const periodFilter = req?.body?.periodFilter || {};
       const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
       const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
-      const workspaceId = req.user?.currentWorkspaceId || null;
       const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
       const packetUserId = String(effectiveUserId || userIdStr);
 
@@ -926,18 +1028,21 @@ module.exports = function createAiRouter(deps) {
           }
         };
 
-        const analysisFile = _safeWriteAnalysisJson({
-          userId: userIdStr,
-          payload: {
-            request: {
-              question: q,
-              mode: 'deep',
-              asOf: req?.body?.asOf || null,
-              periodFilter: req?.body?.periodFilter || null
-            },
-            analyzed: packet
-          }
-        });
+        const canWriteAnalysisFile = AI_DEBUG && process.env.AI_DEBUG_WRITE_FILES === 'true';
+        const analysisFile = canWriteAnalysisFile
+          ? _safeWriteAnalysisJson({
+            userId: userIdStr,
+            payload: {
+              request: {
+                question: q,
+                mode: 'deep',
+                asOf: req?.body?.asOf || null,
+                periodFilter: req?.body?.periodFilter || null
+              },
+              analyzed: packet
+            }
+          })
+          : null;
 
         console.log('[AI_DEEP_ANALYSIS]', JSON.stringify({
           ...analysisEnvelope,
@@ -947,6 +1052,18 @@ module.exports = function createAiRouter(deps) {
 
       const groundedMessages = [
         { role: 'system', content: deepPrompt },
+        profileContext
+          ? {
+            role: 'system',
+            content: `Профиль пользователя:\n${profileContext}`
+          }
+          : null,
+        glossaryContext
+          ? {
+            role: 'system',
+            content: `Персональная шпаргалка терминов:\n${glossaryContext}`
+          }
+          : null,
         {
           role: 'system',
           content: [
@@ -954,23 +1071,29 @@ module.exports = function createAiRouter(deps) {
             'Верни ТОЛЬКО JSON-объект без markdown и без пояснений.',
             'Схема JSON:',
             '{',
-            '  "answer": "живой короткий ответ пользователю на русском, без фантазий",',
+            '  "date": "краткий период или ключевая дата",',
+            '  "fact": "кратко: факт по данным",',
+            '  "plan": "кратко: план/прогноз по данным",',
+            '  "total": "кратко: итог + риск (если есть)",',
+            '  "question": "один короткий follow-up вопрос",',
             '  "facts_used": [',
             '    { "path": "path.to.field", "value": <ожидаемое значение из context_packet_json> }',
             '  ]',
             '}',
             'Требования:',
+            '- Каждый блок (date/fact/plan/total/question) — 1 короткая строка.',
             '- Используй минимум 2 факта в facts_used.',
             '- path должен указывать на реальные поля context_packet_json.',
             '- value должен совпадать с данными по path.',
-            '- В answer используй только подтверждаемые факты из facts_used.',
-            '- Все суммы в формате "3 272 059 ₸" (пробелы между тысячами, без запятых).'
+            '- Используй только подтверждаемые факты из facts_used.',
+            '- Все суммы в формате "3 272 059 ₸" (пробелы между тысячами, без запятых).',
+            '- Формат для пользователя всегда 5 строк: Дата/Факт/План/Итого/Вопрос.'
           ].join('\n')
         },
         { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
         ...deepHistory,
         { role: 'user', content: q }
-      ];
+      ].filter(Boolean);
 
       const groundedResponseFormat = {
         type: 'json_schema',
@@ -979,25 +1102,36 @@ module.exports = function createAiRouter(deps) {
           strict: true,
           schema: {
             type: 'object',
-            additionalProperties: false,
-            properties: {
-              answer: { type: 'string' },
-              facts_used: {
-                type: 'array',
-                minItems: 2,
-                maxItems: 30,
-                items: {
+              additionalProperties: false,
+              properties: {
+                date: { type: 'string' },
+                fact: { type: 'string' },
+                plan: { type: 'string' },
+                total: { type: 'string' },
+                question: { type: 'string' },
+                facts_used: {
+                  type: 'array',
+                  minItems: 2,
+                  maxItems: 30,
+                  items: {
                   type: 'object',
                   additionalProperties: false,
                   properties: {
                     path: { type: 'string' },
-                    value: { type: 'string' }
+                    value: {
+                      oneOf: [
+                        { type: 'string' },
+                        { type: 'number' },
+                        { type: 'boolean' },
+                        { type: 'null' }
+                      ]
+                    }
                   },
-                  required: ['path']
+                  required: ['path', 'value']
                 }
               }
             },
-            required: ['answer', 'facts_used']
+            required: ['date', 'fact', 'plan', 'total', 'question', 'facts_used']
           }
         }
       };
@@ -1009,13 +1143,17 @@ module.exports = function createAiRouter(deps) {
         responseFormat: groundedResponseFormat
       });
       let groundedValidation = null;
+      let structuredAnswer = null;
 
       if (!_isNoAiAnswerText(rawAnswer)) {
         const groundedPayload = _extractFirstJsonObject(rawAnswer);
         if (groundedPayload && typeof groundedPayload === 'object') {
           groundedValidation = _validateGroundedPayload({ packet, payload: groundedPayload });
           if (groundedValidation?.ok) {
-            rawAnswer = groundedValidation.answer;
+            structuredAnswer = _applyAutoRiskToStructured({
+              packet,
+              structured: groundedValidation.structured
+            });
           }
         }
       }
@@ -1041,18 +1179,22 @@ module.exports = function createAiRouter(deps) {
           const groundedValidationRetry = _validateGroundedPayload({ packet, payload: groundedPayloadRetry });
           if (groundedValidationRetry?.ok) {
             groundedValidation = groundedValidationRetry;
-            rawAnswer = groundedValidationRetry.answer;
+            structuredAnswer = _applyAutoRiskToStructured({
+              packet,
+              structured: groundedValidationRetry.structured
+            });
           }
         }
       }
 
-      if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok) {
-        rawAnswer = _buildDeterministicDeepFallback({ packet, query: q });
+      if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok || !structuredAnswer) {
+        structuredAnswer = _buildDeterministicDeepStructuredFallback({ packet });
       }
-      const answer = String(rawAnswer || '').trim() || 'Нет ответа от AI.';
+      const answer = _formatDeepStructuredText(structuredAnswer);
 
-      _pushHistory(userIdStr, 'user', q);
-      _pushHistory(userIdStr, 'assistant', answer);
+      await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
+      _pushHistory(userIdStr, workspaceId, 'user', q);
+      _pushHistory(userIdStr, workspaceId, 'assistant', answer);
       return res.json({ text: answer });
 
     } catch (error) {
@@ -1066,16 +1208,18 @@ module.exports = function createAiRouter(deps) {
   // =========================
   router.get('/history', isAuthenticated, (req, res) => {
     const userId = req.user?._id || req.user?.id;
+    const workspaceId = req.user?.currentWorkspaceId || null;
     if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
     const limit = Math.max(1, Math.min(Number(req.query?.limit) || HISTORY_MAX_MESSAGES, HISTORY_MAX_MESSAGES));
-    const hist = _getHistoryMessages(userId).slice(-limit);
+    const hist = _getHistoryMessages(userId, workspaceId).slice(-limit);
     return res.json({ history: hist });
   });
 
   router.delete('/history', isAuthenticated, (req, res) => {
     const userId = req.user?._id || req.user?.id;
+    const workspaceId = req.user?.currentWorkspaceId || null;
     if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
-    _clearHistory(userId);
+    _clearHistory(userId, workspaceId);
     return res.json({ ok: true });
   });
 

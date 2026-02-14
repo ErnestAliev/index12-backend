@@ -11,15 +11,43 @@
 module.exports = function createUserProfileService({ AiUserProfile }) {
     if (!AiUserProfile) throw new Error('AiUserProfile model is required');
 
+    function _profileFilter(userId, workspaceId = null) {
+        return {
+            userId,
+            workspaceId: workspaceId || null
+        };
+    }
+
+    async function _findScopedProfile(userId, workspaceId = null) {
+        const exact = await AiUserProfile.findOne(_profileFilter(userId, workspaceId)).lean();
+        if (exact) return exact;
+        if (workspaceId) {
+            const legacy = await AiUserProfile.findOne({
+                userId,
+                $or: [
+                    { workspaceId: null },
+                    { workspaceId: { $exists: false } }
+                ]
+            }).lean();
+            if (legacy) return legacy;
+        }
+        return null;
+    }
+
     /**
      * Get user profile, create default if doesn't exist
      */
-    async function getProfile(userId) {
+    async function getProfile(userId, { workspaceId = null } = {}) {
         try {
-            let profile = await AiUserProfile.findOne({ userId }).lean();
+            let profile = await _findScopedProfile(userId, workspaceId);
             if (!profile) {
+                profile = _defaultProfile(userId, workspaceId);
+            } else if (!Object.prototype.hasOwnProperty.call(profile, 'workspaceId')) {
+                profile = { ...profile, workspaceId: workspaceId || null };
+            } else if (workspaceId && String(profile.workspaceId || '') !== String(workspaceId)) {
                 profile = {
                     userId,
+                    workspaceId: workspaceId || null,
                     displayName: null,
                     communicationStyle: 'casual',
                     detailLevel: 'normal',
@@ -33,26 +61,31 @@ module.exports = function createUserProfileService({ AiUserProfile }) {
             return profile;
         } catch (err) {
             console.error('[userProfileService] getProfile error:', err.message);
-            return _defaultProfile(userId);
+            return _defaultProfile(userId, workspaceId);
         }
     }
 
     /**
      * Create or update user profile
      */
-    async function updateProfile(userId, updates) {
+    async function updateProfile(userId, updates, { workspaceId = null } = {}) {
         try {
             const now = new Date();
+            const filter = _profileFilter(userId, workspaceId);
             const result = await AiUserProfile.findOneAndUpdate(
-                { userId },
+                filter,
                 {
                     $set: {
                         ...updates,
+                        workspaceId: workspaceId || null,
                         updatedAt: now,
                         lastInteraction: now
                     },
                     $inc: { interactionCount: 1 },
-                    $setOnInsert: { createdAt: now }
+                    $setOnInsert: {
+                        createdAt: now,
+                        workspaceId: workspaceId || null
+                    }
                 },
                 { upsert: true, new: true, lean: true }
             );
@@ -66,15 +99,21 @@ module.exports = function createUserProfileService({ AiUserProfile }) {
     /**
      * Record interaction (update lastInteraction + increment count)
      */
-    async function recordInteraction(userId) {
+    async function recordInteraction(userId, { workspaceId = null } = {}) {
         try {
+            const now = new Date();
             await AiUserProfile.findOneAndUpdate(
-                { userId },
+                _profileFilter(userId, workspaceId),
                 {
-                    $set: { lastInteraction: new Date(), updatedAt: new Date() },
+                    $set: {
+                        workspaceId: workspaceId || null,
+                        lastInteraction: now,
+                        updatedAt: now
+                    },
                     $inc: { interactionCount: 1 },
                     $setOnInsert: {
-                        createdAt: new Date(),
+                        createdAt: now,
+                        workspaceId: workspaceId || null,
                         communicationStyle: 'casual',
                         detailLevel: 'normal',
                         onboardingComplete: false
@@ -90,21 +129,26 @@ module.exports = function createUserProfileService({ AiUserProfile }) {
     /**
      * Add an agent note (memory about user from past conversations)
      */
-    async function addAgentNote(userId, { note, category = 'pattern' }) {
+    async function addAgentNote(userId, { note, category = 'pattern', workspaceId = null }) {
         try {
             if (!note) return;
+            const now = new Date();
             await AiUserProfile.findOneAndUpdate(
-                { userId },
+                _profileFilter(userId, workspaceId),
                 {
                     $push: {
                         agentNotes: {
-                            $each: [{ note, category, createdAt: new Date() }],
+                            $each: [{ note, category, createdAt: now }],
                             $slice: -20 // Keep last 20 notes max
                         }
                     },
-                    $set: { updatedAt: new Date() },
+                    $set: {
+                        workspaceId: workspaceId || null,
+                        updatedAt: now
+                    },
                     $setOnInsert: {
-                        createdAt: new Date(),
+                        createdAt: now,
+                        workspaceId: workspaceId || null,
                         communicationStyle: 'casual',
                         detailLevel: 'normal',
                         onboardingComplete: false
@@ -120,18 +164,18 @@ module.exports = function createUserProfileService({ AiUserProfile }) {
     /**
      * Mark onboarding as complete
      */
-    async function completeOnboarding(userId, { displayName = null } = {}) {
+    async function completeOnboarding(userId, { displayName = null, workspaceId = null } = {}) {
         const updates = { onboardingComplete: true };
         if (displayName) updates.displayName = displayName;
-        return updateProfile(userId, updates);
+        return updateProfile(userId, updates, { workspaceId });
     }
 
     /**
      * Check if user has completed onboarding
      */
-    async function isOnboarded(userId) {
+    async function isOnboarded(userId, { workspaceId = null } = {}) {
         try {
-            const profile = await AiUserProfile.findOne({ userId }).select('onboardingComplete').lean();
+            const profile = await _findScopedProfile(userId, workspaceId);
             return profile?.onboardingComplete === true;
         } catch (err) {
             return false;
@@ -177,9 +221,10 @@ module.exports = function createUserProfileService({ AiUserProfile }) {
     }
 
     // Helpers
-    function _defaultProfile(userId) {
+    function _defaultProfile(userId, workspaceId = null) {
         return {
             userId,
+            workspaceId: workspaceId || null,
             displayName: null,
             communicationStyle: 'casual',
             detailLevel: 'normal',

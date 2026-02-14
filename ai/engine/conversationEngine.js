@@ -32,6 +32,7 @@ function createConversationEngine({
      */
     async function processMessage({
         userId,
+        workspaceId = null,
         message,
         mode = 'freeform',
         chatHistory = [],
@@ -45,14 +46,14 @@ function createConversationEngine({
 
         // 1. Load profile and glossary
         const [profile, glossaryEntries] = await Promise.all([
-            profileService.getProfile(userId),
-            glossaryService.getGlossary(userId)
+            profileService.getProfile(userId, { workspaceId }),
+            glossaryService.getGlossary(userId, { workspaceId })
         ]);
 
         // 2. Check onboarding
         if (!profile.onboardingComplete) {
             return await handleOnboarding({
-                userId, message: text, profile, glossaryEntries,
+                userId, workspaceId, message: text, profile, glossaryEntries,
                 dataPacketOptions, dbData
             });
         }
@@ -65,7 +66,7 @@ function createConversationEngine({
             return handleGlossaryQuestion({ userId, term: intent.term, glossaryEntries, profile });
         }
         if (intent.intent === 'glossary_teach') {
-            return await handleGlossaryTeach({ userId, term: intent.term, meaning: intent.meaning });
+            return await handleGlossaryTeach({ userId, workspaceId, term: intent.term, meaning: intent.meaning });
         }
 
         // 5. Build data packet if needed
@@ -78,23 +79,7 @@ function createConversationEngine({
             }
         }
 
-        // 6. For deterministic intents, try quickMode first
-        if (intent.deterministic && quickMode && dataPacket) {
-            try {
-                const quickResult = quickMode.handleQuickQuery({
-                    query: text,
-                    dbData: dataPacket,
-                    formatTenge: formatTenge || _formatTenge
-                });
-                if (quickResult) {
-                    // Record interaction
-                    profileService.recordInteraction(userId).catch(() => { });
-                    return { text: quickResult, intent, source: 'quick' };
-                }
-            } catch (err) {
-                console.error('[conversationEngine] quickMode error:', err.message);
-            }
-        }
+        // 6. Deep mode: always use LLM (quickMode is handled separately in aiRoutes for quick/chat)
 
         // 7. Build persona prompt with full context
         const glossaryContext = glossaryService.buildGlossaryContext(glossaryEntries);
@@ -152,7 +137,7 @@ function createConversationEngine({
         const responseText = String(response || '').trim();
 
         // 10. Post-processing: record interaction and extract learnings
-        profileService.recordInteraction(userId).catch(() => { });
+        profileService.recordInteraction(userId, { workspaceId }).catch(() => { });
 
         return {
             text: responseText,
@@ -164,7 +149,7 @@ function createConversationEngine({
     /**
      * Handle onboarding flow for new users
      */
-    async function handleOnboarding({ userId, message, profile, glossaryEntries, dataPacketOptions, dbData }) {
+    async function handleOnboarding({ userId, workspaceId = null, message, profile, glossaryEntries, dataPacketOptions, dbData }) {
         let dataPacket = dbData;
         if (!dataPacket) {
             try {
@@ -183,14 +168,14 @@ function createConversationEngine({
         if (teachMatch && teachMatch[1].trim().length <= 20) {
             const term = teachMatch[1].trim();
             const meaning = teachMatch[2].trim();
-            await glossaryService.addTerm(userId, { term, meaning, source: 'user' });
+            await glossaryService.addTerm(userId, { term, meaning, source: 'user', workspaceId });
 
             // Check if more unknown terms remain
-            const updatedGlossary = await glossaryService.getGlossary(userId);
+            const updatedGlossary = await glossaryService.getGlossary(userId, { workspaceId });
             const remaining = glossaryService.findUnknownTerms(updatedGlossary, categories);
 
             if (remaining.length === 0) {
-                await profileService.completeOnboarding(userId);
+                await profileService.completeOnboarding(userId, { workspaceId });
                 return {
                     text: `Отлично, запомнил: ${term} = ${meaning}. Теперь мне всё понятно! Спрашивай что угодно.`,
                     intent: { intent: 'onboarding' },
@@ -210,9 +195,9 @@ function createConversationEngine({
         const quickIntent = require('./intentClassifier').tryQuickRegex(message);
         if (quickIntent && quickIntent.needsData) {
             // User is asking about data → auto-complete onboarding and answer
-            await profileService.completeOnboarding(userId);
+            await profileService.completeOnboarding(userId, { workspaceId });
             return processMessage({
-                userId, message, chatHistory: [],
+                userId, workspaceId, message, chatHistory: [],
                 dataPacketOptions, dbData: dataPacket
             });
         }
@@ -228,9 +213,9 @@ function createConversationEngine({
             // Mark that we've interacted but DON'T complete onboarding yet  
             // (wait for term explanations if there are unknowns)
             if (unknownTerms.length === 0) {
-                await profileService.completeOnboarding(userId);
+                await profileService.completeOnboarding(userId, { workspaceId });
             } else {
-                await profileService.recordInteraction(userId);
+                await profileService.recordInteraction(userId, { workspaceId });
             }
 
             return {
@@ -241,9 +226,9 @@ function createConversationEngine({
         }
 
         // Continuing onboarding conversation — use LLM
-        await profileService.completeOnboarding(userId);
+        await profileService.completeOnboarding(userId, { workspaceId });
         return processMessage({
-            userId, message, chatHistory: [],
+            userId, workspaceId, message, chatHistory: [],
             dataPacketOptions, dbData: dataPacket
         });
     }
@@ -274,8 +259,8 @@ function createConversationEngine({
     /**
      * Handle user teaching a term
      */
-    async function handleGlossaryTeach({ userId, term, meaning }) {
-        const saved = await glossaryService.addTerm(userId, { term, meaning, source: 'user' });
+    async function handleGlossaryTeach({ userId, workspaceId = null, term, meaning }) {
+        const saved = await glossaryService.addTerm(userId, { term, meaning, source: 'user', workspaceId });
         if (saved) {
             return {
                 text: `Запомнил: ${term} = ${meaning}`,
@@ -386,6 +371,32 @@ function createConversationEngine({
                 for (const op of dataPacket.outliers.expense.slice(0, 3)) {
                     parts.push(`  ${op.date} ${_formatTenge(op.amount)} ${op.categoryName || op.description || ''}`);
                 }
+            }
+        }
+
+        // Individual operations (for detailed queries like "покажи список операций")
+        if (Array.isArray(dataPacket.operations) && dataPacket.operations.length > 0) {
+            const ops_list = dataPacket.operations;
+            parts.push(`\nОперации (${ops_list.length} шт.):`);
+            for (const op of ops_list.slice(0, 50)) {
+                const kind = op.kind || op.type || '?';
+                const amount = Math.abs(op.amount || 0);
+                const d = op.date ? new Date(op.date) : null;
+                const dateStr = d ? `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.${String(d.getUTCFullYear()).slice(-2)}` : '??';
+                const cat = op.categoryName || op.category || '';
+                const contractor = op.contractorName || op.contractor || '';
+                const desc = op.description || op.comment || '';
+                const isFact = op.isFact ? 'факт' : 'план';
+                const account = op.accountName || '';
+                const parts2 = [dateStr, kind, _formatTenge(amount), isFact];
+                if (cat) parts2.push(`кат:${cat}`);
+                if (contractor) parts2.push(`контр:${contractor}`);
+                if (account) parts2.push(`счёт:${account}`);
+                if (desc) parts2.push(desc.slice(0, 40));
+                parts.push(`  ${parts2.join(' | ')}`);
+            }
+            if (ops_list.length > 50) {
+                parts.push(`  ... ещё ${ops_list.length - 50} операций`);
             }
         }
 

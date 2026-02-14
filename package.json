@@ -7,6 +7,7 @@
     "dev": "nodemon server.js",
     "test:deep-regression": "node ai/tests/runDeepRegression.js",
     "ai:context:backfill": "node ai/scripts/backfillContextPackets.js",
+    "ai:memory:migrate-workspace": "node ai/scripts/migrateWorkspaceScopedMemory.js",
     "migrate:transfers:single:dry": "node migrations/migrate-transfer-pairs-to-single.js --dry-run",
     "migrate:transfers:single": "node migrations/migrate-transfer-pairs-to-single.js --execute",
     "test": "echo \"Error: no test specified\" && exit 1"

@@ -374,12 +374,12 @@ const aiGlossarySchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }
 }, { collection: 'ai_glossary' });
-aiGlossarySchema.index({ userId: 1, term: 1 }, { unique: true });
+aiGlossarySchema.index({ userId: 1, workspaceId: 1, term: 1 }, { unique: true });
 const AiGlossary = mongoose.model('AiGlossary', aiGlossarySchema);
 
 // 🧠 AI Memory: Профиль пользователя (стиль общения, заметки агента)
 const aiUserProfileSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
     displayName: { type: String, default: null },
     communicationStyle: { type: String, enum: ['casual', 'formal', 'brief'], default: 'casual' },
@@ -396,6 +396,7 @@ const aiUserProfileSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now }
 }, { collection: 'ai_user_profiles' });
+aiUserProfileSchema.index({ userId: 1, workspaceId: 1 }, { unique: true });
 const AiUserProfile = mongoose.model('AiUserProfile', aiUserProfileSchema);
 
 
