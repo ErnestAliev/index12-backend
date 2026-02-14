@@ -852,6 +852,20 @@ module.exports = function createDataProvider(deps) {
             : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
+        // Recovery fallback: if events reference project IDs that are missing in current workspace
+        // catalog (legacy/migrated data), resolve by ID within the same user scope.
+        const missingIds = idsFromEvents
+            .map((id) => String(id))
+            .filter((id) => !map.has(id));
+        if (missingIds.length) {
+            const recoveryDocs = await Project.find({
+                userId: _uQuery(userId),
+                _id: { $in: missingIds }
+            }).select('name title label projectName').lean();
+            recoveryDocs.forEach((p) => {
+                if (p && p._id) map.set(String(p._id), p);
+            });
+        }
         // Если нет документов Project, но есть id из событий — добавим заглушки
         idsFromEvents.forEach(id => {
             if (!map.has(String(id))) {
@@ -879,6 +893,20 @@ module.exports = function createDataProvider(deps) {
             : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
+        // Recovery fallback: resolve unresolved category IDs from scoped events by ID
+        // within the same user scope (prevents losing names like "Аренда" after migration).
+        const missingIds = idsFromEvents
+            .map((id) => String(id))
+            .filter((id) => !map.has(id));
+        if (missingIds.length) {
+            const recoveryDocs = await Category.find({
+                userId: _uQuery(userId),
+                _id: { $in: missingIds }
+            }).select('name type').lean();
+            recoveryDocs.forEach((c) => {
+                if (c && c._id) map.set(String(c._id), c);
+            });
+        }
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null, type: null }); });
         return Array.from(map.values())
             .map(c => ({ id: String(c._id), name: c.name || `Категория ${String(c._id).slice(-4)}`, type: c.type || null }))
@@ -1269,11 +1297,16 @@ module.exports = function createDataProvider(deps) {
             categoryTags.set(String(c.id), tags);
         });
 
-        // Пополняем теги из описаний операций (если категория не подсказала)
+        // Пополняем теги из текста операций (если категория не подсказала)
         (operationsData.operations || []).forEach(op => {
             const cid = op.categoryId ? String(op.categoryId) : null;
             if (!cid) return;
-            const opTags = _tagByText(op.description);
+            const opTags = _tagByText([
+                op.description,
+                op.categoryName,
+                op.projectName,
+                op.contractorName
+            ].filter(Boolean).join(' '));
             if (!opTags.size) return;
             const cur = categoryTags.get(cid) || new Set();
             opTags.forEach(t => cur.add(t));
@@ -1292,25 +1325,48 @@ module.exports = function createDataProvider(deps) {
         }).sort((a, b) => b.volume - a.volume);
 
         // Tag-level aggregation (rent/payroll/tax/utility/transfer)
+        // Important: aggregate directly from operations so tags still work
+        // even if category directory/name resolution is partially broken.
         const tagSummaryMap = new Map();
-        categorySummary.forEach(cat => {
-            (cat.tags || []).forEach(tag => {
-                if (!tagSummaryMap.has(tag)) {
-                    tagSummaryMap.set(tag, {
-                        tag,
-                        incomeFact: 0,
-                        incomeForecast: 0,
-                        expenseFact: 0,
-                        expenseForecast: 0,
-                        categories: new Set()
-                    });
+        const ensureTagRec = (tag) => {
+            if (!tagSummaryMap.has(tag)) {
+                tagSummaryMap.set(tag, {
+                    tag,
+                    incomeFact: 0,
+                    incomeForecast: 0,
+                    expenseFact: 0,
+                    expenseForecast: 0,
+                    categories: new Set()
+                });
+            }
+            return tagSummaryMap.get(tag);
+        };
+        (operationsData.operations || []).forEach((op) => {
+            const cid = op.categoryId ? String(op.categoryId) : null;
+            const categoryDerivedTags = cid ? (categoryTags.get(cid) || new Set()) : new Set();
+            const opDerivedTags = _tagByText([
+                op.description,
+                op.categoryName,
+                op.projectName,
+                op.contractorName
+            ].filter(Boolean).join(' '));
+            const tags = new Set([...categoryDerivedTags, ...opDerivedTags]);
+            if (!tags.size) return;
+
+            const amount = Number(op.amount) || 0;
+            if (amount <= 0) return;
+            const categoryName = op.categoryName || (cid ? (categoryMap.get(cid)?.name || null) : null);
+
+            tags.forEach((tag) => {
+                const rec = ensureTagRec(tag);
+                if (op.kind === 'income') {
+                    if (op.isFact) rec.incomeFact += amount;
+                    else rec.incomeForecast += amount;
+                } else if (op.kind === 'expense') {
+                    if (op.isFact) rec.expenseFact += amount;
+                    else rec.expenseForecast += amount;
                 }
-                const rec = tagSummaryMap.get(tag);
-                rec.incomeFact += cat.incomeFact || 0;
-                rec.incomeForecast += cat.incomeForecast || 0;
-                rec.expenseFact += cat.expenseFact || 0;
-                rec.expenseForecast += cat.expenseForecast || 0;
-                if (cat.name) rec.categories.add(cat.name);
+                if (categoryName) rec.categories.add(categoryName);
             });
         });
         const tagSummary = Array.from(tagSummaryMap.values()).map(t => ({
