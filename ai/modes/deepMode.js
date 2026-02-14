@@ -539,6 +539,8 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     const q = String(query || '');
     const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
     const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
+    const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
+    const meta = dbData?.meta || {};
 
     const openAccounts = accounts.filter(a => !a?.isHidden && !a?.isExcluded);
     const openIds = new Set(openAccounts.map(a => String(a?._id || a?.id || '')));
@@ -550,12 +552,27 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
 
     const periodEndRaw = dbData?.meta?.periodEnd || null;
     const periodEnd = _parseDateFromRuText(periodEndRaw) || new Date(Date.now() + 30 * 86400000);
+    periodEnd.setUTCHours(23, 59, 59, 999);
+
+    let nowTs = Number.isFinite(Number(meta?.todayTimestamp))
+        ? Number(meta.todayTimestamp)
+        : Date.now();
+    if (!Number.isFinite(nowTs) || nowTs <= 0) {
+        const parsedToday = _parseDateFromRuText(meta?.today || '');
+        if (parsedToday) {
+            parsedToday.setUTCHours(23, 59, 59, 999);
+            nowTs = parsedToday.getTime();
+        }
+    }
 
     const deferAmount = _extractAmountAfterKeywords(q, ['поступлен', 'доход', 'аренд'])
         || (_extractMoneyCandidates(q).sort((a, b) => Math.abs(b) - Math.abs(a))[0] ?? null);
     const deferCategoryNeedle = _extractRequestedCategoryNeedle(q);
     const deferDate = _extractDeferredDateFromText(q);
     const threshold = _extractThresholdFromText(q) || 1_000_000;
+    const shouldExcludeDeferred = Number.isFinite(deferAmount)
+        && deferDate
+        && deferDate.getTime() > periodEnd.getTime();
 
     const futureOpenOps = ops
         .filter((op) => !op?.isFact && _opTouchesOpenAccounts(op, openIds))
@@ -563,6 +580,7 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         .filter((op) => {
             const d = op?.ts ? new Date(op.ts) : (op?.dateIso ? new Date(op.dateIso) : null);
             if (!d || Number.isNaN(d.getTime())) return false;
+            if (d.getTime() <= nowTs) return false;
             return d.getTime() <= periodEnd.getTime();
         });
 
@@ -592,48 +610,132 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         }
     }
 
-    const shouldExcludeDeferred = deferredOpIdx !== null
-        && deferDate
-        && deferDate.getTime() > periodEnd.getTime();
-
     const scenarioOps = futureOpenOps.filter((op) => {
         if (!shouldExcludeDeferred) return true;
+        if (deferredOpIdx === null) return true;
         return op._idx !== deferredOpIdx;
     });
 
-    const dayNetMap = new Map(); // dd.mm.yy -> { net, ts }
+    const dayNetMapOps = new Map(); // dd.mm.yy -> { net, ts }
     scenarioOps.forEach((op) => {
         const d = op?.ts ? new Date(op.ts) : (op?.dateIso ? new Date(op.dateIso) : null);
         if (!d || Number.isNaN(d.getTime())) return;
         const key = _fmtDateKZ(d);
         const delta = _opOpenDelta(op, openIds);
-        if (!dayNetMap.has(key)) {
-            dayNetMap.set(key, { ts: d.getTime(), net: 0 });
+        if (!dayNetMapOps.has(key)) {
+            dayNetMapOps.set(key, { ts: d.getTime(), net: 0 });
         }
-        const rec = dayNetMap.get(key);
+        const rec = dayNetMapOps.get(key);
         rec.net += delta;
-        dayNetMap.set(key, rec);
+        dayNetMapOps.set(key, rec);
     });
 
-    const orderedDays = Array.from(dayNetMap.entries())
-        .map(([dateKey, rec]) => ({ dateKey, ts: rec.ts, net: rec.net }))
+    const timelineRows = timeline
+        .map((row, idx) => {
+            const d = row?.date ? new Date(row.date) : null;
+            if (!d || Number.isNaN(d.getTime())) return null;
+            const income = _toFiniteNumber(row?.income);
+            const expense = _toFiniteNumber(row?.expense);
+            const offsetExpense = _toFiniteNumber(row?.offsetExpense);
+            const withdrawal = _toFiniteNumber(row?.withdrawal);
+            const effectiveExpense = Math.max(0, expense - offsetExpense);
+            return {
+                _idx: idx,
+                ts: d.getTime(),
+                dateKey: _fmtDateKZ(d),
+                income,
+                effectiveExpense,
+                withdrawal,
+                net: income - effectiveExpense - withdrawal
+            };
+        })
+        .filter(Boolean)
+        .filter((r) => r.ts > nowTs && r.ts <= periodEnd.getTime())
         .sort((a, b) => a.ts - b.ts);
 
-    let running = startOpen;
-    let minBalance = startOpen;
-    let minDate = dbData?.meta?.today || periodEndRaw || '?';
+    let deferredTimelineMatched = false;
+    if (shouldExcludeDeferred && Number.isFinite(deferAmount) && timelineRows.length) {
+        let remaining = Math.abs(deferAmount);
+        const targetDateKey = deferDate ? _fmtDateKZ(deferDate) : null;
 
-    orderedDays.forEach((day) => {
-        running += day.net;
-        if (running < minBalance) {
-            minBalance = running;
-            minDate = day.dateKey;
+        const sortedCandidates = [...timelineRows]
+            .filter(r => r.income > 0)
+            .sort((a, b) => {
+                const aDatePenalty = targetDateKey && a.dateKey === targetDateKey ? 0 : 1;
+                const bDatePenalty = targetDateKey && b.dateKey === targetDateKey ? 0 : 1;
+                if (aDatePenalty !== bDatePenalty) return aDatePenalty - bDatePenalty;
+                const aDiff = Math.abs(a.income - Math.abs(deferAmount));
+                const bDiff = Math.abs(b.income - Math.abs(deferAmount));
+                if (aDiff !== bDiff) return aDiff - bDiff;
+                return a.ts - b.ts;
+            });
+
+        for (const row of sortedCandidates) {
+            if (remaining <= 0) break;
+            if (row.income <= 0) continue;
+            const take = Math.min(remaining, row.income);
+            row.income -= take;
+            row.net -= take;
+            remaining -= take;
+            deferredTimelineMatched = true;
         }
+    }
+
+    const dayNetMapTimeline = new Map();
+    timelineRows.forEach((r) => {
+        if (!dayNetMapTimeline.has(r.dateKey)) {
+            dayNetMapTimeline.set(r.dateKey, { ts: r.ts, net: 0 });
+        }
+        const rec = dayNetMapTimeline.get(r.dateKey);
+        rec.net += r.net;
+        dayNetMapTimeline.set(r.dateKey, rec);
     });
 
-    const endBalance = running;
-    const hasCashGap = minBalance < 0;
-    const bufferToThreshold = Math.max(0, threshold - minBalance);
+    const _simulate = (dayMap) => {
+        const days = Array.from(dayMap.entries())
+            .map(([dateKey, rec]) => ({ dateKey, ts: rec.ts, net: rec.net }))
+            .sort((a, b) => a.ts - b.ts);
+
+        let running = startOpen;
+        let minBalance = startOpen;
+        let minDate = dbData?.meta?.today || periodEndRaw || '?';
+
+        days.forEach((day) => {
+            running += day.net;
+            if (running < minBalance) {
+                minBalance = running;
+                minDate = day.dateKey;
+            }
+        });
+
+        return {
+            days,
+            endBalance: running,
+            minBalance,
+            minDate
+        };
+    };
+
+    const opsSim = _simulate(dayNetMapOps);
+    const timelineSim = _simulate(dayNetMapTimeline);
+
+    let chosen = opsSim;
+    let chosenSource = 'operations';
+    if (timelineSim.days.length > 0) {
+        const timelineMoreConservative = timelineSim.minBalance < opsSim.minBalance
+            || timelineSim.endBalance < opsSim.endBalance;
+        if (!opsSim.days.length || timelineMoreConservative) {
+            chosen = timelineSim;
+            chosenSource = 'timeline';
+        }
+    }
+
+    const hasStrictCashGap = chosen.minBalance < 0;
+    const hasRiskGap = chosen.minBalance < threshold;
+    const cashGapLabel = hasStrictCashGap
+        ? 'ДА'
+        : (hasRiskGap ? `НЕТ (но остаток ниже порога ${formatTenge(threshold)})` : 'НЕТ');
+    const bufferToThreshold = Math.max(0, threshold - chosen.minBalance);
 
     const lines = [];
     lines.push(`Стресс-тест (${dbData?.meta?.periodStart || '?'} — ${dbData?.meta?.periodEnd || '?'})`);
@@ -641,19 +743,27 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     if (shouldExcludeDeferred && Number.isFinite(deferAmount)) {
         const deferDateLabel = deferDate ? _fmtDateKZ(deferDate) : 'вне периода';
         lines.push(`• Сценарий: поступление ${formatTenge(Math.abs(deferAmount))} перенесено на ${deferDateLabel} (исключено из февраля).`);
+        if (!deferredTimelineMatched && deferredOpIdx === null) {
+            lines.push('• Внимание: точная операция для переноса не найдена, сценарий посчитан по доступным агрегатам.');
+        }
     } else if (Number.isFinite(deferAmount)) {
         lines.push(`• Сценарий: перенос поступления ${formatTenge(Math.abs(deferAmount))} не изменил период расчета.`);
     }
+    if (chosenSource === 'timeline') {
+        lines.push('• Источник расчета: timeline (консервативно, с учетом агрегированных будущих расходов).');
+    } else {
+        lines.push('• Источник расчета: операции по открытым счетам.');
+    }
     lines.push('');
-    lines.push(`1) Кассовый разрыв на открытых счетах: ${hasCashGap ? 'ДА' : 'НЕТ'}.`);
-    lines.push(`2) Минимальный остаток: ${formatTenge(minBalance)} на ${minDate}.`);
-    lines.push(`3) Остаток на конец периода: ${formatTenge(endBalance)}.`);
+    lines.push(`1) Кассовый разрыв на открытых счетах: ${cashGapLabel}.`);
+    lines.push(`2) Минимальный остаток: ${formatTenge(chosen.minBalance)} на ${chosen.minDate}.`);
+    lines.push(`3) Остаток на конец периода: ${formatTenge(chosen.endBalance)}.`);
     lines.push(`4) Подушка до порога ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)}.`);
 
-    if (orderedDays.length) {
+    if (chosen.days.length) {
         lines.push('');
         lines.push('Ключевые будущие дни (чистый эффект по открытым счетам):');
-        orderedDays.slice(0, 6).forEach((d) => {
+        chosen.days.slice(0, 6).forEach((d) => {
             const sign = d.net >= 0 ? '+' : '';
             lines.push(`• ${d.dateKey}: ${sign}${formatTenge(d.net)}`);
         });
