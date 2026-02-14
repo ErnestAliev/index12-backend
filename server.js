@@ -351,7 +351,8 @@ const aiContextPacketSchema = new mongoose.Schema({
     dataQuality: { type: mongoose.Schema.Types.Mixed, default: {} },
     stats: {
         operationsCount: { type: Number, default: 0 },
-        accountsCount: { type: Number, default: 0 }
+        accountsCount: { type: Number, default: 0 },
+        sourceHash: { type: String, default: '' }
     }
 }, {
     collection: 'ai_context_packets',

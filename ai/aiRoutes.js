@@ -10,6 +10,7 @@
 
 const express = require('express');
 const deepPrompt = require('./prompts/deepPrompt');
+const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketBuilder');
 
 const AIROUTES_VERSION = 'modular-v8.0';
 const https = require('https');
@@ -443,55 +444,40 @@ module.exports = function createAiRouter(deps) {
           const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
           const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
           const workspaceId = req.user?.currentWorkspaceId || null;
-
-          await contextPacketService.upsertMonthlyPacket({
-            workspaceId,
-            userId: String(effectiveUserId || userIdStr),
-            periodStart,
-            periodEnd,
-            timezone: 'Asia/Almaty',
-            prompt: {
-              templateVersion: 'deep-v1',
-              dictionaryVersion: 'dict-v1',
-              text: deepPrompt
-            },
-            dictionary: {
-              entities: {
-                account: 'Счет движения денег',
-                event: 'Операция (income/expense/transfer, факт/прогноз, дата, сумма)',
-                category: 'Категория операции',
-                project: 'Проект/филиал',
-                owner: 'Владелец счета (юрлицо/физлицо)'
-              },
-              rules: [
-                'Внутренний transfer между своими счетами не считать прибылью',
-                'Если запрошены только открытые счета — скрытые исключать',
-                'При конфликте источников явно показывать расхождение'
-              ]
-            },
-            normalized: {
-              accounts: dbData.accounts || [],
-              events: dbData.operations || [],
-              categories: dbData.catalogs?.categories || [],
-              projects: dbData.catalogs?.projects || [],
-              companies: dbData.catalogs?.companies || [],
-              contractors: dbData.catalogs?.contractors || [],
-              individuals: dbData.catalogs?.individuals || []
-            },
-            derived: {
-              meta: dbData.meta || {},
-              totals: dbData.totals || {},
-              accountsData: dbData.accountsData || {},
-              operationsSummary: dbData.operationsSummary || {},
-              categorySummary: dbData.categorySummary || [],
-              tagSummary: dbData.tagSummary || []
-            },
-            dataQuality: dbData.dataQualityReport || {},
-            stats: {
-              operationsCount: Array.isArray(dbData.operations) ? dbData.operations.length : 0,
-              accountsCount: Array.isArray(dbData.accounts) ? dbData.accounts.length : 0
-            }
+          const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
+          const packetUserId = String(effectiveUserId || userIdStr);
+          const packetPayload = buildContextPacketPayload({
+            dbData,
+            promptText: deepPrompt,
+            templateVersion: 'deep-v1',
+            dictionaryVersion: 'dict-v1'
           });
+
+          let shouldUpsertPacket = true;
+          if (periodKey) {
+            const existingPacket = await contextPacketService.getMonthlyPacket({
+              workspaceId,
+              userId: packetUserId,
+              periodKey
+            });
+            const existingHash = String(existingPacket?.stats?.sourceHash || '');
+            const nextHash = String(packetPayload?.stats?.sourceHash || '');
+            if (existingHash && nextHash && existingHash === nextHash) {
+              shouldUpsertPacket = false;
+            }
+          }
+
+          if (shouldUpsertPacket) {
+            await contextPacketService.upsertMonthlyPacket({
+              workspaceId,
+              userId: packetUserId,
+              periodKey,
+              periodStart,
+              periodEnd,
+              timezone: 'Asia/Almaty',
+              ...packetPayload
+            });
+          }
         } catch (packetErr) {
           console.error('[AI][context-packet] upsert failed:', packetErr?.message || packetErr);
         }
@@ -669,6 +655,61 @@ module.exports = function createAiRouter(deps) {
     if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
     _clearHistory(userId);
     return res.json({ ok: true });
+  });
+
+  // =========================
+  // CONTEXT PACKETS ROUTES
+  // =========================
+  router.get('/context-packets', isAuthenticated, async (req, res) => {
+    try {
+      if (!contextPacketsEnabled) {
+        return res.status(501).json({ error: 'Context packets disabled' });
+      }
+      const userId = req.user?._id || req.user?.id;
+      if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
+      let effectiveUserId = userId;
+      if (typeof getCompositeUserId === 'function') {
+        try { effectiveUserId = await getCompositeUserId(req); } catch (_) { }
+      }
+      const workspaceId = req.user?.currentWorkspaceId || null;
+      const limit = Math.max(1, Math.min(Number(req.query?.limit) || 24, 120));
+      const items = await contextPacketService.listMonthlyPacketHeaders({
+        workspaceId,
+        userId: String(effectiveUserId || userId),
+        limit
+      });
+      return res.json({ items });
+    } catch (err) {
+      return res.status(500).json({ error: 'Ошибка чтения context packets' });
+    }
+  });
+
+  router.get('/context-packets/:periodKey', isAuthenticated, async (req, res) => {
+    try {
+      if (!contextPacketsEnabled) {
+        return res.status(501).json({ error: 'Context packets disabled' });
+      }
+      const periodKey = String(req.params?.periodKey || '').trim();
+      if (!/^\d{4}-\d{2}$/.test(periodKey)) {
+        return res.status(400).json({ error: 'Неверный periodKey, ожидается YYYY-MM' });
+      }
+      const userId = req.user?._id || req.user?.id;
+      if (!userId) return res.status(401).json({ error: 'Пользователь не найден' });
+      let effectiveUserId = userId;
+      if (typeof getCompositeUserId === 'function') {
+        try { effectiveUserId = await getCompositeUserId(req); } catch (_) { }
+      }
+      const workspaceId = req.user?.currentWorkspaceId || null;
+      const packet = await contextPacketService.getMonthlyPacket({
+        workspaceId,
+        userId: String(effectiveUserId || userId),
+        periodKey
+      });
+      if (!packet) return res.status(404).json({ error: 'Context packet not found' });
+      return res.json({ packet });
+    } catch (err) {
+      return res.status(500).json({ error: 'Ошибка чтения context packet' });
+    }
   });
 
   // =========================

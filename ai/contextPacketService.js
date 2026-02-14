@@ -110,7 +110,8 @@ module.exports = function createContextPacketService(deps = {}) {
         const safeNormalized = normalized && typeof normalized === 'object' ? normalized : {};
         const safeStats = {
             operationsCount: Number(stats?.operationsCount) || (Array.isArray(safeNormalized.events) ? safeNormalized.events.length : 0),
-            accountsCount: Number(stats?.accountsCount) || (Array.isArray(safeNormalized.accounts) ? safeNormalized.accounts.length : 0)
+            accountsCount: Number(stats?.accountsCount) || (Array.isArray(safeNormalized.accounts) ? safeNormalized.accounts.length : 0),
+            sourceHash: String(stats?.sourceHash || '')
         };
 
         await AiContextPacket.findOneAndUpdate(
