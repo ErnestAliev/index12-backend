@@ -11,6 +11,8 @@
 const express = require('express');
 const deepPrompt = require('./prompts/deepPrompt');
 const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketBuilder');
+const fs = require('fs');
+const path = require('path');
 
 const AIROUTES_VERSION = 'modular-v8.0';
 const https = require('https');
@@ -147,6 +149,20 @@ module.exports = function createAiRouter(deps) {
     if (!v) return null;
     const d = new Date(v);
     return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const _safeWriteAnalysisJson = ({ userId, payload }) => {
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const dir = path.resolve(__dirname, 'debug-logs');
+      fs.mkdirSync(dir, { recursive: true });
+      const filename = `analysis-${String(userId || 'unknown')}-${stamp}.json`;
+      const filePath = path.join(dir, filename);
+      fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf8');
+      return filePath;
+    } catch (_) {
+      return null;
+    }
   };
 
   const _monthStartUtc = (d) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0));
@@ -391,12 +407,20 @@ module.exports = function createAiRouter(deps) {
       const isDeep = req.body?.mode === 'deep';
       const source = req.body?.source || 'ui';
       const timeline = Array.isArray(req.body?.timeline) ? req.body.timeline : null;
+      const requestDebug = req.body?.debugAi === true || String(req.body?.debugAi || '').toLowerCase() === 'true';
 
       const AI_DEBUG = process.env.AI_DEBUG === 'true';
-      let debugInfo = null;
+      const shouldDebugLog = AI_DEBUG || requestDebug;
 
-      if (AI_DEBUG) {
-        console.log('[AI_DEBUG] query:', qLower, 'deep=', isDeep, 'source=', source);
+      if (shouldDebugLog) {
+        console.log('[AI_QUERY_IN]', JSON.stringify({
+          mode: isDeep ? 'deep' : 'chat',
+          source,
+          asOf: req?.body?.asOf || null,
+          periodFilter: req?.body?.periodFilter || null,
+          hasTimeline: !!timeline,
+          question: q
+        }));
       }
 
       // =========================
@@ -575,9 +599,15 @@ module.exports = function createAiRouter(deps) {
           formatTenge: _formatTenge
         });
 
-        console.log('[aiRoutes] quickMode returned:', quickResponse ? 'RESPONSE' : 'NULL');
-        console.log('[aiRoutes] dbData.operations count:', (dbData.operations || []).length);
-        console.log('[aiRoutes] transfers count:', (dbData.operations || []).filter(op => op.kind === 'transfer').length);
+        if (shouldDebugLog) {
+          console.log('[AI_QUICK_ANALYSIS]', JSON.stringify({
+            operationsCount: Array.isArray(dbData.operations) ? dbData.operations.length : 0,
+            transfersCount: Array.isArray(dbData.operations)
+              ? dbData.operations.filter(op => op.kind === 'transfer').length
+              : 0,
+            matched: !!quickResponse
+          }));
+        }
 
         if (quickResponse) {
           _pushHistory(userIdStr, 'user', q);
@@ -623,6 +653,45 @@ module.exports = function createAiRouter(deps) {
               dictionaryVersion: 'dict-v1'
             })
           };
+        }
+
+        if (shouldDebugLog) {
+          const analysisEnvelope = {
+            mode: 'deep',
+            model: modelDeep,
+            question: q,
+            period: {
+              key: periodKey || null,
+              start: periodStart,
+              end: periodEnd,
+              timezone: 'Asia/Almaty'
+            },
+            packetSummary: {
+              sourceHash: packet?.stats?.sourceHash || null,
+              operationsCount: packet?.stats?.operationsCount || 0,
+              accountsCount: packet?.stats?.accountsCount || 0,
+              qualityStatus: packet?.dataQuality?.status || null,
+              qualityScore: packet?.dataQuality?.score || null
+            }
+          };
+
+          const analysisFile = _safeWriteAnalysisJson({
+            userId: userIdStr,
+            payload: {
+              request: {
+                question: q,
+                mode: 'deep',
+                asOf: req?.body?.asOf || null,
+                periodFilter: req?.body?.periodFilter || null
+              },
+              analyzed: packet
+            }
+          });
+
+          console.log('[AI_DEEP_ANALYSIS]', JSON.stringify({
+            ...analysisEnvelope,
+            analysisFile
+          }));
         }
 
         const messages = [

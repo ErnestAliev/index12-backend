@@ -9,6 +9,10 @@
  */
 module.exports = function createDataProvider(deps) {
     const { mongoose, Account, Company, Project, Category, Contractor, Individual, Event } = deps;
+    const _isDebug = () => {
+        const v = String(process.env.AI_DEBUG || '').toLowerCase();
+        return v === '1' || v === 'true';
+    };
 
     // ========================
     // HELPER FUNCTIONS
@@ -300,7 +304,7 @@ module.exports = function createDataProvider(deps) {
             accounts = Array.from(accMap.values());
         }
 
-        if (process.env.AI_DEBUG === '1') {
+        if (_isDebug()) {
             const hiddenList = accounts.filter(a => {
                 const isExcluded = !!(a.isExcluded || a.excluded || a.excludeFromTotal || a.excludedFromTotal);
                 const isHiddenFlag = !!(a.hidden || a.isHidden);
@@ -844,10 +848,10 @@ module.exports = function createDataProvider(deps) {
         const useSnapshotAccounts = snapshot && Array.isArray(snapshot.accounts) && snapshot.accounts.length > 0;
         const useSnapshotCompanies = snapshot && Array.isArray(snapshot.companies) && snapshot.companies.length > 0;
 
-        if (useSnapshotAccounts) {
+        if (useSnapshotAccounts && _isDebug()) {
             console.log(`[dataProvider] 🔥 Using SNAPSHOT for accounts (${snapshot.accounts.length} accounts)`);
         }
-        if (useSnapshotCompanies) {
+        if (useSnapshotCompanies && _isDebug()) {
             console.log(`[dataProvider] 🔥 Using SNAPSHOT for companies (${snapshot.companies.length} companies)`);
         }
 
