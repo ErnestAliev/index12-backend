@@ -913,6 +913,7 @@ function buildBusinessContextLines({ dbData, formatTenge }) {
 
 function buildStressTestReport({ query, dbData, formatTenge }) {
     const q = String(query || '');
+    const qLower = q.toLowerCase();
     const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
     const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
     const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
@@ -941,14 +942,18 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         }
     }
 
-    const deferAmount = _extractAmountAfterKeywords(q, ['поступлен', 'доход', 'аренд'])
+    let deferAmount = _extractAmountAfterKeywords(q, ['поступлен', 'доход', 'аренд'])
         || (_extractMoneyCandidates(q).sort((a, b) => Math.abs(b) - Math.abs(a))[0] ?? null);
     const deferCategoryNeedle = _extractRequestedCategoryNeedle(q);
-    const deferDate = _extractDeferredDateFromText(q);
+    const wantsShiftLastOperation = /(сдвин|перенес|перенос|отлож)/i.test(qLower)
+        && /(последн).*(операц|поступлен|доход)|(операц|поступлен|доход).*(последн)/i.test(qLower);
+    let deferDate = _extractDeferredDateFromText(q);
+    if (!deferDate && wantsShiftLastOperation) {
+        deferDate = new Date(periodEnd.getTime() + 86400000); // by default shift to next day (out of period)
+    }
     const threshold = _extractThresholdFromText(q) || 1_000_000;
-    const shouldExcludeDeferred = Number.isFinite(deferAmount)
-        && deferDate
-        && deferDate.getTime() > periodEnd.getTime();
+    const hasDeferredScenario = !!deferDate && deferDate.getTime() > periodEnd.getTime();
+    const shouldExcludeDeferred = hasDeferredScenario && (Number.isFinite(deferAmount) || wantsShiftLastOperation);
 
     const futureOpenOps = ops
         .filter((op) => !op?.isFact && _opTouchesOpenAccounts(op, openIds))
@@ -961,7 +966,21 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         });
 
     let deferredOpIdx = null;
-    if (Number.isFinite(deferAmount)) {
+
+    if (wantsShiftLastOperation) {
+        const latestIncome = [...futureOpenOps]
+            .filter(op => op?.kind === 'income')
+            .sort((a, b) => (Number(a?.ts) || 0) - (Number(b?.ts) || 0))
+            .pop();
+        if (latestIncome) {
+            deferredOpIdx = latestIncome._idx;
+            if (!Number.isFinite(deferAmount)) {
+                deferAmount = Math.abs(_toFiniteNumber(latestIncome?.amount));
+            }
+        }
+    }
+
+    if (deferredOpIdx === null && Number.isFinite(deferAmount)) {
         const categoryNeedleNorm = _normalizeForMatch(deferCategoryNeedle || '');
         const categoryNeedleStem = _stemRuToken(deferCategoryNeedle || '');
         const incomeCandidates = futureOpenOps
@@ -1107,28 +1126,25 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     }
 
     const hasStrictCashGap = chosen.minBalance < 0;
-    const hasRiskGap = chosen.minBalance < threshold;
-    const cashGapLabel = hasStrictCashGap
-        ? 'ДА'
-        : (hasRiskGap ? `НЕТ (но остаток ниже порога ${formatTenge(threshold)})` : 'НЕТ');
+    const belowThreshold = chosen.minBalance < threshold;
+    const cashGapLabel = hasStrictCashGap ? 'ДА' : 'НЕТ';
     const bufferToThreshold = Math.max(0, threshold - chosen.minBalance);
 
     const lines = [];
-    lines.push(`Стресс-тест (${dbData?.meta?.periodStart || '?'} — ${dbData?.meta?.periodEnd || '?'})`);
-    lines.push(`• Старт открытых счетов: ${formatTenge(startOpen)}`);
+    lines.push(`Стресс-тест по открытым счетам (${dbData?.meta?.periodStart || '?'} — ${dbData?.meta?.periodEnd || '?'})`);
+    lines.push(`• Стартовый остаток: ${formatTenge(startOpen)}`);
     if (shouldExcludeDeferred && Number.isFinite(deferAmount)) {
         const deferDateLabel = deferDate ? _fmtDateKZ(deferDate) : 'вне периода';
-        lines.push(`• Сценарий: поступление ${formatTenge(Math.abs(deferAmount))} перенесено на ${deferDateLabel} (исключено из февраля).`);
+        if (wantsShiftLastOperation) {
+            lines.push(`• Сценарий: последнее будущее поступление ${formatTenge(Math.abs(deferAmount))} перенесено на ${deferDateLabel}.`);
+        } else {
+            lines.push(`• Сценарий: поступление ${formatTenge(Math.abs(deferAmount))} перенесено на ${deferDateLabel}.`);
+        }
         if (!deferredTimelineMatched && deferredOpIdx === null) {
             lines.push('• Внимание: точная операция для переноса не найдена, сценарий посчитан по доступным агрегатам.');
         }
     } else if (Number.isFinite(deferAmount)) {
-        lines.push(`• Сценарий: перенос поступления ${formatTenge(Math.abs(deferAmount))} не изменил период расчета.`);
-    }
-    if (chosenSource === 'timeline') {
-        lines.push('• Источник расчета: timeline (консервативно, с учетом агрегированных будущих расходов).');
-    } else {
-        lines.push('• Источник расчета: операции по открытым счетам.');
+        lines.push(`• Сценарий: перенос поступления ${formatTenge(Math.abs(deferAmount))} не влияет на текущий период.`);
     }
 
     const quality = dbData?.dataQualityReport || null;
@@ -1139,14 +1155,20 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
 
     const contextInsights = buildBusinessContextInsights(dbData);
     if (contextInsights.consistency.hasFutureNetMismatch) {
-        lines.push(`• Обнаружено несоответствие future net: timeline ${formatTenge(contextInsights.consistency.timelineFutureNet)} vs операции ${formatTenge(contextInsights.consistency.operationsFutureNetOpen)}.`);
+        lines.push(`• Проверка данных: по дневному графику ожидаемое сальдо ${formatTenge(contextInsights.consistency.timelineFutureNet)}, по списку операций ${formatTenge(contextInsights.consistency.operationsFutureNetOpen)}.`);
+        lines.push(`• Для надежности взят более осторожный вариант расчета: ${chosenSource === 'timeline' ? 'по дневному графику' : 'по операциям'}.`);
     }
 
     lines.push('');
-    lines.push(`1) Кассовый разрыв на открытых счетах: ${cashGapLabel}.`);
+    lines.push(`1) Кассовый разрыв (отрицательный баланс): ${cashGapLabel}.`);
     lines.push(`2) Минимальный остаток: ${formatTenge(chosen.minBalance)} на ${chosen.minDate}.`);
     lines.push(`3) Остаток на конец периода: ${formatTenge(chosen.endBalance)}.`);
-    lines.push(`4) Подушка до порога ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)}.`);
+    lines.push(`4) Подушка до целевого остатка ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)} (${formatTenge(threshold)} - ${formatTenge(chosen.minBalance)}).`);
+    if (belowThreshold) {
+        lines.push(`• Важно: минимум ниже целевого остатка ${formatTenge(threshold)}.`);
+    } else {
+        lines.push(`• Минимальный остаток выше целевого порога ${formatTenge(threshold)}.`);
+    }
 
     if (chosen.days.length) {
         lines.push('');
