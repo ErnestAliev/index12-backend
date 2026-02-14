@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
 
-const AIROUTES_VERSION = 'quick-deep-v9.5';
+const AIROUTES_VERSION = 'quick-deep-v9.6';
 const https = require('https');
 
 // =========================
@@ -117,7 +117,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.5';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.6';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -606,17 +606,6 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
-  const _inferTagFromQuery = (query) => {
-    const q = _normalizeRu(query);
-    if (!q) return null;
-    const hasAny = (stems) => stems.some((stem) => q.includes(stem));
-    if (hasAny(['аренд', 'rent', 'lease'])) return 'rent';
-    if (hasAny(['фот', 'зарплат', 'salary', 'payroll'])) return 'payroll';
-    if (hasAny(['налог', 'ндс', 'ипн', 'tax'])) return 'tax';
-    if (hasAny(['коммун', 'комунал', 'utility', 'газ', 'свет', 'вода', 'тепл'])) return 'utility';
-    return null;
-  };
-
   const _buildKeywordTokens = (query) => {
     const phrase = _extractCategoryPhrase(query);
     const base = _normalizeRu(phrase || query);
@@ -633,13 +622,115 @@ module.exports = function createAiRouter(deps) {
       .filter((t) => !stop.has(t))
       .filter((t) => t.length >= 3);
 
-    const inferredTag = _inferTagFromQuery(query);
-    if (inferredTag === 'rent') tokens.push('аренд', 'rent', 'lease');
-    if (inferredTag === 'payroll') tokens.push('фот', 'зарплат', 'salary', 'payroll');
-    if (inferredTag === 'tax') tokens.push('налог', 'ндс', 'ипн', 'tax');
-    if (inferredTag === 'utility') tokens.push('коммун', 'комунал', 'газ', 'свет', 'вода', 'тепл', 'utility');
-
     return Array.from(new Set(tokens));
+  };
+
+  const _collectPacketCategories = (packet) => {
+    const out = [];
+    const seen = new Set();
+
+    const fromNormalized = Array.isArray(packet?.normalized?.categories) ? packet.normalized.categories : [];
+    for (const row of fromNormalized) {
+      const id = String(row?.id || row?._id || '').trim();
+      const name = String(row?.name || '').trim();
+      const key = id || `name:${_normalizeRu(name)}`;
+      if (!key || !name || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: id || null, name });
+    }
+
+    const fromDerived = Array.isArray(packet?.derived?.categorySummary) ? packet.derived.categorySummary : [];
+    for (const row of fromDerived) {
+      const id = String(row?.id || row?._id || '').trim();
+      const name = String(row?.name || '').trim();
+      const key = id || `name:${_normalizeRu(name)}`;
+      if (!key || !name || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: id || null, name });
+    }
+
+    return out;
+  };
+
+  const _matchCategoriesByTokens = ({ packet, query }) => {
+    const tokens = _buildKeywordTokens(query);
+    if (!tokens.length) return [];
+    const categories = _collectPacketCategories(packet);
+    if (!categories.length) return [];
+
+    const phrase = _normalizeRu(_extractCategoryPhrase(query));
+    const scored = categories.map((cat) => {
+      const nameNorm = _normalizeRu(cat.name);
+      if (!nameNorm) return null;
+
+      let score = 0;
+      if (phrase && nameNorm === phrase) score += 100;
+      if (phrase && nameNorm.includes(phrase)) score += 30;
+      const matchedTokens = tokens.filter((t) => nameNorm.includes(t));
+      score += matchedTokens.length * 10;
+
+      return score > 0 ? { cat, score } : null;
+    }).filter(Boolean);
+
+    if (!scored.length) return [];
+    scored.sort((a, b) => b.score - a.score);
+    const maxScore = scored[0]?.score || 0;
+    // Keep all reasonably relevant categories, not only one "best guess".
+    return scored
+      .filter((row) => row.score >= Math.max(10, maxScore * 0.5))
+      .map((row) => row.cat);
+  };
+
+  const _sumIncomeByCategoryMatches = ({ packet, matches }) => {
+    if (!Array.isArray(matches) || !matches.length) return null;
+    const ids = new Set(matches.map((m) => String(m?.id || '').trim()).filter(Boolean));
+    const names = new Set(matches.map((m) => _normalizeRu(m?.name || '')).filter(Boolean));
+
+    const bySummary = Array.isArray(packet?.derived?.categorySummary) ? packet.derived.categorySummary : [];
+    let fact = 0;
+    let plan = 0;
+    let matched = 0;
+
+    for (const row of bySummary) {
+      const id = String(row?.id || row?._id || '').trim();
+      const nameNorm = _normalizeRu(row?.name || '');
+      const hit = (id && ids.has(id)) || (nameNorm && names.has(nameNorm));
+      if (!hit) continue;
+      const inc = _readCategoryIncome(row);
+      fact += Number(inc.fact) || 0;
+      plan += Number(inc.plan) || 0;
+      matched += 1;
+    }
+
+    if (matched > 0) {
+      return { fact: Math.max(0, fact), plan: Math.max(0, plan), matched };
+    }
+
+    // Fallback: sum directly by events when category summary is unavailable.
+    const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+    if (!events.length) return null;
+
+    let factEvt = 0;
+    let planEvt = 0;
+    let matchedEvt = 0;
+    for (const op of events) {
+      if (String(op?.kind || op?.type || '').toLowerCase() !== 'income') continue;
+      const opCategoryId = String(op?.categoryId || '').trim();
+      const opCategoryName = _normalizeRu(op?.categoryName || '');
+      const hit = (opCategoryId && ids.has(opCategoryId)) || (opCategoryName && names.has(opCategoryName));
+      if (!hit) continue;
+      const amount = Number(op?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      if (op?.isFact) factEvt += amount;
+      else planEvt += amount;
+      matchedEvt += 1;
+    }
+    if (matchedEvt <= 0) return null;
+    return {
+      fact: Math.max(0, factEvt),
+      plan: Math.max(0, planEvt),
+      matched: matchedEvt
+    };
   };
 
   const _readKeywordIncomeFromEvents = ({ query, packet }) => {
@@ -692,29 +783,28 @@ module.exports = function createAiRouter(deps) {
 
     const matched = _pickBestCategoryMatch({ query, packet });
     if (!matched) {
-      const inferredTag = _inferTagFromQuery(query);
-      const tagSummary = Array.isArray(packet?.derived?.tagSummary) ? packet.derived.tagSummary : [];
-      const tagRow = inferredTag
-        ? tagSummary.find((row) => String(row?.tag || '').toLowerCase() === inferredTag)
-        : null;
-      if (tagRow) {
-        const factTag = Number(tagRow?.incomeFact) || 0;
-        const planTag = Number(tagRow?.incomeForecast) || 0;
-        const totalTag = factTag + planTag;
-        const dateStartTag = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-        const dateEndTag = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-        const dateTextTag = (dateStartTag && dateEndTag && dateStartTag !== 'Invalid Date' && dateEndTag !== 'Invalid Date')
-          ? `${dateStartTag} - ${dateEndTag}`
-          : (dateStartTag || dateEndTag || 'Период не задан');
-        const title = inferredTag === 'rent' ? 'аренда' : inferredTag;
+      const byCategories = _sumIncomeByCategoryMatches({
+        packet,
+        matches: _matchCategoriesByTokens({ packet, query })
+      });
+      if (byCategories) {
+        const factCat = Number(byCategories.fact) || 0;
+        const planCat = Number(byCategories.plan) || 0;
+        const totalCat = factCat + planCat;
+        const dateStartCat = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+        const dateEndCat = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+        const dateTextCat = (dateStartCat && dateEndCat && dateStartCat !== 'Invalid Date' && dateEndCat !== 'Invalid Date')
+          ? `${dateStartCat} - ${dateEndCat}`
+          : (dateStartCat || dateEndCat || 'Период не задан');
+        const phraseLabel = _extractCategoryPhrase(query) || 'категория';
         return _applyAutoRiskToStructured({
           packet,
           structured: {
-            date: dateTextTag,
-            fact: `доходы по "${title}": ${_formatTenge(factTag)}`,
-            plan: `поступления по "${title}": ${_formatTenge(planTag)}`,
-            total: `по "${title}" всего: ${_formatTenge(totalTag)}`,
-            question: `Показать операции по "${title}" по датам?`
+            date: dateTextCat,
+            fact: `доходы по "${phraseLabel}": ${_formatTenge(factCat)}`,
+            plan: `поступления по "${phraseLabel}": ${_formatTenge(planCat)}`,
+            total: `по "${phraseLabel}" всего: ${_formatTenge(totalCat)}`,
+            question: `Показать операции по "${phraseLabel}" по датам?`
           }
         });
       }
@@ -1139,7 +1229,8 @@ module.exports = function createAiRouter(deps) {
           periodStart: periodStartEarly,
           periodEnd: periodEndEarly,
           normalized: {
-            events: Array.isArray(dbData?.operations) ? dbData.operations : []
+            events: Array.isArray(dbData?.operations) ? dbData.operations : [],
+            categories: Array.isArray(dbData?.catalogs?.categories) ? dbData.catalogs.categories : []
           },
           derived: {
             categorySummary: Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [],
