@@ -151,6 +151,50 @@ module.exports = function createAiRouter(deps) {
     return Number.isNaN(d.getTime()) ? null : d;
   };
 
+  const _classifyDeepAnswerTier = (qLower = '') => {
+    const q = String(qLower || '').toLowerCase().trim();
+    if (!q) return 'standard';
+
+    const wantsDetailed = /(подроб|деталь|разверн|по\s+дат|по\s+объект|по\s+проект|по\s+счет|по\s+сч[её]т|покажи\s+все|все\s+операц|таблиц|полный\s+разбор|на\s+ч[её]м\s+построен|на\s+ч[её]м\s+основан|покажи\s+расч|расшифр|доказат)/i.test(q);
+    if (wantsDetailed) return 'detailed';
+
+    const words = q.split(/\s+/).filter(Boolean).length;
+    const isHealthCheck = /(как\s+дела|что\s+по\s+деньгам|вс[её]\s+ок|как\s+ситуац|норм.*ли|дожив[её]м|дотянем)/i.test(q);
+    const asksSimpleShort = words <= 8 && !/(покажи|сравн|расч|подроб|разверн|по\s+дат|по\s+счет|по\s+сч[её]т|по\s+объект|таблиц)/i.test(q);
+    if (isHealthCheck || asksSimpleShort) return 'flash';
+
+    return 'standard';
+  };
+
+  const _enforceDeepAnswerTier = (raw, tier = 'standard') => {
+    const text = String(raw || '').trim();
+    if (!text || tier === 'detailed') return text;
+
+    const lines = text
+      .split(/\r?\n/)
+      .map((l) => String(l || '').trim())
+      .filter(Boolean);
+
+    if (!lines.length) return text;
+
+    const maxLines = tier === 'flash' ? 2 : 4;
+    const maxChars = tier === 'flash' ? 260 : 520;
+
+    let compact = lines.slice(0, maxLines).join('\n');
+
+    if (compact.length > maxChars) {
+      compact = compact.slice(0, maxChars).trim();
+      const lastPunct = Math.max(
+        compact.lastIndexOf('.'),
+        compact.lastIndexOf('!'),
+        compact.lastIndexOf('?')
+      );
+      if (lastPunct > 80) compact = compact.slice(0, lastPunct + 1);
+    }
+
+    return compact;
+  };
+
   const _safeWriteAnalysisJson = ({ userId, payload }) => {
     try {
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -620,7 +664,8 @@ module.exports = function createAiRouter(deps) {
       // DEEP MODE (CFO-level analysis)
       // =========================
       if (isDeep) {
-        const history = _getHistoryMessages(userIdStr);
+        const answerTier = _classifyDeepAnswerTier(qLower);
+        const deepHistory = _getHistoryMessages(userIdStr).slice(answerTier === 'flash' ? -2 : -6);
         const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
         const nowRef = _safeDate(req?.body?.asOf) || new Date();
@@ -696,16 +741,25 @@ module.exports = function createAiRouter(deps) {
 
         const messages = [
           { role: 'system', content: deepPrompt },
+          {
+            role: 'system',
+            content: answerTier === 'detailed'
+              ? 'Пользователь запросил подробный разбор. Ответь полно и структурно, с расчетами и доказательствами.'
+              : answerTier === 'flash'
+                ? 'Пользователь задал короткий вопрос. Ответ максимум 2 строки, только итог по делу. Без длинных списков и без воды.'
+                : 'Пользователь не просил детализацию. Ответ максимум 4 строки: 1 строка итог + до 3 коротких пунктов.'
+          },
           { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
-          ...history,
+          ...deepHistory,
           { role: 'user', content: q }
         ];
 
-        const answer = await _openAiChat(messages, {
+        const rawAnswer = await _openAiChat(messages, {
           modelOverride: modelDeep,
-          maxTokens: 4000,
+          maxTokens: answerTier === 'detailed' ? 2500 : (answerTier === 'flash' ? 260 : 900),
           timeout: 120000
         });
+        const answer = _enforceDeepAnswerTier(rawAnswer, answerTier);
 
         _pushHistory(userIdStr, 'user', q);
         _pushHistory(userIdStr, 'assistant', answer);
