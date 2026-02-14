@@ -51,12 +51,13 @@ function calcCoreMetrics(dbData) {
 
     const catSum = dbData.categorySummary || [];
     const expCats = catSum
-        .filter(c => c.expense && c.expense.fact && c.expense.fact.total)
-        .sort((a, b) => Math.abs(b.expense.fact.total) - Math.abs(a.expense.fact.total));
+        .map(c => ({ ...c, _expenseFactAbs: _catExpenseFactAbs(c) }))
+        .filter(c => c._expenseFactAbs > 0)
+        .sort((a, b) => b._expenseFactAbs - a._expenseFactAbs);
 
     const topExpCat = expCats[0] ? {
         name: expCats[0].name,
-        amount: Math.abs(expCats[0].expense.fact.total)
+        amount: expCats[0]._expenseFactAbs
     } : null;
 
     const topExpCatSharePct = topExpCat && expFact > 0
@@ -150,6 +151,206 @@ function normalizeShortMoneyInText(text, formatTenge) {
         const amount = Math.round(base * mult);
         return formatTenge(amount);
     });
+}
+
+function _toFiniteNumber(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function _catIncomeFact(cat) {
+    const flat = cat?.incomeFact;
+    if (flat !== undefined && flat !== null) return _toFiniteNumber(flat);
+    return _toFiniteNumber(cat?.income?.fact?.total);
+}
+
+function _catIncomeForecast(cat) {
+    const flat = cat?.incomeForecast;
+    if (flat !== undefined && flat !== null) return _toFiniteNumber(flat);
+    return _toFiniteNumber(cat?.income?.forecast?.total);
+}
+
+function _catExpenseFactAbs(cat) {
+    const flat = cat?.expenseFact;
+    if (flat !== undefined && flat !== null) return Math.abs(_toFiniteNumber(flat));
+    return Math.abs(_toFiniteNumber(cat?.expense?.fact?.total));
+}
+
+function _extractPercentFromText(text) {
+    const source = String(text || '');
+    const percentRx = /(\d+(?:[.,]\d+)?)\s*%/i;
+    const wordRx = /(\d+(?:[.,]\d+)?)\s*(?:процент|процента|процентов)\b/i;
+    const m = source.match(percentRx) || source.match(wordRx);
+    if (!m || !m[1]) return null;
+    const n = Number(String(m[1]).replace(',', '.'));
+    return Number.isFinite(n) ? n : null;
+}
+
+function _stemRuToken(token) {
+    const t = _normalizeForMatch(token).replace(/\s+/g, ' ').trim();
+    if (!t) return '';
+    return t.replace(
+        /(иями|ями|ами|ого|ему|ому|ыми|ими|его|ая|яя|ую|юю|ой|ей|ий|ый|ах|ях|ам|ям|ов|ев|е|ы|у|а|я|о|и)$/i,
+        ''
+    );
+}
+
+function _extractRequestedCategoryNeedle(text) {
+    const source = String(text || '');
+
+    const quoted = source.match(/[«"']([^"»']{2,})[»"']/);
+    if (quoted && quoted[1]) {
+        const candidate = quoted[1].trim();
+        if (candidate) return candidate;
+    }
+
+    const afterCategory = source.match(/по\s+категори[ияи]\s+([a-zа-яё0-9_\- ]{2,})/i);
+    if (afterCategory && afterCategory[1]) {
+        const candidate = afterCategory[1]
+            .replace(/\s+(текущ|будущ|прогноз|факт|и\b|рассч|посчит|сумм|процент|%).*$/i, '')
+            .trim();
+        if (candidate) return candidate;
+    }
+
+    const afterPo = source.match(/по\s+([a-zа-яё][a-zа-яё0-9_\-]{2,})/i);
+    if (afterPo && afterPo[1]) return afterPo[1].trim();
+
+    return null;
+}
+
+function _formatPercentLabel(percent) {
+    if (!Number.isFinite(percent)) return null;
+    if (Number.isInteger(percent)) return String(percent);
+    return String(Math.round(percent * 100) / 100).replace('.', ',');
+}
+
+function buildCategoryIncomePercentReport({ query, dbData, formatTenge }) {
+    const q = String(query || '');
+    const qLower = q.toLowerCase();
+    const periodStart = dbData?.meta?.periodStart || '?';
+    const periodEnd = dbData?.meta?.periodEnd || '?';
+    const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
+    const catSum = Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [];
+    const categories = Array.isArray(dbData?.catalogs?.categories) ? dbData.catalogs.categories : [];
+    const tagSummary = Array.isArray(dbData?.tagSummary) ? dbData.tagSummary : [];
+
+    let requestedNeedle = _extractRequestedCategoryNeedle(q);
+    if (!requestedNeedle && /аренд/i.test(qLower)) {
+        requestedNeedle = 'аренда';
+    }
+    if (!requestedNeedle) return null;
+
+    const needleNorm = _normalizeForMatch(requestedNeedle);
+    const needleStem = _stemRuToken(requestedNeedle);
+    if (!needleNorm && !needleStem) return null;
+
+    const matchesNeedle = (name) => {
+        const n = _normalizeForMatch(name);
+        if (!n) return false;
+        if (needleNorm && (n.includes(needleNorm) || needleNorm.includes(n))) return true;
+
+        const nameStem = _stemRuToken(name);
+        if (needleStem && nameStem && (nameStem.includes(needleStem) || needleStem.includes(nameStem))) {
+            return true;
+        }
+
+        // Prefix fallback for Russian declensions ("аренда" vs "аренде").
+        if (needleStem && needleStem.length >= 4 && n.includes(needleStem)) return true;
+        return false;
+    };
+
+    const categoryNameById = new Map();
+    categories.forEach((c) => {
+        const id = c?.id || c?._id;
+        if (!id) return;
+        categoryNameById.set(String(id), c?.name || '');
+    });
+
+    const matchedCategoryNames = new Set();
+    catSum.forEach((c) => {
+        if (c?.name && matchesNeedle(c.name)) matchedCategoryNames.add(c.name);
+    });
+    ops.forEach((op) => {
+        const byId = op?.categoryId ? categoryNameById.get(String(op.categoryId)) : '';
+        const opCategoryName = op?.categoryName || byId || '';
+        if (opCategoryName && matchesNeedle(opCategoryName)) matchedCategoryNames.add(opCategoryName);
+    });
+
+    const incomeOps = ops
+        .map((op) => {
+            const byId = op?.categoryId ? categoryNameById.get(String(op.categoryId)) : '';
+            const categoryName = op?.categoryName || byId || '';
+            return { ...op, _categoryName: categoryName };
+        })
+        .filter((op) => op?.kind === 'income' && op?._categoryName && matchesNeedle(op._categoryName));
+
+    let factTotal = incomeOps
+        .filter(op => op?.isFact)
+        .reduce((s, op) => s + Math.abs(_toFiniteNumber(op?.amount)), 0);
+    let forecastTotal = incomeOps
+        .filter(op => !op?.isFact)
+        .reduce((s, op) => s + Math.abs(_toFiniteNumber(op?.amount)), 0);
+
+    // Fallback to pre-aggregated category summary if operation-level data is incomplete.
+    if (!incomeOps.length) {
+        const matchedCats = catSum.filter(c => c?.name && matchesNeedle(c.name));
+        if (matchedCats.length) {
+            factTotal = matchedCats.reduce((s, c) => s + Math.abs(_catIncomeFact(c)), 0);
+            forecastTotal = matchedCats.reduce((s, c) => s + Math.abs(_catIncomeForecast(c)), 0);
+            matchedCats.forEach(c => matchedCategoryNames.add(c.name));
+        }
+    }
+
+    // Last fallback for rent-like requests by semantic tag.
+    if (factTotal === 0 && forecastTotal === 0 && /аренд|rent|lease/i.test(qLower)) {
+        const rentTag = tagSummary.find(t => String(t?.tag || '').toLowerCase() === 'rent');
+        if (rentTag) {
+            factTotal = Math.abs(_toFiniteNumber(rentTag.incomeFact));
+            forecastTotal = Math.abs(_toFiniteNumber(rentTag.incomeForecast));
+            (rentTag.categories || []).forEach(n => matchedCategoryNames.add(n));
+        }
+    }
+
+    const total = factTotal + forecastTotal;
+    const percent = _extractPercentFromText(q);
+    const percentAmount = Number.isFinite(percent) ? Math.round(total * (percent / 100)) : null;
+
+    const categoryLabel = matchedCategoryNames.size
+        ? Array.from(matchedCategoryNames).sort((a, b) => a.localeCompare(b, 'ru')).join(', ')
+        : requestedNeedle;
+
+    const lines = [];
+    lines.push(`Доходы по категории «${categoryLabel}» (${periodStart} — ${periodEnd})`);
+    lines.push(`• Текущие (факт): ${formatTenge(factTotal)}`);
+    lines.push(`• Будущие (прогноз): ${formatTenge(forecastTotal)}`);
+    lines.push(`• Итого: ${formatTenge(total)}`);
+
+    if (Number.isFinite(percentAmount)) {
+        const label = _formatPercentLabel(percent);
+        lines.push(`• ${label}% от суммы: ${formatTenge(percentAmount)}`);
+    }
+
+    if (incomeOps.length) {
+        const futureOps = incomeOps
+            .filter(op => !op?.isFact)
+            .sort((a, b) => (Number(a?.ts) || 0) - (Number(b?.ts) || 0));
+
+        if (futureOps.length) {
+            lines.push('');
+            lines.push('Будущие доходы (по операциям):');
+            futureOps.slice(0, 5).forEach((op) => {
+                lines.push(`• ${op?.date || op?.dateIso || '?'}: ${formatTenge(Math.abs(_toFiniteNumber(op?.amount)))}`);
+            });
+            if (futureOps.length > 5) {
+                lines.push(`• Еще будущих операций: ${futureOps.length - 5}`);
+            }
+        }
+    } else if (total === 0 && Array.isArray(dbData?.meta?.timeline) && dbData.meta.timeline.length) {
+        lines.push('');
+        lines.push('По категории в операциях нет данных. Timeline содержит только дневные суммы без разбивки по категориям.');
+    }
+
+    return lines.join('\n');
 }
 
 function _normalizeForMatch(text) {
@@ -566,6 +767,10 @@ async function handleDeepQuery({
     const hasWhereLostPhrase = /где\s+потерял|где\s+потеряли|куда\s+дел/.test(qLower);
     const wantsBalanceReconciliation = (moneyCandidates.length >= 2 && hasReconciliationKeywords)
         || (moneyCandidates.length >= 2 && hasWhereLostPhrase && /(счет|счёт|баланс)/i.test(qLower));
+    const wantsCategoryIncomeMath =
+        /(доход|поступлен|приход)/i.test(qLower)
+        && /(категор|аренд|по\s+[«"']?[a-zа-яё])/i.test(qLower)
+        && /(текущ|будущ|прогноз|факт|%|процент|собери|рассч|посчит|сумм)/i.test(qLower);
 
     const wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
     const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
@@ -607,6 +812,16 @@ async function handleDeepQuery({
             formatTenge,
             amounts: moneyCandidates
         });
+        if (answer) {
+            return { answer, shouldSaveToHistory: true };
+        }
+    }
+
+    // =====================
+    // CATEGORY INCOME (fact + forecast + percent)
+    // =====================
+    if (wantsCategoryIncomeMath) {
+        const answer = buildCategoryIncomePercentReport({ query, dbData, formatTenge });
         if (answer) {
             return { answer, shouldSaveToHistory: true };
         }
@@ -842,8 +1057,9 @@ async function handleDeepQuery({
     if (wantsLosses) {
         const catSum = dbData.categorySummary || [];
         const expCats = catSum
-            .filter(c => c.expense && c.expense.fact && c.expense.fact.total)
-            .sort((a, b) => Math.abs(b.expense.fact.total) - Math.abs(a.expense.fact.total));
+            .map(c => ({ ...c, _expenseFactAbs: _catExpenseFactAbs(c) }))
+            .filter(c => c._expenseFactAbs > 0)
+            .sort((a, b) => b._expenseFactAbs - a._expenseFactAbs);
 
         const structural = ['Аренда', 'Зарплата', 'Налоги', 'Коммунальные'];
         const controllable = ['Маркетинг', 'Услуги', 'Материалы'];
@@ -857,7 +1073,7 @@ async function handleDeepQuery({
         let otherTotal = 0;
 
         expCats.forEach(c => {
-            const amt = Math.abs(c.expense.fact.total);
+            const amt = c._expenseFactAbs;
             if (structural.some(s => c.name.includes(s))) structuralTotal += amt;
             else if (controllable.some(s => c.name.includes(s))) controllableTotal += amt;
             else otherTotal += amt;

@@ -251,31 +251,54 @@ module.exports = function createAiRouter(deps) {
     // Category breakdown (TOP categories for business identification)
     const catSum = data.categorySummary || [];
     if (catSum.length > 0) {
+      const catIncomeFact = (c) => {
+        if (c?.incomeFact !== undefined && c?.incomeFact !== null) return Number(c.incomeFact) || 0;
+        return Number(c?.income?.fact?.total) || 0;
+      };
+      const catIncomeForecast = (c) => {
+        if (c?.incomeForecast !== undefined && c?.incomeForecast !== null) return Number(c.incomeForecast) || 0;
+        return Number(c?.income?.forecast?.total) || 0;
+      };
+      const catExpenseFactAbs = (c) => {
+        if (c?.expenseFact !== undefined && c?.expenseFact !== null) return Math.abs(Number(c.expenseFact) || 0);
+        return Math.abs(Number(c?.expense?.fact?.total) || 0);
+      };
+      const catExpenseForecastAbs = (c) => {
+        if (c?.expenseForecast !== undefined && c?.expenseForecast !== null) return Math.abs(Number(c.expenseForecast) || 0);
+        return Math.abs(Number(c?.expense?.forecast?.total) || 0);
+      };
+
       const incomeCategories = catSum
-        .filter(c => c.income?.fact?.total && c.income.fact.total > 0)
-        .sort((a, b) => (b.income?.fact?.total || 0) - (a.income?.fact?.total || 0))
+        .map(c => ({
+          ...c,
+          _incomeFact: catIncomeFact(c),
+          _incomeForecast: catIncomeForecast(c),
+        }))
+        .filter(c => (c._incomeFact + c._incomeForecast) > 0)
+        .sort((a, b) => (b._incomeFact + b._incomeForecast) - (a._incomeFact + a._incomeForecast))
         .slice(0, 10);
 
       const expenseCategories = catSum
-        .filter(c => c.expense?.fact?.total && c.expense.fact.total < 0)
-        .sort((a, b) => Math.abs(b.expense?.fact?.total || 0) - Math.abs(a.expense?.fact?.total || 0))
+        .map(c => ({
+          ...c,
+          _expenseFactAbs: catExpenseFactAbs(c),
+          _expenseForecastAbs: catExpenseForecastAbs(c),
+        }))
+        .filter(c => (c._expenseFactAbs + c._expenseForecastAbs) > 0)
+        .sort((a, b) => (b._expenseFactAbs + b._expenseForecastAbs) - (a._expenseFactAbs + a._expenseForecastAbs))
         .slice(0, 10);
 
       if (incomeCategories.length > 0) {
-        lines.push('Топ категории доходов:');
+        lines.push('Топ категории доходов (факт/прогноз):');
         incomeCategories.forEach(c => {
-          const amt = _formatTenge(c.income.fact.total);
-          const count = c.income.fact.count || 0;
-          lines.push(`- ${c.name}: ${amt} (${count} оп.)`);
+          lines.push(`- ${c.name}: ${_formatTenge(c._incomeFact)} / ${_formatTenge(c._incomeForecast)}`);
         });
       }
 
       if (expenseCategories.length > 0) {
-        lines.push('Топ категории расходов:');
+        lines.push('Топ категории расходов (факт/прогноз):');
         expenseCategories.forEach(c => {
-          const amt = _formatTenge(Math.abs(c.expense.fact.total));
-          const count = c.expense.fact.count || 0;
-          lines.push(`- ${c.name}: ${amt} (${count} оп.)`);
+          lines.push(`- ${c.name}: ${_formatTenge(c._expenseFactAbs)} / ${_formatTenge(c._expenseForecastAbs)}`);
         });
       }
     }
