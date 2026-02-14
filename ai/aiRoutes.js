@@ -12,7 +12,7 @@ const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketB
 const fs = require('fs');
 const path = require('path');
 
-const AIROUTES_VERSION = 'quick-deep-v9.2';
+const AIROUTES_VERSION = 'quick-deep-v9.3';
 const https = require('https');
 
 // =========================
@@ -100,7 +100,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.2';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.3';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -651,7 +651,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // DEEP MODE (CFO-level analysis)
       // =========================
-      const deepHistory = _getHistoryMessages(userIdStr).slice(-4);
+      const deepHistory = [];
       const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
       const nowRef = _safeDate(req?.body?.asOf) || new Date();
@@ -778,38 +778,23 @@ module.exports = function createAiRouter(deps) {
       }
 
       if (!groundedValidation?.ok && !_isNoAiAnswerText(rawAnswer)) {
-        const plainMessages = [
-          { role: 'system', content: deepPrompt },
-          {
-            role: 'system',
-            content: 'Отвечай строго по context_packet_json. По умолчанию коротко и по делу; если пользователь явно просит подробности — дай развернутый разбор с расчетами.'
-          },
-          { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
-          ...deepHistory,
-          { role: 'user', content: q }
-        ];
-        rawAnswer = await _openAiChat(plainMessages, {
-          modelOverride: modelDeep,
+        const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
+        rawAnswer = await _openAiChat(groundedMessages, {
+          modelOverride: fallbackModel,
           maxTokens: 1600,
           timeout: 120000
         });
+        const groundedPayloadRetry = _extractFirstJsonObject(rawAnswer);
+        if (groundedPayloadRetry && typeof groundedPayloadRetry === 'object') {
+          const groundedValidationRetry = _validateGroundedPayload({ packet, payload: groundedPayloadRetry });
+          if (groundedValidationRetry?.ok) {
+            groundedValidation = groundedValidationRetry;
+            rawAnswer = groundedValidationRetry.answer;
+          }
+        }
       }
 
-      if (_isNoAiAnswerText(rawAnswer)) {
-        const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
-        const retryMessages = [
-          { role: 'system', content: deepPrompt },
-          { role: 'system', content: 'Технический ретрай: дай короткий прямой ответ по данным без воды.' },
-          { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
-          { role: 'user', content: q }
-        ];
-        rawAnswer = await _openAiChat(retryMessages, {
-          modelOverride: fallbackModel,
-          maxTokens: 1400,
-          timeout: 120000
-        });
-      }
-      if (_isNoAiAnswerText(rawAnswer)) {
+      if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok) {
         rawAnswer = _buildDeterministicDeepFallback({ packet });
       }
       const answer = String(rawAnswer || '').trim() || 'Нет ответа от AI.';
