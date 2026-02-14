@@ -311,6 +311,15 @@ function buildCategoryIncomePercentReport({ query, dbData, formatTenge }) {
         }
     }
 
+    const hasEvidence =
+        matchedCategoryNames.size > 0
+        || incomeOps.length > 0
+        || factTotal > 0
+        || forecastTotal > 0;
+    if (!hasEvidence && !/(категор|аренд|rent|lease)/i.test(qLower)) {
+        return null;
+    }
+
     const total = factTotal + forecastTotal;
     const percent = _extractPercentFromText(q);
     const percentAmount = Number.isFinite(percent) ? Math.round(total * (percent / 100)) : null;
