@@ -641,9 +641,9 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // 🧠 LIVING CFO: Conversation Engine (replaces raw quick+deep for non-deep mode)
+      // 🧠 LIVING CFO: Conversation Engine (primary handler for ALL modes)
       // =========================
-      if (!isDeep) {
+      {
         // Lazy-init conversation engine (needs _openAiChat defined below)
         if (!conversationEngine) {
           conversationEngine = createConversationEngine({
@@ -700,6 +700,7 @@ module.exports = function createAiRouter(deps) {
           // Fall through to legacy quick+deep pipeline
         }
       }
+
 
       // =========================
       // LEGACY QUICK MODE (fallback for deep mode or engine failure)

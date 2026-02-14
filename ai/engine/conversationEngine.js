@@ -389,7 +389,65 @@ function createConversationEngine({
             }
         }
 
+        // Timeline (daily cashflow) — critical for cashflow analysis
+        const timeline = dataPacket.meta?.timeline;
+        if (Array.isArray(timeline) && timeline.length > 0) {
+            // Find min balance and key metrics
+            let minBal = Infinity, minDate = '';
+            let totalInc = 0, totalExp = 0;
+            const significantDays = [];
+
+            for (const day of timeline) {
+                const bal = day.closingBalance || 0;
+                const d = day.date ? new Date(day.date) : null;
+                const dateStr = d ? `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}` : '??';
+
+                if (bal < minBal) {
+                    minBal = bal;
+                    minDate = dateStr;
+                }
+                totalInc += (day.income || 0);
+                totalExp += (day.expense || 0);
+
+                // Track days with significant movement
+                if ((day.income || 0) > 0 || (day.expense || 0) > 0) {
+                    significantDays.push({
+                        date: dateStr,
+                        income: day.income || 0,
+                        expense: day.expense || 0,
+                        balance: bal
+                    });
+                }
+            }
+
+            const firstBal = timeline[0]?.closingBalance || 0;
+            const lastBal = timeline[timeline.length - 1]?.closingBalance || 0;
+
+            parts.push(`\nДенежный поток (${timeline.length} дней):`);
+            parts.push(`  Начало: ${_formatTenge(firstBal)}, конец: ${_formatTenge(lastBal)}`);
+            parts.push(`  Всего поступлений: ${_formatTenge(totalInc)}, расходов: ${_formatTenge(totalExp)}`);
+            parts.push(`  Минимальный остаток: ${_formatTenge(minBal)} (${minDate})`);
+            if (minBal < 0) {
+                parts.push(`  ⚠️ КАССОВЫЙ РАЗРЫВ: ${minDate}, нехватка ${_formatTenge(Math.abs(minBal))}`);
+            }
+
+            // Show top 10 significant days
+            if (significantDays.length > 0) {
+                parts.push(`  Ключевые дни:`);
+                for (const day of significantDays.slice(0, 10)) {
+                    const inc = day.income > 0 ? `+${_formatTenge(day.income)}` : '';
+                    const exp = day.expense > 0 ? `-${_formatTenge(day.expense)}` : '';
+                    const moves = [inc, exp].filter(Boolean).join(' ');
+                    parts.push(`    ${day.date}: ${moves} → ${_formatTenge(day.balance)}`);
+                }
+                if (significantDays.length > 10) {
+                    parts.push(`    ... ещё ${significantDays.length - 10} дней с движением`);
+                }
+            }
+        }
+
         return parts.join('\n');
+
     }
 
     /**
