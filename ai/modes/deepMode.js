@@ -897,6 +897,17 @@ function buildBusinessContextLines({ dbData, formatTenge }) {
         lines.push(`• Несоответствие данных: future net по timeline ${formatTenge(insights.consistency.timelineFutureNet)} vs по операциям ${formatTenge(insights.consistency.operationsFutureNetOpen)} (разница ${formatTenge(insights.consistency.futureNetDiff)}).`);
     }
 
+    const quality = dbData?.dataQualityReport || null;
+    if (quality?.status && String(quality.status).toLowerCase() !== 'ok') {
+        const score = Number.isFinite(Number(quality.score)) ? Math.round(Number(quality.score)) : null;
+        lines.push(`• Качество данных: ${String(quality.status).toUpperCase()}${score !== null ? ` (score ${score}/100)` : ''}.`);
+        const issues = Array.isArray(quality.issues) ? quality.issues : [];
+        issues.slice(0, 3).forEach((issue) => {
+            const count = Number.isFinite(Number(issue?.count)) ? Number(issue.count) : null;
+            lines.push(`• Проверка: ${issue?.message || issue?.code || 'проблема данных'}${count !== null ? ` (${count})` : ''}.`);
+        });
+    }
+
     return { lines, insights };
 }
 
@@ -1118,6 +1129,12 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         lines.push('• Источник расчета: timeline (консервативно, с учетом агрегированных будущих расходов).');
     } else {
         lines.push('• Источник расчета: операции по открытым счетам.');
+    }
+
+    const quality = dbData?.dataQualityReport || null;
+    if (quality?.status && String(quality.status).toLowerCase() !== 'ok') {
+        const score = Number.isFinite(Number(quality.score)) ? Math.round(Number(quality.score)) : null;
+        lines.push(`• Качество данных: ${String(quality.status).toUpperCase()}${score !== null ? ` (score ${score}/100)` : ''}.`);
     }
 
     const contextInsights = buildBusinessContextInsights(dbData);

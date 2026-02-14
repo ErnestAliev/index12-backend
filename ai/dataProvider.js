@@ -79,6 +79,166 @@ module.exports = function createDataProvider(deps) {
         return userId;
     };
 
+    const _idSet = (items = []) => {
+        const set = new Set();
+        items.forEach((item) => {
+            const id = item?.id || item?._id;
+            if (!id) return;
+            set.add(String(id));
+        });
+        return set;
+    };
+
+    const _pushIssue = (issues, code, count, message, severity = 'warn') => {
+        if (!Number.isFinite(count) || count <= 0) return;
+        issues.push({
+            code,
+            count: Math.round(count),
+            severity,
+            message
+        });
+    };
+
+    function buildDataQualityReport({
+        operations = [],
+        accounts = [],
+        categories = [],
+        projects = [],
+        contractors = [],
+        individuals = [],
+        start = null,
+        end = null
+    }) {
+        const accountIds = _idSet(accounts);
+        const categoryIds = _idSet(categories);
+        const projectIds = _idSet(projects);
+        const contractorIds = _idSet(contractors);
+        const individualIds = _idSet(individuals);
+
+        const rangeStartTs = (start instanceof Date && !Number.isNaN(start.getTime())) ? start.getTime() : null;
+        const rangeEndTs = (end instanceof Date && !Number.isNaN(end.getTime())) ? end.getTime() : null;
+
+        const counters = {
+            totalOperations: 0,
+            unknownKindCount: 0,
+            invalidDateCount: 0,
+            outOfRangeDateCount: 0,
+            zeroAmountCount: 0,
+            missingMonetaryAccountCount: 0,
+            unresolvedAccountRefCount: 0,
+            brokenTransferCount: 0,
+            unresolvedCategoryRefCount: 0,
+            unresolvedProjectRefCount: 0,
+            unresolvedCounterpartyRefCount: 0
+        };
+
+        operations.forEach((op) => {
+            counters.totalOperations += 1;
+
+            const kind = String(op?.kind || '').toLowerCase();
+            if (kind !== 'income' && kind !== 'expense' && kind !== 'transfer') {
+                counters.unknownKindCount += 1;
+            }
+
+            const ts = Number(op?.ts);
+            const hasValidTs = Number.isFinite(ts) && ts > 0;
+            if (!hasValidTs) {
+                counters.invalidDateCount += 1;
+            } else if (
+                Number.isFinite(rangeStartTs)
+                && Number.isFinite(rangeEndTs)
+                && (ts < rangeStartTs || ts > rangeEndTs)
+            ) {
+                counters.outOfRangeDateCount += 1;
+            }
+
+            const amount = Math.abs(Number(op?.amount) || 0);
+            if (amount === 0) counters.zeroAmountCount += 1;
+
+            if (kind === 'income' || kind === 'expense') {
+                const accountId = op?.accountId ? String(op.accountId) : null;
+                if (!accountId) {
+                    counters.missingMonetaryAccountCount += 1;
+                } else if (!accountIds.has(accountId)) {
+                    counters.unresolvedAccountRefCount += 1;
+                }
+
+                const categoryId = op?.categoryId ? String(op.categoryId) : null;
+                if (categoryId && !categoryIds.has(categoryId)) {
+                    counters.unresolvedCategoryRefCount += 1;
+                }
+
+                const projectId = op?.projectId ? String(op.projectId) : null;
+                if (projectId && !projectIds.has(projectId)) {
+                    counters.unresolvedProjectRefCount += 1;
+                }
+            }
+
+            if (kind === 'transfer') {
+                const fromAccountId = op?.fromAccountId ? String(op.fromAccountId) : null;
+                const toAccountId = op?.toAccountId ? String(op.toAccountId) : null;
+                const accountId = op?.accountId ? String(op.accountId) : null;
+                if (!fromAccountId && !toAccountId && !accountId) {
+                    counters.brokenTransferCount += 1;
+                }
+                if (fromAccountId && !accountIds.has(fromAccountId)) {
+                    counters.unresolvedAccountRefCount += 1;
+                }
+                if (toAccountId && !accountIds.has(toAccountId)) {
+                    counters.unresolvedAccountRefCount += 1;
+                }
+                if (accountId && !accountIds.has(accountId)) {
+                    counters.unresolvedAccountRefCount += 1;
+                }
+            }
+
+            const contractorId = op?.contractorId ? String(op.contractorId) : null;
+            const counterpartyIndividualId = op?.counterpartyIndividualId ? String(op.counterpartyIndividualId) : null;
+            if (contractorId && !contractorIds.has(contractorId) && !individualIds.has(contractorId)) {
+                counters.unresolvedCounterpartyRefCount += 1;
+            }
+            if (counterpartyIndividualId && !individualIds.has(counterpartyIndividualId)) {
+                counters.unresolvedCounterpartyRefCount += 1;
+            }
+        });
+
+        const issues = [];
+        _pushIssue(issues, 'unknown_kind', counters.unknownKindCount, 'Есть операции с неопределенным типом (income/expense/transfer).', 'critical');
+        _pushIssue(issues, 'invalid_date', counters.invalidDateCount, 'Есть операции с некорректной датой.', 'critical');
+        _pushIssue(issues, 'out_of_range_date', counters.outOfRangeDateCount, 'Есть операции вне выбранного периода.', 'warn');
+        _pushIssue(issues, 'missing_monetary_account', counters.missingMonetaryAccountCount, 'Есть доходы/расходы без accountId.', 'critical');
+        _pushIssue(issues, 'unresolved_account_ref', counters.unresolvedAccountRefCount, 'Есть операции со ссылками на неизвестные счета.', 'critical');
+        _pushIssue(issues, 'broken_transfer', counters.brokenTransferCount, 'Есть переводы без from/to счета.', 'critical');
+        _pushIssue(issues, 'unresolved_category_ref', counters.unresolvedCategoryRefCount, 'Есть операции со ссылками на неизвестные категории.', 'warn');
+        _pushIssue(issues, 'unresolved_project_ref', counters.unresolvedProjectRefCount, 'Есть операции со ссылками на неизвестные проекты.', 'warn');
+        _pushIssue(issues, 'unresolved_counterparty_ref', counters.unresolvedCounterpartyRefCount, 'Есть операции со ссылками на неизвестных контрагентов/физлиц.', 'warn');
+        _pushIssue(issues, 'zero_amount', counters.zeroAmountCount, 'Есть операции с нулевой суммой.', 'warn');
+
+        let score = 100;
+        score -= counters.unknownKindCount * 8;
+        score -= counters.invalidDateCount * 8;
+        score -= counters.missingMonetaryAccountCount * 6;
+        score -= counters.unresolvedAccountRefCount * 4;
+        score -= counters.brokenTransferCount * 6;
+        score -= counters.outOfRangeDateCount * 2;
+        score -= counters.unresolvedCategoryRefCount * 2;
+        score -= counters.unresolvedProjectRefCount * 2;
+        score -= counters.unresolvedCounterpartyRefCount * 1;
+        score -= counters.zeroAmountCount * 1;
+        score = Math.max(0, Math.min(100, Math.round(score)));
+
+        const status = score >= 95 && issues.length === 0
+            ? 'ok'
+            : (score >= 75 ? 'warn' : 'critical');
+
+        return {
+            status,
+            score,
+            counters,
+            issues
+        };
+    }
+
     // ========================
     // ACCOUNT QUERIES
     // ========================
@@ -846,6 +1006,17 @@ module.exports = function createDataProvider(deps) {
             });
         }
 
+        const dataQualityReport = buildDataQualityReport({
+            operations: operationsData.operations || [],
+            accounts: accountsData.accounts || [],
+            categories: categories || [],
+            projects: projects || [],
+            contractors: contractors || [],
+            individuals: individuals || [],
+            start,
+            end
+        });
+
         // Contractor summary (по операциям)
         const contractorMap = new Map();
         (contractors || []).forEach(c => { if (c?.id) contractorMap.set(String(c.id), c.name || c.id); });
@@ -1028,6 +1199,7 @@ module.exports = function createDataProvider(deps) {
             contractorSummary: contractorSummaryWithShare,
             categorySummary,
             tagSummary,
+            dataQualityReport,
             outliers: {
                 income: incomeOutliers,
                 expense: expenseOutliers

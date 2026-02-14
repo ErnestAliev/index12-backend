@@ -248,6 +248,24 @@ module.exports = function createAiRouter(deps) {
     lines.push(`- Переводы: факт ${_formatTenge(tr.fact?.total || 0)} (${tr.fact?.count || 0}), прогноз ${_formatTenge(tr.forecast?.total || 0)} (${tr.forecast?.count || 0})`);
     lines.push(`- Вывод средств (подтип перевода): факт ${_formatTenge(trOut.fact?.total || 0)} (${trOut.fact?.count || 0}), прогноз ${_formatTenge(trOut.forecast?.total || 0)} (${trOut.forecast?.count || 0})`);
 
+    const quality = data.dataQualityReport || null;
+    if (quality && quality.status) {
+      const statusLabel = String(quality.status || '').toUpperCase();
+      const score = Number.isFinite(Number(quality.score)) ? Math.round(Number(quality.score)) : null;
+      lines.push(`Качество данных: ${statusLabel}${score !== null ? ` (score ${score}/100)` : ''}`);
+
+      const issues = Array.isArray(quality.issues) ? quality.issues : [];
+      if (issues.length) {
+        lines.push('Проблемы качества данных:');
+        issues.slice(0, 5).forEach((issue) => {
+          const sev = String(issue?.severity || 'warn').toUpperCase();
+          const msg = issue?.message || issue?.code || 'Проблема данных';
+          const count = Number.isFinite(Number(issue?.count)) ? Number(issue.count) : null;
+          lines.push(`- [${sev}] ${msg}${count !== null ? ` (${count})` : ''}`);
+        });
+      }
+    }
+
     // Category breakdown (TOP categories for business identification)
     const catSum = data.categorySummary || [];
     if (catSum.length > 0) {
@@ -441,6 +459,13 @@ module.exports = function createAiRouter(deps) {
         // Операции
         const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
         lines.push(`Операций: ${ops.length}`);
+        if (dbData?.dataQualityReport?.status) {
+          const q = dbData.dataQualityReport;
+          lines.push(`Качество данных: ${String(q.status).toUpperCase()} (score ${Math.round(Number(q.score) || 0)}/100)`);
+          (Array.isArray(q.issues) ? q.issues : []).slice(0, 10).forEach((issue) => {
+            lines.push(`- ${issue.message || issue.code} (${issue.count || 0})`);
+          });
+        }
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'user', q);
@@ -463,6 +488,12 @@ module.exports = function createAiRouter(deps) {
         lines.push(`Расходов (факт): ${_formatTenge(opsSummary.expense?.fact?.total || 0)} (${opsSummary.expense?.fact?.count || 0})`);
         lines.push(`Переводов (факт): ${_formatTenge(opsSummary.transfer?.fact?.total || 0)} (${opsSummary.transfer?.fact?.count || 0})`);
         lines.push(`Вывод средств (факт): ${_formatTenge(opsSummary.transfer?.withdrawalOut?.fact?.total || 0)} (${opsSummary.transfer?.withdrawalOut?.fact?.count || 0})`);
+        if (dbData?.dataQualityReport?.status) {
+          const q = dbData.dataQualityReport;
+          lines.push(`Качество данных: ${String(q.status).toUpperCase()} (score ${Math.round(Number(q.score) || 0)}/100)`);
+          const topIssue = Array.isArray(q.issues) && q.issues.length ? q.issues[0] : null;
+          if (topIssue) lines.push(`Ключевая проблема: ${topIssue.message || topIssue.code} (${topIssue.count || 0})`);
+        }
 
         const answer = lines.join('\n');
         _pushHistory(userIdStr, 'user', q);

@@ -13,6 +13,11 @@ ai/
 │   ├── chatPrompt.js         # Промпт для Chat режима
 │   └── deepPrompt.js         # Промпт для Deep режима
 │
+├── docs/                      # Доменная модель и контракт нормализации
+│   ├── ENTITY_DICTIONARY.md
+│   ├── NORMALIZATION_CONTRACT.md
+│   └── UNIVERSAL_SCENARIO.md
+│
 ├── aiRoutes.js               # Главный роутер (маршрутизация запросов)
 ├── dataProvider.js           # Слой доступа к MongoDB
 └── quickHandler.js           # ⚠️ DEPRECATED - удалить
