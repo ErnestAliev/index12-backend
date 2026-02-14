@@ -96,6 +96,7 @@ module.exports = function createAiRouter(deps) {
   const contextPacketService = createContextPacketService({ AiContextPacket });
   const contextPacketsEnabled = !!contextPacketService?.enabled;
   const quickMode = require('./modes/quickMode');
+  const chatMode = require('./modes/chatMode');
 
   // 🧠 Living CFO: Memory + Intent + Conversation Engine
   const { AiGlossary, AiUserProfile } = models;
@@ -553,6 +554,73 @@ module.exports = function createAiRouter(deps) {
   };
 
   // =========================
+  // DB data context for LLM (used by chatMode)
+  // =========================
+  const _formatDbDataForAi = (data) => {
+    const lines = [];
+    const meta = data.meta || {};
+    const opsSummary = data.operationsSummary || {};
+    const totals = data.totals || {};
+
+    lines.push(`Данные БД: период ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
+    lines.push(`Сегодня: ${meta.today || '?'}`);
+
+    // Accounts
+    lines.push('Счета (текущий → прогноз):');
+    (data.accounts || []).slice(0, 50).forEach(a => {
+      const hiddenMarker = a.isHidden ? ' [скрыт]' : '';
+      const curr = _formatTenge(a.currentBalance || 0);
+      const fut = _formatTenge(a.futureBalance || 0);
+      lines.push(`- ${a.name}${hiddenMarker}: ${curr} → ${fut}`);
+    });
+    const totalOpen = totals.open?.current ?? 0;
+    const totalHidden = totals.hidden?.current ?? 0;
+    const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
+    lines.push(`Итоги счетов: открытые ${_formatTenge(totalOpen)}, скрытые ${_formatTenge(totalHidden)}, все ${_formatTenge(totalAll)}`);
+
+    // Operations summary
+    const inc = opsSummary.income || {};
+    const exp = opsSummary.expense || {};
+    lines.push('Сводка операций:');
+    lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
+    lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
+
+    // Category breakdown
+    const catSum = data.categorySummary || [];
+    if (catSum.length > 0) {
+      const incomeCategories = catSum
+        .filter(c => c.income?.fact?.total && c.income.fact.total > 0)
+        .sort((a, b) => (b.income?.fact?.total || 0) - (a.income?.fact?.total || 0))
+        .slice(0, 10);
+
+      const expenseCategories = catSum
+        .filter(c => c.expense?.fact?.total && c.expense.fact.total < 0)
+        .sort((a, b) => Math.abs(b.expense?.fact?.total || 0) - Math.abs(a.expense?.fact?.total || 0))
+        .slice(0, 10);
+
+      if (incomeCategories.length > 0) {
+        lines.push('Топ категории доходов:');
+        incomeCategories.forEach(c => {
+          const amt = _formatTenge(c.income.fact.total);
+          const count = c.income.fact.count || 0;
+          lines.push(`- ${c.name}: ${amt} (${count} оп.)`);
+        });
+      }
+
+      if (expenseCategories.length > 0) {
+        lines.push('Топ категории расходов:');
+        expenseCategories.forEach(c => {
+          const amt = _formatTenge(Math.abs(c.expense.fact.total));
+          const count = c.expense.fact.count || 0;
+          lines.push(`- ${c.name}: ${amt} (${count} оп.)`);
+        });
+      }
+    }
+
+    return lines.join('\n');
+  };
+
+  // =========================
   // Access control
   // =========================
   const _isAiAllowed = (req) => {
@@ -728,6 +796,27 @@ module.exports = function createAiRouter(deps) {
           _pushHistory(userIdStr, 'assistant', quickResponse);
           return res.json({ text: quickResponse });
         }
+      }
+
+      // =========================
+      // CHAT MODE (GPT-4o fallback for non-deep, non-quick queries)
+      // =========================
+      if (!isDeep) {
+        const chatHistory = _getHistoryMessages(userIdStr);
+        const modelChat = process.env.OPENAI_MODEL || 'gpt-4o';
+
+        const chatResponse = await chatMode.handleChatQuery({
+          query: q,
+          dbData,
+          history: chatHistory,
+          openAiChat: _openAiChat,
+          formatDbDataForAi: _formatDbDataForAi,
+          modelChat
+        });
+
+        _pushHistory(userIdStr, 'user', q);
+        _pushHistory(userIdStr, 'assistant', chatResponse);
+        return res.json({ text: chatResponse });
       }
 
       // =========================
