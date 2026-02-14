@@ -914,6 +914,7 @@ function buildBusinessContextLines({ dbData, formatTenge }) {
 function buildStressTestReport({ query, dbData, formatTenge }) {
     const q = String(query || '');
     const qLower = q.toLowerCase();
+    const wantsDetailedStress = /(подроб|детал|объясн|почему|как\s*сч(и|е)т|раскрой|формул|источник|mismatch|несоответ|проверк.*данн)/i.test(qLower);
     const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
     const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
     const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
@@ -1148,29 +1149,35 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     }
 
     const quality = dbData?.dataQualityReport || null;
-    if (quality?.status && String(quality.status).toLowerCase() !== 'ok') {
+    if (wantsDetailedStress && quality?.status && String(quality.status).toLowerCase() !== 'ok') {
         const score = Number.isFinite(Number(quality.score)) ? Math.round(Number(quality.score)) : null;
         lines.push(`• Качество данных: ${String(quality.status).toUpperCase()}${score !== null ? ` (score ${score}/100)` : ''}.`);
     }
 
     const contextInsights = buildBusinessContextInsights(dbData);
-    if (contextInsights.consistency.hasFutureNetMismatch) {
+    if (wantsDetailedStress && contextInsights.consistency.hasFutureNetMismatch) {
         lines.push(`• Проверка данных: по дневному графику ожидаемое сальдо ${formatTenge(contextInsights.consistency.timelineFutureNet)}, по списку операций ${formatTenge(contextInsights.consistency.operationsFutureNetOpen)}.`);
         lines.push(`• Для надежности взят более осторожный вариант расчета: ${chosenSource === 'timeline' ? 'по дневному графику' : 'по операциям'}.`);
+    } else if (!wantsDetailedStress && quality?.status && String(quality.status).toLowerCase() === 'critical') {
+        lines.push('• Внимание: в данных есть критичные несоответствия, расчет может отличаться от факта.');
     }
 
     lines.push('');
-    lines.push(`1) Кассовый разрыв (отрицательный баланс): ${cashGapLabel}.`);
+    lines.push(`1) Кассовый разрыв: ${cashGapLabel}.`);
     lines.push(`2) Минимальный остаток: ${formatTenge(chosen.minBalance)} на ${chosen.minDate}.`);
     lines.push(`3) Остаток на конец периода: ${formatTenge(chosen.endBalance)}.`);
-    lines.push(`4) Подушка до целевого остатка ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)} (${formatTenge(threshold)} - ${formatTenge(chosen.minBalance)}).`);
+    if (wantsDetailedStress) {
+        lines.push(`4) Подушка до целевого остатка ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)} (${formatTenge(threshold)} - ${formatTenge(chosen.minBalance)}).`);
+    } else {
+        lines.push(`4) Чтобы минимальный остаток был не ниже ${formatTenge(threshold)}, нужна подушка ${formatTenge(bufferToThreshold)}.`);
+    }
     if (belowThreshold) {
         lines.push(`• Важно: минимум ниже целевого остатка ${formatTenge(threshold)}.`);
     } else {
         lines.push(`• Минимальный остаток выше целевого порога ${formatTenge(threshold)}.`);
     }
 
-    if (chosen.days.length) {
+    if (wantsDetailedStress && chosen.days.length) {
         lines.push('');
         lines.push('Ключевые будущие дни (чистый эффект по открытым счетам):');
         chosen.days.slice(0, 6).forEach((d) => {
