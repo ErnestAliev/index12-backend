@@ -1387,8 +1387,16 @@ module.exports = function createAiRouter(deps) {
         }
       }
 
+      const forcedCategoryStructured = _maybeBuildCategoryIncomeStructured({
+        query: q,
+        packet
+      });
+      if (forcedCategoryStructured) {
+        structuredAnswer = forcedCategoryStructured;
+      }
+
       if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok || !structuredAnswer) {
-        structuredAnswer = _buildDeterministicDeepStructuredFallback({ packet });
+        structuredAnswer = forcedCategoryStructured || _buildDeterministicDeepStructuredFallback({ packet });
       }
       const answer = _formatDeepStructuredText(structuredAnswer);
 
