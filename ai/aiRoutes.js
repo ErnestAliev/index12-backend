@@ -1,11 +1,9 @@
 // backend/ai/aiRoutes.js
-// AI assistant routes - MODULAR ARCHITECTURE
+// AI assistant routes - QUICK + DEEP
 //
 // ✅ Features:
-// - QUICK mode: deterministic lists → modes/quickMode.js
-// - CHAT mode: general conversation → modes/chatMode.js  
+// - QUICK mode: deterministic fast replies
 // - DEEP mode: unified prompt + context packet JSON
-// - DIAG command: diagnostics
 // - Hybrid data: snapshot (accounts/companies) + MongoDB (operations)
 
 const express = require('express');
@@ -14,7 +12,7 @@ const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketB
 const fs = require('fs');
 const path = require('path');
 
-const AIROUTES_VERSION = 'modular-v8.0';
+const AIROUTES_VERSION = 'quick-deep-v9.1';
 const https = require('https');
 
 // =========================
@@ -85,12 +83,11 @@ module.exports = function createAiRouter(deps) {
   const {
     mongoose,
     models,
-    FRONTEND_URL,
     isAuthenticated,
     getCompositeUserId,
   } = deps;
 
-  const { Event, Account, Company, Contractor, Individual, Project, Category, AiContextPacket } = models;
+  const { AiContextPacket } = models;
 
   // Create data provider for direct database access
   const createDataProvider = require('./dataProvider');
@@ -98,15 +95,12 @@ module.exports = function createAiRouter(deps) {
   const createContextPacketService = require('./contextPacketService');
   const contextPacketService = createContextPacketService({ AiContextPacket });
   const contextPacketsEnabled = !!contextPacketService?.enabled;
-
-  // Import mode handlers
   const quickMode = require('./modes/quickMode');
-  const chatMode = require('./modes/chatMode');
 
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-modular-v8.0';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.1';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -151,39 +145,6 @@ module.exports = function createAiRouter(deps) {
     return Number.isNaN(d.getTime()) ? null : d;
   };
 
-  const _normalizeSpaces = (s) => {
-    const source = String(s || '');
-    let out = '';
-    let prevSpace = true;
-    for (let i = 0; i < source.length; i += 1) {
-      const ch = source[i];
-      const isSpace = ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === '\f' || ch === '\v';
-      if (isSpace) {
-        if (!prevSpace) out += ' ';
-        prevSpace = true;
-      } else {
-        out += ch;
-        prevSpace = false;
-      }
-    }
-    return out.trim();
-  };
-
-  const _containsAny = (text, parts = []) => {
-    const src = String(text || '');
-    for (const part of parts) {
-      if (!part) continue;
-      if (src.includes(part)) return true;
-    }
-    return false;
-  };
-
-  const _countWords = (text) => {
-    const normalized = _normalizeSpaces(text);
-    if (!normalized) return 0;
-    return normalized.split(' ').filter(Boolean).length;
-  };
-
   const _startsWithAny = (text, prefixes = []) => {
     const src = String(text || '');
     for (const prefix of prefixes) {
@@ -191,11 +152,6 @@ module.exports = function createAiRouter(deps) {
       if (src.startsWith(prefix)) return true;
     }
     return false;
-  };
-
-  const _containsTokenSimple = (text, token) => {
-    const src = ` ${String(text || '').trim()} `;
-    return src.includes(` ${token} `);
   };
 
   const _isValidPeriodKey = (value) => {
@@ -262,70 +218,19 @@ module.exports = function createAiRouter(deps) {
     const d = packet?.derived || {};
     const totals = d?.totals || {};
     const ops = d?.operationsSummary || {};
+    const liq = d?.liquiditySignals || {};
 
     const current = n(totals?.open?.current ?? totals?.all?.current);
     const forecast = n(totals?.open?.future ?? totals?.all?.future);
-    const delta = forecast - current;
     const incForecast = n(ops?.income?.forecast?.total);
     const expForecast = Math.abs(n(ops?.expense?.forecast?.total));
-
-    if (forecast >= 0) {
-      return `Итог: прогноз к концу периода ${_formatTenge(forecast)} (сейчас ${_formatTenge(current)}, изменение ${_formatTenge(delta)}). Плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
-    }
-    return `Итог: прогноз к концу периода ${_formatTenge(forecast)} (сейчас ${_formatTenge(current)}, изменение ${_formatTenge(delta)}). Нужна корректировка плана: плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
-  };
-
-  const _classifyDeepAnswerTier = (qLower = '') => {
-    const q = _normalizeSpaces(String(qLower || '').toLowerCase());
-    if (!q) return 'standard';
-
-    const wantsDetailed = _containsAny(q, [
-      'подроб', 'деталь', 'разверн', 'по дат', 'по объект', 'по проект', 'по счет', 'по счёт',
-      'покажи все', 'все операц', 'таблиц', 'полный разбор', 'на чем построен', 'на чём построен',
-      'на чем основан', 'на чём основан', 'покажи расч', 'расшифр', 'доказат'
-    ]);
-    if (wantsDetailed) return 'detailed';
-
-    const words = _countWords(q);
-    const isHealthCheck = _containsAny(q, [
-      'как дела', 'что по деньгам', 'все ок', 'всё ок', 'как ситуац', 'норм',
-      'дожив', 'дотянем'
-    ]);
-    const asksSimpleShort = words <= 8 && !_containsAny(q, [
-      'покажи', 'сравн', 'расч', 'подроб', 'разверн', 'по дат', 'по счет', 'по счёт', 'по объект', 'таблиц'
-    ]);
-    if (isHealthCheck || asksSimpleShort) return 'flash';
-
-    return 'standard';
-  };
-
-  const _enforceDeepAnswerTier = (raw, tier = 'standard') => {
-    const text = String(raw || '').trim();
-    if (!text || tier === 'detailed') return text;
-
-    const lines = text
-      .split('\r\n').join('\n').split('\r').join('\n').split('\n')
-      .map((l) => String(l || '').trim())
-      .filter(Boolean);
-
-    if (!lines.length) return text;
-
-    const maxLines = tier === 'flash' ? 2 : 4;
-    const maxChars = tier === 'flash' ? 260 : 520;
-
-    let compact = lines.slice(0, maxLines).join('\n');
-
-    if (compact.length > maxChars) {
-      compact = compact.slice(0, maxChars).trim();
-      const lastPunct = Math.max(
-        compact.lastIndexOf('.'),
-        compact.lastIndexOf('!'),
-        compact.lastIndexOf('?')
-      );
-      if (lastPunct > 80) compact = compact.slice(0, lastPunct + 1);
-    }
-
-    return compact;
+    const hasLiq = !!liq?.available;
+    const minDate = String(liq?.minClosingBalance?.date || '');
+    const minAmount = n(liq?.minClosingBalance?.amount);
+    const minLabel = hasLiq
+      ? `${_formatTenge(minAmount)} на ${minDate || 'дате периода'}`
+      : 'н/д (нет timeline в контексте)';
+    return `Технический fallback по данным пакета: текущий остаток ${_formatTenge(current)}, минимум в периоде ${minLabel}, конец периода ${_formatTenge(forecast)}, плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
   };
 
   const _safeWriteAnalysisJson = ({ userId, payload }) => {
@@ -427,118 +332,6 @@ module.exports = function createAiRouter(deps) {
   };
 
   // =========================
-  // DB data context for LLM
-  // =========================
-  const _formatDbDataForAi = (data) => {
-    const lines = [];
-    const meta = data.meta || {};
-    const opsSummary = data.operationsSummary || {};
-    const totals = data.totals || {};
-
-    lines.push(`Данные БД: период ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
-    lines.push(`Сегодня: ${meta.today || '?'}`);
-
-    // Accounts
-    lines.push('Счета (текущий → прогноз):');
-    (data.accounts || []).slice(0, 50).forEach(a => {
-      const hiddenMarker = a.isHidden ? ' [скрыт]' : '';
-      const curr = _formatTenge(a.currentBalance || 0);
-      const fut = _formatTenge(a.futureBalance || 0);
-      lines.push(`- ${a.name}${hiddenMarker}: ${curr} → ${fut}`);
-    });
-    const totalOpen = totals.open?.current ?? 0;
-    const totalHidden = totals.hidden?.current ?? 0;
-    const totalAll = totals.all?.current ?? (totalOpen + totalHidden);
-    lines.push(`Итоги счетов: открытые ${_formatTenge(totalOpen)}, скрытые ${_formatTenge(totalHidden)}, все ${_formatTenge(totalAll)}`);
-
-    // Operations summary
-    const inc = opsSummary.income || {};
-    const exp = opsSummary.expense || {};
-    const tr = opsSummary.transfer || {};
-    const trOut = tr.withdrawalOut || {};
-    lines.push('Сводка операций:');
-    lines.push(`- Доходы: факт ${_formatTenge(inc.fact?.total || 0)} (${inc.fact?.count || 0}), прогноз ${_formatTenge(inc.forecast?.total || 0)} (${inc.forecast?.count || 0})`);
-    lines.push(`- Расходы: факт ${_formatTenge(-(exp.fact?.total || 0))} (${exp.fact?.count || 0}), прогноз ${_formatTenge(-(exp.forecast?.total || 0))} (${exp.forecast?.count || 0})`);
-    lines.push(`- Переводы: факт ${_formatTenge(tr.fact?.total || 0)} (${tr.fact?.count || 0}), прогноз ${_formatTenge(tr.forecast?.total || 0)} (${tr.forecast?.count || 0})`);
-    lines.push(`- Вывод средств (подтип перевода): факт ${_formatTenge(trOut.fact?.total || 0)} (${trOut.fact?.count || 0}), прогноз ${_formatTenge(trOut.forecast?.total || 0)} (${trOut.forecast?.count || 0})`);
-
-    const quality = data.dataQualityReport || null;
-    if (quality && quality.status) {
-      const statusLabel = String(quality.status || '').toUpperCase();
-      const score = Number.isFinite(Number(quality.score)) ? Math.round(Number(quality.score)) : null;
-      lines.push(`Качество данных: ${statusLabel}${score !== null ? ` (score ${score}/100)` : ''}`);
-
-      const issues = Array.isArray(quality.issues) ? quality.issues : [];
-      if (issues.length) {
-        lines.push('Проблемы качества данных:');
-        issues.slice(0, 5).forEach((issue) => {
-          const sev = String(issue?.severity || 'warn').toUpperCase();
-          const msg = issue?.message || issue?.code || 'Проблема данных';
-          const count = Number.isFinite(Number(issue?.count)) ? Number(issue.count) : null;
-          lines.push(`- [${sev}] ${msg}${count !== null ? ` (${count})` : ''}`);
-        });
-      }
-    }
-
-    // Category breakdown (TOP categories for business identification)
-    const catSum = data.categorySummary || [];
-    if (catSum.length > 0) {
-      const catIncomeFact = (c) => {
-        if (c?.incomeFact !== undefined && c?.incomeFact !== null) return Number(c.incomeFact) || 0;
-        return Number(c?.income?.fact?.total) || 0;
-      };
-      const catIncomeForecast = (c) => {
-        if (c?.incomeForecast !== undefined && c?.incomeForecast !== null) return Number(c.incomeForecast) || 0;
-        return Number(c?.income?.forecast?.total) || 0;
-      };
-      const catExpenseFactAbs = (c) => {
-        if (c?.expenseFact !== undefined && c?.expenseFact !== null) return Math.abs(Number(c.expenseFact) || 0);
-        return Math.abs(Number(c?.expense?.fact?.total) || 0);
-      };
-      const catExpenseForecastAbs = (c) => {
-        if (c?.expenseForecast !== undefined && c?.expenseForecast !== null) return Math.abs(Number(c.expenseForecast) || 0);
-        return Math.abs(Number(c?.expense?.forecast?.total) || 0);
-      };
-
-      const incomeCategories = catSum
-        .map(c => ({
-          ...c,
-          _incomeFact: catIncomeFact(c),
-          _incomeForecast: catIncomeForecast(c),
-        }))
-        .filter(c => (c._incomeFact + c._incomeForecast) > 0)
-        .sort((a, b) => (b._incomeFact + b._incomeForecast) - (a._incomeFact + a._incomeForecast))
-        .slice(0, 10);
-
-      const expenseCategories = catSum
-        .map(c => ({
-          ...c,
-          _expenseFactAbs: catExpenseFactAbs(c),
-          _expenseForecastAbs: catExpenseForecastAbs(c),
-        }))
-        .filter(c => (c._expenseFactAbs + c._expenseForecastAbs) > 0)
-        .sort((a, b) => (b._expenseFactAbs + b._expenseForecastAbs) - (a._expenseFactAbs + a._expenseForecastAbs))
-        .slice(0, 10);
-
-      if (incomeCategories.length > 0) {
-        lines.push('Топ категории доходов (факт/прогноз):');
-        incomeCategories.forEach(c => {
-          lines.push(`- ${c.name}: ${_formatTenge(c._incomeFact)} / ${_formatTenge(c._incomeForecast)}`);
-        });
-      }
-
-      if (expenseCategories.length > 0) {
-        lines.push('Топ категории расходов (факт/прогноз):');
-        expenseCategories.forEach(c => {
-          lines.push(`- ${c.name}: ${_formatTenge(c._expenseFactAbs)} / ${_formatTenge(c._expenseForecastAbs)}`);
-        });
-      }
-    }
-
-    return lines.join('\n');
-  };
-
-  // =========================
   // Access control
   // =========================
   const _isAiAllowed = (req) => {
@@ -548,27 +341,6 @@ module.exports = function createAiRouter(deps) {
     const allowedEmails = (process.env.AI_ALLOW_EMAILS || '').split(',').map(e => e.trim()).filter(Boolean);
     const userEmail = req.user?.email || '';
     return allowedEmails.includes(userEmail);
-  };
-
-  // =========================
-  // DIAGNOSTICS COMMAND
-  // =========================
-  const _isDiagnosticsQuery = (s) => {
-    const t = String(s || '').toLowerCase();
-    if (!t) return false;
-    if (t.includes('диагност') || t.includes('diagnostic')) return true;
-    return (
-      t === 'diag'
-      || t.startsWith('diag ')
-      || t.endsWith(' diag')
-      || _containsTokenSimple(t, 'diag')
-    );
-  };
-
-  const _isFullDiagnosticsQuery = (s) => {
-    const t = String(s || '').toLowerCase();
-    // Специальный триггер с опечаткой "дикагностика"
-    return t.includes('дикагност');
   };
 
   // =========================
@@ -604,7 +376,7 @@ module.exports = function createAiRouter(deps) {
 
       if (shouldDebugLog) {
         console.log('[AI_QUERY_IN]', JSON.stringify({
-          mode: isDeep ? 'deep' : 'chat',
+          mode: isDeep ? 'deep' : 'quick',
           source,
           asOf: req?.body?.asOf || null,
           periodFilter: req?.body?.periodFilter || null,
@@ -697,87 +469,6 @@ module.exports = function createAiRouter(deps) {
       }
 
       // =========================
-      // DIAGNOSTICS COMMAND
-      // =========================
-      if (_isFullDiagnosticsQuery(qLower)) {
-        const lines = [];
-        const meta = dbData.meta || {};
-
-        lines.push('ДИКАГНОСТИКА (полный список)');
-        lines.push(`Период: ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
-        lines.push(`Сегодня: ${meta.today || '?'}`);
-        lines.push('');
-
-        // Счета
-        const accounts = Array.isArray(dbData.accounts) ? dbData.accounts : [];
-        lines.push(`Счета (${accounts.length}):`);
-        accounts.forEach(a => lines.push(`- ${a.name || 'Счет'} | cur=${_formatTenge(a.currentBalance || 0)} | hidden=${a.isHidden ? 'yes' : 'no'} | id=${a._id}`));
-        lines.push('');
-
-        // Компании
-        const companies = Array.isArray(dbData.catalogs?.companies) ? dbData.catalogs.companies : [];
-        lines.push(`Компании (${companies.length}):`);
-        companies.forEach(c => lines.push(`- ${c.name || c} | id=${c.id || c._id || '?'}`));
-        lines.push('');
-
-        // Проекты
-        const projects = Array.isArray(dbData.catalogs?.projects) ? dbData.catalogs.projects : [];
-        lines.push(`Проекты (${projects.length}):`);
-        projects.forEach(p => lines.push(`- ${p.name || p} | id=${p.id || p._id || '?'}`));
-        lines.push('');
-
-        // Категории
-        const categories = Array.isArray(dbData.catalogs?.categories) ? dbData.catalogs.categories : [];
-        lines.push(`Категории (${categories.length}):`);
-        categories.forEach(cat => lines.push(`- ${cat.name || cat} | id=${cat.id || cat._id || '?'}`));
-        lines.push('');
-
-        // Операции
-        const ops = Array.isArray(dbData.operations) ? dbData.operations : [];
-        lines.push(`Операций: ${ops.length}`);
-        if (dbData?.dataQualityReport?.status) {
-          const q = dbData.dataQualityReport;
-          lines.push(`Качество данных: ${String(q.status).toUpperCase()} (score ${Math.round(Number(q.score) || 0)}/100)`);
-          (Array.isArray(q.issues) ? q.issues : []).slice(0, 10).forEach((issue) => {
-            lines.push(`- ${issue.message || issue.code} (${issue.count || 0})`);
-          });
-        }
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'user', q);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      if (_isDiagnosticsQuery(qLower)) {
-        const lines = [];
-        const meta = dbData.meta || {};
-        const opsSummary = dbData.operationsSummary || {};
-
-        lines.push('ДИАГНОСТИКА');
-        lines.push(`Период: ${meta.periodStart || '?'} — ${meta.periodEnd || meta.today || '?'}`);
-        lines.push(`Сегодня: ${meta.today || '?'}`);
-        lines.push('');
-        lines.push(`Счетов: ${(dbData.accounts || []).length}`);
-        lines.push(`Операций: ${(dbData.operations || []).length}`);
-        lines.push(`Доходов (факт): ${_formatTenge(opsSummary.income?.fact?.total || 0)} (${opsSummary.income?.fact?.count || 0})`);
-        lines.push(`Расходов (факт): ${_formatTenge(opsSummary.expense?.fact?.total || 0)} (${opsSummary.expense?.fact?.count || 0})`);
-        lines.push(`Переводов (факт): ${_formatTenge(opsSummary.transfer?.fact?.total || 0)} (${opsSummary.transfer?.fact?.count || 0})`);
-        lines.push(`Вывод средств (факт): ${_formatTenge(opsSummary.transfer?.withdrawalOut?.fact?.total || 0)} (${opsSummary.transfer?.withdrawalOut?.fact?.count || 0})`);
-        if (dbData?.dataQualityReport?.status) {
-          const q = dbData.dataQualityReport;
-          lines.push(`Качество данных: ${String(q.status).toUpperCase()} (score ${Math.round(Number(q.score) || 0)}/100)`);
-          const topIssue = Array.isArray(q.issues) && q.issues.length ? q.issues[0] : null;
-          if (topIssue) lines.push(`Ключевая проблема: ${topIssue.message || topIssue.code} (${topIssue.count || 0})`);
-        }
-
-        const answer = lines.join('\n');
-        _pushHistory(userIdStr, 'user', q);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
-      }
-
-      // =========================
       // TRY QUICK MODE (deterministic, fast)
       // Skip if user explicitly chose Deep Mode (preserves conversation context)
       // =========================
@@ -809,144 +500,118 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // DEEP MODE (CFO-level analysis)
       // =========================
-      if (isDeep) {
-        const answerTier = _classifyDeepAnswerTier(qLower);
-        const deepHistory = _getHistoryMessages(userIdStr).slice(answerTier === 'flash' ? -2 : -6);
-        const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
+      const deepHistory = _getHistoryMessages(userIdStr).slice(-6);
+      const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
-        const nowRef = _safeDate(req?.body?.asOf) || new Date();
-        const periodFilter = req?.body?.periodFilter || {};
-        const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
-        const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
-        const workspaceId = req.user?.currentWorkspaceId || null;
-        const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
-        const packetUserId = String(effectiveUserId || userIdStr);
+      const nowRef = _safeDate(req?.body?.asOf) || new Date();
+      const periodFilter = req?.body?.periodFilter || {};
+      const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
+      const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
+      const workspaceId = req.user?.currentWorkspaceId || null;
+      const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
+      const packetUserId = String(effectiveUserId || userIdStr);
 
-        let packet = null;
-        if (contextPacketsEnabled && periodKey) {
-          packet = await contextPacketService.getMonthlyPacket({
-            workspaceId,
-            userId: packetUserId,
-            periodKey
-          });
-        }
-
-        if (!packet) {
-          packet = {
-            periodKey: periodKey || null,
-            periodStart,
-            periodEnd,
-            timezone: 'Asia/Almaty',
-            ...buildContextPacketPayload({
-              dbData,
-              promptText: deepPrompt,
-              templateVersion: 'deep-v1',
-              dictionaryVersion: 'dict-v1'
-            })
-          };
-        }
-
-        if (shouldDebugLog) {
-          const analysisEnvelope = {
-            mode: 'deep',
-            model: modelDeep,
-            question: q,
-            period: {
-              key: periodKey || null,
-              start: periodStart,
-              end: periodEnd,
-              timezone: 'Asia/Almaty'
-            },
-            packetSummary: {
-              sourceHash: packet?.stats?.sourceHash || null,
-              operationsCount: packet?.stats?.operationsCount || 0,
-              accountsCount: packet?.stats?.accountsCount || 0,
-              qualityStatus: packet?.dataQuality?.status || null,
-              qualityScore: packet?.dataQuality?.score || null
-            }
-          };
-
-          const analysisFile = _safeWriteAnalysisJson({
-            userId: userIdStr,
-            payload: {
-              request: {
-                question: q,
-                mode: 'deep',
-                asOf: req?.body?.asOf || null,
-                periodFilter: req?.body?.periodFilter || null
-              },
-              analyzed: packet
-            }
-          });
-
-          console.log('[AI_DEEP_ANALYSIS]', JSON.stringify({
-            ...analysisEnvelope,
-            analysisFile
-          }));
-        }
-
-        const messages = [
-          { role: 'system', content: deepPrompt },
-          {
-            role: 'system',
-            content: answerTier === 'detailed'
-              ? 'Пользователь запросил подробный разбор. Ответь полно и структурно, с расчетами и доказательствами.'
-              : answerTier === 'flash'
-                ? 'Пользователь задал короткий вопрос. Ответ максимум 2 строки, только итог по делу. Без длинных списков и без воды.'
-                : 'Пользователь не просил детализацию. Ответ максимум 4 строки: 1 строка итог + до 3 коротких пунктов.'
-          },
-          { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
-          ...deepHistory,
-          { role: 'user', content: q }
-        ];
-
-        let rawAnswer = await _openAiChat(messages, {
-          modelOverride: modelDeep,
-          maxTokens: answerTier === 'detailed' ? 2500 : (answerTier === 'flash' ? 260 : 900),
-          timeout: 120000
+      let packet = null;
+      if (contextPacketsEnabled && periodKey) {
+        packet = await contextPacketService.getMonthlyPacket({
+          workspaceId,
+          userId: packetUserId,
+          periodKey
         });
-        if (_isNoAiAnswerText(rawAnswer)) {
-          const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
-          const retryMessages = [
-            { role: 'system', content: deepPrompt },
-            { role: 'system', content: 'Технический ретрай: дай короткий прямой ответ по данным без воды.' },
-            { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
-            { role: 'user', content: q }
-          ];
-          rawAnswer = await _openAiChat(retryMessages, {
-            modelOverride: fallbackModel,
-            maxTokens: 1400,
-            timeout: 120000
-          });
-        }
-        if (_isNoAiAnswerText(rawAnswer)) {
-          rawAnswer = _buildDeterministicDeepFallback({ packet });
-        }
-        const answer = _enforceDeepAnswerTier(rawAnswer, answerTier);
-
-        _pushHistory(userIdStr, 'user', q);
-        _pushHistory(userIdStr, 'assistant', answer);
-        return res.json({ text: answer });
       }
 
-      // =========================
-      // CHAT MODE (GPT-4o fallback for general queries)
-      // =========================
-      const history = _getHistoryMessages(userIdStr);
-      const modelChat = process.env.OPENAI_MODEL || 'gpt-4o';
+      if (!packet) {
+        packet = {
+          periodKey: periodKey || null,
+          periodStart,
+          periodEnd,
+          timezone: 'Asia/Almaty',
+          ...buildContextPacketPayload({
+            dbData,
+            promptText: deepPrompt,
+            templateVersion: 'deep-v1',
+            dictionaryVersion: 'dict-v1'
+          })
+        };
+      }
 
-      const response = await chatMode.handleChatQuery({
-        query: q,
-        dbData,
-        history,
-        openAiChat: _openAiChat,
-        formatDbDataForAi: _formatDbDataForAi,
-        modelChat
+      if (shouldDebugLog) {
+        const analysisEnvelope = {
+          mode: 'deep',
+          model: modelDeep,
+          question: q,
+          period: {
+            key: periodKey || null,
+            start: periodStart,
+            end: periodEnd,
+            timezone: 'Asia/Almaty'
+          },
+          packetSummary: {
+            sourceHash: packet?.stats?.sourceHash || null,
+            operationsCount: packet?.stats?.operationsCount || 0,
+            accountsCount: packet?.stats?.accountsCount || 0,
+            qualityStatus: packet?.dataQuality?.status || null,
+            qualityScore: packet?.dataQuality?.score || null
+          }
+        };
+
+        const analysisFile = _safeWriteAnalysisJson({
+          userId: userIdStr,
+          payload: {
+            request: {
+              question: q,
+              mode: 'deep',
+              asOf: req?.body?.asOf || null,
+              periodFilter: req?.body?.periodFilter || null
+            },
+            analyzed: packet
+          }
+        });
+
+        console.log('[AI_DEEP_ANALYSIS]', JSON.stringify({
+          ...analysisEnvelope,
+          analysisFile
+        }));
+      }
+
+      const messages = [
+        { role: 'system', content: deepPrompt },
+        {
+          role: 'system',
+          content: 'Отвечай строго по context_packet_json. По умолчанию коротко и по делу; если пользователь явно просит подробности — дай развернутый разбор с расчетами.'
+        },
+        { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
+        ...deepHistory,
+        { role: 'user', content: q }
+      ];
+
+      let rawAnswer = await _openAiChat(messages, {
+        modelOverride: modelDeep,
+        maxTokens: 1600,
+        timeout: 120000
       });
+      if (_isNoAiAnswerText(rawAnswer)) {
+        const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
+        const retryMessages = [
+          { role: 'system', content: deepPrompt },
+          { role: 'system', content: 'Технический ретрай: дай короткий прямой ответ по данным без воды.' },
+          { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
+          { role: 'user', content: q }
+        ];
+        rawAnswer = await _openAiChat(retryMessages, {
+          modelOverride: fallbackModel,
+          maxTokens: 1400,
+          timeout: 120000
+        });
+      }
+      if (_isNoAiAnswerText(rawAnswer)) {
+        rawAnswer = _buildDeterministicDeepFallback({ packet });
+      }
+      const answer = String(rawAnswer || '').trim() || 'Нет ответа от AI.';
 
       _pushHistory(userIdStr, 'user', q);
-      _pushHistory(userIdStr, 'assistant', response);
-      return res.json({ text: response });
+      _pushHistory(userIdStr, 'assistant', answer);
+      return res.json({ text: answer });
 
     } catch (error) {
       console.error('AI Query Error:', error);
@@ -1037,7 +702,6 @@ module.exports = function createAiRouter(deps) {
       contextPackets: contextPacketsEnabled,
       modes: {
         quick: 'modes/quickMode.js',
-        chat: 'modes/chatMode.js',
         deep: 'unified-context-packet'
       }
     });
