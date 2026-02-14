@@ -12,7 +12,7 @@ const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketB
 const fs = require('fs');
 const path = require('path');
 
-const AIROUTES_VERSION = 'quick-deep-v9.1';
+const AIROUTES_VERSION = 'quick-deep-v9.2';
 const https = require('https');
 
 // =========================
@@ -100,7 +100,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.1';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.2';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -207,6 +207,157 @@ module.exports = function createAiRouter(deps) {
       || t.startsWith('ошибка связи с ai')
       || t.startsWith('ошибка: timeout')
     );
+  };
+
+  const _extractFirstJsonObject = (text) => {
+    const src = String(text || '').trim();
+    if (!src) return null;
+
+    const direct = (() => {
+      try {
+        return JSON.parse(src);
+      } catch (_) {
+        return null;
+      }
+    })();
+    if (direct && typeof direct === 'object') return direct;
+
+    const fenced = src
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    const fencedParsed = (() => {
+      try {
+        return JSON.parse(fenced);
+      } catch (_) {
+        return null;
+      }
+    })();
+    if (fencedParsed && typeof fencedParsed === 'object') return fencedParsed;
+
+    const start = src.indexOf('{');
+    if (start < 0) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < src.length; i += 1) {
+      const ch = src[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const candidate = src.slice(start, i + 1);
+          try {
+            return JSON.parse(candidate);
+          } catch (_) {
+            return null;
+          }
+        }
+      }
+    }
+    return null;
+  };
+
+  const _pathTokens = (pathExpr) => {
+    const src = String(pathExpr || '').trim();
+    if (!src) return [];
+    const tokens = [];
+    const rx = /([^[.\]]+)|\[(\d+)\]/g;
+    let m;
+    while ((m = rx.exec(src)) !== null) {
+      if (m[1]) tokens.push(m[1]);
+      else if (m[2]) tokens.push(Number(m[2]));
+    }
+    return tokens;
+  };
+
+  const _resolvePath = (root, pathExpr) => {
+    const tokens = _pathTokens(pathExpr);
+    if (!tokens.length) return { ok: false, value: undefined };
+    let cur = root;
+    for (const token of tokens) {
+      if (cur === null || cur === undefined) return { ok: false, value: undefined };
+      if (typeof token === 'number') {
+        if (!Array.isArray(cur) || token < 0 || token >= cur.length) return { ok: false, value: undefined };
+        cur = cur[token];
+      } else {
+        if (!Object.prototype.hasOwnProperty.call(cur, token)) return { ok: false, value: undefined };
+        cur = cur[token];
+      }
+    }
+    return { ok: true, value: cur };
+  };
+
+  const _normalizeComparable = (v) => {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (!s) return '';
+      const numeric = Number(s.replace(/\s+/g, '').replace(',', '.'));
+      if (Number.isFinite(numeric)) return numeric;
+      return s;
+    }
+    if (typeof v === 'boolean') return v;
+    return null;
+  };
+
+  const _isExpectedMatch = (actual, expected) => {
+    const a = _normalizeComparable(actual);
+    const b = _normalizeComparable(expected);
+    if (a === null || b === null) return false;
+    if (typeof a === 'number' && typeof b === 'number') {
+      return Math.abs(a - b) < 0.5;
+    }
+    return String(a) === String(b);
+  };
+
+  const _validateGroundedPayload = ({ packet, payload }) => {
+    const answer = String(payload?.answer || '').trim();
+    const facts = Array.isArray(payload?.facts_used) ? payload.facts_used : [];
+    if (!answer) return { ok: false, reason: 'empty_answer' };
+    if (!facts.length) return { ok: false, reason: 'no_facts_used' };
+
+    const validatedFacts = [];
+    for (const item of facts.slice(0, 30)) {
+      const pathExpr = String(item?.path || '').trim();
+      if (!pathExpr) continue;
+      const resolved = _resolvePath(packet, pathExpr);
+      if (!resolved.ok) continue;
+
+      const hasExpected = Object.prototype.hasOwnProperty.call(item || {}, 'value');
+      if (hasExpected && !_isExpectedMatch(resolved.value, item.value)) {
+        continue;
+      }
+
+      validatedFacts.push({
+        path: pathExpr,
+        value: resolved.value
+      });
+    }
+
+    if (!validatedFacts.length) return { ok: false, reason: 'facts_not_verified' };
+    return {
+      ok: true,
+      answer,
+      validatedFacts
+    };
   };
 
   const _buildDeterministicDeepFallback = ({ packet }) => {
@@ -500,7 +651,7 @@ module.exports = function createAiRouter(deps) {
       // =========================
       // DEEP MODE (CFO-level analysis)
       // =========================
-      const deepHistory = _getHistoryMessages(userIdStr).slice(-6);
+      const deepHistory = _getHistoryMessages(userIdStr).slice(-4);
       const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
       const nowRef = _safeDate(req?.body?.asOf) || new Date();
@@ -574,22 +725,75 @@ module.exports = function createAiRouter(deps) {
         }));
       }
 
-      const messages = [
+      const groundedMessages = [
         { role: 'system', content: deepPrompt },
         {
           role: 'system',
-          content: 'Отвечай строго по context_packet_json. По умолчанию коротко и по делу; если пользователь явно просит подробности — дай развернутый разбор с расчетами.'
+          content: [
+            'Отвечай строго по context_packet_json.',
+            'Верни ТОЛЬКО JSON-объект без markdown и без пояснений.',
+            'Схема JSON:',
+            '{',
+            '  "answer": "живой короткий ответ пользователю на русском, без фантазий",',
+            '  "facts_used": [',
+            '    { "path": "path.to.field", "value": <ожидаемое значение из context_packet_json> }',
+            '  ]',
+            '}',
+            'Требования:',
+            '- Используй минимум 2 факта в facts_used.',
+            '- path должен указывать на реальные поля context_packet_json.',
+            '- value должен совпадать с данными по path.',
+            '- В answer используй только подтверждаемые факты из facts_used.'
+          ].join('\n')
         },
         { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
         ...deepHistory,
         { role: 'user', content: q }
       ];
 
-      let rawAnswer = await _openAiChat(messages, {
+      let rawAnswer = await _openAiChat(groundedMessages, {
         modelOverride: modelDeep,
         maxTokens: 1600,
         timeout: 120000
       });
+      let groundedValidation = null;
+
+      if (!_isNoAiAnswerText(rawAnswer)) {
+        const groundedPayload = _extractFirstJsonObject(rawAnswer);
+        if (groundedPayload && typeof groundedPayload === 'object') {
+          groundedValidation = _validateGroundedPayload({ packet, payload: groundedPayload });
+          if (groundedValidation?.ok) {
+            rawAnswer = groundedValidation.answer;
+          }
+        }
+      }
+
+      if (shouldDebugLog) {
+        console.log('[AI_DEEP_GROUNDED]', JSON.stringify({
+          ok: !!groundedValidation?.ok,
+          reason: groundedValidation?.ok ? null : (groundedValidation?.reason || 'parse_or_schema_failed'),
+          factsVerified: groundedValidation?.ok ? groundedValidation.validatedFacts.length : 0
+        }));
+      }
+
+      if (!groundedValidation?.ok && !_isNoAiAnswerText(rawAnswer)) {
+        const plainMessages = [
+          { role: 'system', content: deepPrompt },
+          {
+            role: 'system',
+            content: 'Отвечай строго по context_packet_json. По умолчанию коротко и по делу; если пользователь явно просит подробности — дай развернутый разбор с расчетами.'
+          },
+          { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
+          ...deepHistory,
+          { role: 'user', content: q }
+        ];
+        rawAnswer = await _openAiChat(plainMessages, {
+          modelOverride: modelDeep,
+          maxTokens: 1600,
+          timeout: 120000
+        });
+      }
+
       if (_isNoAiAnswerText(rawAnswer)) {
         const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
         const retryMessages = [
