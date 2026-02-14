@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
 
-const AIROUTES_VERSION = 'quick-deep-v9.4';
+const AIROUTES_VERSION = 'quick-deep-v9.5';
 const https = require('https');
 
 // =========================
@@ -117,7 +117,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.4';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.5';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -598,6 +598,16 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _inferTagFromQuery = (query) => {
+    const q = _normalizeRu(query);
+    if (!q) return null;
+    if (/(аренд|rent|lease)/i.test(q)) return 'rent';
+    if (/(фот|зарплат|salary|payroll)/i.test(q)) return 'payroll';
+    if (/(налог|ндс|ипн|tax)/i.test(q)) return 'tax';
+    if (/(коммун|комунал|utility|газ|свет|вода|тепл)/i.test(q)) return 'utility';
+    return null;
+  };
+
   const _maybeBuildCategoryIncomeStructured = ({ query, packet }) => {
     const q = _normalizeRu(query);
     const asksIncome = /(доход|доходы|поступлен|выручк|приход)/i.test(q);
@@ -606,6 +616,33 @@ module.exports = function createAiRouter(deps) {
 
     const matched = _pickBestCategoryMatch({ query, packet });
     if (!matched) {
+      const inferredTag = _inferTagFromQuery(query);
+      const tagSummary = Array.isArray(packet?.derived?.tagSummary) ? packet.derived.tagSummary : [];
+      const tagRow = inferredTag
+        ? tagSummary.find((row) => String(row?.tag || '').toLowerCase() === inferredTag)
+        : null;
+      if (tagRow) {
+        const factTag = Number(tagRow?.incomeFact) || 0;
+        const planTag = Number(tagRow?.incomeForecast) || 0;
+        const totalTag = factTag + planTag;
+        const dateStartTag = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+        const dateEndTag = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+        const dateTextTag = (dateStartTag && dateEndTag && dateStartTag !== 'Invalid Date' && dateEndTag !== 'Invalid Date')
+          ? `${dateStartTag} - ${dateEndTag}`
+          : (dateStartTag || dateEndTag || 'Период не задан');
+        const title = inferredTag === 'rent' ? 'аренда' : inferredTag;
+        return _applyAutoRiskToStructured({
+          packet,
+          structured: {
+            date: dateTextTag,
+            fact: `доходы по "${title}": ${_formatTenge(factTag)}`,
+            plan: `поступления по "${title}": ${_formatTenge(planTag)}`,
+            total: `по "${title}" всего: ${_formatTenge(totalTag)}`,
+            question: `Показать операции по "${title}" по датам?`
+          }
+        });
+      }
+
       const hints = _pickCategoryHints({ query, packet, limit: 3 });
       const rawPhrase = _extractCategoryPhrase(query);
       const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
@@ -923,7 +960,8 @@ module.exports = function createAiRouter(deps) {
       }
 
       const qLower = q.toLowerCase();
-      const isDeep = req.body?.mode === 'deep';
+      const requestedMode = String(req.body?.mode || '').trim().toLowerCase();
+      const isDeep = requestedMode === 'deep';
       const source = req.body?.source || 'ui';
       const timeline = Array.isArray(req.body?.timeline) ? req.body.timeline : null;
       const requestDebug = req.body?.debugAi === true || String(req.body?.debugAi || '').toLowerCase() === 'true';
@@ -981,6 +1019,36 @@ module.exports = function createAiRouter(deps) {
         if (safeTimeline) {
           dbData.meta = dbData.meta || {};
           dbData.meta.timeline = safeTimeline;
+        }
+      }
+
+      // If deep button is enabled, keep this request strictly in deep path.
+      // For deterministic category-income asks, return grounded result immediately.
+      if (isDeep) {
+        const nowRefEarly = _safeDate(req?.body?.asOf) || new Date();
+        const periodFilterEarly = req?.body?.periodFilter || {};
+        const periodStartEarly = _safeDate(periodFilterEarly?.customStart) || _monthStartUtc(nowRefEarly);
+        const periodEndEarly = _safeDate(periodFilterEarly?.customEnd) || _monthEndUtc(nowRefEarly);
+        const packetEarly = {
+          periodStart: periodStartEarly,
+          periodEnd: periodEndEarly,
+          derived: {
+            categorySummary: Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [],
+            tagSummary: Array.isArray(dbData?.tagSummary) ? dbData.tagSummary : []
+          }
+        };
+        const deterministicEarly = _maybeBuildCategoryIncomeStructured({
+          query: q,
+          packet: packetEarly
+        });
+        if (deterministicEarly) {
+          const earlyAnswer = _formatDeepStructuredText(deterministicEarly);
+          try {
+            await profileService.recordInteraction(userId, { workspaceId });
+          } catch (_) { }
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', earlyAnswer);
+          return res.json({ text: earlyAnswer });
         }
       }
 
