@@ -139,7 +139,7 @@ module.exports = function createAiRouter(deps) {
     const num = Number(n || 0);
     const sign = num < 0 ? '- ' : '';
     try {
-      return sign + new Intl.NumberFormat('ru-RU').format(Math.abs(Math.round(num))).replace(/\u00A0/g, ' ') + ' ₸';
+      return sign + new Intl.NumberFormat('ru-RU').format(Math.abs(Math.round(num))).split('\u00A0').join(' ') + ' ₸';
     } catch (_) {
       return sign + String(Math.round(Math.abs(num))) + ' ₸';
     }
@@ -151,16 +151,149 @@ module.exports = function createAiRouter(deps) {
     return Number.isNaN(d.getTime()) ? null : d;
   };
 
+  const _normalizeSpaces = (s) => {
+    const source = String(s || '');
+    let out = '';
+    let prevSpace = true;
+    for (let i = 0; i < source.length; i += 1) {
+      const ch = source[i];
+      const isSpace = ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === '\f' || ch === '\v';
+      if (isSpace) {
+        if (!prevSpace) out += ' ';
+        prevSpace = true;
+      } else {
+        out += ch;
+        prevSpace = false;
+      }
+    }
+    return out.trim();
+  };
+
+  const _containsAny = (text, parts = []) => {
+    const src = String(text || '');
+    for (const part of parts) {
+      if (!part) continue;
+      if (src.includes(part)) return true;
+    }
+    return false;
+  };
+
+  const _countWords = (text) => {
+    const normalized = _normalizeSpaces(text);
+    if (!normalized) return 0;
+    return normalized.split(' ').filter(Boolean).length;
+  };
+
+  const _startsWithAny = (text, prefixes = []) => {
+    const src = String(text || '');
+    for (const prefix of prefixes) {
+      if (!prefix) continue;
+      if (src.startsWith(prefix)) return true;
+    }
+    return false;
+  };
+
+  const _containsTokenSimple = (text, token) => {
+    const src = ` ${String(text || '').trim()} `;
+    return src.includes(` ${token} `);
+  };
+
+  const _isValidPeriodKey = (value) => {
+    const key = String(value || '');
+    if (key.length !== 7) return false;
+    if (key[4] !== '-') return false;
+    const chars = [key[0], key[1], key[2], key[3], key[5], key[6]];
+    for (const ch of chars) {
+      if (ch < '0' || ch > '9') return false;
+    }
+    return true;
+  };
+
+  const _extractOpenAiText = (parsed) => {
+    const choice = parsed?.choices?.[0] || {};
+    const msg = choice?.message || {};
+
+    if (typeof msg.content === 'string' && msg.content.trim()) {
+      return msg.content.trim();
+    }
+
+    if (Array.isArray(msg.content)) {
+      const chunks = msg.content
+        .map((part) => {
+          if (typeof part === 'string') return part;
+          if (!part || typeof part !== 'object') return '';
+          if (typeof part.text === 'string') return part.text;
+          if (typeof part.content === 'string') return part.content;
+          if (typeof part.value === 'string') return part.value;
+          return '';
+        })
+        .filter(Boolean)
+        .join('\n')
+        .trim();
+      if (chunks) return chunks;
+    }
+
+    if (typeof msg.refusal === 'string' && msg.refusal.trim()) {
+      return `Не могу ответить: ${msg.refusal.trim()}`;
+    }
+
+    return '';
+  };
+
+  const _isNoAiAnswerText = (text) => {
+    const t = String(text || '').trim().toLowerCase();
+    return (
+      !t
+      || t === 'нет ответа от ai.'
+      || t === 'нет ответа от ai'
+      || t.startsWith('ошибка openai')
+      || t.startsWith('ошибка обработки ответа ai')
+      || t.startsWith('ошибка связи с ai')
+      || t.startsWith('ошибка: timeout')
+    );
+  };
+
+  const _buildDeterministicDeepFallback = ({ packet }) => {
+    const n = (v) => {
+      const x = Number(v);
+      return Number.isFinite(x) ? x : 0;
+    };
+
+    const d = packet?.derived || {};
+    const totals = d?.totals || {};
+    const ops = d?.operationsSummary || {};
+
+    const current = n(totals?.open?.current ?? totals?.all?.current);
+    const forecast = n(totals?.open?.future ?? totals?.all?.future);
+    const delta = forecast - current;
+    const incForecast = n(ops?.income?.forecast?.total);
+    const expForecast = Math.abs(n(ops?.expense?.forecast?.total));
+
+    if (forecast >= 0) {
+      return `Итог: прогноз к концу периода ${_formatTenge(forecast)} (сейчас ${_formatTenge(current)}, изменение ${_formatTenge(delta)}). Плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
+    }
+    return `Итог: прогноз к концу периода ${_formatTenge(forecast)} (сейчас ${_formatTenge(current)}, изменение ${_formatTenge(delta)}). Нужна корректировка плана: плановые поступления ${_formatTenge(incForecast)}, плановые расходы ${_formatTenge(expForecast)}.`;
+  };
+
   const _classifyDeepAnswerTier = (qLower = '') => {
-    const q = String(qLower || '').toLowerCase().trim();
+    const q = _normalizeSpaces(String(qLower || '').toLowerCase());
     if (!q) return 'standard';
 
-    const wantsDetailed = /(подроб|деталь|разверн|по\s+дат|по\s+объект|по\s+проект|по\s+счет|по\s+сч[её]т|покажи\s+все|все\s+операц|таблиц|полный\s+разбор|на\s+ч[её]м\s+построен|на\s+ч[её]м\s+основан|покажи\s+расч|расшифр|доказат)/i.test(q);
+    const wantsDetailed = _containsAny(q, [
+      'подроб', 'деталь', 'разверн', 'по дат', 'по объект', 'по проект', 'по счет', 'по счёт',
+      'покажи все', 'все операц', 'таблиц', 'полный разбор', 'на чем построен', 'на чём построен',
+      'на чем основан', 'на чём основан', 'покажи расч', 'расшифр', 'доказат'
+    ]);
     if (wantsDetailed) return 'detailed';
 
-    const words = q.split(/\s+/).filter(Boolean).length;
-    const isHealthCheck = /(как\s+дела|что\s+по\s+деньгам|вс[её]\s+ок|как\s+ситуац|норм.*ли|дожив[её]м|дотянем)/i.test(q);
-    const asksSimpleShort = words <= 8 && !/(покажи|сравн|расч|подроб|разверн|по\s+дат|по\s+счет|по\s+сч[её]т|по\s+объект|таблиц)/i.test(q);
+    const words = _countWords(q);
+    const isHealthCheck = _containsAny(q, [
+      'как дела', 'что по деньгам', 'все ок', 'всё ок', 'как ситуац', 'норм',
+      'дожив', 'дотянем'
+    ]);
+    const asksSimpleShort = words <= 8 && !_containsAny(q, [
+      'покажи', 'сравн', 'расч', 'подроб', 'разверн', 'по дат', 'по счет', 'по счёт', 'по объект', 'таблиц'
+    ]);
     if (isHealthCheck || asksSimpleShort) return 'flash';
 
     return 'standard';
@@ -171,7 +304,7 @@ module.exports = function createAiRouter(deps) {
     if (!text || tier === 'detailed') return text;
 
     const lines = text
-      .split(/\r?\n/)
+      .split('\r\n').join('\n').split('\r').join('\n').split('\n')
       .map((l) => String(l || '').trim())
       .filter(Boolean);
 
@@ -197,7 +330,7 @@ module.exports = function createAiRouter(deps) {
 
   const _safeWriteAnalysisJson = ({ userId, payload }) => {
     try {
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const stamp = new Date().toISOString().split(':').join('-').split('.').join('-');
       const dir = path.resolve(__dirname, 'debug-logs');
       fs.mkdirSync(dir, { recursive: true });
       const filename = `analysis-${String(userId || 'unknown')}-${stamp}.json`;
@@ -226,7 +359,8 @@ module.exports = function createAiRouter(deps) {
     const model = modelOverride || defaultModel;
 
     // Reasoning models (o1/o3, gpt-5*) ignore temperature in many cases
-    const isReasoningModel = /^o[13]/i.test(model) || /^gpt-5/i.test(model);
+    const modelLower = String(model || '').toLowerCase();
+    const isReasoningModel = _startsWithAny(modelLower, ['o1', 'o3', 'gpt-5']);
 
     const payloadObj = {
       model,
@@ -267,7 +401,14 @@ module.exports = function createAiRouter(deps) {
                 return;
               }
               const parsed = JSON.parse(data);
-              resolve(parsed?.choices?.[0]?.message?.content || 'Нет ответа от AI.');
+              const text = _extractOpenAiText(parsed);
+              if (text) {
+                resolve(text);
+                return;
+              }
+              const finishReason = parsed?.choices?.[0]?.finish_reason || 'unknown';
+              console.warn(`[OpenAI] Empty message content (finish_reason=${finishReason}, model=${model}, maxTokens=${maxTokens})`);
+              resolve('Нет ответа от AI.');
             } catch (e) {
               console.error('Parse Error:', e);
               resolve('Ошибка обработки ответа AI.');
@@ -416,7 +557,12 @@ module.exports = function createAiRouter(deps) {
     const t = String(s || '').toLowerCase();
     if (!t) return false;
     if (t.includes('диагност') || t.includes('diagnostic')) return true;
-    return /(^|[^a-z])diag([^a-z]|$)/i.test(t);
+    return (
+      t === 'diag'
+      || t.startsWith('diag ')
+      || t.endsWith(' diag')
+      || _containsTokenSimple(t, 'diag')
+    );
   };
 
   const _isFullDiagnosticsQuery = (s) => {
@@ -754,11 +900,28 @@ module.exports = function createAiRouter(deps) {
           { role: 'user', content: q }
         ];
 
-        const rawAnswer = await _openAiChat(messages, {
+        let rawAnswer = await _openAiChat(messages, {
           modelOverride: modelDeep,
           maxTokens: answerTier === 'detailed' ? 2500 : (answerTier === 'flash' ? 260 : 900),
           timeout: 120000
         });
+        if (_isNoAiAnswerText(rawAnswer)) {
+          const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
+          const retryMessages = [
+            { role: 'system', content: deepPrompt },
+            { role: 'system', content: 'Технический ретрай: дай короткий прямой ответ по данным без воды.' },
+            { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
+            { role: 'user', content: q }
+          ];
+          rawAnswer = await _openAiChat(retryMessages, {
+            modelOverride: fallbackModel,
+            maxTokens: 1400,
+            timeout: 120000
+          });
+        }
+        if (_isNoAiAnswerText(rawAnswer)) {
+          rawAnswer = _buildDeterministicDeepFallback({ packet });
+        }
         const answer = _enforceDeepAnswerTier(rawAnswer, answerTier);
 
         _pushHistory(userIdStr, 'user', q);
@@ -842,7 +1005,7 @@ module.exports = function createAiRouter(deps) {
         return res.status(501).json({ error: 'Context packets disabled' });
       }
       const periodKey = String(req.params?.periodKey || '').trim();
-      if (!/^\d{4}-\d{2}$/.test(periodKey)) {
+      if (!_isValidPeriodKey(periodKey)) {
         return res.status(400).json({ error: 'Неверный periodKey, ожидается YYYY-MM' });
       }
       const userId = req.user?._id || req.user?.id;
