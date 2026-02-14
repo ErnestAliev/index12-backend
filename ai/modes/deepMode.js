@@ -924,7 +924,7 @@ function buildBusinessContextLines({ dbData, formatTenge }) {
 function buildStressTestReport({ query, dbData, formatTenge }) {
     const q = String(query || '');
     const qLower = q.toLowerCase();
-    const wantsDetailedStress = /(подроб|детал|объясн|почему|как\s*сч(и|е)т|раскрой|формул|источник|mismatch|несоответ|проверк.*данн)/i.test(qLower);
+    const wantsDetailedStress = /(подроб|детал|объясн|почему|как\s*сч(и|е)т|раскрой|формул|источник|mismatch|несоответ|проверк.*данн|строго|детермин|технич)/i.test(qLower);
     const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
     const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
     const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
@@ -1670,6 +1670,172 @@ function buildOperationsListReport({ dbData, formatTenge, scope = 'all' }) {
     return lines.join('\n');
 }
 
+function _shouldKeepRawDeterministicText(qLower = '') {
+    return /(сыры|детермин|строго|json|таблиц|по строкам|как есть|без перефраз|технич)/i.test(qLower);
+}
+
+function _suggestDeepFollowUpQuestion({ query, dbData, branch = 'general' }) {
+    const qLower = String(query || '').toLowerCase();
+    if (/(без вопросов|только ответ|не задавай|коротко без)/i.test(qLower)) return null;
+
+    const metrics = calcCoreMetrics(dbData);
+    const insights = buildBusinessContextInsights(dbData);
+
+    if (insights?.consistency?.hasFutureNetMismatch) {
+        return 'Подтвердим расхождение между timeline и операциями, чтобы дальше опираться на один источник?';
+    }
+
+    if (branch === 'stress') {
+        if (metrics.runwayDaysOpen !== null && metrics.runwayDaysOpen <= 20) {
+            return 'Какой 1 ближайший расход можно сдвинуть, чтобы увеличить запас по открытому счету?';
+        }
+        return 'Считать сразу второй сценарий: задержка еще одного поступления на 3 дня?';
+    }
+
+    if (branch === 'month') {
+        return 'Где в этом месяце главный рычаг прибыли: поднять доход или срезать 1-2 статьи расходов?';
+    }
+
+    const topCore = Array.isArray(insights?.coreIncomeCategories) ? insights.coreIncomeCategories : [];
+    if (topCore.length >= 2) {
+        const totalCore = topCore.reduce((s, c) => s + _toFiniteNumber(c.adjustedCoreIncome), 0);
+        const firstShare = totalCore > 0 ? (_toFiniteNumber(topCore[0].adjustedCoreIncome) / totalCore) : 0;
+        if (firstShare >= 0.65) {
+            return `Доход сильно зависит от категории «${topCore[0].name}». Добавим цель на диверсификацию источников дохода?`;
+        }
+    }
+
+    return 'Какой следующий шаг важнее сейчас: снизить риск кассового давления или ускорить рост прибыли?';
+}
+
+function _applyDeepBehaviorProtocol({ query, dbData, answer, branch = 'general', keepRawDeterministic = false }) {
+    const text = String(answer || '').trim();
+    if (!text) return answer;
+    if (keepRawDeterministic) return text;
+    if (/\?/.test(text)) return text; // already asks follow-up
+
+    const followUp = _suggestDeepFollowUpQuestion({ query, dbData, branch });
+    if (!followUp) return text;
+    return `${text}\n\nОдин важный вопрос:\n${followUp}`;
+}
+
+function _extractFirstJsonObject(text) {
+    const s = String(text || '');
+    const start = s.indexOf('{');
+    const end = s.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    return s.slice(start, end + 1);
+}
+
+function _normalizeIntentName(intentRaw) {
+    const v = String(intentRaw || '').trim().toLowerCase();
+    const map = {
+        stress_test: 'stress_test',
+        operations_list: 'operations_list',
+        balance_reconciliation: 'balance_reconciliation',
+        category_income_math: 'category_income_math',
+        month_assessment: 'month_assessment',
+        project_expenses: 'project_expenses',
+        spend_limit: 'spend_limit',
+        finance: 'finance',
+        invest: 'invest',
+        unknown: 'unknown'
+    };
+    return map[v] || 'unknown';
+}
+
+function _normalizeScopeName(scopeRaw) {
+    const v = String(scopeRaw || '').trim().toLowerCase();
+    if (v === 'open' || v === 'hidden' || v === 'all') return v;
+    return null;
+}
+
+async function _classifyDeepIntentLLM({ query, openAiChat, modelDeep }) {
+    const q = String(query || '').trim();
+    if (!q) return null;
+
+    const systemPrompt = [
+        '[DEEP_INTENT_CLASSIFIER]',
+        'Классифицируй финансовый запрос пользователя.',
+        'Верни ТОЛЬКО JSON без пояснений.',
+        'Схема:',
+        '{',
+        '  "intent": "stress_test|operations_list|balance_reconciliation|category_income_math|month_assessment|project_expenses|spend_limit|finance|invest|unknown",',
+        '  "scope": "open|hidden|all|null",',
+        '  "confidence": 0.0',
+        '}',
+        'Правила:',
+        '- confidence в диапазоне 0..1',
+        '- если не уверен, intent="unknown"'
+    ].join('\n');
+
+    try {
+        const response = await openAiChat(
+            [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: q }
+            ],
+            {
+                modelOverride: modelDeep,
+                maxTokens: 220,
+                timeout: 20000
+            }
+        );
+
+        const jsonText = _extractFirstJsonObject(response);
+        if (!jsonText) return null;
+        const parsed = JSON.parse(jsonText);
+        const intent = _normalizeIntentName(parsed?.intent);
+        const scope = _normalizeScopeName(parsed?.scope);
+        const confidence = Math.max(0, Math.min(1, _toFiniteNumber(parsed?.confidence)));
+
+        return { intent, scope, confidence };
+    } catch (_) {
+        return null;
+    }
+}
+
+async function _humanizeDeterministicAnswer({
+    query,
+    rawAnswer,
+    openAiChat,
+    modelDeep
+}) {
+    const source = String(rawAnswer || '').trim();
+    if (!source) return rawAnswer;
+
+    const messages = [
+        {
+            role: 'system',
+            content: [
+                'Ты финансовый ассистент.',
+                'Тебе уже дали ГОТОВЫЙ расчет.',
+                'Задача: объяснить ответ простым человеческим языком.',
+                'КРИТИЧНО: не менять ни одной цифры, даты и факта; можно только перефразировать.',
+                'Не добавляй новые суммы, категории, операции или выводы.',
+                'Избегай техничных формулировок (future net, source, mismatch), если пользователь не просил детали.',
+                'Ответ короткий: 4-8 строк, по сути.'
+            ].join('\n')
+        },
+        {
+            role: 'user',
+            content: `Вопрос пользователя:\n${query}\n\nГотовый расчет:\n${source}\n\nПерефразируй простым языком без изменения цифр.`
+        }
+    ];
+
+    try {
+        const ai = await openAiChat(messages, {
+            modelOverride: modelDeep,
+            maxTokens: 600,
+            timeout: 60000
+        });
+        const out = String(ai || '').trim();
+        return out || rawAnswer;
+    } catch (_) {
+        return rawAnswer;
+    }
+}
+
 /**
  * Handle Deep Mode queries (CFO analysis)
  * @param {Object} params
@@ -1694,6 +1860,7 @@ async function handleDeepQuery({
     modelDeep
 }) {
     const qLower = String(query || '').toLowerCase();
+    const keepRawDeterministic = _shouldKeepRawDeterministicText(qLower);
     const metrics = calcCoreMetrics(dbData);
     const answersMoreExpenses = /(расходы?.*(ещ[её]|еще).*будут|будут.*расход|еще будут|ещё будут)/i.test(qLower);
     const answersNoMoreExpenses = /(расходов?.*(больше\s+)?не\s+будет|все\s+расходы\s+оплачены|всё\s+расходы\s+оплачены|все\s+оплачено|всё\s+оплачено)/i.test(qLower);
@@ -1702,10 +1869,25 @@ async function handleDeepQuery({
         if (answersMoreExpenses || answersNoMoreExpenses) {
             session.pending = null;
             const explicitExpensesStatus = answersMoreExpenses ? 'more' : 'none';
-            const answer = buildMonthAssessmentReport({
+            const rawAnswer = buildMonthAssessmentReport({
                 dbData,
                 formatTenge,
                 explicitExpensesStatus
+            });
+            const humanized = keepRawDeterministic
+                ? rawAnswer
+                : await _humanizeDeterministicAnswer({
+                    query,
+                    rawAnswer,
+                    openAiChat,
+                    modelDeep
+                });
+            const answer = _applyDeepBehaviorProtocol({
+                query,
+                dbData,
+                answer: humanized,
+                branch: 'month',
+                keepRawDeterministic
             });
             return { answer, shouldSaveToHistory: true };
         }
@@ -1723,29 +1905,47 @@ async function handleDeepQuery({
     const asksOperationsList = mentionsOperations && /(все|список|покаж|посмотр|выведи|выгруз|какие)/i.test(qLower);
     const asksOpenScope = /(открыт.*счет|по открытым|открытые счета)/i.test(qLower);
     const asksHiddenScope = /(скрыт.*счет|по скрытым|скрытые счета)/i.test(qLower);
-    const wantsOperationsList = mentionsOperations && (asksOperationsList || asksOpenScope || asksHiddenScope);
-    const wantsStressTest = /(стресс|stress[-\s]*test|стресс[-\s]*тест)/i.test(qLower)
+    let inferredScope = asksHiddenScope ? 'hidden' : (asksOpenScope ? 'open' : 'all');
+
+    let wantsOperationsList = mentionsOperations && (asksOperationsList || asksOpenScope || asksHiddenScope);
+    let wantsStressTest = /(стресс|stress[-\s]*test|стресс[-\s]*тест)/i.test(qLower)
         && /(перенос|перенест|сдвин|отлож|кассов|подушк|min|минимальн|конец.*месяц|конец.*феврал)/i.test(qLower);
     const hasReconciliationKeywords = /(разниц|не\s*сход|не\s*бь[её]тся|сверк|банкинг|в\s*систем[еы]|по\s*системе|из\s*банка|в\s*банке|реальн.*банк)/i.test(qLower);
     const hasWhereLostPhrase = /где\s+потерял|где\s+потеряли|куда\s+дел/.test(qLower);
-    const wantsBalanceReconciliation = (moneyCandidates.length >= 2 && hasReconciliationKeywords)
+    let wantsBalanceReconciliation = (moneyCandidates.length >= 2 && hasReconciliationKeywords)
         || (moneyCandidates.length >= 2 && hasWhereLostPhrase && /(счет|счёт|баланс)/i.test(qLower));
-    const wantsCategoryIncomeMath =
+    let wantsCategoryIncomeMath =
         /(доход|поступлен|приход)/i.test(qLower)
         && /(категор|аренд|по\s+[«"']?[a-zа-яё])/i.test(qLower)
         && /(текущ|будущ|прогноз|факт|%|процент|собери|рассч|посчит|сумм)/i.test(qLower);
-    const wantsMonthAssessment = /(изучи.*доход.*расход.*перевод|доход.*расход.*перевод.*месяц|как.*оцен.*месяц|оценк.*месяц|оцени.*месяц|картин.*месяц|месяц.*как)/i.test(qLower);
+    let wantsMonthAssessment = /(изучи.*доход.*расход.*перевод|доход.*расход.*перевод.*месяц|как.*оцен.*месяц|оценк.*месяц|оцени.*месяц|картин.*месяц|месяц.*как)/i.test(qLower);
 
-    const wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
-    const wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
-    const wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
-    const wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
-    const wantsProjectExpenses = /расход.*проект|проект.*расход|статьи.*расход.*проект|проект.*статьи/i.test(qLower);
+    let wantsInvest = /инвест|влож|инвестици|портфель|доходность|риск.профиль/i.test(qLower);
+    let wantsFinance = /ситуац|картина|финанс|прибыл|марж|(как.*дела)|(в.*целом)|(в.*общ)|(общ.*ситуац)|что по деньг/i.test(qLower);
+    let wantsTellUnknown = /что-нибудь.*не знаю|удиви|чего я не знаю/i.test(qLower);
+    let wantsLosses = /теря|потер|куда ушл|на что трат/i.test(qLower);
+    let wantsProjectExpenses = /расход.*проект|проект.*расход|статьи.*расход.*проект|проект.*статьи/i.test(qLower);
     const wantsScaling = /масштаб|рост|расшир|экспанс|новый.*рынок|новый.*продукт/i.test(qLower);
     const wantsHiring = /наня|найм|команд|c-level|cfo|cmo|cto|сотрудник/i.test(qLower);
     const wantsTaxOptimization = /налог|опн|сн|кпн|упрощ[её]нк|оптимизац.*налог/i.test(qLower);
     const wantsExit = /продать.*бизнес|продажа.*бизнес|exit|выход|оценка.*бизнес/i.test(qLower);
-    const wantsSpendLimit = /(сколько .*тратить|лимит.*расход|безболезненн|ремонт|потратить.*остаться в плюсе)/i.test(qLower);
+    let wantsSpendLimit = /(сколько .*тратить|лимит.*расход|безболезненн|ремонт|потратить.*остаться в плюсе)/i.test(qLower);
+
+    const llmIntent = await _classifyDeepIntentLLM({ query, openAiChat, modelDeep });
+    const llmCanOverride = !!llmIntent && llmIntent.intent !== 'unknown' && llmIntent.confidence >= 0.7;
+    if (llmCanOverride) {
+        if (llmIntent.scope) inferredScope = llmIntent.scope;
+        const force = llmIntent.intent;
+        wantsStressTest = wantsStressTest || force === 'stress_test';
+        wantsOperationsList = wantsOperationsList || force === 'operations_list';
+        wantsBalanceReconciliation = wantsBalanceReconciliation || force === 'balance_reconciliation';
+        wantsCategoryIncomeMath = wantsCategoryIncomeMath || force === 'category_income_math';
+        wantsMonthAssessment = wantsMonthAssessment || force === 'month_assessment';
+        wantsProjectExpenses = wantsProjectExpenses || force === 'project_expenses';
+        wantsSpendLimit = wantsSpendLimit || force === 'spend_limit';
+        wantsFinance = wantsFinance || force === 'finance';
+        wantsInvest = wantsInvest || force === 'invest';
+    }
 
     let justSetLiving = false;
 
@@ -1761,7 +1961,22 @@ async function handleDeepQuery({
     // OPERATIONS LIST (deterministic, no LLM)
     // =====================
     if (wantsStressTest) {
-        const answer = buildStressTestReport({ query, dbData, formatTenge });
+        const rawAnswer = buildStressTestReport({ query, dbData, formatTenge });
+        const humanized = keepRawDeterministic
+            ? rawAnswer
+            : await _humanizeDeterministicAnswer({
+                query,
+                rawAnswer,
+                openAiChat,
+                modelDeep
+            });
+        const answer = _applyDeepBehaviorProtocol({
+            query,
+            dbData,
+            answer: humanized,
+            branch: 'stress',
+            keepRawDeterministic
+        });
         return { answer, shouldSaveToHistory: true };
     }
 
@@ -1769,7 +1984,7 @@ async function handleDeepQuery({
     // OPERATIONS LIST (deterministic, no LLM)
     // =====================
     if (wantsOperationsList) {
-        const scope = asksHiddenScope ? 'hidden' : (asksOpenScope ? 'open' : 'all');
+        const scope = inferredScope || 'all';
         const answer = buildOperationsListReport({ dbData, formatTenge, scope });
         return { answer, shouldSaveToHistory: true };
     }
@@ -1778,13 +1993,28 @@ async function handleDeepQuery({
     // BALANCE RECONCILIATION (system vs bank)
     // =====================
     if (wantsBalanceReconciliation) {
-        const answer = buildBalanceReconciliationReport({
+        const rawAnswer = buildBalanceReconciliationReport({
             query,
             dbData,
             formatTenge,
             amounts: moneyCandidates
         });
-        if (answer) {
+        if (rawAnswer) {
+            const humanized = keepRawDeterministic
+                ? rawAnswer
+                : await _humanizeDeterministicAnswer({
+                    query,
+                    rawAnswer,
+                    openAiChat,
+                    modelDeep
+                });
+            const answer = _applyDeepBehaviorProtocol({
+                query,
+                dbData,
+                answer: humanized,
+                branch: 'reconciliation',
+                keepRawDeterministic
+            });
             return { answer, shouldSaveToHistory: true };
         }
     }
@@ -1793,8 +2023,23 @@ async function handleDeepQuery({
     // CATEGORY INCOME (fact + forecast + percent)
     // =====================
     if (wantsCategoryIncomeMath) {
-        const answer = buildCategoryIncomePercentReport({ query, dbData, formatTenge });
-        if (answer) {
+        const rawAnswer = buildCategoryIncomePercentReport({ query, dbData, formatTenge });
+        if (rawAnswer) {
+            const humanized = keepRawDeterministic
+                ? rawAnswer
+                : await _humanizeDeterministicAnswer({
+                    query,
+                    rawAnswer,
+                    openAiChat,
+                    modelDeep
+                });
+            const answer = _applyDeepBehaviorProtocol({
+                query,
+                dbData,
+                answer: humanized,
+                branch: 'category',
+                keepRawDeterministic
+            });
             return { answer, shouldSaveToHistory: true };
         }
     }
@@ -1806,7 +2051,22 @@ async function handleDeepQuery({
         if (session) {
             session.pending = { type: 'month_assessment_expenses_status' };
         }
-        const answer = buildMonthAssessmentReport({ dbData, formatTenge });
+        const rawAnswer = buildMonthAssessmentReport({ dbData, formatTenge });
+        const humanized = keepRawDeterministic
+            ? rawAnswer
+            : await _humanizeDeterministicAnswer({
+                query,
+                rawAnswer,
+                openAiChat,
+                modelDeep
+            });
+        const answer = _applyDeepBehaviorProtocol({
+            query,
+            dbData,
+            answer: humanized,
+            branch: 'month',
+            keepRawDeterministic
+        });
         return { answer, shouldSaveToHistory: true };
     }
 

@@ -15,6 +15,7 @@ ai/
 │
 ├── docs/                      # Доменная модель и контракт нормализации
 │   ├── ENTITY_DICTIONARY.md
+│   ├── DEEP_BEHAVIOR_PROTOCOL.md
 │   ├── NORMALIZATION_CONTRACT.md
 │   └── UNIVERSAL_SCENARIO.md
 │
