@@ -543,6 +543,16 @@ function _extractThresholdFromText(text) {
     return null;
 }
 
+function _percentile(values, p = 0.9) {
+    const arr = (Array.isArray(values) ? values : [])
+        .map((v) => _toFiniteNumber(v))
+        .filter((v) => v > 0)
+        .sort((a, b) => a - b);
+    if (!arr.length) return 0;
+    const pos = Math.min(arr.length - 1, Math.max(0, Math.floor((arr.length - 1) * p)));
+    return arr[pos];
+}
+
 function _resolveNowTsFromMeta(meta = {}) {
     if (Number.isFinite(Number(meta?.todayTimestamp))) {
         return Number(meta.todayTimestamp);
@@ -952,7 +962,7 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     if (!deferDate && wantsShiftLastOperation) {
         deferDate = new Date(periodEnd.getTime() + 86400000); // by default shift to next day (out of period)
     }
-    const threshold = _extractThresholdFromText(q) || 1_000_000;
+    const userThreshold = _extractThresholdFromText(q);
     const hasDeferredScenario = !!deferDate && deferDate.getTime() > periodEnd.getTime();
     const shouldExcludeDeferred = hasDeferredScenario && (Number.isFinite(deferAmount) || wantsShiftLastOperation);
 
@@ -1013,6 +1023,7 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     });
 
     const dayNetMapOps = new Map(); // dd.mm.yy -> { net, ts }
+    const dayFlowMapOps = new Map(); // dd.mm.yy -> { ts, inflow, outflow }
     scenarioOps.forEach((op) => {
         const d = op?.ts ? new Date(op.ts) : (op?.dateIso ? new Date(op.dateIso) : null);
         if (!d || Number.isNaN(d.getTime())) return;
@@ -1024,6 +1035,29 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         const rec = dayNetMapOps.get(key);
         rec.net += delta;
         dayNetMapOps.set(key, rec);
+
+        if (!dayFlowMapOps.has(key)) {
+            dayFlowMapOps.set(key, { ts: d.getTime(), inflow: 0, outflow: 0 });
+        }
+        const flowRec = dayFlowMapOps.get(key);
+        const amount = Math.abs(_toFiniteNumber(op?.amount));
+        if (amount > 0) {
+            if (op?.kind === 'income') {
+                const acc = op?.accountId ? String(op.accountId) : null;
+                if (acc && openIds.has(acc)) flowRec.inflow += amount;
+            } else if (op?.kind === 'expense') {
+                const acc = op?.accountId ? String(op.accountId) : null;
+                if (acc && openIds.has(acc)) flowRec.outflow += amount;
+            } else if (op?.kind === 'transfer') {
+                const fromAcc = op?.fromAccountId ? String(op.fromAccountId) : null;
+                const toAcc = op?.toAccountId ? String(op.toAccountId) : null;
+                const fromOpen = !!(fromAcc && openIds.has(fromAcc));
+                const toOpen = !!(toAcc && openIds.has(toAcc));
+                if (fromOpen && !toOpen) flowRec.outflow += amount;
+                else if (!fromOpen && toOpen) flowRec.inflow += amount;
+            }
+        }
+        dayFlowMapOps.set(key, flowRec);
     });
 
     const timelineRows = timeline
@@ -1078,6 +1112,7 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     }
 
     const dayNetMapTimeline = new Map();
+    const dayFlowMapTimeline = new Map();
     timelineRows.forEach((r) => {
         if (!dayNetMapTimeline.has(r.dateKey)) {
             dayNetMapTimeline.set(r.dateKey, { ts: r.ts, net: 0 });
@@ -1085,6 +1120,14 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         const rec = dayNetMapTimeline.get(r.dateKey);
         rec.net += r.net;
         dayNetMapTimeline.set(r.dateKey, rec);
+
+        if (!dayFlowMapTimeline.has(r.dateKey)) {
+            dayFlowMapTimeline.set(r.dateKey, { ts: r.ts, inflow: 0, outflow: 0 });
+        }
+        const flowRec = dayFlowMapTimeline.get(r.dateKey);
+        flowRec.inflow += Math.max(0, _toFiniteNumber(r.income));
+        flowRec.outflow += Math.max(0, _toFiniteNumber(r.effectiveExpense) + _toFiniteNumber(r.withdrawal));
+        dayFlowMapTimeline.set(r.dateKey, flowRec);
     });
 
     const _simulate = (dayMap) => {
@@ -1094,6 +1137,7 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
 
         let running = startOpen;
         let minBalance = startOpen;
+        let maxBalance = startOpen;
         let minDate = dbData?.meta?.today || periodEndRaw || '?';
 
         days.forEach((day) => {
@@ -1102,12 +1146,16 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
                 minBalance = running;
                 minDate = day.dateKey;
             }
+            if (running > maxBalance) {
+                maxBalance = running;
+            }
         });
 
         return {
             days,
             endBalance: running,
             minBalance,
+            maxBalance,
             minDate
         };
     };
@@ -1125,6 +1173,45 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
             chosenSource = 'timeline';
         }
     }
+
+    const contextInsights = buildBusinessContextInsights(dbData);
+
+    const combinedFlowMap = new Map();
+    const _mergeFlowMap = (srcMap) => {
+        srcMap.forEach((rec, dateKey) => {
+            if (!combinedFlowMap.has(dateKey)) {
+                combinedFlowMap.set(dateKey, { ts: rec.ts, inflow: 0, outflow: 0 });
+            }
+            const cur = combinedFlowMap.get(dateKey);
+            cur.ts = Math.min(cur.ts || rec.ts, rec.ts || cur.ts);
+            cur.inflow = Math.max(_toFiniteNumber(cur.inflow), _toFiniteNumber(rec.inflow));
+            cur.outflow = Math.max(_toFiniteNumber(cur.outflow), _toFiniteNumber(rec.outflow));
+            combinedFlowMap.set(dateKey, cur);
+        });
+    };
+    _mergeFlowMap(dayFlowMapTimeline);
+    _mergeFlowMap(dayFlowMapOps);
+
+    const combinedFlowDays = Array.from(combinedFlowMap.values())
+        .sort((a, b) => _toFiniteNumber(a.ts) - _toFiniteNumber(b.ts));
+    const outflowAllDays = combinedFlowDays
+        .map((d) => Math.max(0, _toFiniteNumber(d.outflow)));
+    const outflowSeries = outflowAllDays
+        .filter((v) => v > 0);
+    const avgOutflow = outflowAllDays.length
+        ? (outflowAllDays.reduce((s, v) => s + v, 0) / outflowAllDays.length)
+        : 0;
+    const maxOutflow = outflowSeries.length ? Math.max(...outflowSeries) : 0;
+    const p90Outflow = _percentile(outflowSeries, 0.9);
+    const reserveDays = 3;
+    const reserveByRun = avgOutflow * reserveDays;
+    const volatilityBuffer = Math.max(0, (_toFiniteNumber(chosen.maxBalance) - _toFiniteNumber(chosen.minBalance)) * 0.2);
+    const mismatchBuffer = contextInsights.consistency.hasFutureNetMismatch
+        ? Math.abs(_toFiniteNumber(contextInsights.consistency.futureNetDiff)) * 0.2
+        : 0;
+    const dynamicThreshold = Math.round(Math.max(0, maxOutflow, p90Outflow, reserveByRun, volatilityBuffer, mismatchBuffer));
+    const threshold = Number.isFinite(userThreshold) ? Math.round(Math.abs(userThreshold)) : dynamicThreshold;
+    const thresholdSource = Number.isFinite(userThreshold) ? 'user' : 'dynamic';
 
     const hasStrictCashGap = chosen.minBalance < 0;
     const belowThreshold = chosen.minBalance < threshold;
@@ -1154,7 +1241,6 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
         lines.push(`• Качество данных: ${String(quality.status).toUpperCase()}${score !== null ? ` (score ${score}/100)` : ''}.`);
     }
 
-    const contextInsights = buildBusinessContextInsights(dbData);
     if (wantsDetailedStress && contextInsights.consistency.hasFutureNetMismatch) {
         lines.push(`• Проверка данных: по дневному графику ожидаемое сальдо ${formatTenge(contextInsights.consistency.timelineFutureNet)}, по списку операций ${formatTenge(contextInsights.consistency.operationsFutureNetOpen)}.`);
         lines.push(`• Для надежности взят более осторожный вариант расчета: ${chosenSource === 'timeline' ? 'по дневному графику' : 'по операциям'}.`);
@@ -1163,13 +1249,32 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     }
 
     lines.push('');
-    lines.push(`1) Кассовый разрыв: ${cashGapLabel}.`);
-    lines.push(`2) Минимальный остаток: ${formatTenge(chosen.minBalance)} на ${chosen.minDate}.`);
-    lines.push(`3) Остаток на конец периода: ${formatTenge(chosen.endBalance)}.`);
-    if (wantsDetailedStress) {
-        lines.push(`4) Подушка до целевого остатка ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)} (${formatTenge(threshold)} - ${formatTenge(chosen.minBalance)}).`);
+    if (!wantsDetailedStress) {
+        lines.push(`Коротко: в минус не уходите, но ${chosen.minDate} остаток проседает до ${formatTenge(chosen.minBalance)}.`);
+        lines.push(`На конец периода ожидается ${formatTenge(chosen.endBalance)}.`);
+        lines.push(`Рекомендуемый минимальный запас: ${formatTenge(threshold)}${thresholdSource === 'user' ? ' (задан вами)' : ' (посчитан по движениям)'}.`);
+        lines.push(`Не хватает до этого запаса: ${formatTenge(bufferToThreshold)}.`);
+        if (thresholdSource !== 'user') {
+            const factorCandidates = [
+                { label: `пиковый дневной отток`, value: Math.round(maxOutflow) },
+                { label: `запас на ${reserveDays} дня`, value: Math.round(reserveByRun) },
+                { label: `буфер волатильности`, value: Math.round(volatilityBuffer) },
+                { label: `буфер расхождения данных`, value: Math.round(mismatchBuffer) }
+            ].filter(f => f.value > 0).sort((a, b) => b.value - a.value).slice(0, 2);
+            if (factorCandidates.length) {
+                lines.push(`Почему такой порог: ${factorCandidates.map(f => `${f.label} ${formatTenge(f.value)}`).join(', ')}.`);
+            } else {
+                lines.push('Почему такой порог: в будущем периоде не найдено существенных оттоков.');
+            }
+        }
     } else {
-        lines.push(`4) Чтобы минимальный остаток был не ниже ${formatTenge(threshold)}, нужна подушка ${formatTenge(bufferToThreshold)}.`);
+        lines.push(`1) Кассовый разрыв: ${cashGapLabel}.`);
+        lines.push(`2) Минимальный остаток: ${formatTenge(chosen.minBalance)} на ${chosen.minDate}.`);
+        lines.push(`3) Остаток на конец периода: ${formatTenge(chosen.endBalance)}.`);
+        lines.push(`4) Подушка до целевого остатка ${formatTenge(threshold)}: ${formatTenge(bufferToThreshold)} (${formatTenge(threshold)} - ${formatTenge(chosen.minBalance)}).`);
+        if (thresholdSource !== 'user') {
+            lines.push(`5) Порог собран из факторов: 5-дневный отток ${formatTenge(Math.round(reserveByRun))}, пик дня ${formatTenge(Math.round(maxOutflow))}, p90 оттока ${formatTenge(Math.round(p90Outflow))}, волатильность ${formatTenge(Math.round(volatilityBuffer))}, буфер расхождения ${formatTenge(Math.round(mismatchBuffer))}.`);
+        }
     }
     if (belowThreshold) {
         lines.push(`• Важно: минимум ниже целевого остатка ${formatTenge(threshold)}.`);
