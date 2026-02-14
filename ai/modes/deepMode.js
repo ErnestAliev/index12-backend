@@ -447,6 +447,14 @@ function buildMonthAssessmentReport({ dbData, formatTenge, explicitExpensesStatu
     }
 
     lines.push(`• Оценка: ${monthStatus}.`);
+
+    const { lines: contextLines } = buildBusinessContextLines({ dbData, formatTenge });
+    if (contextLines.length) {
+        lines.push('');
+        lines.push('Контекст (детерминированно):');
+        contextLines.forEach((l) => lines.push(l));
+    }
+
     lines.push('');
 
     if (explicitExpensesStatus === 'more') {
@@ -533,6 +541,363 @@ function _extractThresholdFromText(text) {
     const threshold = _extractAmountAfterKeywords(text, ['не\\s+ниже', 'не\\s+меньше', 'порог', 'минимальн']);
     if (Number.isFinite(threshold)) return Math.round(Math.abs(threshold));
     return null;
+}
+
+function _resolveNowTsFromMeta(meta = {}) {
+    if (Number.isFinite(Number(meta?.todayTimestamp))) {
+        return Number(meta.todayTimestamp);
+    }
+
+    const todayParsed = _parseDateFromRuText(meta?.today || '');
+    if (todayParsed) {
+        todayParsed.setUTCHours(23, 59, 59, 999);
+        return todayParsed.getTime();
+    }
+
+    return Date.now();
+}
+
+function _resolvePeriodEndTsFromMeta(meta = {}) {
+    const parsed = _parseDateFromRuText(meta?.periodEnd || '');
+    if (parsed) {
+        parsed.setUTCHours(23, 59, 59, 999);
+        return parsed.getTime();
+    }
+    return Date.now() + 30 * 86400000;
+}
+
+function _utilityLikeText(text) {
+    const t = _normalizeForMatch(text || '');
+    if (!t) return false;
+    return /(комун|коммун|utility|utilities|электр|свет|газ|вода|тепл|жарык|рэк|су\b|энерг|теплов)/i.test(t);
+}
+
+function _opCounterpartyText(op) {
+    return [
+        op?.contractorName,
+        op?.toCompanyName,
+        op?.fromCompanyName,
+        op?.toIndividualName,
+        op?.fromIndividualName,
+        op?.description
+    ].filter(Boolean).join(' | ');
+}
+
+function buildBusinessContextInsights(dbData) {
+    const ops = Array.isArray(dbData?.operations) ? dbData.operations : [];
+    const accounts = Array.isArray(dbData?.accounts) ? dbData.accounts : [];
+    const projects = Array.isArray(dbData?.catalogs?.projects) ? dbData.catalogs.projects : [];
+    const timeline = Array.isArray(dbData?.meta?.timeline) ? dbData.meta.timeline : [];
+    const meta = dbData?.meta || {};
+
+    const accountMap = new Map();
+    accounts.forEach((a) => {
+        const id = a?._id || a?.id;
+        if (!id) return;
+        const isHidden = !!(a?.isHidden || a?.isExcluded);
+        accountMap.set(String(id), {
+            name: a?.name || `Счет ${String(id).slice(-4)}`,
+            isHidden
+        });
+    });
+
+    const openIds = new Set(
+        Array.from(accountMap.entries())
+            .filter(([, a]) => !a.isHidden)
+            .map(([id]) => id)
+    );
+
+    const projectNameById = new Map();
+    projects.forEach((p) => {
+        const id = p?.id || p?._id;
+        if (!id) return;
+        projectNameById.set(String(id), p?.name || `Проект ${String(id).slice(-4)}`);
+    });
+
+    const catMap = new Map();
+    const projectMap = new Map();
+    const accountMotionMap = new Map();
+
+    let openIncome = 0;
+    let openExpense = 0;
+    let hiddenIncome = 0;
+    let hiddenExpense = 0;
+
+    const upsertCat = (name) => {
+        const key = String(name || 'Без категории');
+        if (!catMap.has(key)) {
+            catMap.set(key, {
+                name: key,
+                income: 0,
+                expense: 0,
+                incomeOps: 0,
+                expenseOps: 0,
+                utilityIncomeOps: 0,
+                utilityExpenseOps: 0
+            });
+        }
+        return catMap.get(key);
+    };
+
+    const upsertProject = (id, name) => {
+        const key = String(id || '');
+        if (!key) return null;
+        if (!projectMap.has(key)) {
+            projectMap.set(key, {
+                id: key,
+                name: name || `Проект ${key.slice(-4)}`,
+                income: 0,
+                expense: 0,
+                profit: 0,
+                incomeOps: 0,
+                expenseOps: 0
+            });
+        }
+        return projectMap.get(key);
+    };
+
+    const upsertAccountMotion = (accId, fallbackName = null) => {
+        const key = String(accId || '');
+        if (!key || !openIds.has(key)) return null;
+        if (!accountMotionMap.has(key)) {
+            const metaAcc = accountMap.get(key);
+            accountMotionMap.set(key, {
+                id: key,
+                name: metaAcc?.name || fallbackName || `Счет ${key.slice(-4)}`,
+                volume: 0,
+                income: 0,
+                expense: 0,
+                transferIn: 0,
+                transferOut: 0,
+                net: 0
+            });
+        }
+        return accountMotionMap.get(key);
+    };
+
+    ops.forEach((op) => {
+        const amount = Math.abs(_toFiniteNumber(op?.amount));
+        if (!amount) return;
+
+        const kind = String(op?.kind || '');
+        if (kind !== 'income' && kind !== 'expense' && kind !== 'transfer') return;
+
+        const accountId = op?.accountId ? String(op.accountId) : null;
+        const fromAccountId = op?.fromAccountId ? String(op.fromAccountId) : null;
+        const toAccountId = op?.toAccountId ? String(op.toAccountId) : null;
+        const accountMeta = accountId ? accountMap.get(accountId) : null;
+
+        if (kind === 'income' || kind === 'expense') {
+            const isHidden = !!accountMeta?.isHidden;
+            if (kind === 'income') {
+                if (isHidden) hiddenIncome += amount;
+                else openIncome += amount;
+            } else {
+                if (isHidden) hiddenExpense += amount;
+                else openExpense += amount;
+            }
+        }
+
+        if (kind === 'income' || kind === 'expense') {
+            const cat = upsertCat(op?.categoryName || 'Без категории');
+            const utilityLike = _utilityLikeText(cat.name) || _utilityLikeText(_opCounterpartyText(op));
+            if (kind === 'income') {
+                cat.income += amount;
+                cat.incomeOps += 1;
+                if (utilityLike) cat.utilityIncomeOps += 1;
+            } else {
+                cat.expense += amount;
+                cat.expenseOps += 1;
+                if (utilityLike) cat.utilityExpenseOps += 1;
+            }
+        }
+
+        const projectId = op?.projectId ? String(op.projectId) : null;
+        if (projectId && (kind === 'income' || kind === 'expense')) {
+            const p = upsertProject(projectId, op?.projectName || projectNameById.get(projectId));
+            if (p) {
+                if (kind === 'income') {
+                    p.income += amount;
+                    p.incomeOps += 1;
+                } else {
+                    p.expense += amount;
+                    p.expenseOps += 1;
+                }
+                p.profit = p.income - p.expense;
+            }
+        }
+
+        if (kind === 'income' || kind === 'expense') {
+            if (accountId && openIds.has(accountId)) {
+                const acc = upsertAccountMotion(accountId, op?.accountName);
+                if (acc) {
+                    acc.volume += amount;
+                    if (kind === 'income') {
+                        acc.income += amount;
+                        acc.net += amount;
+                    } else {
+                        acc.expense += amount;
+                        acc.net -= amount;
+                    }
+                }
+            }
+        } else if (kind === 'transfer') {
+            if (fromAccountId && openIds.has(fromAccountId)) {
+                const accFrom = upsertAccountMotion(fromAccountId, op?.fromAccountName);
+                if (accFrom) {
+                    accFrom.volume += amount;
+                    accFrom.transferOut += amount;
+                    accFrom.net -= amount;
+                }
+            }
+            if (toAccountId && openIds.has(toAccountId)) {
+                const accTo = upsertAccountMotion(toAccountId, op?.toAccountName);
+                if (accTo) {
+                    accTo.volume += amount;
+                    accTo.transferIn += amount;
+                    accTo.net += amount;
+                }
+            }
+        }
+    });
+
+    const categories = Array.from(catMap.values()).map((c) => {
+        const hasBoth = c.income > 0 && c.expense > 0;
+        const overlapRatio = hasBoth ? (Math.min(c.income, c.expense) / Math.max(c.income, c.expense)) : 0;
+        const utilityOps = c.utilityIncomeOps + c.utilityExpenseOps;
+        const allOps = c.incomeOps + c.expenseOps;
+        const utilityShare = allOps > 0 ? utilityOps / allOps : 0;
+        const коммунLike = _utilityLikeText(c.name);
+        const isCompensation = hasBoth && (
+            (коммунLike && overlapRatio >= 0.25) ||
+            utilityShare >= 0.5 ||
+            overlapRatio >= 0.7
+        );
+        const passThroughAmount = isCompensation ? Math.min(c.income, c.expense) : 0;
+        const adjustedCoreIncome = Math.max(0, c.income - passThroughAmount);
+        return {
+            ...c,
+            overlapRatio,
+            utilityShare,
+            isCompensation,
+            passThroughAmount,
+            adjustedCoreIncome
+        };
+    });
+
+    const compensationCategories = categories
+        .filter(c => c.isCompensation)
+        .sort((a, b) => b.passThroughAmount - a.passThroughAmount);
+
+    const coreIncomeCategories = categories
+        .filter(c => c.adjustedCoreIncome > 0)
+        .sort((a, b) => b.adjustedCoreIncome - a.adjustedCoreIncome);
+
+    const projectSummary = Array.from(projectMap.values())
+        .sort((a, b) => Math.abs(b.profit) - Math.abs(a.profit));
+
+    const primaryOpenAccount = Array.from(accountMotionMap.values())
+        .sort((a, b) => b.volume - a.volume)[0] || null;
+
+    const nowTs = _resolveNowTsFromMeta(meta);
+    const periodEndTs = _resolvePeriodEndTsFromMeta(meta);
+    const operationsFutureNetOpen = ops
+        .filter((op) => !op?.isFact)
+        .filter((op) => {
+            const ts = _toFiniteNumber(op?.ts);
+            if (!ts) return false;
+            return ts > nowTs && ts <= periodEndTs;
+        })
+        .reduce((s, op) => s + _opOpenDelta(op, openIds), 0);
+
+    const timelineFutureNet = timeline
+        .map((row) => {
+            const d = row?.date ? new Date(row.date) : null;
+            if (!d || Number.isNaN(d.getTime())) return null;
+            const ts = d.getTime();
+            if (!(ts > nowTs && ts <= periodEndTs)) return null;
+            const income = _toFiniteNumber(row?.income);
+            const expense = _toFiniteNumber(row?.expense);
+            const offsetExpense = _toFiniteNumber(row?.offsetExpense);
+            const withdrawal = _toFiniteNumber(row?.withdrawal);
+            const effectiveExpense = Math.max(0, expense - offsetExpense);
+            return income - effectiveExpense - withdrawal;
+        })
+        .filter(v => v !== null)
+        .reduce((s, v) => s + v, 0);
+
+    const timelineFutureDaysCount = timeline
+        .map((row) => {
+            const d = row?.date ? new Date(row.date) : null;
+            if (!d || Number.isNaN(d.getTime())) return null;
+            const ts = d.getTime();
+            return (ts > nowTs && ts <= periodEndTs) ? 1 : null;
+        })
+        .filter(Boolean).length;
+
+    const futureNetDiff = timelineFutureNet - operationsFutureNetOpen;
+    const hasFutureNetMismatch = timelineFutureDaysCount > 0 && Math.abs(futureNetDiff) >= 1000;
+
+    return {
+        compensationCategories,
+        coreIncomeCategories,
+        projectSummary,
+        primaryOpenAccount,
+        flowProfile: {
+            openIncome,
+            openExpense,
+            hiddenIncome,
+            hiddenExpense
+        },
+        consistency: {
+            operationsFutureNetOpen,
+            timelineFutureNet,
+            futureNetDiff,
+            hasFutureNetMismatch
+        }
+    };
+}
+
+function buildBusinessContextLines({ dbData, formatTenge }) {
+    const insights = buildBusinessContextInsights(dbData);
+    const lines = [];
+
+    if (insights.coreIncomeCategories.length) {
+        const coreTop = insights.coreIncomeCategories.slice(0, 3)
+            .map(c => `${c.name} (${formatTenge(c.adjustedCoreIncome)})`)
+            .join(', ');
+        lines.push(`• Ядро дохода (без транзита): ${coreTop}`);
+    }
+
+    if (insights.compensationCategories.length) {
+        const compTop = insights.compensationCategories.slice(0, 3)
+            .map(c => `${c.name} (${formatTenge(c.passThroughAmount)})`)
+            .join(', ');
+        lines.push(`• Компенсационные/транзитные категории: ${compTop} — это не операционная маржа.`);
+    }
+
+    if (insights.projectSummary.length) {
+        const projTop = insights.projectSummary.slice(0, 3)
+            .map(p => `${p.name}: ${formatTenge(p.profit)}`)
+            .join(', ');
+        lines.push(`• Проекты (прибыль до налогов): ${projTop}`);
+    }
+
+    if (insights.primaryOpenAccount) {
+        const a = insights.primaryOpenAccount;
+        lines.push(`• Основной счет движения (open): ${a.name} | оборот ${formatTenge(a.volume)} | net ${formatTenge(a.net)}.`);
+    }
+
+    const fp = insights.flowProfile;
+    if (fp.openIncome || fp.hiddenIncome || fp.openExpense || fp.hiddenExpense) {
+        lines.push(`• Профиль потоков: open доход ${formatTenge(fp.openIncome)}, open расход ${formatTenge(fp.openExpense)}, hidden доход ${formatTenge(fp.hiddenIncome)}, hidden расход ${formatTenge(fp.hiddenExpense)}.`);
+    }
+
+    if (insights.consistency.hasFutureNetMismatch) {
+        lines.push(`• Несоответствие данных: future net по timeline ${formatTenge(insights.consistency.timelineFutureNet)} vs по операциям ${formatTenge(insights.consistency.operationsFutureNetOpen)} (разница ${formatTenge(insights.consistency.futureNetDiff)}).`);
+    }
+
+    return { lines, insights };
 }
 
 function buildStressTestReport({ query, dbData, formatTenge }) {
@@ -754,6 +1119,12 @@ function buildStressTestReport({ query, dbData, formatTenge }) {
     } else {
         lines.push('• Источник расчета: операции по открытым счетам.');
     }
+
+    const contextInsights = buildBusinessContextInsights(dbData);
+    if (contextInsights.consistency.hasFutureNetMismatch) {
+        lines.push(`• Обнаружено несоответствие future net: timeline ${formatTenge(contextInsights.consistency.timelineFutureNet)} vs операции ${formatTenge(contextInsights.consistency.operationsFutureNetOpen)}.`);
+    }
+
     lines.push('');
     lines.push(`1) Кассовый разрыв на открытых счетах: ${cashGapLabel}.`);
     lines.push(`2) Минимальный остаток: ${formatTenge(chosen.minBalance)} на ${chosen.minDate}.`);
