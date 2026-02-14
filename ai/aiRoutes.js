@@ -494,9 +494,9 @@ module.exports = function createAiRouter(deps) {
   const _extractCategoryPhrase = (query) => {
     const q = _normalizeRu(query);
     if (!q) return '';
-    const byPo = q.match(/\bпо\s+([a-zа-я0-9\s]{2,80})$/i);
+    const byPo = q.match(/(?:^|\s)по\s+([a-zа-я0-9\s]{2,80})$/i);
     if (byPo && byPo[1]) return _normalizeRu(byPo[1]);
-    const byCategory = q.match(/\bкатегор(?:ия|ии)?\s+([a-zа-я0-9\s]{2,80})$/i);
+    const byCategory = q.match(/(?:^|\s)категор(?:ия|ии)?\s+([a-zа-я0-9\s]{2,80})$/i);
     if (byCategory && byCategory[1]) return _normalizeRu(byCategory[1]);
     return q;
   };
@@ -612,7 +612,7 @@ module.exports = function createAiRouter(deps) {
     const q = _normalizeRu(query);
     const asksIncome = /(доход|доходы|поступлен|выручк|приход)/i.test(q);
     if (!asksIncome) return null;
-    if (!/\bпо\b/i.test(q) && !/\bкатегор/i.test(q)) return null;
+    if (!/(?:^|\s)по(?:\s|$)/i.test(q) && !/категор/i.test(q)) return null;
 
     const matched = _pickBestCategoryMatch({ query, packet });
     if (!matched) {
@@ -980,6 +980,13 @@ module.exports = function createAiRouter(deps) {
           question: q
         }));
       }
+      if (isDeep) {
+        console.log('[AI_DEEP_MODE]', JSON.stringify({
+          mode: requestedMode,
+          source,
+          question: q
+        }));
+      }
 
       // =========================
       // Get composite user ID for shared workspaces
@@ -1042,6 +1049,7 @@ module.exports = function createAiRouter(deps) {
           packet: packetEarly
         });
         if (deterministicEarly) {
+          console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'early_category', question: q }));
           const earlyAnswer = _formatDeepStructuredText(deterministicEarly);
           try {
             await profileService.recordInteraction(userId, { workspaceId });
@@ -1460,11 +1468,18 @@ module.exports = function createAiRouter(deps) {
         packet
       });
       if (forcedCategoryStructured) {
+        console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'forced_category', question: q }));
         structuredAnswer = forcedCategoryStructured;
       }
 
       if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok || !structuredAnswer) {
+        console.log('[AI_DEEP_BRANCH]', JSON.stringify({
+          branch: 'fallback',
+          reason: _isNoAiAnswerText(rawAnswer) ? 'no_ai_answer' : (!groundedValidation?.ok ? 'grounding_failed' : 'no_structured')
+        }));
         structuredAnswer = forcedCategoryStructured || _buildDeterministicDeepStructuredFallback({ packet });
+      } else if (!forcedCategoryStructured) {
+        console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'grounded' }));
       }
       const answer = _formatDeepStructuredText(structuredAnswer);
 
