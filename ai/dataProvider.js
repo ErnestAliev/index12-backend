@@ -85,11 +85,29 @@ module.exports = function createDataProvider(deps) {
 
     const _wsVariants = (workspaceId) => {
         if (!workspaceId) return [];
-        const wsStr = String(workspaceId);
-        const wsObj = _uObjId(workspaceId);
+        const wsStr = String(workspaceId).trim();
+        if (!wsStr) return [];
+
+        const wsObj = _uObjId(wsStr);
         const variants = [wsStr];
-        if (wsObj && String(wsObj) !== wsStr) variants.push(wsObj);
-        return variants;
+        if (wsObj && typeof wsObj === 'object') {
+            // Keep both string and ObjectId forms: historical records use both.
+            variants.push(wsObj);
+        } else if (wsObj && String(wsObj) !== wsStr) {
+            variants.push(wsObj);
+        }
+
+        const uniq = [];
+        const seen = new Set();
+        for (const value of variants) {
+            const key = (value && typeof value === 'object')
+                ? `obj:${String(value)}`
+                : `str:${String(value)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            uniq.push(value);
+        }
+        return uniq;
     };
 
     const _wsScopeCondition = (workspaceId) => {

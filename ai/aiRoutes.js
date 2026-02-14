@@ -1155,7 +1155,8 @@ module.exports = function createAiRouter(deps) {
       const timeline = Array.isArray(req.body?.timeline) ? req.body.timeline : null;
       const requestDebug = req.body?.debugAi === true || String(req.body?.debugAi || '').toLowerCase() === 'true';
 
-      const AI_DEBUG = process.env.AI_DEBUG === 'true';
+      const aiDebugRaw = String(process.env.AI_DEBUG || '').trim().toLowerCase();
+      const AI_DEBUG = aiDebugRaw === 'true' || aiDebugRaw === '1';
       const allowClientDebug = process.env.AI_ALLOW_CLIENT_DEBUG === 'true';
       const shouldDebugLog = AI_DEBUG || (allowClientDebug && requestDebug);
 
