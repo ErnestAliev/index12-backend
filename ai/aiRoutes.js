@@ -933,6 +933,51 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _readCategoryOperationsFromEventsStrict = ({ packet, categoryId = null, categoryName = null }) => {
+    const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+    if (!events.length) return null;
+
+    const targetId = String(categoryId || '').trim();
+    const targetName = _normalizeRu(categoryName || '');
+    if (!targetId && !targetName) return null;
+
+    let factTotal = 0;
+    let planTotal = 0;
+    let factCount = 0;
+    let planCount = 0;
+    let matched = 0;
+
+    for (const op of events) {
+      const opCategoryId = String(op?.categoryId || '').trim();
+      const opCategoryName = _normalizeRu(op?.categoryName || '');
+      const hitById = targetId && opCategoryId && opCategoryId === targetId;
+      const hitByName = !hitById && targetName && opCategoryName && opCategoryName === targetName;
+      if (!hitById && !hitByName) continue;
+
+      const amount = Number(op?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+
+      matched += 1;
+      if (op?.isFact) {
+        factTotal += amount;
+        factCount += 1;
+      } else {
+        planTotal += amount;
+        planCount += 1;
+      }
+    }
+
+    if (matched <= 0) return null;
+    return {
+      factTotal: Math.max(0, factTotal),
+      planTotal: Math.max(0, planTotal),
+      total: Math.max(0, factTotal + planTotal),
+      factCount,
+      planCount,
+      matched
+    };
+  };
+
   const _buildKeywordTokens = (query) => {
     const phrase = _extractCategoryPhrase(query);
     const base = _normalizeRu(phrase || query);
@@ -1268,13 +1313,18 @@ module.exports = function createAiRouter(deps) {
     const effectiveQuery = auto?.query || query;
     const q = _normalizeRu(effectiveQuery);
     const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
+    const asksOperations = tokens.some((token) => (
+      token.includes('операц')
+      || token.includes('операции')
+      || token.includes('операций')
+    ));
     const asksIncome = tokens.some((token) => (
       token.includes('доход')
       || token.includes('поступлен')
       || token.includes('выручк')
       || token.includes('приход')
     ));
-    if (!asksIncome) return null;
+    if (!asksIncome && !asksOperations) return null;
     const scopedByCategory = tokens.includes('по') || tokens.some((token) => token.startsWith('категор'));
     if (!scopedByCategory) return null;
 
@@ -1367,14 +1417,46 @@ module.exports = function createAiRouter(deps) {
         ? `${dateStart} - ${dateEnd}`
         : (dateStart || dateEnd || 'Период не задан');
       const hintText = hints.length ? hints.join(', ') : 'подсказок пока нет';
+      const wantOpsOnly = asksOperations && !asksIncome;
       return {
         date: dateText,
         fact: `не нашел точную категорию для "${rawPhrase || query}"`,
         plan: `ближайшие варианты: ${hintText}`,
-        total: 'доход по категории посчитаю после уточнения',
+        total: wantOpsOnly
+          ? 'операции по категории посчитаю после уточнения'
+          : 'доход по категории посчитаю после уточнения',
         question: hints.length
           ? `Выбери категорию: ${hintText}?`
           : 'Как точно называется нужная категория?'
+      };
+    }
+
+    if (asksOperations && !asksIncome) {
+      const strictOps = _readCategoryOperationsFromEventsStrict({
+        packet,
+        categoryId: matched?.id || matched?._id || null,
+        categoryName: matched?.name || null
+      });
+      const dateStartOps = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+      const dateEndOps = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+      const dateTextOps = (dateStartOps && dateEndOps && dateStartOps !== 'Invalid Date' && dateEndOps !== 'Invalid Date')
+        ? `${dateStartOps} - ${dateEndOps}`
+        : (dateStartOps || dateEndOps || 'Период не задан');
+      if (strictOps) {
+        return {
+          date: dateTextOps,
+          fact: `операции по "${matched.name}" (факт): ${strictOps.factCount} шт, ${_formatTenge(strictOps.factTotal)}`,
+          plan: `операции по "${matched.name}" (план): ${strictOps.planCount} шт, ${_formatTenge(strictOps.planTotal)}`,
+          total: `по "${matched.name}" всего: ${strictOps.matched} шт, ${_formatTenge(strictOps.total)}`,
+          question: `Показать 3 операции по "${matched.name}" по датам?`
+        };
+      }
+      return {
+        date: dateTextOps,
+        fact: `по "${matched.name}" не нашел операций в периоде`,
+        plan: 'проверь фильтр дат или название категории',
+        total: `по "${matched.name}" всего: 0 шт, ${_formatTenge(0)}`,
+        question: 'Показать ближайшие категории с операциями?'
       };
     }
 
@@ -1832,73 +1914,6 @@ module.exports = function createAiRouter(deps) {
         }
       }
 
-      // If deep button is enabled, keep this request strictly in deep path.
-      // For deterministic category-income asks, return grounded result immediately.
-      if (isDeep) {
-        const nowRefEarly = _safeDate(req?.body?.asOf) || new Date();
-        const periodFilterEarly = req?.body?.periodFilter || {};
-        const periodStartEarly = _safeDate(periodFilterEarly?.customStart) || _monthStartUtc(nowRefEarly);
-        const periodEndEarly = _safeDate(periodFilterEarly?.customEnd) || _monthEndUtc(nowRefEarly);
-        const packetEarly = {
-          periodStart: periodStartEarly,
-          periodEnd: periodEndEarly,
-          normalized: {
-            events: Array.isArray(dbData?.operations) ? dbData.operations : [],
-            categories: Array.isArray(dbData?.catalogs?.categories) ? dbData.catalogs.categories : [],
-            projects: Array.isArray(dbData?.catalogs?.projects) ? dbData.catalogs.projects : [],
-            accounts: Array.isArray(dbData?.accounts) ? dbData.accounts : [],
-            companies: Array.isArray(dbData?.catalogs?.companies) ? dbData.catalogs.companies : [],
-            contractors: Array.isArray(dbData?.catalogs?.contractors) ? dbData.catalogs.contractors : [],
-            individuals: Array.isArray(dbData?.catalogs?.individuals) ? dbData.catalogs.individuals : []
-          },
-          derived: {
-            categorySummary: Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : [],
-            tagSummary: Array.isArray(dbData?.tagSummary) ? dbData.tagSummary : []
-          }
-        };
-        const pendingCategory = (currentSession && currentSession.pending && currentSession.pending.type === 'category_income_drilldown')
-          ? currentSession.pending
-          : null;
-        if (pendingCategory && _isNegativeReply(qLowerResolved)) {
-          currentSession.pending = null;
-          const cancelText = 'Ок, детализацию по категории отменил.';
-          _pushHistory(userIdStr, workspaceId, 'user', q);
-          _pushHistory(userIdStr, workspaceId, 'assistant', cancelText);
-          return res.json({ text: cancelText });
-        }
-        if (pendingCategory && _isAffirmativeReply(qLowerResolved)) {
-          const drillStructured = _buildCategoryIncomeDrilldownStructured({
-            packet: packetEarly,
-            categoryName: pendingCategory.categoryName,
-            maxDates: 3
-          });
-          currentSession.pending = null;
-          if (drillStructured) {
-            const drillAnswer = _formatDeepStructuredText(drillStructured);
-            _pushHistory(userIdStr, workspaceId, 'user', q);
-            _pushHistory(userIdStr, workspaceId, 'assistant', drillAnswer);
-            return res.json({ text: drillAnswer });
-          }
-        }
-        const deterministicEarly = _maybeBuildCategoryIncomeStructured({
-          query: qResolved,
-          packet: packetEarly
-        });
-        if (deterministicEarly) {
-          console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'early_category', question: qResolved }));
-          _rememberCategoryDrilldownPending({ session: currentSession, structured: deterministicEarly });
-          const earlyAnswer = _formatDeepStructuredText(deterministicEarly);
-          try {
-            await profileService.recordInteraction(userId, { workspaceId });
-          } catch (_) { }
-          _pushHistory(userIdStr, workspaceId, 'user', q);
-          _pushHistory(userIdStr, workspaceId, 'assistant', earlyAnswer);
-          return res.json({ text: earlyAnswer });
-        }
-      }
-
-
-
       // =========================
       // LEGACY QUICK MODE (fallback for deep mode or engine failure)
       // =========================
@@ -2184,19 +2199,6 @@ module.exports = function createAiRouter(deps) {
         }));
       }
 
-      const deterministicCategoryStructured = _maybeBuildCategoryIncomeStructured({
-        query: qResolved,
-        packet
-      });
-      if (deterministicCategoryStructured) {
-        _rememberCategoryDrilldownPending({ session: currentSession, structured: deterministicCategoryStructured });
-        const deterministicAnswer = _formatDeepStructuredText(deterministicCategoryStructured);
-        await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
-        _pushHistory(userIdStr, workspaceId, 'user', q);
-        _pushHistory(userIdStr, workspaceId, 'assistant', deterministicAnswer);
-        return res.json({ text: deterministicAnswer });
-      }
-
       const groundedMessages = [
         { role: 'system', content: deepPrompt },
         profileContext
@@ -2334,25 +2336,26 @@ module.exports = function createAiRouter(deps) {
         }
       }
 
-      const forcedCategoryStructured = _maybeBuildCategoryIncomeStructured({
-        query: qResolved,
-        packet
-      });
-      if (forcedCategoryStructured) {
-        console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'forced_category', question: qResolved }));
-        structuredAnswer = forcedCategoryStructured;
-      }
-
       if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok || !structuredAnswer) {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({
           branch: 'fallback',
           reason: _isNoAiAnswerText(rawAnswer) ? 'no_ai_answer' : (!groundedValidation?.ok ? 'grounding_failed' : 'no_structured')
         }));
-        structuredAnswer = forcedCategoryStructured || _buildDeterministicDeepStructuredFallback({ packet });
-      } else if (!forcedCategoryStructured) {
+        const dateStartFail = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
+        const dateEndFail = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
+        const dateTextFail = (dateStartFail && dateEndFail && dateStartFail !== 'Invalid Date' && dateEndFail !== 'Invalid Date')
+          ? `${dateStartFail} - ${dateEndFail}`
+          : (dateStartFail || dateEndFail || 'Период не задан');
+        structuredAnswer = {
+          date: dateTextFail,
+          fact: 'не удалось собрать подтвержденный ответ из context packet',
+          plan: 'цифры не показаны, чтобы не дать неверный итог',
+          total: 'ответ не сформирован',
+          question: 'Повторить запрос точнее по периоду или категории?'
+        };
+      } else {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'grounded' }));
       }
-      _rememberCategoryDrilldownPending({ session: currentSession, structured: structuredAnswer });
       const answer = _formatDeepStructuredText(structuredAnswer);
 
       await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
