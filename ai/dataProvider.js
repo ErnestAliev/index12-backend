@@ -83,6 +83,37 @@ module.exports = function createDataProvider(deps) {
         return userId;
     };
 
+    const _wsVariants = (workspaceId) => {
+        if (!workspaceId) return [];
+        const wsStr = String(workspaceId);
+        const wsObj = _uObjId(workspaceId);
+        const variants = [wsStr];
+        if (wsObj && String(wsObj) !== wsStr) variants.push(wsObj);
+        return variants;
+    };
+
+    const _wsScopeCondition = (workspaceId) => {
+        const variants = _wsVariants(workspaceId);
+        if (!variants.length) return null;
+        return {
+            $or: [
+                { workspaceId: { $in: variants } },
+                { workspaceId: { $exists: false } },
+                { workspaceId: null }
+            ]
+        };
+    };
+
+    const _withWorkspaceScope = (baseQuery, workspaceId) => {
+        const q = (baseQuery && typeof baseQuery === 'object') ? { ...baseQuery } : {};
+        const wsCondition = _wsScopeCondition(workspaceId);
+        if (!wsCondition) return q;
+        if (Array.isArray(q.$and)) {
+            return { ...q, $and: [...q.$and, wsCondition] };
+        }
+        return { $and: [q, wsCondition] };
+    };
+
     const _idSet = (items = []) => {
         const set = new Set();
         items.forEach((item) => {
@@ -385,48 +416,19 @@ module.exports = function createDataProvider(deps) {
         const endRef = end ? _localEndOfDay(end) : _localEndOfDay(nowRef);
 
         // Build query
-        const query = { userId: _uQuery(userId) };
-        if (workspaceId) {
-            const wsStr = String(workspaceId);
-            const wsId = _uObjId(workspaceId);
-            const wsVariants = [wsStr, wsId];
-            query.$or = [
-                { workspaceId: { $in: wsVariants } },
-                { workspaceId: { $exists: false } },
-                { workspaceId: null }
-            ];
-        }
+        const baseQuery = { userId: _uQuery(userId) };
 
         if (!includeHidden && visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length > 0) {
-            query._id = {
+            baseQuery._id = {
                 $in: visibleAccountIds.map(id => {
                     try { return new mongoose.Types.ObjectId(id); } catch { return id; }
                 })
             };
         }
+        const query = _withWorkspaceScope(baseQuery, workspaceId);
 
         // Fetch accounts without populate (we'll do manual lookups if needed)
         let accounts = await Account.find(query).lean();
-        // Fallbacks: legacy data without workspaceId or mismatched type
-        if (workspaceId) {
-            const legacyAccs = await Account.find({ userId: _uQuery(userId), $or: [{ workspaceId: { $exists: false } }, { workspaceId: null }] }).lean();
-            const allAccsNoFilter = await Account.find({ userId: _uQuery(userId) }).lean();
-
-            const allowIds = (visibleAccountIds && Array.isArray(visibleAccountIds) && visibleAccountIds.length)
-                ? new Set(visibleAccountIds.map(id => String(id)))
-                : null;
-
-            const accMap = new Map();
-            const maybeAdd = (a) => {
-                if (!a || !a._id) return;
-                const id = String(a._id);
-                if (allowIds && !allowIds.has(id)) return;
-                accMap.set(id, a);
-            };
-
-            [...accounts, ...legacyAccs, ...allAccsNoFilter].forEach(maybeAdd);
-            accounts = Array.from(accMap.values());
-        }
 
         if (_isDebug()) {
             const hiddenList = accounts.filter(a => {
@@ -460,7 +462,7 @@ module.exports = function createDataProvider(deps) {
                 ]
             };
 
-            const allOps = await Event.find(opsQuery).lean();
+            const allOps = await Event.find(_withWorkspaceScope(opsQuery, workspaceId)).lean();
 
             // Calculate current balance (up to nowRef)
             const currentOps = allOps.filter(op => new Date(op.date) <= nowRef);
@@ -560,57 +562,18 @@ module.exports = function createDataProvider(deps) {
             userId: _uQuery(userId),
             date: { $gte: start, $lte: end }
         };
-        if (workspaceId) {
-            const wsStr = String(workspaceId);
-            const wsId = _uObjId(workspaceId);
-            const wsVariants = [wsStr, wsId];
-            query.$or = [
-                { workspaceId: { $in: wsVariants } },
-                { workspaceId: { $exists: false } },
-                { workspaceId: null }
-            ];
-        }
 
         // Add date range to query
         // query.date = { $gte: start, $lte: end }; // This line is now redundant
 
         // Fetch operations without populate (using lean for performance)
-        let operations = await Event.find(query)
+        let operations = await Event.find(_withWorkspaceScope(query, workspaceId))
             .sort({ date: -1 })
             .lean();
-        if (workspaceId) {
-            const fallbackQuery = {
-                userId: _uQuery(userId),
-                date: { $gte: start, $lte: end }
-            };
-            const legacyOps = await Event.find(fallbackQuery).sort({ date: -1 }).lean();
-            const map = new Map();
-            [...operations, ...legacyOps].forEach(op => {
-                if (op && op._id) map.set(String(op._id), op);
-            });
-            operations = Array.from(map.values());
-        }
 
         // Get accounts for intermediary check (use same userId variants) and names for transfers
-        const accountsQuery = { userId: _uQuery(userId) };
-        if (workspaceId) {
-            const wsStr = String(workspaceId);
-            const wsId = _uObjId(workspaceId);
-            const wsVariants = [wsStr, wsId];
-            accountsQuery.$or = [
-                { workspaceId: { $in: wsVariants } },
-                { workspaceId: { $exists: false } },
-                { workspaceId: null }
-            ];
-        }
-        let accounts = await Account.find(accountsQuery).lean();
-        // Дополнительно загрузим все аккаунты пользователя (без workspace-фильтра) для имени переводов
-        const allUserAccounts = await Account.find({ userId: _uQuery(userId) }).lean();
-        const accMap = new Map();
-        const addAcc = (a) => { if (a && a._id) accMap.set(String(a._id), a); };
-        accounts.forEach(addAcc);
-        allUserAccounts.forEach(addAcc);
-        accounts = Array.from(accMap.values());
+        const accountsQuery = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
+        const accounts = await Account.find(accountsQuery).lean();
 
         const accNameById = new Map(accounts.map(a => [String(a._id), a.name || 'Счет']));
         const accountIndividualIds = new Set(
@@ -622,13 +585,13 @@ module.exports = function createDataProvider(deps) {
         // Companies & individuals maps for transfers
         let companies = [];
         try {
-            companies = await Company.find({ userId: _uQuery(userId) }).lean();
+            companies = await Company.find(_withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId)).lean();
         } catch (_) { companies = []; }
         const companyNameById = new Map(companies.map(c => [String(c._id), c.name || 'Компания']));
 
         let individuals = [];
         try {
-            individuals = await Individual.find({ userId: _uQuery(userId) }).lean();
+            individuals = await Individual.find(_withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId)).lean();
         } catch (_) { individuals = []; }
         const individualNameById = new Map(individuals.map(i => [String(i._id), i.name || 'Физлицо']));
 
@@ -837,25 +800,15 @@ module.exports = function createDataProvider(deps) {
     // CATALOG QUERIES
     // ========================
 
-    const _buildWsCondition = (workspaceId) => {
-        if (!workspaceId) return null;
-        const wsStr = String(workspaceId);
-        const wsId = _uObjId(workspaceId);
-        const variants = [wsStr, wsId];
-        return {
-            $or: [
-                { workspaceId: { $in: variants } },
-                { workspaceId: { $exists: false } },
-                { workspaceId: null }
-            ]
-        };
-    };
-
     async function getCompanies(userId, workspaceId = null) {
-        const q = { userId: _uQuery(userId) };
+        const q = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
         const docs = await Company.find(q).select('name taxRegime taxPercent identificationNumber').lean();
-        const idsFromEvents = await Event.distinct('companyId', { userId: _uQuery(userId), companyId: { $ne: null } });
-        const extraDocs = idsFromEvents.length ? await Company.find({ _id: { $in: idsFromEvents } }).select('name taxRegime taxPercent identificationNumber').lean() : [];
+        const idsFromEvents = await Event.distinct('companyId', _withWorkspaceScope({ userId: _uQuery(userId), companyId: { $ne: null } }, workspaceId));
+        const extraDocs = idsFromEvents.length
+            ? await Company.find(_withWorkspaceScope({ userId: _uQuery(userId), _id: { $in: idsFromEvents } }, workspaceId))
+                .select('name taxRegime taxPercent identificationNumber')
+                .lean()
+            : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
@@ -871,10 +824,14 @@ module.exports = function createDataProvider(deps) {
     }
 
     async function getProjects(userId, workspaceId = null) {
-        const q = { userId: _uQuery(userId) };
+        const q = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
         const docs = await Project.find(q).select('name title label projectName').lean();
-        const idsFromEvents = await Event.distinct('projectId', { userId: _uQuery(userId), projectId: { $ne: null } });
-        const extraDocs = idsFromEvents.length ? await Project.find({ _id: { $in: idsFromEvents } }).select('name title label projectName').lean() : [];
+        const idsFromEvents = await Event.distinct('projectId', _withWorkspaceScope({ userId: _uQuery(userId), projectId: { $ne: null } }, workspaceId));
+        const extraDocs = idsFromEvents.length
+            ? await Project.find(_withWorkspaceScope({ userId: _uQuery(userId), _id: { $in: idsFromEvents } }, workspaceId))
+                .select('name title label projectName')
+                .lean()
+            : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(p => { if (p && p._id) map.set(String(p._id), p); });
         // Если нет документов Project, но есть id из событий — добавим заглушки
@@ -894,10 +851,14 @@ module.exports = function createDataProvider(deps) {
     }
 
     async function getCategories(userId, workspaceId = null) {
-        const q = { userId: _uQuery(userId) };
+        const q = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
         const docs = await Category.find(q).select('name type').lean();
-        const idsFromEvents = await Event.distinct('categoryId', { userId: _uQuery(userId), categoryId: { $ne: null } });
-        const extraDocs = idsFromEvents.length ? await Category.find({ _id: { $in: idsFromEvents } }).select('name type').lean() : [];
+        const idsFromEvents = await Event.distinct('categoryId', _withWorkspaceScope({ userId: _uQuery(userId), categoryId: { $ne: null } }, workspaceId));
+        const extraDocs = idsFromEvents.length
+            ? await Category.find(_withWorkspaceScope({ userId: _uQuery(userId), _id: { $in: idsFromEvents } }, workspaceId))
+                .select('name type')
+                .lean()
+            : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null, type: null }); });
@@ -907,10 +868,14 @@ module.exports = function createDataProvider(deps) {
     }
 
     async function getContractors(userId, workspaceId = null) {
-        const q = { userId: _uQuery(userId) };
+        const q = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
         const docs = await Contractor.find(q).select('name').lean();
-        const idsFromEvents = await Event.distinct('contractorId', { userId: _uQuery(userId), contractorId: { $ne: null } });
-        const extraDocs = idsFromEvents.length ? await Contractor.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
+        const idsFromEvents = await Event.distinct('contractorId', _withWorkspaceScope({ userId: _uQuery(userId), contractorId: { $ne: null } }, workspaceId));
+        const extraDocs = idsFromEvents.length
+            ? await Contractor.find(_withWorkspaceScope({ userId: _uQuery(userId), _id: { $in: idsFromEvents } }, workspaceId))
+                .select('name')
+                .lean()
+            : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(c => { if (c && c._id) map.set(String(c._id), c); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });
@@ -920,10 +885,14 @@ module.exports = function createDataProvider(deps) {
     }
 
     async function getIndividuals(userId, workspaceId = null) {
-        const q = { userId: _uQuery(userId) };
+        const q = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
         const docs = await Individual.find(q).select('name').lean();
-        const idsFromEvents = await Event.distinct('individualId', { userId: _uQuery(userId), individualId: { $ne: null } });
-        const extraDocs = idsFromEvents.length ? await Individual.find({ _id: { $in: idsFromEvents } }).select('name').lean() : [];
+        const idsFromEvents = await Event.distinct('individualId', _withWorkspaceScope({ userId: _uQuery(userId), individualId: { $ne: null } }, workspaceId));
+        const extraDocs = idsFromEvents.length
+            ? await Individual.find(_withWorkspaceScope({ userId: _uQuery(userId), _id: { $in: idsFromEvents } }, workspaceId))
+                .select('name')
+                .lean()
+            : [];
         const map = new Map();
         [...docs, ...extraDocs].forEach(i => { if (i && i._id) map.set(String(i._id), i); });
         idsFromEvents.forEach(id => { if (!map.has(String(id))) map.set(String(id), { _id: id, name: null }); });

@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
 
-const AIROUTES_VERSION = 'quick-deep-v9.3';
+const AIROUTES_VERSION = 'quick-deep-v9.4';
 const https = require('https');
 
 // =========================
@@ -117,7 +117,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.3';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.4';
 
   // =========================
   // KZ time helpers (UTC+05:00)
