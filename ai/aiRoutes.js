@@ -1151,6 +1151,193 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _collectFilterEntities = (packet) => {
+    const out = [];
+    const seen = new Set();
+
+    const push = ({ type, id = null, name = '' }) => {
+      const normName = _normalizeRu(name);
+      const normId = String(id || '').trim();
+      if (!normName && !normId) return;
+      const key = normId ? `${type}|id:${normId}` : `${type}|name:${normName}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        type,
+        id: normId || null,
+        name: String(name || '').trim() || (normName || '')
+      });
+    };
+
+    const categories = [
+      ...(Array.isArray(packet?.normalized?.categories) ? packet.normalized.categories : []),
+      ...(Array.isArray(packet?.derived?.categorySummary) ? packet.derived.categorySummary : [])
+    ];
+    for (const row of categories) {
+      push({ type: 'category', id: row?.id || row?._id || null, name: row?.name || '' });
+    }
+
+    const projects = Array.isArray(packet?.normalized?.projects) ? packet.normalized.projects : [];
+    for (const row of projects) {
+      push({ type: 'project', id: row?.id || row?._id || null, name: row?.name || '' });
+    }
+
+    const accounts = Array.isArray(packet?.normalized?.accounts) ? packet.normalized.accounts : [];
+    for (const row of accounts) {
+      push({ type: 'account', id: row?.id || row?._id || null, name: row?.name || '' });
+    }
+
+    const companies = Array.isArray(packet?.normalized?.companies) ? packet.normalized.companies : [];
+    for (const row of companies) {
+      push({ type: 'company', id: row?.id || row?._id || null, name: row?.name || '' });
+    }
+
+    const contractors = Array.isArray(packet?.normalized?.contractors) ? packet.normalized.contractors : [];
+    for (const row of contractors) {
+      push({ type: 'contractor', id: row?.id || row?._id || null, name: row?.name || '' });
+    }
+
+    const individuals = Array.isArray(packet?.normalized?.individuals) ? packet.normalized.individuals : [];
+    for (const row of individuals) {
+      push({ type: 'individual', id: row?.id || row?._id || null, name: row?.name || '' });
+    }
+
+    // Fallback names from operations in case catalogs are partially degraded.
+    const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+    for (const op of events) {
+      push({ type: 'category', id: op?.categoryId || null, name: op?.categoryName || '' });
+      push({ type: 'project', id: op?.projectId || null, name: op?.projectName || '' });
+      push({ type: 'account', id: op?.accountId || null, name: op?.accountName || '' });
+      push({ type: 'account', id: op?.fromAccountId || null, name: op?.fromAccountName || '' });
+      push({ type: 'account', id: op?.toAccountId || null, name: op?.toAccountName || '' });
+      push({ type: 'company', id: op?.companyId || null, name: op?.companyName || '' });
+      push({ type: 'company', id: op?.fromCompanyId || null, name: op?.fromCompanyName || '' });
+      push({ type: 'company', id: op?.toCompanyId || null, name: op?.toCompanyName || '' });
+      push({ type: 'contractor', id: op?.contractorId || null, name: op?.contractorName || '' });
+      push({ type: 'individual', id: op?.individualId || null, name: op?.individualName || '' });
+      push({ type: 'individual', id: op?.fromIndividualId || null, name: op?.fromIndividualName || '' });
+      push({ type: 'individual', id: op?.toIndividualId || null, name: op?.toIndividualName || '' });
+    }
+
+    return out;
+  };
+
+  const _scoreEntityMatch = (phraseNorm, nameNorm) => {
+    if (!phraseNorm || !nameNorm) return 0;
+    if (phraseNorm === nameNorm) return 1;
+    if (nameNorm.includes(phraseNorm) || phraseNorm.includes(nameNorm)) return 0.93;
+
+    const phraseTokens = phraseNorm.split(' ').filter(Boolean);
+    const nameTokens = nameNorm.split(' ').filter(Boolean);
+    const tokenScore = (phraseTokens.length && nameTokens.length)
+      ? Math.max(...phraseTokens.map((qt) => Math.max(...nameTokens.map((nt) => _similarity(qt, nt)))))
+      : 0;
+    return Math.max(_similarity(phraseNorm, nameNorm), tokenScore);
+  };
+
+  const _rankFilterEntities = ({ phrase, packet, limit = 8 }) => {
+    const phraseNorm = _normalizeRu(phrase);
+    if (!phraseNorm) return [];
+    const ranked = _collectFilterEntities(packet)
+      .map((entity) => {
+        const score = _scoreEntityMatch(phraseNorm, _normalizeRu(entity?.name || ''));
+        return { entity, score };
+      })
+      .filter((row) => row.score >= 0.35)
+      .sort((a, b) => b.score - a.score);
+    return ranked.slice(0, Math.max(1, Math.min(Number(limit) || 8, 20)));
+  };
+
+  const _buildOpSearchText = (op) => _normalizeRu([
+    op?.description,
+    op?.categoryName,
+    op?.projectName,
+    op?.contractorName,
+    op?.accountName,
+    op?.fromAccountName,
+    op?.toAccountName,
+    op?.companyName,
+    op?.fromCompanyName,
+    op?.toCompanyName,
+    op?.individualName,
+    op?.fromIndividualName,
+    op?.toIndividualName
+  ].filter(Boolean).join(' '));
+
+  const _eventMatchesEntity = ({ op, entity, phrase }) => {
+    if (!op || !entity) return false;
+    const eqId = (a, b) => {
+      const aa = String(a || '').trim();
+      const bb = String(b || '').trim();
+      return !!aa && !!bb && aa === bb;
+    };
+    const eqName = (a, b) => {
+      const aa = _normalizeRu(a);
+      const bb = _normalizeRu(b);
+      if (!aa || !bb) return false;
+      return aa === bb || aa.includes(bb) || bb.includes(aa);
+    };
+
+    const targetId = String(entity?.id || '').trim();
+    const targetName = String(entity?.name || '').trim();
+
+    switch (entity.type) {
+      case 'category':
+        return (targetId && eqId(op?.categoryId, targetId))
+          || (targetName && eqName(op?.categoryName, targetName));
+      case 'project':
+        return (targetId && eqId(op?.projectId, targetId))
+          || (targetName && eqName(op?.projectName, targetName));
+      case 'account':
+        return (targetId && (
+          eqId(op?.accountId, targetId)
+          || eqId(op?.fromAccountId, targetId)
+          || eqId(op?.toAccountId, targetId)
+        )) || (targetName && (
+          eqName(op?.accountName, targetName)
+          || eqName(op?.fromAccountName, targetName)
+          || eqName(op?.toAccountName, targetName)
+        ));
+      case 'company':
+        return (targetId && (
+          eqId(op?.companyId, targetId)
+          || eqId(op?.fromCompanyId, targetId)
+          || eqId(op?.toCompanyId, targetId)
+        )) || (targetName && (
+          eqName(op?.companyName, targetName)
+          || eqName(op?.fromCompanyName, targetName)
+          || eqName(op?.toCompanyName, targetName)
+        ));
+      case 'contractor':
+        return (targetId && (
+          eqId(op?.contractorId, targetId)
+          || eqId(op?.counterpartyIndividualId, targetId)
+        )) || (targetName && eqName(op?.contractorName, targetName));
+      case 'individual':
+        return (targetId && (
+          eqId(op?.individualId, targetId)
+          || eqId(op?.fromIndividualId, targetId)
+          || eqId(op?.toIndividualId, targetId)
+          || eqId(op?.counterpartyIndividualId, targetId)
+        )) || (targetName && (
+          eqName(op?.individualName, targetName)
+          || eqName(op?.fromIndividualName, targetName)
+          || eqName(op?.toIndividualName, targetName)
+        ));
+      case 'text': {
+        const q = _normalizeRu(phrase || targetName);
+        if (!q) return false;
+        const text = _buildOpSearchText(op);
+        if (!text) return false;
+        if (text.includes(q)) return true;
+        const qTokens = q.split(' ').filter((t) => t.length >= 3);
+        return qTokens.length > 0 && qTokens.every((t) => text.includes(t));
+      }
+      default:
+        return false;
+    }
+  };
+
   const _readKeywordIncomeFromEvents = ({ query, packet }) => {
     const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
     if (!events.length) return null;
@@ -1222,6 +1409,20 @@ module.exports = function createAiRouter(deps) {
     session.pending = {
       type: 'category_income_drilldown',
       categoryName,
+      createdAt: Date.now()
+    };
+  };
+
+  const _rememberOpsDrilldownPending = ({ session, structured }) => {
+    if (!session || !structured || typeof structured !== 'object') return;
+    if (session?.pending?.type === 'glossary_term') return;
+    const drill = structured?._drilldown;
+    if (!drill || typeof drill !== 'object') return;
+    session.pending = {
+      type: 'ops_drilldown',
+      label: String(drill?.label || '').trim() || null,
+      period: String(drill?.period || '').trim() || null,
+      rows: Array.isArray(drill?.rows) ? drill.rows.slice(0, 3).map((v) => String(v || '').trim()).filter(Boolean) : [],
       createdAt: Date.now()
     };
   };
@@ -1313,178 +1514,141 @@ module.exports = function createAiRouter(deps) {
     const effectiveQuery = auto?.query || query;
     const q = _normalizeRu(effectiveQuery);
     const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
-    const asksOperations = tokens.some((token) => (
-      token.includes('операц')
-      || token.includes('операции')
-      || token.includes('операций')
-    ));
+    const asksOperations = tokens.some((token) => token.includes('операц'));
     const asksIncome = tokens.some((token) => (
       token.includes('доход')
       || token.includes('поступлен')
       || token.includes('выручк')
       || token.includes('приход')
     ));
-    if (!asksIncome && !asksOperations) return null;
-    const scopedByCategory = tokens.includes('по') || tokens.some((token) => token.startsWith('категор'));
-    if (!scopedByCategory) return null;
+    const asksExpense = tokens.some((token) => (
+      token.includes('расход')
+      || token.includes('затрат')
+      || token.includes('трат')
+      || token.includes('списан')
+    ));
+    if (!asksIncome && !asksOperations && !asksExpense) return null;
 
-    const matched = _pickBestCategoryMatch({ query: effectiveQuery, packet });
-    if (!matched) {
-      const byCategories = _sumIncomeByCategoryMatches({
-        packet,
-        matches: _matchCategoriesByTokens({ packet, query: effectiveQuery })
-      });
-      if (byCategories) {
-        const factCat = Number(byCategories.fact) || 0;
-        const planCat = Number(byCategories.plan) || 0;
-        const totalCat = factCat + planCat;
-        const dateStartCat = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-        const dateEndCat = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-        const dateTextCat = (dateStartCat && dateEndCat && dateStartCat !== 'Invalid Date' && dateEndCat !== 'Invalid Date')
-          ? `${dateStartCat} - ${dateEndCat}`
-          : (dateStartCat || dateEndCat || 'Период не задан');
-        const phraseLabel = _extractCategoryPhrase(effectiveQuery) || 'категория';
-        return _applyAutoRiskToStructured({
-          packet,
-          structured: {
-            date: dateTextCat,
-            fact: `доходы по "${phraseLabel}": ${_formatTenge(factCat)}`,
-            plan: `поступления по "${phraseLabel}": ${_formatTenge(planCat)}`,
-            total: `по "${phraseLabel}" всего: ${_formatTenge(totalCat)}`,
-            question: `Показать операции по "${phraseLabel}" по датам?`
-          }
-        });
-      }
+    const scopedQuery = tokens.includes('по')
+      || tokens.some((token) => token.startsWith('категор'))
+      || tokens.some((token) => token.startsWith('проект'))
+      || tokens.some((token) => token.startsWith('счет'))
+      || tokens.some((token) => token.startsWith('компан'))
+      || tokens.some((token) => token.startsWith('контрагент'))
+      || tokens.some((token) => token.startsWith('физлиц'));
+    if (!scopedQuery) return null;
 
-      const keywordIncome = _readKeywordIncomeFromEvents({ query: effectiveQuery, packet });
-      if (keywordIncome) {
-        const factKw = Number(keywordIncome.fact) || 0;
-        const planKw = Number(keywordIncome.plan) || 0;
-        const totalKw = factKw + planKw;
-        const dateStartKw = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-        const dateEndKw = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-        const dateTextKw = (dateStartKw && dateEndKw && dateStartKw !== 'Invalid Date' && dateEndKw !== 'Invalid Date')
-          ? `${dateStartKw} - ${dateEndKw}`
-          : (dateStartKw || dateEndKw || 'Период не задан');
-        const phraseLabel = _extractCategoryPhrase(effectiveQuery) || 'категория';
-        return _applyAutoRiskToStructured({
-          packet,
-          structured: {
-            date: dateTextKw,
-            fact: `доходы по "${phraseLabel}": ${_formatTenge(factKw)}`,
-            plan: `поступления по "${phraseLabel}": ${_formatTenge(planKw)}`,
-            total: `по "${phraseLabel}" всего: ${_formatTenge(totalKw)}`,
-            question: `Показать найденные операции по "${phraseLabel}" по датам?`
-          }
-        });
-      }
+    const rawPhrase = _extractCategoryPhrase(effectiveQuery);
+    const phrase = _normalizeRu(rawPhrase);
+    if (!phrase) return null;
+    const phraseLooksGeneric = (
+      /^дат/.test(phrase)
+      || /^период/.test(phrase)
+      || /^месяц/.test(phrase)
+      || /^недел/.test(phrase)
+      || /^год/.test(phrase)
+      || /^итог/.test(phrase)
+      || /^риск/.test(phrase)
+      || /^день/.test(phrase)
+    );
+    if (phraseLooksGeneric) return null;
 
-      const tagHint = _inferStandardIncomeTagFromQuery(effectiveQuery);
-      if (tagHint) {
-        const tagIncome = _readIncomeByTag({ packet, tag: tagHint.tag });
-        if (tagIncome) {
-          const factTag = Number(tagIncome.fact) || 0;
-          const planTag = Number(tagIncome.plan) || 0;
-          const totalTag = factTag + planTag;
-          const dateStartTag = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-          const dateEndTag = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-          const dateTextTag = (dateStartTag && dateEndTag && dateStartTag !== 'Invalid Date' && dateEndTag !== 'Invalid Date')
-            ? `${dateStartTag} - ${dateEndTag}`
-            : (dateStartTag || dateEndTag || 'Период не задан');
-          const topCategories = tagIncome.categories.slice(0, 3).join(', ');
-          const questionText = topCategories
-            ? `Показать детализацию по категориям: ${topCategories}?`
-            : `Показать детализацию по "${tagHint.label}" по операциям?`;
+    const ranked = _rankFilterEntities({ phrase, packet, limit: 8 });
+    const best = ranked[0] || null;
+    const bestEntity = (best && best.score >= 0.62) ? best.entity : { type: 'text', id: null, name: rawPhrase || phrase };
 
-          return _applyAutoRiskToStructured({
-            packet,
-            structured: {
-              date: dateTextTag,
-              fact: `доходы по "${tagHint.label}": ${_formatTenge(factTag)}`,
-              plan: `поступления по "${tagHint.label}": ${_formatTenge(planTag)}`,
-              total: `по "${tagHint.label}" всего: ${_formatTenge(totalTag)}`,
-              question: questionText
-            }
-          });
-        }
-      }
-
-      const hints = _pickCategoryHints({ query: effectiveQuery, packet, limit: 3 });
-      const rawPhrase = _extractCategoryPhrase(effectiveQuery);
-      const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-      const dateEnd = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-      const dateText = (dateStart && dateEnd && dateStart !== 'Invalid Date' && dateEnd !== 'Invalid Date')
-        ? `${dateStart} - ${dateEnd}`
-        : (dateStart || dateEnd || 'Период не задан');
-      const hintText = hints.length ? hints.join(', ') : 'подсказок пока нет';
-      const wantOpsOnly = asksOperations && !asksIncome;
-      return {
-        date: dateText,
-        fact: `не нашел точную категорию для "${rawPhrase || query}"`,
-        plan: `ближайшие варианты: ${hintText}`,
-        total: wantOpsOnly
-          ? 'операции по категории посчитаю после уточнения'
-          : 'доход по категории посчитаю после уточнения',
-        question: hints.length
-          ? `Выбери категорию: ${hintText}?`
-          : 'Как точно называется нужная категория?'
-      };
-    }
-
-    if (asksOperations && !asksIncome) {
-      const strictOps = _readCategoryOperationsFromEventsStrict({
-        packet,
-        categoryId: matched?.id || matched?._id || null,
-        categoryName: matched?.name || null
-      });
-      const dateStartOps = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-      const dateEndOps = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-      const dateTextOps = (dateStartOps && dateEndOps && dateStartOps !== 'Invalid Date' && dateEndOps !== 'Invalid Date')
-        ? `${dateStartOps} - ${dateEndOps}`
-        : (dateStartOps || dateEndOps || 'Период не задан');
-      if (strictOps) {
-        return {
-          date: dateTextOps,
-          fact: `операции по "${matched.name}" (факт): ${strictOps.factCount} шт, ${_formatTenge(strictOps.factTotal)}`,
-          plan: `операции по "${matched.name}" (план): ${strictOps.planCount} шт, ${_formatTenge(strictOps.planTotal)}`,
-          total: `по "${matched.name}" всего: ${strictOps.matched} шт, ${_formatTenge(strictOps.total)}`,
-          question: `Показать 3 операции по "${matched.name}" по датам?`
-        };
-      }
-      return {
-        date: dateTextOps,
-        fact: `по "${matched.name}" не нашел операций в периоде`,
-        plan: 'проверь фильтр дат или название категории',
-        total: `по "${matched.name}" всего: 0 шт, ${_formatTenge(0)}`,
-        question: 'Показать ближайшие категории с операциями?'
-      };
-    }
-
-    const strictIncome = _readCategoryIncomeFromEventsStrict({
-      packet,
-      categoryId: matched?.id || matched?._id || null,
-      categoryName: matched?.name || null
-    });
-    const summaryIncome = _readCategoryIncome(matched);
-    const fact = Number(strictIncome?.fact ?? summaryIncome?.fact ?? 0) || 0;
-    const plan = Number(strictIncome?.plan ?? summaryIncome?.plan ?? 0) || 0;
-    const total = fact + plan;
     const dateStart = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
     const dateEnd = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
     const dateText = (dateStart && dateEnd && dateStart !== 'Invalid Date' && dateEnd !== 'Invalid Date')
       ? `${dateStart} - ${dateEnd}`
       : (dateStart || dateEnd || 'Период не задан');
 
-    const structured = {
+    const kindFilter = asksIncome && !asksExpense
+      ? 'income'
+      : (asksExpense && !asksIncome ? 'expense' : null);
+
+    const events = Array.isArray(packet?.normalized?.events) ? packet.normalized.events : [];
+    const matches = events.filter((op) => {
+      if (kindFilter && String(op?.kind || op?.type || '').toLowerCase() !== kindFilter) return false;
+      return _eventMatchesEntity({ op, entity: bestEntity, phrase });
+    });
+
+    if (!matches.length && (!best || best.score < 0.62)) {
+      const hints = ranked.slice(0, 3).map((row) => row?.entity?.name).filter(Boolean);
+      const hintText = hints.length ? hints.join(', ') : 'подсказок пока нет';
+      return {
+        date: dateText,
+        fact: `не нашел точное совпадение для "${rawPhrase || query}"`,
+        plan: `ближайшие варианты: ${hintText}`,
+        total: asksOperations
+          ? 'операции посчитаю сразу после уточнения фильтра'
+          : 'сумму посчитаю сразу после уточнения фильтра',
+        question: hints.length
+          ? `Уточни фильтр: ${hintText}?`
+          : 'Как точно называется категория/проект/счет?'
+      };
+    }
+
+    const factOps = matches.filter((op) => !!op?.isFact);
+    const planOps = matches.filter((op) => !op?.isFact);
+    const factAmount = factOps.reduce((sum, op) => sum + (Number(op?.amount) || 0), 0);
+    const planAmount = planOps.reduce((sum, op) => sum + (Number(op?.amount) || 0), 0);
+    const totalAmount = factAmount + planAmount;
+    const label = String(bestEntity?.name || rawPhrase || phrase).trim() || 'фильтр';
+
+    const drilldownRows = matches
+      .slice()
+      .sort((a, b) => (Number(a?.ts) || 0) - (Number(b?.ts) || 0))
+      .slice(0, 3)
+      .map((op) => {
+        const d = String(op?.date || op?.dateIso || '').trim() || _fmtDateKZ(op?.ts || '');
+        const k = String(op?.kind || op?.type || '').toLowerCase();
+        return `${d} ${k} ${_formatTenge(Number(op?.amount) || 0)}`;
+      })
+      .filter(Boolean);
+
+    if (asksOperations && !asksIncome && !asksExpense) {
+      return {
+        date: dateText,
+        fact: `операции по "${label}" (факт): ${factOps.length} шт, ${_formatTenge(factAmount)}`,
+        plan: `операции по "${label}" (план): ${planOps.length} шт, ${_formatTenge(planAmount)}`,
+        total: `по "${label}" всего: ${matches.length} шт, ${_formatTenge(totalAmount)}`,
+        question: `Показать 3 операции по "${label}" по датам?`,
+        _drilldown: {
+          label,
+          period: dateText,
+          rows: drilldownRows
+        }
+      };
+    }
+
+    if (kindFilter === 'expense') {
+      return {
+        date: dateText,
+        fact: `расходы по "${label}": ${_formatTenge(factAmount)}`,
+        plan: `план расходов по "${label}": ${_formatTenge(planAmount)}`,
+        total: `по "${label}" всего: ${_formatTenge(totalAmount)}`,
+        question: `Показать 3 операции по "${label}" по датам?`,
+        _drilldown: {
+          label,
+          period: dateText,
+          rows: drilldownRows
+        }
+      };
+    }
+
+    return {
       date: dateText,
-      fact: `доходы по "${matched.name}": ${_formatTenge(fact)}`,
-      plan: `поступления по "${matched.name}": ${_formatTenge(plan)}`,
-      total: `по "${matched.name}" всего: ${_formatTenge(total)}`,
-      question: strictIncome?.matched
-        ? `Показать ${strictIncome.matched} операций по "${matched.name}" по датам?`
-        : `Показать операции по "${matched.name}" по датам?`
+      fact: `доходы по "${label}": ${_formatTenge(factAmount)}`,
+      plan: `поступления по "${label}": ${_formatTenge(planAmount)}`,
+      total: `по "${label}" всего: ${_formatTenge(totalAmount)}`,
+      question: `Показать 3 операции по "${label}" по датам?`,
+      _drilldown: {
+        label,
+        period: dateText,
+        rows: drilldownRows
+      }
     };
-    return _applyAutoRiskToStructured({ packet, structured });
   };
 
   const _buildDeterministicDeepStructuredFallback = ({ packet }) => {
@@ -1806,6 +1970,33 @@ module.exports = function createAiRouter(deps) {
           _pushHistory(userIdStr, workspaceId, 'user', q);
           _pushHistory(userIdStr, workspaceId, 'assistant', ack);
           return res.json({ text: ack });
+        }
+      }
+
+      const pendingOps = (currentSession && currentSession.pending && currentSession.pending.type === 'ops_drilldown')
+        ? currentSession.pending
+        : null;
+      if (pendingOps) {
+        if (_isNegativeReply(q)) {
+          currentSession.pending = null;
+          const cancelText = 'Ок, без детализации операций.';
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', cancelText);
+          return res.json({ text: cancelText });
+        }
+        if (_isAffirmativeReply(q)) {
+          const rows = Array.isArray(pendingOps.rows) ? pendingOps.rows.slice(0, 3) : [];
+          const detail = _formatDeepStructuredText({
+            date: pendingOps.period || 'Период не задан',
+            fact: rows.length ? `операции: ${rows.join('; ')}` : 'операции по фильтру не найдены',
+            plan: pendingOps.label ? `фильтр: "${pendingOps.label}"` : 'фильтр: не задан',
+            total: `показано: ${rows.length} шт`,
+            question: 'Показать следующие операции?'
+          });
+          currentSession.pending = null;
+          _pushHistory(userIdStr, workspaceId, 'user', q);
+          _pushHistory(userIdStr, workspaceId, 'assistant', detail);
+          return res.json({ text: detail });
         }
       }
 
@@ -2199,6 +2390,20 @@ module.exports = function createAiRouter(deps) {
         }));
       }
 
+      const deepFilterStructured = _maybeBuildCategoryIncomeStructured({
+        query: qResolved,
+        packet
+      });
+      if (deepFilterStructured) {
+        _rememberOpsDrilldownPending({ session: currentSession, structured: deepFilterStructured });
+        const deepFilterAnswer = _formatDeepStructuredText(deepFilterStructured);
+        console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'filter_executor', question: qResolved }));
+        await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
+        _pushHistory(userIdStr, workspaceId, 'user', q);
+        _pushHistory(userIdStr, workspaceId, 'assistant', deepFilterAnswer);
+        return res.json({ text: deepFilterAnswer });
+      }
+
       const groundedMessages = [
         { role: 'system', content: deepPrompt },
         profileContext
@@ -2347,7 +2552,8 @@ module.exports = function createAiRouter(deps) {
         });
         if (deterministicRecovery) {
           structuredAnswer = deterministicRecovery;
-          console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'fallback_deterministic_category', question: qResolved }));
+          _rememberOpsDrilldownPending({ session: currentSession, structured: structuredAnswer });
+          console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'fallback_filter_executor', question: qResolved }));
         } else {
         const dateStartFail = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
         const dateEndFail = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
@@ -2365,6 +2571,7 @@ module.exports = function createAiRouter(deps) {
       } else {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'grounded' }));
       }
+      _rememberOpsDrilldownPending({ session: currentSession, structured: structuredAnswer });
       const answer = _formatDeepStructuredText(structuredAnswer);
 
       await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
