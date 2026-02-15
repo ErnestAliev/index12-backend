@@ -132,14 +132,14 @@ module.exports = function createAiRouter(deps) {
   };
 
   const _buildLlmContext = (body = {}) => {
-    const journalPacket = (body?.journalPacket && typeof body.journalPacket === 'object')
-      ? body.journalPacket
+    const tableContext = (body?.tableContext && typeof body.tableContext === 'object')
+      ? body.tableContext
       : null;
 
     return {
       periodFilter: body?.periodFilter || null,
       asOf: body?.asOf || null,
-      journalPacket,
+      tableContext,
       snapshot: null
     };
   };
@@ -159,9 +159,13 @@ module.exports = function createAiRouter(deps) {
     const systemPrompt = [
       'Ты AI-ассистент финансовой системы INDEX12.',
       'Отвечай только на русском языке.',
-      'Единственный источник данных: journal_packet_json.',
+      'Единственный источник данных: operations_table_json.',
       'Статусы: "Исполнено" = факт, "План" = план.',
-      'Для расчётов в первую очередь используй journal_packet_json.summaryByStatus и journal_packet_json.aggregates.',
+      'Для расчётов используй operations_table_json.summary как приоритетный источник итогов по текущему срезу.',
+      'Для детализации используй operations_table_json.rows.',
+      'Типы строк: "Доход", "Расход", "Перевод".',
+      'Никогда не пиши "не найдены", если соответствующая сумма в operations_table_json.summary больше 0.',
+      'Если rows непустой и содержит нужный тип операций, ответ должен содержать числовой итог.',
       'Всегда различай факт и план в расчётах.',
       'Если пользователь не просил объединять — показывай факт и план раздельно.',
       'Не придумывай числа и факты, которых нет в данных.',
@@ -175,7 +179,7 @@ module.exports = function createAiRouter(deps) {
     const userContent = [
       `Вопрос пользователя:\n${question}`,
       '',
-      `journal_packet_json:\n${JSON.stringify(context?.journalPacket || null, null, 2)}`,
+      `operations_table_json:\n${JSON.stringify(context?.tableContext || null, null, 2)}`,
       '',
       `meta_json:\n${JSON.stringify({ periodFilter: context?.periodFilter || null, asOf: context?.asOf || null }, null, 2)}`
     ].join('\n');
