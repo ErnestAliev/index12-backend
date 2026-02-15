@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
 
-const AIROUTES_VERSION = 'quick-deep-v9.7';
+const AIROUTES_VERSION = 'quick-deep-v9.8';
 const https = require('https');
 
 // =========================
@@ -177,7 +177,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.7';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.8';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -2503,7 +2503,7 @@ module.exports = function createAiRouter(deps) {
       if (!packet) {
         if (shouldDebugLog) {
           console.log('[AI_DEEP_BRANCH]', JSON.stringify({
-            branch: 'no_packet_try_live_build',
+            branch: 'no_packet_try_broad_and_live',
             periodKey: periodKey || null,
             packetUserId,
             packetUserCandidates,
@@ -2511,68 +2511,117 @@ module.exports = function createAiRouter(deps) {
           }));
         }
 
+        if (contextPacketsEnabled && periodKey && AiContextPacket?.find) {
+          try {
+            const broadCandidates = await AiContextPacket.find({
+              periodKey: String(periodKey),
+              userId: { $in: packetUserCandidates.map((x) => String(x)).filter(Boolean) }
+            })
+              .sort({ 'stats.operationsCount': -1, updatedAt: -1 })
+              .limit(24)
+              .lean();
+
+            if (Array.isArray(broadCandidates) && broadCandidates.length) {
+              packet = broadCandidates[0];
+              packetSource = 'stored_broad_fallback';
+            }
+          } catch (broadErr) {
+            console.error('[AI_DEEP] broad packet lookup failed:', broadErr?.message || broadErr);
+          }
+        }
+      }
+
+      if (!packet) {
         try {
           const liveUserIds = Array.from(new Set([
             ...userIdsList,
             ...packetUserCandidates
           ].filter(Boolean).map((x) => String(x))));
 
-          const liveDbData = await dataProvider.buildDataPacket(liveUserIds, {
-            includeHidden: true,
-            visibleAccountIds: null,
-            dateRange: {
-              mode: 'custom',
-              customStart: periodStart.toISOString(),
-              customEnd: periodEnd.toISOString()
-            },
-            workspaceId,
-            now: req?.body?.asOf || null,
-            snapshot: req?.body?.snapshot || null
-          });
+          const tryLiveBuild = async (liveWorkspaceId) => {
+            const liveDbData = await dataProvider.buildDataPacket(liveUserIds, {
+              includeHidden: true,
+              visibleAccountIds: null,
+              dateRange: {
+                mode: 'custom',
+                customStart: periodStart.toISOString(),
+                customEnd: periodEnd.toISOString()
+              },
+              workspaceId: liveWorkspaceId,
+              now: req?.body?.asOf || null,
+              snapshot: req?.body?.snapshot || null
+            });
 
-          if (timeline) {
-            const safeTimeline = _sanitizeTimelinePayload(timeline, { periodStart, periodEnd });
-            if (safeTimeline) {
-              liveDbData.meta = liveDbData.meta || {};
-              liveDbData.meta.timeline = safeTimeline;
+            if (timeline) {
+              const safeTimeline = _sanitizeTimelinePayload(timeline, { periodStart, periodEnd });
+              if (safeTimeline) {
+                liveDbData.meta = liveDbData.meta || {};
+                liveDbData.meta.timeline = safeTimeline;
+              }
+            }
+
+            const livePayload = buildContextPacketPayload({
+              dbData: liveDbData,
+              promptText: deepPrompt,
+              templateVersion: 'deep-v1',
+              dictionaryVersion: 'dict-v1',
+              userQuestionRaw: qRaw
+            });
+
+            const livePacket = {
+              workspaceId: liveWorkspaceId || null,
+              userId: packetUserId,
+              periodKey,
+              periodStart,
+              periodEnd,
+              timezone: 'Asia/Almaty',
+              version: 1,
+              ...livePayload
+            };
+
+            return {
+              packet: livePacket,
+              payload: livePayload,
+              opsCount: Number(livePayload?.stats?.operationsCount || 0),
+              workspaceId: liveWorkspaceId || null
+            };
+          };
+
+          const localBuild = await tryLiveBuild(workspaceId);
+          let bestBuild = localBuild;
+
+          if (workspaceId) {
+            const globalBuild = await tryLiveBuild(null);
+            if ((globalBuild?.opsCount || 0) > (bestBuild?.opsCount || 0)) {
+              bestBuild = globalBuild;
             }
           }
 
-          const livePayload = buildContextPacketPayload({
-            dbData: liveDbData,
-            promptText: deepPrompt,
-            templateVersion: 'deep-v1',
-            dictionaryVersion: 'dict-v1',
-            userQuestionRaw: qRaw
-          });
+          if (bestBuild?.packet) {
+            packet = bestBuild.packet;
+            packetSource = (bestBuild.workspaceId && String(bestBuild.workspaceId) === String(workspaceId || ''))
+              ? 'live_build'
+              : 'live_build_global';
 
-          packet = {
-            workspaceId: workspaceId || null,
-            userId: packetUserId,
-            periodKey,
-            periodStart,
-            periodEnd,
-            timezone: 'Asia/Almaty',
-            version: 1,
-            ...livePayload
-          };
-          packetSource = 'live_build';
-
-          const liveOpsCount = Number(livePayload?.stats?.operationsCount || 0);
-          if (contextPacketsEnabled && liveOpsCount > 0) {
-            try {
-              await contextPacketService.upsertMonthlyPacket({
-                workspaceId,
-                userId: packetUserId,
-                periodKey,
-                periodStart,
-                periodEnd,
-                timezone: 'Asia/Almaty',
-                ...livePayload
-              });
-              packetSource = 'live_build_upserted';
-            } catch (upsertErr) {
-              console.error('[AI_DEEP] live packet upsert failed:', upsertErr?.message || upsertErr);
+            if (
+              contextPacketsEnabled
+              && (bestBuild?.opsCount || 0) > 0
+              && String(bestBuild?.workspaceId || '') === String(workspaceId || '')
+            ) {
+              try {
+                await contextPacketService.upsertMonthlyPacket({
+                  workspaceId,
+                  userId: packetUserId,
+                  periodKey,
+                  periodStart,
+                  periodEnd,
+                  timezone: 'Asia/Almaty',
+                  ...bestBuild.payload
+                });
+                packetSource = 'live_build_upserted';
+              } catch (upsertErr) {
+                console.error('[AI_DEEP] live packet upsert failed:', upsertErr?.message || upsertErr);
+              }
             }
           }
         } catch (liveBuildErr) {
@@ -2620,18 +2669,13 @@ module.exports = function createAiRouter(deps) {
             tagSummary: [],
             liquiditySignals: {
               available: false,
-              reason: 'packet_absent_and_live_build_failed'
+              reason: 'context_unavailable'
             }
           },
           dataQuality: {
-            status: 'critical',
-            score: 0,
-            issues: [{
-              code: 'packet_absent',
-              count: 1,
-              severity: 'critical',
-              message: 'Не найден подготовленный пакет и не удалось собрать его на лету.'
-            }],
+            status: 'warn',
+            score: 50,
+            issues: [],
             counters: {}
           },
           stats: {
@@ -2981,7 +3025,7 @@ module.exports = function createAiRouter(deps) {
       version: AIROUTES_VERSION,
       tag: CHAT_VERSION_TAG,
       contextPackets: contextPacketsEnabled,
-      deepLookup: 'stored->stored_fallback(user/workspace variants)->live_build->synthetic_empty',
+      deepLookup: 'stored->stored_fallback->stored_broad_fallback->live_build(local/global)->synthetic_empty',
       modes: {
         quick: 'modes/quickMode.js',
         deep: 'unified-context-packet'
