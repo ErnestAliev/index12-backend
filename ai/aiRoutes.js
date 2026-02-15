@@ -22,6 +22,7 @@ const https = require('https');
 // 24h rolling TTL: хранит дневную переписку для «сквозного» дня
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const _chatSessions = new Map();
+const HISTORY_MAX_CONTENT_CHARS = 2800;
 
 const _sessionScopeKey = (userId, workspaceId = null) => {
   const uid = String(userId || '').trim();
@@ -51,6 +52,63 @@ const _getChatSession = (userId, workspaceId = null) => {
   return fresh;
 };
 
+const _truncateHistoryContent = (value, maxChars = HISTORY_MAX_CONTENT_CHARS) => {
+  const src = String(value || '').trim();
+  if (!src) return '';
+  if (src.length <= maxChars) return src;
+  return `${src.slice(0, Math.max(0, maxChars - 1)).trim()}…`;
+};
+
+const _extractHistoryTextFromOpenAiEnvelope = (content) => {
+  const raw = String(content || '').trim();
+  if (!raw || raw[0] !== '{') return null;
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (!parsed?.choices || !Array.isArray(parsed.choices)) return null;
+
+  const msg = parsed?.choices?.[0]?.message || {};
+  if (typeof msg?.content === 'string' && msg.content.trim()) {
+    return msg.content.trim();
+  }
+  if (Array.isArray(msg?.content)) {
+    const chunks = msg.content
+      .map((part) => {
+        if (typeof part === 'string') return part;
+        if (!part || typeof part !== 'object') return '';
+        if (typeof part.text === 'string') return part.text;
+        if (typeof part.content === 'string') return part.content;
+        if (typeof part.value === 'string') return part.value;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    if (chunks) return chunks;
+  }
+
+  const finish = String(parsed?.choices?.[0]?.finish_reason || 'unknown');
+  return `AI ответил без текстового контента (finish_reason=${finish})`;
+};
+
+const _sanitizeHistoryContent = (role, content) => {
+  let text = String(content || '').trim();
+  if (!text) return '';
+
+  if (role === 'assistant') {
+    const envelopeText = _extractHistoryTextFromOpenAiEnvelope(text);
+    if (envelopeText) text = envelopeText;
+  }
+
+  return _truncateHistoryContent(text);
+};
+
 // =========================
 // CHAT HISTORY HELPERS
 // =========================
@@ -60,10 +118,12 @@ const _pushHistory = (userId, workspaceId, role, content) => {
   const s = _getChatSession(userId, workspaceId);
   if (!s) return;
   if (!Array.isArray(s.history)) s.history = [];
+  const normalizedRole = (role === 'assistant') ? 'assistant' : 'user';
+  const safeContent = _sanitizeHistoryContent(normalizedRole, content);
 
   const msg = {
-    role: (role === 'assistant') ? 'assistant' : 'user',
-    content: String(content || '').trim(),
+    role: normalizedRole,
+    content: safeContent,
   };
 
   if (!msg.content) return;
@@ -224,6 +284,208 @@ module.exports = function createAiRouter(deps) {
       || t.startsWith('ошибка связи с ai')
       || t.startsWith('ошибка: timeout')
     );
+  };
+
+  const _parseRawOpenAiEnvelope = (rawText) => {
+    const src = String(rawText || '').trim();
+    if (!src || src[0] !== '{') return null;
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(src);
+    } catch (_) {
+      return null;
+    }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed?.choices)) return null;
+
+    return {
+      parsed,
+      text: _extractOpenAiText(parsed),
+      finishReason: parsed?.choices?.[0]?.finish_reason || null,
+      model: parsed?.model || null,
+      usage: parsed?.usage || null
+    };
+  };
+
+  const _compactEntityList = (items, { limit = 120 } = {}) => {
+    if (!Array.isArray(items)) return [];
+    const out = [];
+    for (const row of items) {
+      if (!row || typeof row !== 'object') continue;
+      const id = String(row?.id || row?._id || '').trim() || null;
+      const name = String(row?.name || '').trim() || null;
+      if (!id && !name) continue;
+      out.push({ id, name });
+      if (out.length >= limit) break;
+    }
+    return out;
+  };
+
+  const _compactAccounts = (accounts, { limit = 120 } = {}) => {
+    if (!Array.isArray(accounts)) return [];
+    const out = [];
+    for (const a of accounts) {
+      if (!a || typeof a !== 'object') continue;
+      const id = String(a?._id || a?.id || '').trim() || null;
+      const name = String(a?.name || '').trim() || null;
+      if (!id && !name) continue;
+      out.push({
+        id,
+        name,
+        currentBalance: Number(a?.currentBalance ?? a?.balance ?? 0) || 0,
+        futureBalance: Number(a?.futureBalance ?? a?.balance ?? 0) || 0,
+        isHidden: !!a?.isHidden,
+        isExcluded: !!a?.isExcluded
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  };
+
+  const _compactEventsForLlm = (events, { limit = 320 } = {}) => {
+    if (!Array.isArray(events)) return [];
+    const out = [];
+    for (const op of events) {
+      if (!op || typeof op !== 'object') continue;
+      const amount = Number(op?.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      const kind = String(op?.kind || op?.type || '').toLowerCase();
+      if (!kind) continue;
+      out.push({
+        id: String(op?._id || '').trim() || null,
+        date: String(op?.date || op?.dateIso || '').trim() || null,
+        kind,
+        isFact: !!op?.isFact,
+        amount: Math.round(amount),
+        category: op?.categoryName || null,
+        project: op?.projectName || null,
+        projectId: op?.projectId ? String(op.projectId) : null,
+        account: op?.accountName || op?.fromAccountName || op?.toAccountName || null,
+        contractor: op?.contractorName || null,
+      });
+    }
+    if (out.length <= limit) return out;
+    return out.slice(-limit);
+  };
+
+  const _buildProjectSummaryForLlm = (packet, compactEvents) => {
+    const src = Array.isArray(packet?.derived?.projectSummary) ? packet.derived.projectSummary : null;
+    if (src && src.length) {
+      return src.slice(0, 120).map((row) => ({
+        id: row?.id ? String(row.id) : null,
+        name: row?.name || null,
+        incomeFact: Number(row?.incomeFact || 0) || 0,
+        incomeForecast: Number(row?.incomeForecast || 0) || 0,
+        expenseFact: Number(row?.expenseFact || 0) || 0,
+        expenseForecast: Number(row?.expenseForecast || 0) || 0,
+        profitFact: Number(row?.profitFact || 0) || 0,
+        profitForecast: Number(row?.profitForecast || 0) || 0,
+        profitTotal: Number(row?.profitTotal || 0) || 0
+      }));
+    }
+
+    const byProject = new Map();
+    for (const op of (Array.isArray(compactEvents) ? compactEvents : [])) {
+      const projectName = String(op?.project || '').trim();
+      const key = String(op?.projectId || projectName || 'no-project').trim();
+      if (!byProject.has(key)) {
+        byProject.set(key, {
+          id: op?.projectId ? String(op.projectId) : null,
+          name: projectName || 'Без проекта',
+          incomeFact: 0,
+          incomeForecast: 0,
+          expenseFact: 0,
+          expenseForecast: 0
+        });
+      }
+      const rec = byProject.get(key);
+      const amount = Number(op?.amount || 0) || 0;
+      if (amount <= 0) continue;
+      if (op?.kind === 'income') {
+        if (op?.isFact) rec.incomeFact += amount;
+        else rec.incomeForecast += amount;
+      } else if (op?.kind === 'expense') {
+        if (op?.isFact) rec.expenseFact += amount;
+        else rec.expenseForecast += amount;
+      }
+    }
+
+    return Array.from(byProject.values())
+      .map((row) => {
+        const profitFact = row.incomeFact - row.expenseFact;
+        const profitForecast = row.incomeForecast - row.expenseForecast;
+        return {
+          ...row,
+          profitFact,
+          profitForecast,
+          profitTotal: profitFact + profitForecast
+        };
+      })
+      .sort((a, b) => Math.abs((b.profitTotal || 0)) - Math.abs((a.profitTotal || 0)))
+      .slice(0, 120);
+  };
+
+  const _buildLlmPacket = (packet, {
+    question = '',
+    eventsLimit = 140,
+    categoriesLimit = 90,
+    projectsLimit = 90,
+    includeParties = false
+  } = {}) => {
+    const compactEvents = _compactEventsForLlm(packet?.normalized?.events, { limit: eventsLimit });
+    const projectSummary = _buildProjectSummaryForLlm(packet, compactEvents);
+
+    return {
+      periodKey: packet?.periodKey || null,
+      periodStart: packet?.periodStart || null,
+      periodEnd: packet?.periodEnd || null,
+      timezone: packet?.timezone || 'Asia/Almaty',
+      prompt: {
+        templateVersion: packet?.prompt?.templateVersion || 'deep-v1',
+        dictionaryVersion: packet?.prompt?.dictionaryVersion || 'dict-v1'
+      },
+      dictionary: {
+        entities: packet?.dictionary?.entities || {},
+        rules: Array.isArray(packet?.dictionary?.rules) ? packet.dictionary.rules : []
+      },
+      normalized: {
+        accounts: _compactAccounts(packet?.normalized?.accounts, { limit: 120 }),
+        events: compactEvents,
+        categories: _compactEntityList(packet?.normalized?.categories, { limit: categoriesLimit }),
+        projects: _compactEntityList(packet?.normalized?.projects, { limit: projectsLimit }),
+        companies: _compactEntityList(packet?.normalized?.companies, { limit: 40 }),
+        contractors: includeParties ? _compactEntityList(packet?.normalized?.contractors, { limit: 80 }) : [],
+        individuals: includeParties ? _compactEntityList(packet?.normalized?.individuals, { limit: 60 }) : []
+      },
+      derived: {
+        meta: {
+          today: packet?.derived?.meta?.today || null,
+          periodStart: packet?.derived?.meta?.periodStart || null,
+          periodEnd: packet?.derived?.meta?.periodEnd || null,
+          forecastUntil: packet?.derived?.meta?.forecastUntil || null,
+          source: packet?.derived?.meta?.source || null,
+        },
+        totals: packet?.derived?.totals || {},
+        operationsSummary: packet?.derived?.operationsSummary || {},
+        categorySummary: Array.isArray(packet?.derived?.categorySummary) ? packet.derived.categorySummary.slice(0, 60) : [],
+        tagSummary: Array.isArray(packet?.derived?.tagSummary) ? packet.derived.tagSummary.slice(0, 30) : [],
+        liquiditySignals: packet?.derived?.liquiditySignals || {},
+        projectSummary: Array.isArray(projectSummary) ? projectSummary.slice(0, 80) : []
+      },
+      dataQuality: {
+        status: packet?.dataQuality?.status || null,
+        score: Number(packet?.dataQuality?.score || 0) || 0,
+        issues: Array.isArray(packet?.dataQuality?.issues) ? packet.dataQuality.issues.slice(0, 10) : [],
+        counters: packet?.dataQuality?.counters || {}
+      },
+      stats: {
+        operationsCount: Number(packet?.stats?.operationsCount || compactEvents.length) || 0,
+        accountsCount: Number(packet?.stats?.accountsCount || 0) || 0,
+        sourceHash: String(packet?.stats?.sourceHash || ''),
+        llmEventsCount: compactEvents.length
+      },
+      userQuestionRaw: String(question || '')
+    };
   };
 
   const _extractFirstJsonObject = (text) => {
@@ -2316,12 +2578,20 @@ module.exports = function createAiRouter(deps) {
       const profileContext = profileService.buildProfileContext(profile);
 
       // 🔥 FIX: Use actual chat history instead of empty array
-      const deepHistory = _getHistoryMessages(userIdStr, workspaceId).slice(-6);
+      const deepHistory = _getHistoryMessages(userIdStr, workspaceId).slice(-4);
       const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
+      const deepMaxTokens = Math.max(2200, Math.min(Number(process.env.OPENAI_MAX_TOKENS_DEEP) || 5200, 12000));
 
       packet.derived = (packet.derived && typeof packet.derived === 'object') ? packet.derived : {};
       packet.derived.meta = (packet.derived.meta && typeof packet.derived.meta === 'object') ? packet.derived.meta : {};
       packet.derived.meta.userQuestionRaw = qRaw;
+      const llmPacket = _buildLlmPacket(packet, {
+        question: qRaw,
+        eventsLimit: 140,
+        categoriesLimit: 90,
+        projectsLimit: 90,
+        includeParties: false
+      });
 
       if (shouldDebugLog) {
         const analysisEnvelope = {
@@ -2339,6 +2609,7 @@ module.exports = function createAiRouter(deps) {
             sourceHash: packet?.stats?.sourceHash || null,
             operationsCount: packet?.stats?.operationsCount || 0,
             accountsCount: packet?.stats?.accountsCount || 0,
+            llmEventsCount: llmPacket?.stats?.llmEventsCount || 0,
             qualityStatus: packet?.dataQuality?.status || null,
             qualityScore: packet?.dataQuality?.score || null
           }
@@ -2380,22 +2651,62 @@ module.exports = function createAiRouter(deps) {
             content: `Персональная шпаргалка терминов:\n${glossaryContext}`
           }
           : null,
-        { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
+        { role: 'system', content: `context_packet_json:\n${JSON.stringify(llmPacket)}` },
         ...deepHistory,
         { role: 'user', content: qResolved }
       ].filter(Boolean);
 
-      let answer = await _openAiChat(freeformMessages, {
+      const answerRaw = await _openAiChat(freeformMessages, {
         modelOverride: modelDeep,
-        maxTokens: 2200,
+        maxTokens: deepMaxTokens,
         timeout: 120000,
         emptyPolicy: 'raw'
       });
+      let parsedAnswer = _parseRawOpenAiEnvelope(answerRaw);
+      let answer = parsedAnswer
+        ? String(parsedAnswer.text || '').trim()
+        : String(answerRaw || '').trim();
+
+      if (!answer && parsedAnswer?.finishReason === 'length') {
+        const retryPacket = _buildLlmPacket(packet, {
+          question: qRaw,
+          eventsLimit: 80,
+          categoriesLimit: 60,
+          projectsLimit: 60,
+          includeParties: false
+        });
+        const retryMessages = [
+          { role: 'system', content: deepPrompt },
+          { role: 'system', content: 'Ответь коротко и по делу, без JSON и без прелюдий.' },
+          { role: 'system', content: `context_packet_json:\n${JSON.stringify(retryPacket)}` },
+          ...deepHistory.slice(-2),
+          { role: 'user', content: qResolved }
+        ];
+        const retryRaw = await _openAiChat(retryMessages, {
+          modelOverride: modelDeep,
+          maxTokens: Math.max(deepMaxTokens, 6400),
+          timeout: 120000,
+          emptyPolicy: 'raw'
+        });
+        const retryParsed = _parseRawOpenAiEnvelope(retryRaw);
+        if (retryParsed) {
+          parsedAnswer = retryParsed;
+          answer = String(retryParsed.text || '').trim();
+        } else {
+          answer = String(retryRaw || '').trim();
+        }
+      }
+
+      if (!answer) {
+        const finish = parsedAnswer?.finishReason || 'unknown';
+        answer = `AI не вернул текстовый ответ (finish_reason=${finish}).`;
+      }
 
       if (shouldDebugLog) {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({
           branch: 'freeform',
-          noAnswer: _isNoAiAnswerText(answer)
+          noAnswer: _isNoAiAnswerText(answer),
+          finishReason: parsedAnswer?.finishReason || null
         }));
       }
 
