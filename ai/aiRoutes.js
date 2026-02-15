@@ -1,9 +1,11 @@
 // backend/ai/aiRoutes.js
-// QUICK-only AI routes (deterministic, no LLM)
+// Hybrid AI routes:
+// - quick_button -> deterministic quick mode
+// - chat         -> LLM agent with journal packet context
 
 const express = require('express');
 
-const AIROUTES_VERSION = 'quick-only-v1.0';
+const AIROUTES_VERSION = 'hybrid-v2.0';
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -129,8 +131,150 @@ module.exports = function createAiRouter(deps) {
     return allowedEmails.includes(userEmail);
   };
 
+  const _buildLlmContext = (body = {}) => {
+    const journalPacket = (body?.journalPacket && typeof body.journalPacket === 'object')
+      ? body.journalPacket
+      : null;
+    const snapshot = (body?.snapshot && typeof body.snapshot === 'object')
+      ? body.snapshot
+      : null;
+
+    return {
+      periodFilter: body?.periodFilter || null,
+      asOf: body?.asOf || null,
+      journalPacket,
+      snapshot: snapshot
+        ? {
+            accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
+            companies: Array.isArray(snapshot.companies) ? snapshot.companies : []
+          }
+        : null
+    };
+  };
+
+  const _callLlmAgent = async ({ question, context }) => {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+    if (!apiKey) {
+      return {
+        ok: false,
+        status: 503,
+        text: 'AI временно недоступен: отсутствует OPENAI_API_KEY.'
+      };
+    }
+
+    const systemPrompt = [
+      'Ты AI-ассистент финансовой системы INDEX12.',
+      'Отвечай только на русском языке.',
+      'Главный источник данных: journal_packet_json (если есть).',
+      'Не придумывай числа и факты, которых нет в данных.',
+      'Если данных недостаточно — прямо укажи, чего не хватает.',
+      'Ответ делай понятным и коротким, с ключевыми цифрами по запросу пользователя.'
+    ].join(' ');
+
+    const userContent = [
+      `Вопрос пользователя:\n${question}`,
+      '',
+      `journal_packet_json:\n${JSON.stringify(context?.journalPacket || null, null, 2)}`,
+      '',
+      `snapshot_json:\n${JSON.stringify(context?.snapshot || null, null, 2)}`,
+      '',
+      `meta_json:\n${JSON.stringify({ periodFilter: context?.periodFilter || null, asOf: context?.asOf || null }, null, 2)}`
+    ].join('\n');
+
+    let upstream;
+    try {
+      upstream = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          max_tokens: 1200,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userContent }
+          ]
+        })
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        status: 502,
+        text: 'Ошибка сети при обращении к AI.',
+        debug: { message: error?.message || String(error) }
+      };
+    }
+
+    let payload = null;
+    try {
+      payload = await upstream.json();
+    } catch (_) {
+      payload = null;
+    }
+
+    if (!upstream.ok) {
+      return {
+        ok: false,
+        status: upstream.status || 502,
+        text: 'AI сервис вернул ошибку.',
+        debug: payload
+      };
+    }
+
+    const choice = payload?.choices?.[0] || null;
+    const finishReason = choice?.finish_reason || null;
+    const content = choice?.message?.content;
+    const text = typeof content === 'string'
+      ? content.trim()
+      : Array.isArray(content)
+        ? content.map((part) => String(part?.text || '')).join('').trim()
+        : '';
+
+    if (text) {
+      return {
+        ok: true,
+        status: 200,
+        text,
+        debug: {
+          model,
+          finishReason,
+          usage: payload?.usage || null
+        }
+      };
+    }
+
+    if (finishReason === 'length') {
+      return {
+        ok: true,
+        status: 200,
+        text: 'AI не успел завершить ответ (лимит генерации). Сузьте период или уточните вопрос.',
+        debug: {
+          model,
+          finishReason,
+          usage: payload?.usage || null
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      status: 200,
+      text: 'Нет ответа от AI.',
+      debug: {
+        model,
+        finishReason,
+        usage: payload?.usage || null
+      }
+    };
+  };
+
   router.get('/ping', (req, res) => {
-    res.json({ ok: true, mode: 'quick-only', version: AIROUTES_VERSION });
+    res.json({ ok: true, mode: 'hybrid', version: AIROUTES_VERSION });
   });
 
   router.post('/query', isAuthenticated, async (req, res) => {
@@ -146,6 +290,28 @@ module.exports = function createAiRouter(deps) {
       const qRaw = String(req.body?.message ?? '');
       const q = qRaw.trim();
       if (!q) return res.status(400).json({ error: 'Пустой запрос' });
+
+      const source = String(req?.body?.source || 'chat');
+      const isQuickButton = source === 'quick_button';
+
+      // Chat/source=chat must always go to LLM (no deterministic gate).
+      if (!isQuickButton) {
+        const context = _buildLlmContext(req.body || {});
+        const llmResult = await _callLlmAgent({ question: q, context });
+        const debugEnabled = req?.body?.debugAi === true;
+
+        if (!llmResult.ok) {
+          return res.status(llmResult.status || 500).json({
+            error: llmResult.text,
+            ...(debugEnabled ? { debug: llmResult.debug || null } : {})
+          });
+        }
+
+        return res.json({
+          text: llmResult.text,
+          ...(debugEnabled ? { debug: llmResult.debug || null } : {})
+        });
+      }
 
       let effectiveUserId = userId;
       if (typeof getCompositeUserId === 'function') {
@@ -178,27 +344,25 @@ module.exports = function createAiRouter(deps) {
 
       // Quick buttons must be consistent with Operations Editor source/rules.
       // Replace operation aggregates with journal-based dataset.
-      if (String(req?.body?.source || '') === 'quick_button') {
-        const quickJournal = await quickJournalAdapter.buildFromJournal({
-          userId: dataUserId,
-          periodFilter: req?.body?.periodFilter || null,
-          asOf: req?.body?.asOf || null,
-          categoriesCatalog: dbData?.catalogs?.categories || []
-        });
+      const quickJournal = await quickJournalAdapter.buildFromJournal({
+        userId: dataUserId,
+        periodFilter: req?.body?.periodFilter || null,
+        asOf: req?.body?.asOf || null,
+        categoriesCatalog: dbData?.catalogs?.categories || []
+      });
 
-        dbData.operations = quickJournal.operations;
-        dbData.operationsSummary = quickJournal.summary;
-        dbData.categorySummary = quickJournal.categorySummary;
-        dbData.meta = {
-          ...(dbData.meta || {}),
-          periodStart: quickJournal?.meta?.periodStart || dbData?.meta?.periodStart || '?',
-          periodEnd: quickJournal?.meta?.periodEnd || dbData?.meta?.periodEnd || '?'
-        };
+      dbData.operations = quickJournal.operations;
+      dbData.operationsSummary = quickJournal.summary;
+      dbData.categorySummary = quickJournal.categorySummary;
+      dbData.meta = {
+        ...(dbData.meta || {}),
+        periodStart: quickJournal?.meta?.periodStart || dbData?.meta?.periodStart || '?',
+        periodEnd: quickJournal?.meta?.periodEnd || dbData?.meta?.periodEnd || '?'
+      };
 
-        // Accounts/companies for quick buttons must come strictly from frontend snapshot.
-        _applyRawSnapshotAccounts(dbData, req?.body?.snapshot || null);
-        _applyRawSnapshotCompanies(dbData, req?.body?.snapshot || null);
-      }
+      // Accounts/companies for quick buttons must come strictly from frontend snapshot.
+      _applyRawSnapshotAccounts(dbData, req?.body?.snapshot || null);
+      _applyRawSnapshotCompanies(dbData, req?.body?.snapshot || null);
 
       const quickResponse = quickMode.handleQuickQuery({
         query: q.toLowerCase(),
@@ -213,7 +377,7 @@ module.exports = function createAiRouter(deps) {
         text: 'Режим QUICK: этот запрос не поддержан предустановками. Используйте запросы по счетам, доходам, расходам, переводам, компаниям, проектам, категориям, контрагентам или физлицам.'
       });
     } catch (error) {
-      console.error('AI Quick Query Error:', error);
+      console.error('AI Query Error:', error);
       return res.status(500).json({ error: 'Ошибка обработки запроса' });
     }
   });
@@ -222,11 +386,12 @@ module.exports = function createAiRouter(deps) {
     res.json({
       version: AIROUTES_VERSION,
       modes: {
-        quick: 'modes/quickMode.js'
+        quick: 'modes/quickMode.js',
+        chat: 'openai chat completions'
       },
-      llm: false,
+      llm: true,
       deep: false,
-      chat: false
+      chat: true
     });
   });
 
