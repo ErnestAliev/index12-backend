@@ -1771,7 +1771,14 @@ module.exports = function createAiRouter(deps) {
   // =========================
   // OpenAI caller (supports model override)
   // =========================
-  const _openAiChat = async (messages, { temperature = 0, maxTokens = 2000, modelOverride = null, timeout = 60000, responseFormat = null } = {}) => {
+  const _openAiChat = async (messages, {
+    temperature = 0,
+    maxTokens = 2000,
+    modelOverride = null,
+    timeout = 60000,
+    responseFormat = null,
+    emptyPolicy = 'fallback'
+  } = {}) => {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       console.warn('OPENAI_API_KEY is missing');
@@ -1823,6 +1830,10 @@ module.exports = function createAiRouter(deps) {
             try {
               if (resp.statusCode < 200 || resp.statusCode >= 300) {
                 console.error(`OpenAI Error ${resp.statusCode}:`, data);
+                if (emptyPolicy === 'raw' && String(data || '').trim()) {
+                  resolve(data);
+                  return;
+                }
                 resolve(`Ошибка OpenAI (${resp.statusCode}).`);
                 return;
               }
@@ -1834,9 +1845,17 @@ module.exports = function createAiRouter(deps) {
               }
               const finishReason = parsed?.choices?.[0]?.finish_reason || 'unknown';
               console.warn(`[OpenAI] Empty message content (finish_reason=${finishReason}, model=${model}, maxTokens=${maxTokens})`);
+              if (emptyPolicy === 'raw') {
+                resolve(String(data || '').trim());
+                return;
+              }
               resolve('Нет ответа от AI.');
             } catch (e) {
               console.error('Parse Error:', e);
+              if (emptyPolicy === 'raw') {
+                resolve(String(data || '').trim());
+                return;
+              }
               resolve('Ошибка обработки ответа AI.');
             }
           });
@@ -2409,11 +2428,9 @@ module.exports = function createAiRouter(deps) {
       let answer = await _openAiChat(freeformMessages, {
         modelOverride: modelDeep,
         maxTokens: 2200,
-        timeout: 120000
+        timeout: 120000,
+        emptyPolicy: 'raw'
       });
-      if (_isNoAiAnswerText(answer)) {
-        answer = 'Нет ответа от AI.';
-      }
 
       if (shouldDebugLog) {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({
