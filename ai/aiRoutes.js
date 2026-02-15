@@ -168,8 +168,13 @@ module.exports = function createAiRouter(deps) {
       'Ты AI-ассистент финансовой системы INDEX12.',
       'Отвечай только на русском языке.',
       'Главный источник данных: journal_packet_json (если есть).',
+      'Статусы: "Исполнено" = факт, "План" = план.',
+      'Всегда различай факт и план в расчётах.',
+      'Если пользователь не просил объединять — показывай факт и план раздельно.',
       'Не придумывай числа и факты, которых нет в данных.',
       'Если данных недостаточно — прямо укажи, чего не хватает.',
+      'Формат денег: 8 490 000 ₸ (пробелы между тысячами, знак ₸ в конце числа).',
+      'Не используй формат 8,490,000 и не используй KZT.',
       'Ответ делай понятным и коротким, с ключевыми цифрами по запросу пользователя.'
     ].join(' ');
 
@@ -235,11 +240,28 @@ module.exports = function createAiRouter(deps) {
         ? content.map((part) => String(part?.text || '')).join('').trim()
         : '';
 
+    const _normalizeMoneyText = (raw) => {
+      let out = String(raw || '');
+      if (!out) return out;
+
+      // 8,490,000 -> 8 490 000
+      out = out.replace(/\b\d{1,3}(?:,\d{3})+\b/g, (m) => m.replace(/,/g, ' '));
+      // Replace textual currency marker
+      out = out.replace(/\bKZT\b/gi, '₸');
+      // Prefix currency -> suffix currency: ₸8 490 000 -> 8 490 000 ₸
+      out = out.replace(/₸\s*([0-9][0-9\s]*(?:[.,][0-9]+)?)/g, (_, num) => `${String(num).trim()} ₸`);
+      // Keep consistent spacing near currency symbol
+      out = out.replace(/(\d)₸/g, '$1 ₸');
+      out = out.replace(/\s{2,}/g, ' ');
+
+      return out.trim();
+    };
+
     if (text) {
       return {
         ok: true,
         status: 200,
-        text,
+        text: _normalizeMoneyText(text),
         debug: {
           model,
           finishReason,
