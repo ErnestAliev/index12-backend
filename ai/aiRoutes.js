@@ -135,20 +135,12 @@ module.exports = function createAiRouter(deps) {
     const journalPacket = (body?.journalPacket && typeof body.journalPacket === 'object')
       ? body.journalPacket
       : null;
-    const snapshot = (body?.snapshot && typeof body.snapshot === 'object')
-      ? body.snapshot
-      : null;
 
     return {
       periodFilter: body?.periodFilter || null,
       asOf: body?.asOf || null,
       journalPacket,
-      snapshot: snapshot
-        ? {
-            accounts: Array.isArray(snapshot.accounts) ? snapshot.accounts : [],
-            companies: Array.isArray(snapshot.companies) ? snapshot.companies : []
-          }
-        : null
+      snapshot: null
     };
   };
 
@@ -167,8 +159,9 @@ module.exports = function createAiRouter(deps) {
     const systemPrompt = [
       'Ты AI-ассистент финансовой системы INDEX12.',
       'Отвечай только на русском языке.',
-      'Главный источник данных: journal_packet_json (если есть).',
+      'Единственный источник данных: journal_packet_json.',
       'Статусы: "Исполнено" = факт, "План" = план.',
+      'Для расчётов в первую очередь используй journal_packet_json.summaryByStatus и journal_packet_json.aggregates.',
       'Всегда различай факт и план в расчётах.',
       'Если пользователь не просил объединять — показывай факт и план раздельно.',
       'Не придумывай числа и факты, которых нет в данных.',
@@ -183,8 +176,6 @@ module.exports = function createAiRouter(deps) {
       `Вопрос пользователя:\n${question}`,
       '',
       `journal_packet_json:\n${JSON.stringify(context?.journalPacket || null, null, 2)}`,
-      '',
-      `snapshot_json:\n${JSON.stringify(context?.snapshot || null, null, 2)}`,
       '',
       `meta_json:\n${JSON.stringify({ periodFilter: context?.periodFilter || null, asOf: context?.asOf || null }, null, 2)}`
     ].join('\n');
@@ -327,7 +318,10 @@ module.exports = function createAiRouter(deps) {
 
       // Chat/source=chat must always go to LLM (no deterministic gate).
       if (!isQuickButton) {
-        const context = _buildLlmContext(req.body || {});
+        const context = _buildLlmContext({
+          ...(req.body || {}),
+          snapshot: null
+        });
         const llmResult = await _callLlmAgent({ question: q, context });
         const debugEnabled = req?.body?.debugAi === true;
 
