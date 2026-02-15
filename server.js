@@ -10,10 +10,6 @@ const MongoStore = require('connect-mongo');
 const http = require('http'); // 🟢 Native Node.js HTTP module
 const socketIo = require('socket.io'); // 🟢 Socket.io
 const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
-const createDataProvider = require('./ai/dataProvider');
-const createContextPacketService = require('./ai/contextPacketService');
-const { buildContextPacketPayload, derivePeriodKey } = require('./ai/contextPacketBuilder');
-const deepPrompt = require('./ai/prompts/deepPrompt');
 const crypto = require('crypto'); // 🟢 For invitation tokens
 
 // 🟢 Загрузка .env
@@ -336,76 +332,7 @@ eventSchema.index({ userId: 1, dateKey: 1 });
 
 const Event = mongoose.model('Event', eventSchema);
 
-const aiContextPacketSchema = new mongoose.Schema({
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', default: null, index: true },
-    userId: { type: String, required: true, index: true },
-    periodKey: { type: String, required: true, index: true }, // YYYY-MM
-    periodStart: { type: Date, required: true },
-    periodEnd: { type: Date, required: true },
-    timezone: { type: String, default: 'Asia/Almaty' },
-    version: { type: Number, default: 1 },
-    prompt: {
-        templateVersion: { type: String, default: 'deep-v1' },
-        dictionaryVersion: { type: String, default: 'dict-v1' },
-        text: { type: String, default: '' }
-    },
-    dictionary: { type: mongoose.Schema.Types.Mixed, default: {} },
-    normalized: { type: mongoose.Schema.Types.Mixed, default: {} },
-    derived: { type: mongoose.Schema.Types.Mixed, default: {} },
-    dataQuality: { type: mongoose.Schema.Types.Mixed, default: {} },
-    stats: {
-        operationsCount: { type: Number, default: 0 },
-        accountsCount: { type: Number, default: 0 },
-        sourceHash: { type: String, default: '' }
-    }
-}, {
-    collection: 'ai_context_packets',
-    minimize: false,
-    timestamps: true
-});
-aiContextPacketSchema.index({ workspaceId: 1, userId: 1, periodKey: 1 }, { unique: true });
-aiContextPacketSchema.index({ workspaceId: 1, userId: 1, updatedAt: -1 });
-const AiContextPacket = mongoose.model('AiContextPacket', aiContextPacketSchema);
-const aiPacketDataProvider = createDataProvider({ mongoose, Event, Account, Company, Contractor, Individual, Project, Category });
-const aiPacketService = createContextPacketService({ AiContextPacket });
-const AI_PACKET_TIMEZONE = 'Asia/Almaty';
-
-// 🧠 AI Memory: Шпаргалка терминов пользователя
-const aiGlossarySchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
-    term: { type: String, required: true },
-    meaning: { type: String, required: true },
-    source: { type: String, enum: ['user', 'ai_inferred', 'system'], default: 'user' },
-    confidence: { type: Number, default: 1.0 },
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
-}, { collection: 'ai_glossary' });
-aiGlossarySchema.index({ userId: 1, workspaceId: 1, term: 1 }, { unique: true });
-const AiGlossary = mongoose.model('AiGlossary', aiGlossarySchema);
-
-// 🧠 AI Memory: Профиль пользователя (стиль общения, заметки агента)
-const aiUserProfileSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
-    displayName: { type: String, default: null },
-    communicationStyle: { type: String, enum: ['casual', 'formal', 'brief'], default: 'casual' },
-    detailLevel: { type: String, enum: ['minimal', 'normal', 'detailed'], default: 'normal' },
-    onboardingComplete: { type: Boolean, default: false },
-    knownPreferences: { type: mongoose.Schema.Types.Mixed, default: {} },
-    agentNotes: [{
-        note: String,
-        category: { type: String, enum: ['risk', 'pattern', 'preference', 'reminder'] },
-        createdAt: { type: Date, default: Date.now }
-    }],
-    lastInteraction: { type: Date, default: Date.now },
-    interactionCount: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
-}, { collection: 'ai_user_profiles' });
-aiUserProfileSchema.index({ userId: 1, workspaceId: 1 }, { unique: true });
-const AiUserProfile = mongoose.model('AiUserProfile', aiUserProfileSchema);
-
+// AI deep/chat/context-packet models removed: QUICK-only mode
 
 // --- CONFIG ---
 app.use(session({
@@ -740,309 +667,13 @@ async function getCompositeUserId(req) {
     }
 }
 
-const _isValidPeriodKey = (value) => /^\d{4}-\d{2}$/.test(String(value || '').trim());
-
-const _periodBoundsFromKey = (periodKey) => {
-    const key = String(periodKey || '').trim();
-    if (!_isValidPeriodKey(key)) return null;
-    const [yRaw, mRaw] = key.split('-');
-    const y = Number(yRaw);
-    const m = Number(mRaw);
-    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return null;
-    const periodStart = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
-    const periodEnd = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
-    return { periodStart, periodEnd };
-};
-
-const _periodKeysFromDates = (dates = []) => {
-    const keys = new Set();
-    for (const raw of (Array.isArray(dates) ? dates : [])) {
-        const d = new Date(raw);
-        if (Number.isNaN(d.getTime())) continue;
-        const key = derivePeriodKey(d, AI_PACKET_TIMEZONE);
-        if (_isValidPeriodKey(key)) keys.add(key);
-    }
-    return Array.from(keys);
-};
-
-async function rebuildContextPacketForPeriod({
-    userId,
-    workspaceId = null,
-    periodKey,
-    reason = 'manual'
-}) {
-    if (!aiPacketService?.enabled) return { ok: false, reason: 'service_disabled' };
-
-    const userIdStr = String(userId || '').trim();
-    if (!userIdStr) return { ok: false, reason: 'missing_user' };
-
-    const key = String(periodKey || '').trim();
-    if (!_isValidPeriodKey(key)) return { ok: false, reason: 'invalid_period_key' };
-
-    const bounds = _periodBoundsFromKey(key);
-    if (!bounds) return { ok: false, reason: 'invalid_period_bounds' };
-
-    const { periodStart, periodEnd } = bounds;
-    const ws = workspaceId || null;
-
-    const dbData = await aiPacketDataProvider.buildDataPacket([userIdStr], {
-        includeHidden: true,
-        visibleAccountIds: null,
-        dateRange: {
-            mode: 'custom',
-            customStart: periodStart.toISOString(),
-            customEnd: periodEnd.toISOString()
-        },
-        workspaceId: ws,
-        now: new Date().toISOString(),
-        snapshot: null
-    });
-
-    const operationsCount = Array.isArray(dbData?.operations) ? dbData.operations.length : 0;
-    const existing = await aiPacketService.getMonthlyPacket({
-        workspaceId: ws,
-        userId: userIdStr,
-        periodKey: key
-    });
-
-    if (operationsCount <= 0) {
-        if (existing?._id) {
-            await AiContextPacket.deleteOne({ _id: existing._id });
-            console.log(`[AI][context-packet] deleted empty period=${key} user=${userIdStr} ws=${ws || 'null'} reason=${reason}`);
-            return { ok: true, action: 'deleted_empty' };
-        }
-        return { ok: true, action: 'skip_empty' };
-    }
-
-    const payload = buildContextPacketPayload({
-        dbData,
-        promptText: deepPrompt,
-        templateVersion: 'deep-v1',
-        dictionaryVersion: 'dict-v1',
-        userQuestionRaw: ''
-    });
-    const existingHash = String(existing?.stats?.sourceHash || '');
-    const nextHash = String(payload?.stats?.sourceHash || '');
-    if (existingHash && nextHash && existingHash === nextHash) {
-        return { ok: true, action: 'unchanged' };
-    }
-
-    await aiPacketService.upsertMonthlyPacket({
-        workspaceId: ws,
-        userId: userIdStr,
-        periodKey: key,
-        periodStart,
-        periodEnd,
-        timezone: AI_PACKET_TIMEZONE,
-        ...payload
-    });
-
-    console.log(`[AI][context-packet] upsert period=${key} user=${userIdStr} ws=${ws || 'null'} ops=${operationsCount} reason=${reason}`);
-    return { ok: true, action: 'upserted' };
-}
-
-function triggerContextPacketRebuildByDates({
-    userId,
-    workspaceId = null,
-    dates = [],
-    reason = 'event_change'
-}) {
-    const userIdStr = String(userId || '').trim();
-    if (!userIdStr) return;
-
-    const periodKeys = _periodKeysFromDates(dates);
-    if (!periodKeys.length) return;
-
-    setImmediate(async () => {
-        for (const periodKey of periodKeys) {
-            try {
-                await rebuildContextPacketForPeriod({
-                    userId: userIdStr,
-                    workspaceId,
-                    periodKey,
-                    reason
-                });
-            } catch (err) {
-                console.error('[AI][context-packet] rebuild failed:', {
-                    periodKey,
-                    userId: userIdStr,
-                    workspaceId: workspaceId || null,
-                    reason,
-                    error: err?.message || err
-                });
-            }
-        }
-    });
-}
-
-async function normalizeAiContextPacketsCollection() {
-    if (!aiPacketService?.enabled) return { deduped: 0, removedNullShadowed: 0, totalRemoved: 0 };
-
-    const docs = await AiContextPacket.find({})
-        .select({ _id: 1, userId: 1, workspaceId: 1, periodKey: 1, updatedAt: 1, createdAt: 1 })
-        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
-        .lean();
-
-    const keepByStrictKey = new Map();
-    const duplicateIds = [];
-
-    for (const doc of docs) {
-        const userIdStr = String(doc?.userId || '').trim();
-        const periodKey = String(doc?.periodKey || '').trim();
-        if (!userIdStr || !_isValidPeriodKey(periodKey)) {
-            duplicateIds.push(doc?._id);
-            continue;
-        }
-        const wsKey = doc?.workspaceId ? String(doc.workspaceId) : 'null';
-        const strictKey = `${userIdStr}|${wsKey}|${periodKey}`;
-        if (keepByStrictKey.has(strictKey)) {
-            duplicateIds.push(doc._id);
-            continue;
-        }
-        keepByStrictKey.set(strictKey, doc);
-    }
-
-    const keepDocs = Array.from(keepByStrictKey.values());
-    const hasConcreteWorkspaceByUserPeriod = new Set();
-    for (const doc of keepDocs) {
-        const userIdStr = String(doc?.userId || '').trim();
-        const periodKey = String(doc?.periodKey || '').trim();
-        if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
-        if (doc?.workspaceId) {
-            hasConcreteWorkspaceByUserPeriod.add(`${userIdStr}|${periodKey}`);
-        }
-    }
-
-    const shadowedNullIds = [];
-    for (const doc of keepDocs) {
-        const userIdStr = String(doc?.userId || '').trim();
-        const periodKey = String(doc?.periodKey || '').trim();
-        if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
-        if (!doc?.workspaceId && hasConcreteWorkspaceByUserPeriod.has(`${userIdStr}|${periodKey}`)) {
-            shadowedNullIds.push(doc._id);
-        }
-    }
-
-    const allRemoveIds = Array.from(new Set([
-        ...duplicateIds.map((id) => String(id)),
-        ...shadowedNullIds.map((id) => String(id))
-    ])).map((id) => new mongoose.Types.ObjectId(id));
-
-    if (allRemoveIds.length > 0) {
-        await AiContextPacket.deleteMany({ _id: { $in: allRemoveIds } });
-    }
-
-    try {
-        await AiContextPacket.collection.createIndex(
-            { workspaceId: 1, userId: 1, periodKey: 1 },
-            { unique: true, name: 'workspaceId_1_userId_1_periodKey_1' }
-        );
-    } catch (err) {
-        console.error('[AI][context-packet] ensure unique index failed:', err?.message || err);
-    }
-
-    return {
-        deduped: duplicateIds.length,
-        removedNullShadowed: shadowedNullIds.length,
-        totalRemoved: allRemoveIds.length
-    };
+// QUICK-only mode: deep/chat/context-packet rebuild is disabled.
+function triggerContextPacketRebuildByDates() {
+    return;
 }
 
 async function prebuildAllContextPacketsOnStartup() {
-    if (!aiPacketService?.enabled) return;
-
-    console.log('[AI][context-packet] startup prebuild started');
-    const cleanup = await normalizeAiContextPacketsCollection();
-    console.log(`[AI][context-packet] cleanup done: deduped=${cleanup.deduped}, removedNullShadowed=${cleanup.removedNullShadowed}, totalRemoved=${cleanup.totalRemoved}`);
-
-    const groups = await Event.aggregate([
-        { $match: { date: { $type: 'date' } } },
-        {
-            $project: {
-                userId: 1,
-                workspaceId: { $ifNull: ['$workspaceId', null] },
-                periodKey: {
-                    $dateToString: {
-                        format: '%Y-%m',
-                        date: '$date',
-                        timezone: AI_PACKET_TIMEZONE
-                    }
-                }
-            }
-        },
-        {
-            $group: {
-                _id: {
-                    userId: '$userId',
-                    workspaceId: '$workspaceId',
-                    periodKey: '$periodKey'
-                },
-                operationsCount: { $sum: 1 }
-            }
-        },
-        { $sort: { '_id.periodKey': 1 } }
-    ]);
-
-    const groupedByCanonicalKey = new Map();
-    for (const g of groups) {
-        const userIdRaw = g?._id?.userId;
-        const userIdStr = String(userIdRaw || '').trim();
-        const periodKey = String(g?._id?.periodKey || '').trim();
-        if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
-        const wsRaw = g?._id?.workspaceId || null;
-        const wsCanonical = wsRaw ? String(wsRaw).trim() : null;
-        const wsKey = wsCanonical || 'null';
-        const key = `${userIdStr}|${wsKey}|${periodKey}`;
-
-        const prev = groupedByCanonicalKey.get(key);
-        if (!prev) {
-            groupedByCanonicalKey.set(key, {
-                userId: userIdStr,
-                workspaceId: wsCanonical,
-                periodKey,
-                operationsCount: Number(g?.operationsCount) || 0
-            });
-        } else {
-            prev.operationsCount += Number(g?.operationsCount) || 0;
-        }
-    }
-
-    const grouped = Array.from(groupedByCanonicalKey.values());
-    const hasConcreteWorkspaceByUserPeriod = new Set();
-    for (const row of grouped) {
-        if (row.workspaceId) {
-            hasConcreteWorkspaceByUserPeriod.add(`${row.userId}|${row.periodKey}`);
-        }
-    }
-
-    const prebuildRows = grouped
-        .filter((row) => {
-            if ((Number(row.operationsCount) || 0) <= 0) return false;
-            if (!row.workspaceId && hasConcreteWorkspaceByUserPeriod.has(`${row.userId}|${row.periodKey}`)) {
-                return false;
-            }
-            return true;
-        })
-        .sort((a, b) => {
-            if (a.periodKey < b.periodKey) return -1;
-            if (a.periodKey > b.periodKey) return 1;
-            if (String(a.userId) < String(b.userId)) return -1;
-            if (String(a.userId) > String(b.userId)) return 1;
-            return String(a.workspaceId || '').localeCompare(String(b.workspaceId || ''));
-        });
-
-    let processed = 0;
-    for (const row of prebuildRows) {
-        await rebuildContextPacketForPeriod({
-            userId: row.userId,
-            workspaceId: row.workspaceId || null,
-            periodKey: row.periodKey,
-            reason: 'startup_prebuild'
-        });
-        processed += 1;
-    }
-
-    console.log(`[AI][context-packet] startup prebuild done: periods=${processed}`);
+    return;
 }
 
 // --- ROUTES ---
@@ -2280,7 +1911,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // =================================================================
 app.use('/api/ai', createAiRouter({
     mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category, AiContextPacket, AiGlossary, AiUserProfile },
+    models: { Event, Account, Company, Contractor, Individual, Project, Category },
     FRONTEND_URL,
     isAuthenticated,
     getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation
@@ -3236,13 +2867,8 @@ mongoose.connect(DB_URL, {
     serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds
     socketTimeoutMS: 45000,
 })
-    .then(async () => {
+.then(async () => {
         console.log('✅ MongoDB подключена.');
-        try {
-            await prebuildAllContextPacketsOnStartup();
-        } catch (err) {
-            console.error('[AI][context-packet] startup prebuild failed:', err?.message || err);
-        }
         server.listen(PORT, () => {
             console.log(`✅ Сервер запущен на порту ${PORT}`);
         });
