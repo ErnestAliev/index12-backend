@@ -152,6 +152,50 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _detectStatusScope = (questionRaw = '') => {
+    const q = String(questionRaw || '').toLowerCase();
+
+    const hasBoth = /(факт\s*и\s*план|план\s*и\s*факт|сравн|разниц|оба|вместе|включая план)/i.test(q);
+    if (hasBoth) return 'both';
+
+    const hasPlan = /(план|планируем|прогноз|ожида|будет|предстоит|заплан)/i.test(q);
+    if (hasPlan) return 'plan';
+
+    const hasFact = /(факт|исполнено|уже|составил|составили|получили|поступил|поступило|потратили|потрачено|за прошед)/i.test(q);
+    if (hasFact) return 'fact';
+
+    // Default for business questions: factual results.
+    return 'fact';
+  };
+
+  const _applyStatusScopeToContext = (context, statusScopeHint) => {
+    const scoped = {
+      ...(context || {}),
+      statusScopeHint: statusScopeHint || 'fact'
+    };
+
+    const jp = scoped?.journalPacket;
+    if (!jp || !Array.isArray(jp.operations)) return scoped;
+
+    const opsFact = jp.operations.filter((op) => String(op?.status || '') === 'Исполнено');
+    const opsPlan = jp.operations.filter((op) => String(op?.status || '') === 'План');
+
+    const nextPacket = {
+      ...jp,
+      operationsFact: opsFact,
+      operationsPlan: opsPlan
+    };
+
+    if (statusScopeHint === 'fact') {
+      nextPacket.operations = opsFact;
+    } else if (statusScopeHint === 'plan') {
+      nextPacket.operations = opsPlan;
+    }
+
+    scoped.journalPacket = nextPacket;
+    return scoped;
+  };
+
   const _callLlmAgent = async ({ question, context }) => {
     const apiKey = process.env.OPENAI_API_KEY;
     const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -169,6 +213,10 @@ module.exports = function createAiRouter(deps) {
       'Отвечай только на русском языке.',
       'Главный источник данных: journal_packet_json (если есть).',
       'Статусы: "Исполнено" = факт, "План" = план.',
+      'Поле status_scope_hint обязательно к исполнению:',
+      '- fact: использовать только операции со статусом "Исполнено".',
+      '- plan: использовать только операции со статусом "План".',
+      '- both: показывать факт и план раздельно.',
       'Всегда различай факт и план в расчётах.',
       'Если пользователь не просил объединять — показывай факт и план раздельно.',
       'Не придумывай числа и факты, которых нет в данных.',
@@ -183,6 +231,8 @@ module.exports = function createAiRouter(deps) {
       `Вопрос пользователя:\n${question}`,
       '',
       `journal_packet_json:\n${JSON.stringify(context?.journalPacket || null, null, 2)}`,
+      '',
+      `status_scope_hint:\n${String(context?.statusScopeHint || 'fact')}`,
       '',
       `snapshot_json:\n${JSON.stringify(context?.snapshot || null, null, 2)}`,
       '',
@@ -327,7 +377,9 @@ module.exports = function createAiRouter(deps) {
 
       // Chat/source=chat must always go to LLM (no deterministic gate).
       if (!isQuickButton) {
-        const context = _buildLlmContext(req.body || {});
+        const statusScopeHint = _detectStatusScope(q);
+        const baseContext = _buildLlmContext(req.body || {});
+        const context = _applyStatusScopeToContext(baseContext, statusScopeHint);
         const llmResult = await _callLlmAgent({ question: q, context });
         const debugEnabled = req?.body?.debugAi === true;
 
