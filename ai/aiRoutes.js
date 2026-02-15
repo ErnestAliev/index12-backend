@@ -1966,7 +1966,7 @@ module.exports = function createAiRouter(deps) {
       const pendingTerm = (currentSession && currentSession.pending && currentSession.pending.type === 'glossary_term')
         ? currentSession.pending
         : null;
-      if (pendingTerm) {
+      if (!isDeep && pendingTerm) {
         const cancelPending = /(отмена|отменить|неважно|пропусти|забудь)/i.test(qLower);
         if (cancelPending) {
           currentSession.pending = null;
@@ -2001,7 +2001,7 @@ module.exports = function createAiRouter(deps) {
       const pendingOps = (currentSession && currentSession.pending && currentSession.pending.type === 'ops_drilldown')
         ? currentSession.pending
         : null;
-      if (pendingOps) {
+      if (!isDeep && pendingOps) {
         if (_isNegativeReply(q)) {
           currentSession.pending = null;
           const cancelText = 'Ок, без детализации операций.';
@@ -2186,12 +2186,14 @@ module.exports = function createAiRouter(deps) {
             source: 'user',
             confidence: 1.0
           });
-          await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
-          const scopeSuffix = projectHint?.name ? ` (проект: ${projectHint.name})` : '';
-          const ack = `Записал в шпаргалку: ${term} = ${meaning}${scopeSuffix}`;
-          _pushHistory(userIdStr, workspaceId, 'user', q);
-          _pushHistory(userIdStr, workspaceId, 'assistant', ack);
-          return res.json({ text: ack });
+          if (!isDeep) {
+            await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
+            const scopeSuffix = projectHint?.name ? ` (проект: ${projectHint.name})` : '';
+            const ack = `Записал в шпаргалку: ${term} = ${meaning}${scopeSuffix}`;
+            _pushHistory(userIdStr, workspaceId, 'user', q);
+            _pushHistory(userIdStr, workspaceId, 'assistant', ack);
+            return res.json({ text: ack });
+          }
         }
       }
 
@@ -2209,7 +2211,7 @@ module.exports = function createAiRouter(deps) {
         dbData?.catalogs?.categories || [],
         dbData?.catalogs?.projects || []
       );
-      if (!profile?.onboardingComplete && unknownTerms.length > 0) {
+      if (!isDeep && !profile?.onboardingComplete && unknownTerms.length > 0) {
         const onboardingText = buildOnboardingMessage({
           dataPacket: dbData,
           unknownTerms,
@@ -2236,7 +2238,7 @@ module.exports = function createAiRouter(deps) {
         isWellKnownTerm: glossaryService.isWellKnownTerm
       });
       const termToClarify = unknownMention?.name || unknownAbbreviation;
-      if (termToClarify) {
+      if (!isDeep && termToClarify) {
         if (currentSession) {
           currentSession.pending = {
             type: 'glossary_term',
@@ -2399,15 +2401,6 @@ module.exports = function createAiRouter(deps) {
             content: `Персональная шпаргалка терминов:\n${glossaryContext}`
           }
           : null,
-        {
-          role: 'system',
-          content: [
-            'Отвечай свободно, без обязательного JSON-формата.',
-            'Используй context_packet_json как основной источник данных.',
-            'Если данных недостаточно — прямо скажи об этом.',
-            'Дай нормальный человекочитаемый ответ по вопросу пользователя.'
-          ].join('\n')
-        },
         { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
         ...deepHistory,
         { role: 'user', content: qResolved }
