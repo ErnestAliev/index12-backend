@@ -511,14 +511,25 @@ module.exports = function createAiRouter(deps) {
     const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
     if (!tokens.length) return '';
 
+    const trimTail = (parts) => {
+      const tailStop = new Set([
+        'посчитай', 'рассчитай', 'считай', 'покажи', 'выведи', 'дай', 'сколько',
+        'итог', 'итого', 'сумма', 'сумму', 'суммы', 'операции', 'операций',
+        'факт', 'план'
+      ]);
+      const out = parts.slice();
+      while (out.length && tailStop.has(out[out.length - 1])) out.pop();
+      return out;
+    };
+
     const byPoIdx = tokens.lastIndexOf('по');
     if (byPoIdx >= 0 && byPoIdx < tokens.length - 1) {
-      return tokens.slice(byPoIdx + 1).join(' ');
+      return trimTail(tokens.slice(byPoIdx + 1)).join(' ');
     }
 
     const categoryIdx = tokens.findIndex((t) => t.startsWith('категор'));
     if (categoryIdx >= 0 && categoryIdx < tokens.length - 1) {
-      return tokens.slice(categoryIdx + 1).join(' ');
+      return trimTail(tokens.slice(categoryIdx + 1)).join(' ');
     }
     return q;
   };
@@ -1514,6 +1525,17 @@ module.exports = function createAiRouter(deps) {
     const effectiveQuery = auto?.query || query;
     const q = _normalizeRu(effectiveQuery);
     const tokens = q.split(' ').map((t) => t.trim()).filter(Boolean);
+    const asksCalc = tokens.some((token) => (
+      token.includes('посчита')
+      || token.includes('рассчита')
+      || token === 'считай'
+      || token.includes('сколько')
+      || token.includes('сумм')
+      || token.includes('итог')
+      || token.includes('покаж')
+      || token.includes('вывед')
+      || token === 'дай'
+    ));
     const asksOperations = tokens.some((token) => token.includes('операц'));
     const asksIncome = tokens.some((token) => (
       token.includes('доход')
@@ -1527,7 +1549,6 @@ module.exports = function createAiRouter(deps) {
       || token.includes('трат')
       || token.includes('списан')
     ));
-    if (!asksIncome && !asksOperations && !asksExpense) return null;
 
     const scopedQuery = tokens.includes('по')
       || tokens.some((token) => token.startsWith('категор'))
@@ -1537,6 +1558,9 @@ module.exports = function createAiRouter(deps) {
       || tokens.some((token) => token.startsWith('контрагент'))
       || tokens.some((token) => token.startsWith('физлиц'));
     if (!scopedQuery) return null;
+    const scopedCalc = scopedQuery && asksCalc;
+    if (!asksIncome && !asksOperations && !asksExpense && !scopedCalc) return null;
+    const operationsMode = asksOperations || (scopedCalc && !asksIncome && !asksExpense);
 
     const rawPhrase = _extractCategoryPhrase(effectiveQuery);
     const phrase = _normalizeRu(rawPhrase);
@@ -1580,7 +1604,7 @@ module.exports = function createAiRouter(deps) {
         date: dateText,
         fact: `не нашел точное совпадение для "${rawPhrase || query}"`,
         plan: `ближайшие варианты: ${hintText}`,
-        total: asksOperations
+        total: operationsMode
           ? 'операции посчитаю сразу после уточнения фильтра'
           : 'сумму посчитаю сразу после уточнения фильтра',
         question: hints.length
@@ -1607,7 +1631,7 @@ module.exports = function createAiRouter(deps) {
       })
       .filter(Boolean);
 
-    if (asksOperations && !asksIncome && !asksExpense) {
+    if (operationsMode && !asksIncome && !asksExpense) {
       return {
         date: dateText,
         fact: `операции по "${label}" (факт): ${factOps.length} шт, ${_formatTenge(factAmount)}`,
@@ -1925,7 +1949,8 @@ module.exports = function createAiRouter(deps) {
         return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
       }
 
-      const q = String(req.body?.message || '').trim();
+      const qRaw = String(req.body?.message ?? '');
+      const q = qRaw.trim();
       if (!q) {
         return res.status(400).json({ error: 'Пустой запрос' });
       }
@@ -2067,43 +2092,8 @@ module.exports = function createAiRouter(deps) {
         }
       }
 
-      let qResolved = q;
-      let qLowerResolved = qLower;
-      if (isDeep) {
-        const nowRefResolve = _safeDate(req?.body?.asOf) || new Date();
-        const periodFilterResolve = req?.body?.periodFilter || {};
-        const periodStartResolve = _safeDate(periodFilterResolve?.customStart) || _monthStartUtc(nowRefResolve);
-        const periodEndResolve = _safeDate(periodFilterResolve?.customEnd) || _monthEndUtc(nowRefResolve);
-        const packetResolve = {
-          periodStart: periodStartResolve,
-          periodEnd: periodEndResolve,
-          normalized: {
-            events: Array.isArray(dbData?.operations) ? dbData.operations : [],
-            categories: Array.isArray(dbData?.catalogs?.categories) ? dbData.catalogs.categories : [],
-            projects: Array.isArray(dbData?.catalogs?.projects) ? dbData.catalogs.projects : [],
-            accounts: Array.isArray(dbData?.accounts) ? dbData.accounts : [],
-            companies: Array.isArray(dbData?.catalogs?.companies) ? dbData.catalogs.companies : [],
-            contractors: Array.isArray(dbData?.catalogs?.contractors) ? dbData.catalogs.contractors : [],
-            individuals: Array.isArray(dbData?.catalogs?.individuals) ? dbData.catalogs.individuals : []
-          },
-          derived: {
-            categorySummary: Array.isArray(dbData?.categorySummary) ? dbData.categorySummary : []
-          }
-        };
-        const resolved = _autoCorrectQueryWithDictionary({ query: q, packet: packetResolve });
-        if (resolved?.corrected && resolved?.query) {
-          qResolved = String(resolved.query);
-          qLowerResolved = qResolved.toLowerCase();
-          if (shouldDebugLog) {
-            console.log('[AI_QUERY_AUTOCORRECT]', JSON.stringify({
-              from: q,
-              to: qResolved,
-              replacements: resolved?.replacements || [],
-              phrase: resolved?.phrase || null
-            }));
-          }
-        }
-      }
+      let qResolved = qRaw;
+      let qLowerResolved = qRaw.toLowerCase();
 
       // =========================
       // LEGACY QUICK MODE (fallback for deep mode or engine failure)
@@ -2280,7 +2270,8 @@ module.exports = function createAiRouter(deps) {
             dbData,
             promptText: deepPrompt,
             templateVersion: 'deep-v1',
-            dictionaryVersion: 'dict-v1'
+            dictionaryVersion: 'dict-v1',
+            userQuestionRaw: qRaw
           });
 
           let shouldUpsertPacket = true;
@@ -2343,10 +2334,14 @@ module.exports = function createAiRouter(deps) {
             dbData,
             promptText: deepPrompt,
             templateVersion: 'deep-v1',
-            dictionaryVersion: 'dict-v1'
+            dictionaryVersion: 'dict-v1',
+            userQuestionRaw: qRaw
           })
         };
       }
+      packet.derived = (packet.derived && typeof packet.derived === 'object') ? packet.derived : {};
+      packet.derived.meta = (packet.derived.meta && typeof packet.derived.meta === 'object') ? packet.derived.meta : {};
+      packet.derived.meta.userQuestionRaw = qRaw;
 
       if (shouldDebugLog) {
         const analysisEnvelope = {
@@ -2388,20 +2383,6 @@ module.exports = function createAiRouter(deps) {
           ...analysisEnvelope,
           analysisFile
         }));
-      }
-
-      const deepFilterStructured = _maybeBuildCategoryIncomeStructured({
-        query: qResolved,
-        packet
-      });
-      if (deepFilterStructured) {
-        _rememberOpsDrilldownPending({ session: currentSession, structured: deepFilterStructured });
-        const deepFilterAnswer = _formatDeepStructuredText(deepFilterStructured);
-        console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'filter_executor', question: qResolved }));
-        await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
-        _pushHistory(userIdStr, workspaceId, 'user', q);
-        _pushHistory(userIdStr, workspaceId, 'assistant', deepFilterAnswer);
-        return res.json({ text: deepFilterAnswer });
       }
 
       const groundedMessages = [
@@ -2546,15 +2527,6 @@ module.exports = function createAiRouter(deps) {
           branch: 'fallback',
           reason: _isNoAiAnswerText(rawAnswer) ? 'no_ai_answer' : (!groundedValidation?.ok ? 'grounding_failed' : 'no_structured')
         }));
-        const deterministicRecovery = _maybeBuildCategoryIncomeStructured({
-          query: qResolved,
-          packet
-        });
-        if (deterministicRecovery) {
-          structuredAnswer = deterministicRecovery;
-          _rememberOpsDrilldownPending({ session: currentSession, structured: structuredAnswer });
-          console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'fallback_filter_executor', question: qResolved }));
-        } else {
         const dateStartFail = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
         const dateEndFail = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
         const dateTextFail = (dateStartFail && dateEndFail && dateStartFail !== 'Invalid Date' && dateEndFail !== 'Invalid Date')
@@ -2567,7 +2539,6 @@ module.exports = function createAiRouter(deps) {
           total: 'ответ не сформирован',
           question: 'Повторить запрос точнее по периоду или категории?'
         };
-        }
       } else {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'grounded' }));
       }

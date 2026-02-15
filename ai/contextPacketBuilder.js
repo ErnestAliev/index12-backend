@@ -140,8 +140,10 @@ function buildContextPacketPayload({
     dbData,
     promptText = '',
     templateVersion = 'deep-v1',
-    dictionaryVersion = 'dict-v1'
+    dictionaryVersion = 'dict-v1',
+    userQuestionRaw = ''
 }) {
+    const rawQuestion = String(userQuestionRaw ?? '');
     const normalized = {
         accounts: dbData?.accounts || [],
         events: dbData?.operations || [],
@@ -152,8 +154,13 @@ function buildContextPacketPayload({
         individuals: dbData?.catalogs?.individuals || []
     };
 
+    const derivedMeta = (dbData?.meta && typeof dbData.meta === 'object')
+        ? { ...dbData.meta }
+        : {};
+    derivedMeta.userQuestionRaw = rawQuestion;
+
     const derived = {
-        meta: dbData?.meta || {},
+        meta: derivedMeta,
         totals: dbData?.totals || {},
         accountsData: dbData?.accountsData || {},
         operationsSummary: dbData?.operationsSummary || {},
@@ -184,10 +191,16 @@ function buildContextPacketPayload({
         text: String(promptText || '')
     };
 
+    const derivedForHash = {
+        ...derived,
+        meta: { ...(derived.meta || {}) }
+    };
+    delete derivedForHash.meta.userQuestionRaw;
+
     const hashSource = {
         prompt,
         normalized,
-        derived,
+        derived: derivedForHash,
         dataQuality
     };
     const sourceHash = _hashPayload(hashSource);
