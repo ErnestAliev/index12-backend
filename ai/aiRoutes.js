@@ -8,12 +8,12 @@
 
 const express = require('express');
 const deepPrompt = require('./prompts/deepPrompt');
-const { derivePeriodKey } = require('./contextPacketBuilder');
+const { derivePeriodKey, buildContextPacketPayload } = require('./contextPacketBuilder');
 const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
 
-const AIROUTES_VERSION = 'quick-deep-v9.6';
+const AIROUTES_VERSION = 'quick-deep-v9.7';
 const https = require('https');
 
 // =========================
@@ -177,7 +177,7 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
 
   // Метка версии для быстрой проверки деплоя
-  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.6';
+  const CHAT_VERSION_TAG = 'aiRoutes-quick-deep-v9.7';
 
   // =========================
   // KZ time helpers (UTC+05:00)
@@ -242,7 +242,7 @@ module.exports = function createAiRouter(deps) {
     return true;
   };
 
-  const _expandUserIdCandidates = (primaryUserId, fallbackUserId = null) => {
+  const _expandUserIdCandidates = (primaryUserId, fallbackUserIds = null, workspaceId = null) => {
     const out = [];
     const push = (v) => {
       const s = String(v || '').trim();
@@ -251,13 +251,23 @@ module.exports = function createAiRouter(deps) {
     };
 
     push(primaryUserId);
-    push(fallbackUserId);
+    const fallbacks = Array.isArray(fallbackUserIds) ? fallbackUserIds : [fallbackUserIds];
+    for (const f of fallbacks) push(f);
 
     const src = String(primaryUserId || '').trim();
     const marker = '_ws_';
     const idx = src.indexOf(marker);
     if (idx > 0) {
       push(src.slice(0, idx));
+    }
+
+    const ws = String(workspaceId || '').trim();
+    if (ws) {
+      const seed = out.slice();
+      for (const id of seed) {
+        if (id.includes(marker)) continue;
+        push(`${id}${marker}${ws}`);
+      }
     }
 
     return out;
@@ -2460,7 +2470,13 @@ module.exports = function createAiRouter(deps) {
       const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
       const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
       const packetUserId = String(effectiveUserId || userIdStr);
-      const packetUserCandidates = _expandUserIdCandidates(packetUserId, userIdStr);
+      const packetFallbackIds = [
+        userIdStr,
+        req.user?.id || null,
+        req.user?._id || null,
+        req.user?.ownerId || null
+      ];
+      const packetUserCandidates = _expandUserIdCandidates(packetUserId, packetFallbackIds, workspaceId);
       const packetWorkspaceCandidates = workspaceId ? [workspaceId, null] : [null];
 
       let packet = null;
@@ -2485,21 +2501,146 @@ module.exports = function createAiRouter(deps) {
       }
 
       if (!packet) {
-        const dateStart = _fmtDateKZ(periodStart);
-        const dateEnd = _fmtDateKZ(periodEnd);
-        const noPacketText = `За период ${dateStart} - ${dateEnd} нет подготовленного пакета данных. Добавьте/обновите операции или дождитесь пересборки.`;
         if (shouldDebugLog) {
           console.log('[AI_DEEP_BRANCH]', JSON.stringify({
-            branch: 'no_packet',
+            branch: 'no_packet_try_live_build',
             periodKey: periodKey || null,
             packetUserId,
             packetUserCandidates,
             packetWorkspaceCandidates: packetWorkspaceCandidates.map((x) => x ? String(x) : null)
           }));
         }
-        _pushHistory(userIdStr, workspaceId, 'user', q);
-        _pushHistory(userIdStr, workspaceId, 'assistant', noPacketText);
-        return res.json({ text: noPacketText });
+
+        try {
+          const liveUserIds = Array.from(new Set([
+            ...userIdsList,
+            ...packetUserCandidates
+          ].filter(Boolean).map((x) => String(x))));
+
+          const liveDbData = await dataProvider.buildDataPacket(liveUserIds, {
+            includeHidden: true,
+            visibleAccountIds: null,
+            dateRange: {
+              mode: 'custom',
+              customStart: periodStart.toISOString(),
+              customEnd: periodEnd.toISOString()
+            },
+            workspaceId,
+            now: req?.body?.asOf || null,
+            snapshot: req?.body?.snapshot || null
+          });
+
+          if (timeline) {
+            const safeTimeline = _sanitizeTimelinePayload(timeline, { periodStart, periodEnd });
+            if (safeTimeline) {
+              liveDbData.meta = liveDbData.meta || {};
+              liveDbData.meta.timeline = safeTimeline;
+            }
+          }
+
+          const livePayload = buildContextPacketPayload({
+            dbData: liveDbData,
+            promptText: deepPrompt,
+            templateVersion: 'deep-v1',
+            dictionaryVersion: 'dict-v1',
+            userQuestionRaw: qRaw
+          });
+
+          packet = {
+            workspaceId: workspaceId || null,
+            userId: packetUserId,
+            periodKey,
+            periodStart,
+            periodEnd,
+            timezone: 'Asia/Almaty',
+            version: 1,
+            ...livePayload
+          };
+          packetSource = 'live_build';
+
+          const liveOpsCount = Number(livePayload?.stats?.operationsCount || 0);
+          if (contextPacketsEnabled && liveOpsCount > 0) {
+            try {
+              await contextPacketService.upsertMonthlyPacket({
+                workspaceId,
+                userId: packetUserId,
+                periodKey,
+                periodStart,
+                periodEnd,
+                timezone: 'Asia/Almaty',
+                ...livePayload
+              });
+              packetSource = 'live_build_upserted';
+            } catch (upsertErr) {
+              console.error('[AI_DEEP] live packet upsert failed:', upsertErr?.message || upsertErr);
+            }
+          }
+        } catch (liveBuildErr) {
+          console.error('[AI_DEEP] live packet build failed:', liveBuildErr?.message || liveBuildErr);
+        }
+      }
+
+      if (!packet) {
+        packet = {
+          workspaceId: workspaceId || null,
+          userId: packetUserId,
+          periodKey,
+          periodStart,
+          periodEnd,
+          timezone: 'Asia/Almaty',
+          version: 1,
+          prompt: {
+            templateVersion: 'deep-v1',
+            dictionaryVersion: 'dict-v1',
+            text: String(deepPrompt || '')
+          },
+          dictionary: {
+            entities: {},
+            rules: []
+          },
+          normalized: {
+            accounts: [],
+            events: [],
+            categories: [],
+            projects: [],
+            companies: [],
+            contractors: [],
+            individuals: []
+          },
+          derived: {
+            meta: {
+              periodStart: periodStart?.toISOString?.() || null,
+              periodEnd: periodEnd?.toISOString?.() || null,
+              source: 'synthetic',
+              userQuestionRaw: qRaw
+            },
+            totals: {},
+            operationsSummary: {},
+            categorySummary: [],
+            tagSummary: [],
+            liquiditySignals: {
+              available: false,
+              reason: 'packet_absent_and_live_build_failed'
+            }
+          },
+          dataQuality: {
+            status: 'critical',
+            score: 0,
+            issues: [{
+              code: 'packet_absent',
+              count: 1,
+              severity: 'critical',
+              message: 'Не найден подготовленный пакет и не удалось собрать его на лету.'
+            }],
+            counters: {}
+          },
+          stats: {
+            operationsCount: 0,
+            accountsCount: 0,
+            sourceHash: ''
+          }
+        };
+        packetSource = 'synthetic_empty';
       }
 
       const packetProjects = Array.isArray(packet?.normalized?.projects) ? packet.normalized.projects : [];
@@ -2840,6 +2981,7 @@ module.exports = function createAiRouter(deps) {
       version: AIROUTES_VERSION,
       tag: CHAT_VERSION_TAG,
       contextPackets: contextPacketsEnabled,
+      deepLookup: 'stored->stored_fallback(user/workspace variants)->live_build->synthetic_empty',
       modes: {
         quick: 'modes/quickMode.js',
         deep: 'unified-context-packet'
