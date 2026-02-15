@@ -28,6 +28,8 @@ module.exports = function createAiRouter(deps) {
   });
 
   const quickMode = require('./modes/quickMode');
+  const createQuickJournalAdapter = require('./quickJournalAdapter');
+  const quickJournalAdapter = createQuickJournalAdapter({ Event });
   const router = express.Router();
 
   const _formatTenge = (n) => {
@@ -76,9 +78,7 @@ module.exports = function createAiRouter(deps) {
         }
       }
 
-      const userIdsList = Array.from(
-        new Set([effectiveUserId, req.user?.id || req.user?._id].filter(Boolean).map(String))
-      );
+      const dataUserId = String(effectiveUserId || userId);
 
       const workspaceId = req.user?.currentWorkspaceId || null;
       const requestIncludeHidden = req?.body?.includeHidden === true;
@@ -86,7 +86,7 @@ module.exports = function createAiRouter(deps) {
         ? req.body.visibleAccountIds
         : null;
 
-      const dbData = await dataProvider.buildDataPacket(userIdsList, {
+      const dbData = await dataProvider.buildDataPacket(dataUserId, {
         includeHidden: requestIncludeHidden,
         visibleAccountIds: requestVisibleAccountIds,
         dateRange: req?.body?.periodFilter || null,
@@ -94,6 +94,26 @@ module.exports = function createAiRouter(deps) {
         now: req?.body?.asOf || null,
         snapshot: req?.body?.snapshot || null,
       });
+
+      // Quick buttons must be consistent with Operations Editor source/rules.
+      // Replace operation aggregates with journal-based dataset.
+      if (String(req?.body?.source || '') === 'quick_button') {
+        const quickJournal = await quickJournalAdapter.buildFromJournal({
+          userId: dataUserId,
+          periodFilter: req?.body?.periodFilter || null,
+          asOf: req?.body?.asOf || null,
+          categoriesCatalog: dbData?.catalogs?.categories || []
+        });
+
+        dbData.operations = quickJournal.operations;
+        dbData.operationsSummary = quickJournal.summary;
+        dbData.categorySummary = quickJournal.categorySummary;
+        dbData.meta = {
+          ...(dbData.meta || {}),
+          periodStart: quickJournal?.meta?.periodStart || dbData?.meta?.periodStart || '?',
+          periodEnd: quickJournal?.meta?.periodEnd || dbData?.meta?.periodEnd || '?'
+        };
+      }
 
       const quickResponse = quickMode.handleQuickQuery({
         query: q.toLowerCase(),
