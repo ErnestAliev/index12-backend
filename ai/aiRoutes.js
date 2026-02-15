@@ -249,7 +249,7 @@ module.exports = function createAiRouter(deps) {
         },
         body: JSON.stringify({
           model,
-          temperature: 0.2,
+          temperature: 0,
           max_tokens: 1200,
           messages: [
             { role: 'system', content: systemPrompt },
