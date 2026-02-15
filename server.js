@@ -10,6 +10,10 @@ const MongoStore = require('connect-mongo');
 const http = require('http'); // 🟢 Native Node.js HTTP module
 const socketIo = require('socket.io'); // 🟢 Socket.io
 const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
+const createDataProvider = require('./ai/dataProvider');
+const createContextPacketService = require('./ai/contextPacketService');
+const { buildContextPacketPayload, derivePeriodKey } = require('./ai/contextPacketBuilder');
+const deepPrompt = require('./ai/prompts/deepPrompt');
 const crypto = require('crypto'); // 🟢 For invitation tokens
 
 // 🟢 Загрузка .env
@@ -362,6 +366,9 @@ const aiContextPacketSchema = new mongoose.Schema({
 aiContextPacketSchema.index({ workspaceId: 1, userId: 1, periodKey: 1 }, { unique: true });
 aiContextPacketSchema.index({ workspaceId: 1, userId: 1, updatedAt: -1 });
 const AiContextPacket = mongoose.model('AiContextPacket', aiContextPacketSchema);
+const aiPacketDataProvider = createDataProvider({ mongoose, Event, Account, Company, Contractor, Individual, Project, Category });
+const aiPacketService = createContextPacketService({ AiContextPacket });
+const AI_PACKET_TIMEZONE = 'Asia/Almaty';
 
 // 🧠 AI Memory: Шпаргалка терминов пользователя
 const aiGlossarySchema = new mongoose.Schema({
@@ -731,6 +738,192 @@ async function getCompositeUserId(req) {
         console.error('❌ [getCompositeUserId] Error:', err);
         return realUserId;
     }
+}
+
+const _isValidPeriodKey = (value) => /^\d{4}-\d{2}$/.test(String(value || '').trim());
+
+const _periodBoundsFromKey = (periodKey) => {
+    const key = String(periodKey || '').trim();
+    if (!_isValidPeriodKey(key)) return null;
+    const [yRaw, mRaw] = key.split('-');
+    const y = Number(yRaw);
+    const m = Number(mRaw);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return null;
+    const periodStart = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
+    const periodEnd = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
+    return { periodStart, periodEnd };
+};
+
+const _periodKeysFromDates = (dates = []) => {
+    const keys = new Set();
+    for (const raw of (Array.isArray(dates) ? dates : [])) {
+        const d = new Date(raw);
+        if (Number.isNaN(d.getTime())) continue;
+        const key = derivePeriodKey(d, AI_PACKET_TIMEZONE);
+        if (_isValidPeriodKey(key)) keys.add(key);
+    }
+    return Array.from(keys);
+};
+
+async function rebuildContextPacketForPeriod({
+    userId,
+    workspaceId = null,
+    periodKey,
+    reason = 'manual'
+}) {
+    if (!aiPacketService?.enabled) return { ok: false, reason: 'service_disabled' };
+
+    const userIdStr = String(userId || '').trim();
+    if (!userIdStr) return { ok: false, reason: 'missing_user' };
+
+    const key = String(periodKey || '').trim();
+    if (!_isValidPeriodKey(key)) return { ok: false, reason: 'invalid_period_key' };
+
+    const bounds = _periodBoundsFromKey(key);
+    if (!bounds) return { ok: false, reason: 'invalid_period_bounds' };
+
+    const { periodStart, periodEnd } = bounds;
+    const ws = workspaceId || null;
+
+    const dbData = await aiPacketDataProvider.buildDataPacket([userIdStr], {
+        includeHidden: true,
+        visibleAccountIds: null,
+        dateRange: {
+            mode: 'custom',
+            customStart: periodStart.toISOString(),
+            customEnd: periodEnd.toISOString()
+        },
+        workspaceId: ws,
+        now: new Date().toISOString(),
+        snapshot: null
+    });
+
+    const operationsCount = Array.isArray(dbData?.operations) ? dbData.operations.length : 0;
+    const existing = await aiPacketService.getMonthlyPacket({
+        workspaceId: ws,
+        userId: userIdStr,
+        periodKey: key
+    });
+
+    if (operationsCount <= 0) {
+        if (existing?._id) {
+            await AiContextPacket.deleteOne({ _id: existing._id });
+            console.log(`[AI][context-packet] deleted empty period=${key} user=${userIdStr} ws=${ws || 'null'} reason=${reason}`);
+            return { ok: true, action: 'deleted_empty' };
+        }
+        return { ok: true, action: 'skip_empty' };
+    }
+
+    const payload = buildContextPacketPayload({
+        dbData,
+        promptText: deepPrompt,
+        templateVersion: 'deep-v1',
+        dictionaryVersion: 'dict-v1',
+        userQuestionRaw: ''
+    });
+    const existingHash = String(existing?.stats?.sourceHash || '');
+    const nextHash = String(payload?.stats?.sourceHash || '');
+    if (existingHash && nextHash && existingHash === nextHash) {
+        return { ok: true, action: 'unchanged' };
+    }
+
+    await aiPacketService.upsertMonthlyPacket({
+        workspaceId: ws,
+        userId: userIdStr,
+        periodKey: key,
+        periodStart,
+        periodEnd,
+        timezone: AI_PACKET_TIMEZONE,
+        ...payload
+    });
+
+    console.log(`[AI][context-packet] upsert period=${key} user=${userIdStr} ws=${ws || 'null'} ops=${operationsCount} reason=${reason}`);
+    return { ok: true, action: 'upserted' };
+}
+
+function triggerContextPacketRebuildByDates({
+    userId,
+    workspaceId = null,
+    dates = [],
+    reason = 'event_change'
+}) {
+    const userIdStr = String(userId || '').trim();
+    if (!userIdStr) return;
+
+    const periodKeys = _periodKeysFromDates(dates);
+    if (!periodKeys.length) return;
+
+    setImmediate(async () => {
+        for (const periodKey of periodKeys) {
+            try {
+                await rebuildContextPacketForPeriod({
+                    userId: userIdStr,
+                    workspaceId,
+                    periodKey,
+                    reason
+                });
+            } catch (err) {
+                console.error('[AI][context-packet] rebuild failed:', {
+                    periodKey,
+                    userId: userIdStr,
+                    workspaceId: workspaceId || null,
+                    reason,
+                    error: err?.message || err
+                });
+            }
+        }
+    });
+}
+
+async function prebuildAllContextPacketsOnStartup() {
+    if (!aiPacketService?.enabled) return;
+
+    console.log('[AI][context-packet] startup prebuild started');
+    const groups = await Event.aggregate([
+        { $match: { date: { $type: 'date' } } },
+        {
+            $project: {
+                userId: 1,
+                workspaceId: { $ifNull: ['$workspaceId', null] },
+                periodKey: {
+                    $dateToString: {
+                        format: '%Y-%m',
+                        date: '$date',
+                        timezone: AI_PACKET_TIMEZONE
+                    }
+                }
+            }
+        },
+        {
+            $group: {
+                _id: {
+                    userId: '$userId',
+                    workspaceId: '$workspaceId',
+                    periodKey: '$periodKey'
+                },
+                operationsCount: { $sum: 1 }
+            }
+        },
+        { $sort: { '_id.periodKey': 1 } }
+    ]);
+
+    let processed = 0;
+    for (const g of groups) {
+        const userIdRaw = g?._id?.userId;
+        const userIdStr = String(userIdRaw || '').trim();
+        const periodKey = String(g?._id?.periodKey || '').trim();
+        if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
+        if ((Number(g?.operationsCount) || 0) <= 0) continue;
+        await rebuildContextPacketForPeriod({
+            userId: userIdStr,
+            workspaceId: g?._id?.workspaceId || null,
+            periodKey,
+            reason: 'startup_prebuild'
+        });
+        processed += 1;
+    }
+
+    console.log(`[AI][context-packet] startup prebuild done: periods=${processed}`);
 }
 
 // --- ROUTES ---
@@ -2339,6 +2532,13 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
+        triggerContextPacketRebuildByDates({
+            userId,
+            workspaceId: req.user.currentWorkspaceId || null,
+            dates: [newEvent.date],
+            reason: 'event_created'
+        });
+
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', newEvent);
 
         res.status(201).json(newEvent);
@@ -2369,6 +2569,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (!existingEvent) {
             return res.status(404).json({ message: 'Event not found' });
         }
+        const previousDate = existingEvent.date;
 
         // Check ownership for manager role (req.workspaceRole set by checkWorkspacePermission middleware)
         // Admin has full access, manager only own operations
@@ -2401,6 +2602,13 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userIdQuery }, updatedData, { new: true });
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
         await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+
+        triggerContextPacketRebuildByDates({
+            userId,
+            workspaceId: req.user.currentWorkspaceId || null,
+            dates: [previousDate, updatedEvent.date],
+            reason: 'event_updated'
+        });
 
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', updatedEvent);
 
@@ -2442,12 +2650,22 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
         }
         // Proceed with regular delete
 
+        const affectedDates = [eventToDelete.date];
         await Event.deleteOne({ _id: id });
 
         // Cascade delete split children if parent
         if (eventToDelete.isSplitParent) {
+            const splitChildren = await Event.find({ parentOpId: eventToDelete._id }).select('date').lean();
+            affectedDates.push(...splitChildren.map((row) => row?.date).filter(Boolean));
             await Event.deleteMany({ parentOpId: eventToDelete._id });
         }
+
+        triggerContextPacketRebuildByDates({
+            userId,
+            workspaceId: req.user.currentWorkspaceId || null,
+            dates: affectedDates,
+            reason: 'event_deleted'
+        });
 
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', id);
 
@@ -2515,6 +2733,13 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 'fromIndividualId', 'toIndividualId'
             ]);
 
+            triggerContextPacketRebuildByDates({
+                userId,
+                workspaceId: req.user.currentWorkspaceId || null,
+                dates: [withdrawalEvent.date],
+                reason: 'transfer_created'
+            });
+
             emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', withdrawalEvent);
 
             return res.status(201).json(withdrawalEvent);
@@ -2549,6 +2774,13 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
         await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
 
+        triggerContextPacketRebuildByDates({
+            userId,
+            workspaceId: req.user.currentWorkspaceId || null,
+            dates: [transferEvent.date],
+            reason: 'transfer_created'
+        });
+
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', transferEvent);
 
         res.status(201).json(transferEvent);
@@ -2560,7 +2792,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 });
 
 app.post('/api/import/operations', isAuthenticated, async (req, res) => {
-    const { operations, selectedRows } = req.body; const userId = req.user.id;
+    const { operations, selectedRows } = req.body;
+    const userId = await getCompositeUserId(req);
     if (!Array.isArray(operations)) { return res.status(400).json({ message: 'Invalid data' }); }
     let rowsToImport = (selectedRows && Array.isArray(selectedRows)) ? operations.filter((_, index) => new Set(selectedRows).has(index)) : operations;
     const caches = { categories: {}, projects: {}, accounts: {}, companies: {}, contractors: {}, individuals: {}, prepayments: {} };
@@ -2585,6 +2818,12 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         }
         if (createdOps.length > 0) {
             const insertedDocs = await Event.insertMany(createdOps);
+            triggerContextPacketRebuildByDates({
+                userId,
+                workspaceId: req.user.currentWorkspaceId || null,
+                dates: insertedDocs.map((doc) => doc?.date).filter(Boolean),
+                reason: 'operations_imported'
+            });
             emitToWorkspace(req, req.user.currentWorkspaceId, 'operations_imported', insertedDocs.length);
             res.status(201).json(insertedDocs);
         }
@@ -2785,15 +3024,24 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
 
             let deletedOpsCount = 0;
             let opsDeleted = false;
+            const affectedDates = [];
+            const workspaceId = req.user.currentWorkspaceId || null;
+            const loadRelatedOps = async () => {
+                if (foreignKeyField === 'accountId') {
+                    return Event.find({ userId, $or: [{ accountId: id }, { fromAccountId: id }, { toAccountId: id }] });
+                }
+                if (foreignKeyField === 'companyId') {
+                    return Event.find({ userId, $or: [{ companyId: id }, { fromCompanyId: id }, { toCompanyId: id }] });
+                }
+                if (foreignKeyField === 'individualId') {
+                    return Event.find({ userId, $or: [{ individualId: id }, { counterpartyIndividualId: id }, { fromIndividualId: id }, { toIndividualId: id }] });
+                }
+                return Event.find({ userId, [foreignKeyField]: id });
+            };
 
             if (deleteOperations === 'true') {
-                let query = { userId, [foreignKeyField]: id };
-
-                let relatedOps;
-                if (foreignKeyField === 'accountId') relatedOps = await Event.find({ userId, $or: [{ accountId: id }, { fromAccountId: id }, { toAccountId: id }] });
-                else if (foreignKeyField === 'companyId') relatedOps = await Event.find({ userId, $or: [{ companyId: id }, { fromCompanyId: id }, { toCompanyId: id }] });
-                else if (foreignKeyField === 'individualId') relatedOps = await Event.find({ userId, $or: [{ individualId: id }, { counterpartyIndividualId: id }, { fromIndividualId: id }, { toIndividualId: id }] });
-                else relatedOps = await Event.find(query);
+                const relatedOps = await loadRelatedOps();
+                affectedDates.push(...relatedOps.map((op) => op?.date).filter(Boolean));
 
                 const idsToDelete = relatedOps.map(op => op._id);
                 if (idsToDelete.length > 0) {
@@ -2804,6 +3052,9 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
                 }
 
             } else {
+                const relatedOps = await loadRelatedOps();
+                affectedDates.push(...relatedOps.map((op) => op?.date).filter(Boolean));
+
                 let update = { [foreignKeyField]: null };
                 if (foreignKeyField === 'accountId') { await Event.updateMany({ userId, accountId: id }, { accountId: null }); await Event.updateMany({ userId, fromAccountId: id }, { fromAccountId: null }); await Event.updateMany({ userId, toAccountId: id }, { toAccountId: null }); }
                 else if (foreignKeyField === 'companyId') { await Event.updateMany({ userId, companyId: id }, { companyId: null }); await Event.updateMany({ userId, fromCompanyId: id }, { fromCompanyId: null }); await Event.updateMany({ userId, toCompanyId: id }, { toCompanyId: null }); }
@@ -2814,6 +3065,15 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
                     await Event.updateMany({ userId, toIndividualId: id }, { toIndividualId: null });
                 }
                 else await Event.updateMany({ userId, [foreignKeyField]: id }, update);
+            }
+
+            if (affectedDates.length > 0) {
+                triggerContextPacketRebuildByDates({
+                    userId,
+                    workspaceId,
+                    dates: affectedDates,
+                    reason: `${path}_cascade_${deleteOperations === 'true' ? 'delete_ops' : 'nullify_refs'}`
+                });
             }
 
             if (emitEventName) {
@@ -2857,8 +3117,13 @@ mongoose.connect(DB_URL, {
     serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds
     socketTimeoutMS: 45000,
 })
-    .then(() => {
+    .then(async () => {
         console.log('✅ MongoDB подключена.');
+        try {
+            await prebuildAllContextPacketsOnStartup();
+        } catch (err) {
+            console.error('[AI][context-packet] startup prebuild failed:', err?.message || err);
+        }
         server.listen(PORT, () => {
             console.log(`✅ Сервер запущен на порту ${PORT}`);
         });

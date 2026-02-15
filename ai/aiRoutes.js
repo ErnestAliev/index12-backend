@@ -8,7 +8,7 @@
 
 const express = require('express');
 const deepPrompt = require('./prompts/deepPrompt');
-const { buildContextPacketPayload, derivePeriodKey } = require('./contextPacketBuilder');
+const { derivePeriodKey } = require('./contextPacketBuilder');
 const fs = require('fs');
 const path = require('path');
 const { buildOnboardingMessage } = require('./prompts/onboardingPrompt');
@@ -2090,24 +2090,27 @@ module.exports = function createAiRouter(deps) {
       const requestVisibleAccountIds = Array.isArray(req?.body?.visibleAccountIds)
         ? req.body.visibleAccountIds
         : null;
-      const dbData = await dataProvider.buildDataPacket(userIdsList, {
-        includeHidden: requestIncludeHidden,
-        visibleAccountIds: requestVisibleAccountIds,
-        dateRange: req?.body?.periodFilter || null,
-        workspaceId,
-        now: req?.body?.asOf || null,
-        snapshot: req?.body?.snapshot || null, // 🔥 HYBRID: accounts/companies from snapshot, operations from MongoDB
-      });
+      let dbData = null;
+      if (!isDeep) {
+        dbData = await dataProvider.buildDataPacket(userIdsList, {
+          includeHidden: requestIncludeHidden,
+          visibleAccountIds: requestVisibleAccountIds,
+          dateRange: req?.body?.periodFilter || null,
+          workspaceId,
+          now: req?.body?.asOf || null,
+          snapshot: req?.body?.snapshot || null, // 🔥 HYBRID: accounts/companies from snapshot, operations from MongoDB
+        });
 
-      if (timeline) {
-        const periodFilterForTimeline = req?.body?.periodFilter || {};
-        const nowRefTimeline = _safeDate(req?.body?.asOf) || new Date();
-        const startTimeline = _safeDate(periodFilterForTimeline?.customStart) || _monthStartUtc(nowRefTimeline);
-        const endTimeline = _safeDate(periodFilterForTimeline?.customEnd) || _monthEndUtc(nowRefTimeline);
-        const safeTimeline = _sanitizeTimelinePayload(timeline, { periodStart: startTimeline, periodEnd: endTimeline });
-        if (safeTimeline) {
-          dbData.meta = dbData.meta || {};
-          dbData.meta.timeline = safeTimeline;
+        if (timeline) {
+          const periodFilterForTimeline = req?.body?.periodFilter || {};
+          const nowRefTimeline = _safeDate(req?.body?.asOf) || new Date();
+          const startTimeline = _safeDate(periodFilterForTimeline?.customStart) || _monthStartUtc(nowRefTimeline);
+          const endTimeline = _safeDate(periodFilterForTimeline?.customEnd) || _monthEndUtc(nowRefTimeline);
+          const safeTimeline = _sanitizeTimelinePayload(timeline, { periodStart: startTimeline, periodEnd: endTimeline });
+          if (safeTimeline) {
+            dbData.meta = dbData.meta || {};
+            dbData.meta.timeline = safeTimeline;
+          }
         }
       }
 
@@ -2168,6 +2171,41 @@ module.exports = function createAiRouter(deps) {
       // =========================
       const memoryUserId = userId;
       const memoryWorkspaceId = workspaceId || null;
+      const nowRef = _safeDate(req?.body?.asOf) || new Date();
+      const periodFilter = req?.body?.periodFilter || {};
+      const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
+      const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
+      const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
+      const packetUserId = String(effectiveUserId || userIdStr);
+
+      let packet = null;
+      let packetSource = 'stored';
+      if (contextPacketsEnabled && periodKey) {
+        packet = await contextPacketService.getMonthlyPacket({
+          workspaceId,
+          userId: packetUserId,
+          periodKey
+        });
+      }
+
+      if (!packet) {
+        const dateStart = _fmtDateKZ(periodStart);
+        const dateEnd = _fmtDateKZ(periodEnd);
+        const noPacketText = `За период ${dateStart} - ${dateEnd} нет подготовленного пакета данных. Добавьте/обновите операции или дождитесь пересборки.`;
+        if (shouldDebugLog) {
+          console.log('[AI_DEEP_BRANCH]', JSON.stringify({
+            branch: 'no_packet',
+            periodKey: periodKey || null,
+            packetUserId
+          }));
+        }
+        _pushHistory(userIdStr, workspaceId, 'user', q);
+        _pushHistory(userIdStr, workspaceId, 'assistant', noPacketText);
+        return res.json({ text: noPacketText });
+      }
+
+      const packetProjects = Array.isArray(packet?.normalized?.projects) ? packet.normalized.projects : [];
+      const packetCategories = Array.isArray(packet?.normalized?.categories) ? packet.normalized.categories : [];
 
       // Lightweight style adaptation by user signals
       const profileUpdates = {};
@@ -2189,7 +2227,7 @@ module.exports = function createAiRouter(deps) {
 
       const projectHint = _pickProjectFromQuery({
         query: qResolved,
-        projects: dbData?.catalogs?.projects || []
+        projects: packetProjects
       });
 
       const teachMatch = q.match(/^(.{1,30})\s*[-—=:]\s*(.+)$/i);
@@ -2227,8 +2265,8 @@ module.exports = function createAiRouter(deps) {
 
       const unknownTerms = glossaryService.findUnknownTerms(
         glossaryEntries,
-        dbData?.catalogs?.categories || [],
-        dbData?.catalogs?.projects || []
+        packetCategories,
+        packetProjects
       );
       if (!isDeep && !profile?.onboardingComplete && unknownTerms.length > 0) {
         const onboardingText = buildOnboardingMessage({
@@ -2252,8 +2290,8 @@ module.exports = function createAiRouter(deps) {
       const unknownAbbreviation = _extractUnknownAbbreviationFromQuery({
         query: qResolved,
         glossaryEntries,
-        categories: dbData?.catalogs?.categories || [],
-        projects: dbData?.catalogs?.projects || [],
+        categories: packetCategories,
+        projects: packetProjects,
         isWellKnownTerm: glossaryService.isWellKnownTerm
       });
       const termToClarify = unknownMention?.name || unknownAbbreviation;
@@ -2277,89 +2315,10 @@ module.exports = function createAiRouter(deps) {
       const glossaryContext = glossaryService.buildGlossaryContext(glossaryEntries);
       const profileContext = profileService.buildProfileContext(profile);
 
-      // Context packet upsert (monthly, for DEEP mode)
-      if (contextPacketsEnabled) {
-        try {
-          const nowRefPkt = _safeDate(req?.body?.asOf) || new Date();
-          const periodFilterPkt = req?.body?.periodFilter || {};
-          const pStartPkt = _safeDate(periodFilterPkt?.customStart) || _monthStartUtc(nowRefPkt);
-          const pEndPkt = _safeDate(periodFilterPkt?.customEnd) || _monthEndUtc(nowRefPkt);
-          const wsPkt = req.user?.currentWorkspaceId || null;
-          const pKeyPkt = derivePeriodKey(pStartPkt, 'Asia/Almaty');
-          const pUserPkt = String(effectiveUserId || userIdStr);
-          const packetPayload = buildContextPacketPayload({
-            dbData,
-            promptText: deepPrompt,
-            templateVersion: 'deep-v1',
-            dictionaryVersion: 'dict-v1',
-            userQuestionRaw: qRaw
-          });
-
-          let shouldUpsertPacket = true;
-          if (pKeyPkt) {
-            const existingPacket = await contextPacketService.getMonthlyPacket({
-              workspaceId: wsPkt,
-              userId: pUserPkt,
-              periodKey: pKeyPkt
-            });
-            const existingHash = String(existingPacket?.stats?.sourceHash || '');
-            const nextHash = String(packetPayload?.stats?.sourceHash || '');
-            if (existingHash && nextHash && existingHash === nextHash) {
-              shouldUpsertPacket = false;
-            }
-          }
-
-          if (shouldUpsertPacket) {
-            await contextPacketService.upsertMonthlyPacket({
-              workspaceId: wsPkt,
-              userId: pUserPkt,
-              periodKey: pKeyPkt,
-              periodStart: pStartPkt,
-              periodEnd: pEndPkt,
-              timezone: 'Asia/Almaty',
-              ...packetPayload
-            });
-          }
-        } catch (packetErr) {
-          console.error('[AI][context-packet] upsert failed:', packetErr?.message || packetErr);
-        }
-      }
-
       // 🔥 FIX: Use actual chat history instead of empty array
       const deepHistory = _getHistoryMessages(userIdStr, workspaceId).slice(-6);
       const modelDeep = process.env.OPENAI_MODEL_DEEP || 'gpt-4o';
 
-      const nowRef = _safeDate(req?.body?.asOf) || new Date();
-      const periodFilter = req?.body?.periodFilter || {};
-      const periodStart = _safeDate(periodFilter?.customStart) || _monthStartUtc(nowRef);
-      const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
-      const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
-      const packetUserId = String(effectiveUserId || userIdStr);
-
-      let packet = null;
-      if (contextPacketsEnabled && periodKey) {
-        packet = await contextPacketService.getMonthlyPacket({
-          workspaceId,
-          userId: packetUserId,
-          periodKey
-        });
-      }
-
-      if (!packet) {
-        packet = {
-          periodKey: periodKey || null,
-          periodStart,
-          periodEnd,
-          timezone: 'Asia/Almaty',
-          ...buildContextPacketPayload({
-            dbData,
-            promptText: deepPrompt,
-            templateVersion: 'deep-v1',
-            dictionaryVersion: 'dict-v1',
-            userQuestionRaw: qRaw
-          })
-        };
-      }
       packet.derived = (packet.derived && typeof packet.derived === 'object') ? packet.derived : {};
       packet.derived.meta = (packet.derived.meta && typeof packet.derived.meta === 'object') ? packet.derived.meta : {};
       packet.derived.meta.userQuestionRaw = qRaw;
@@ -2368,6 +2327,7 @@ module.exports = function createAiRouter(deps) {
         const analysisEnvelope = {
           mode: 'deep',
           model: modelDeep,
+          packetSource,
           question: qResolved,
           period: {
             key: periodKey || null,
