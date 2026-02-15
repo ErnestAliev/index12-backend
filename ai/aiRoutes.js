@@ -242,6 +242,27 @@ module.exports = function createAiRouter(deps) {
     return true;
   };
 
+  const _expandUserIdCandidates = (primaryUserId, fallbackUserId = null) => {
+    const out = [];
+    const push = (v) => {
+      const s = String(v || '').trim();
+      if (!s) return;
+      if (!out.includes(s)) out.push(s);
+    };
+
+    push(primaryUserId);
+    push(fallbackUserId);
+
+    const src = String(primaryUserId || '').trim();
+    const marker = '_ws_';
+    const idx = src.indexOf(marker);
+    if (idx > 0) {
+      push(src.slice(0, idx));
+    }
+
+    return out;
+  };
+
   const _extractOpenAiText = (parsed) => {
     const choice = parsed?.choices?.[0] || {};
     const msg = choice?.message || {};
@@ -2439,15 +2460,28 @@ module.exports = function createAiRouter(deps) {
       const periodEnd = _safeDate(periodFilter?.customEnd) || _monthEndUtc(nowRef);
       const periodKey = derivePeriodKey(periodStart, 'Asia/Almaty');
       const packetUserId = String(effectiveUserId || userIdStr);
+      const packetUserCandidates = _expandUserIdCandidates(packetUserId, userIdStr);
+      const packetWorkspaceCandidates = workspaceId ? [workspaceId, null] : [null];
 
       let packet = null;
       let packetSource = 'stored';
       if (contextPacketsEnabled && periodKey) {
-        packet = await contextPacketService.getMonthlyPacket({
-          workspaceId,
-          userId: packetUserId,
-          periodKey
-        });
+        for (const uidCandidate of packetUserCandidates) {
+          if (packet) break;
+          for (const wsCandidate of packetWorkspaceCandidates) {
+            packet = await contextPacketService.getMonthlyPacket({
+              workspaceId: wsCandidate,
+              userId: uidCandidate,
+              periodKey
+            });
+            if (packet) {
+              packetSource = (uidCandidate === packetUserId && wsCandidate === workspaceId)
+                ? 'stored'
+                : 'stored_fallback';
+              break;
+            }
+          }
+        }
       }
 
       if (!packet) {
@@ -2458,7 +2492,9 @@ module.exports = function createAiRouter(deps) {
           console.log('[AI_DEEP_BRANCH]', JSON.stringify({
             branch: 'no_packet',
             periodKey: periodKey || null,
-            packetUserId
+            packetUserId,
+            packetUserCandidates,
+            packetWorkspaceCandidates: packetWorkspaceCandidates.map((x) => x ? String(x) : null)
           }));
         }
         _pushHistory(userIdStr, workspaceId, 'user', q);
