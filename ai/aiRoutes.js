@@ -175,6 +175,7 @@ module.exports = function createAiRouter(deps) {
       'Если данных недостаточно — прямо укажи, чего не хватает.',
       'Формат денег: 8 490 000 ₸ (пробелы между тысячами, знак ₸ в конце числа).',
       'Не используй формат 8,490,000 и не используй KZT.',
+      'Пиши в обычном тексте, без markdown-разметки: не используй *, **, #, ```.',
       'Ответ делай понятным и коротким, с ключевыми цифрами по запросу пользователя.'
     ].join(' ');
 
@@ -243,6 +244,14 @@ module.exports = function createAiRouter(deps) {
     const _normalizeMoneyText = (raw) => {
       let out = String(raw || '');
       if (!out) return out;
+
+      // Strip common markdown artifacts
+      out = out.replace(/```[\s\S]*?```/g, (m) => m.replace(/```/g, ''));
+      out = out.replace(/^\s*#{1,6}\s*/gm, '');
+      out = out.replace(/\*\*(.*?)\*\*/g, '$1');
+      out = out.replace(/\*(.*?)\*/g, '$1');
+      out = out.replace(/`([^`]+)`/g, '$1');
+      out = out.replace(/^\s*\*\s+/gm, '- ');
 
       // 8,490,000 -> 8 490 000
       out = out.replace(/\b\d{1,3}(?:,\d{3})+\b/g, (m) => m.replace(/,/g, ' '));
