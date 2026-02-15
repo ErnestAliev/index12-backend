@@ -2385,7 +2385,7 @@ module.exports = function createAiRouter(deps) {
         }));
       }
 
-      const groundedMessages = [
+      const freeformMessages = [
         { role: 'system', content: deepPrompt },
         profileContext
           ? {
@@ -2402,27 +2402,10 @@ module.exports = function createAiRouter(deps) {
         {
           role: 'system',
           content: [
-            'Отвечай строго по context_packet_json.',
-            'Верни ТОЛЬКО JSON-объект без markdown и без пояснений.',
-            'Схема JSON:',
-            '{',
-            '  "date": "краткий период или ключевая дата",',
-            '  "fact": "кратко: факт по данным",',
-            '  "plan": "кратко: план/прогноз по данным",',
-            '  "total": "кратко: итог + риск (если есть)",',
-            '  "question": "один короткий follow-up вопрос",',
-            '  "facts_used": [',
-            '    { "path": "path.to.field", "value": <ожидаемое значение из context_packet_json> }',
-            '  ]',
-            '}',
-            'Требования:',
-            '- Каждый блок (date/fact/plan/total/question) — 1 короткая строка.',
-            '- Используй минимум 2 факта в facts_used.',
-            '- path должен указывать на реальные поля context_packet_json.',
-            '- value должен совпадать с данными по path.',
-            '- Используй только подтверждаемые факты из facts_used.',
-            '- Все суммы в формате "3 272 059 ₸" (пробелы между тысячами, без запятых).',
-            '- Формат для пользователя всегда 5 строк: Дата/Факт/План/Итого/Вопрос.'
+            'Отвечай свободно, без обязательного JSON-формата.',
+            'Используй context_packet_json как основной источник данных.',
+            'Если данных недостаточно — прямо скажи об этом.',
+            'Дай нормальный человекочитаемый ответ по вопросу пользователя.'
           ].join('\n')
         },
         { role: 'system', content: `context_packet_json:\n${JSON.stringify(packet)}` },
@@ -2430,120 +2413,21 @@ module.exports = function createAiRouter(deps) {
         { role: 'user', content: qResolved }
       ].filter(Boolean);
 
-      const groundedResponseFormat = {
-        type: 'json_schema',
-        json_schema: {
-          name: 'deep_grounded_answer',
-          strict: true,
-          schema: {
-            type: 'object',
-              additionalProperties: false,
-              properties: {
-                date: { type: 'string' },
-                fact: { type: 'string' },
-                plan: { type: 'string' },
-                total: { type: 'string' },
-                question: { type: 'string' },
-                facts_used: {
-                  type: 'array',
-                  minItems: 2,
-                  maxItems: 30,
-                  items: {
-                  type: 'object',
-                  additionalProperties: false,
-                  properties: {
-                    path: { type: 'string' },
-                    value: {
-                      oneOf: [
-                        { type: 'string' },
-                        { type: 'number' },
-                        { type: 'boolean' },
-                        { type: 'null' }
-                      ]
-                    }
-                  },
-                  required: ['path', 'value']
-                }
-              }
-            },
-            required: ['date', 'fact', 'plan', 'total', 'question', 'facts_used']
-          }
-        }
-      };
-
-      let rawAnswer = await _openAiChat(groundedMessages, {
+      let answer = await _openAiChat(freeformMessages, {
         modelOverride: modelDeep,
-        maxTokens: 1600,
-        timeout: 120000,
-        responseFormat: groundedResponseFormat
+        maxTokens: 2200,
+        timeout: 120000
       });
-      let groundedValidation = null;
-      let structuredAnswer = null;
-
-      if (!_isNoAiAnswerText(rawAnswer)) {
-        const groundedPayload = _extractFirstJsonObject(rawAnswer);
-        if (groundedPayload && typeof groundedPayload === 'object') {
-          groundedValidation = _validateGroundedPayload({ packet, payload: groundedPayload });
-          if (groundedValidation?.ok) {
-            structuredAnswer = _applyAutoRiskToStructured({
-              packet,
-              structured: groundedValidation.structured
-            });
-          }
-        }
+      if (_isNoAiAnswerText(answer)) {
+        answer = 'Нет ответа от AI.';
       }
 
       if (shouldDebugLog) {
-        console.log('[AI_DEEP_GROUNDED]', JSON.stringify({
-          ok: !!groundedValidation?.ok,
-          reason: groundedValidation?.ok ? null : (groundedValidation?.reason || 'parse_or_schema_failed'),
-          factsVerified: groundedValidation?.ok ? groundedValidation.validatedFacts.length : 0
-        }));
-      }
-
-      if (!groundedValidation?.ok && !_isNoAiAnswerText(rawAnswer)) {
-        const fallbackModel = process.env.OPENAI_MODEL || 'gpt-4o';
-        rawAnswer = await _openAiChat(groundedMessages, {
-          modelOverride: fallbackModel,
-          maxTokens: 1600,
-          timeout: 120000,
-          responseFormat: groundedResponseFormat
-        });
-        const groundedPayloadRetry = _extractFirstJsonObject(rawAnswer);
-        if (groundedPayloadRetry && typeof groundedPayloadRetry === 'object') {
-          const groundedValidationRetry = _validateGroundedPayload({ packet, payload: groundedPayloadRetry });
-          if (groundedValidationRetry?.ok) {
-            groundedValidation = groundedValidationRetry;
-            structuredAnswer = _applyAutoRiskToStructured({
-              packet,
-              structured: groundedValidationRetry.structured
-            });
-          }
-        }
-      }
-
-      if (_isNoAiAnswerText(rawAnswer) || !groundedValidation?.ok || !structuredAnswer) {
         console.log('[AI_DEEP_BRANCH]', JSON.stringify({
-          branch: 'fallback',
-          reason: _isNoAiAnswerText(rawAnswer) ? 'no_ai_answer' : (!groundedValidation?.ok ? 'grounding_failed' : 'no_structured')
+          branch: 'freeform',
+          noAnswer: _isNoAiAnswerText(answer)
         }));
-        const dateStartFail = _fmtDateKZ(packet?.periodStart || packet?.derived?.meta?.periodStart || '');
-        const dateEndFail = _fmtDateKZ(packet?.periodEnd || packet?.derived?.meta?.periodEnd || '');
-        const dateTextFail = (dateStartFail && dateEndFail && dateStartFail !== 'Invalid Date' && dateEndFail !== 'Invalid Date')
-          ? `${dateStartFail} - ${dateEndFail}`
-          : (dateStartFail || dateEndFail || 'Период не задан');
-        structuredAnswer = {
-          date: dateTextFail,
-          fact: 'не удалось собрать подтвержденный ответ из context packet',
-          plan: 'цифры не показаны, чтобы не дать неверный итог',
-          total: 'ответ не сформирован',
-          question: 'Повторить запрос точнее по периоду или категории?'
-        };
-      } else {
-        console.log('[AI_DEEP_BRANCH]', JSON.stringify({ branch: 'grounded' }));
       }
-      _rememberOpsDrilldownPending({ session: currentSession, structured: structuredAnswer });
-      const answer = _formatDeepStructuredText(structuredAnswer);
 
       await profileService.recordInteraction(memoryUserId, { workspaceId: memoryWorkspaceId });
       _pushHistory(userIdStr, workspaceId, 'user', q);
