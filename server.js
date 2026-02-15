@@ -875,10 +875,86 @@ function triggerContextPacketRebuildByDates({
     });
 }
 
+async function normalizeAiContextPacketsCollection() {
+    if (!aiPacketService?.enabled) return { deduped: 0, removedNullShadowed: 0, totalRemoved: 0 };
+
+    const docs = await AiContextPacket.find({})
+        .select({ _id: 1, userId: 1, workspaceId: 1, periodKey: 1, updatedAt: 1, createdAt: 1 })
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .lean();
+
+    const keepByStrictKey = new Map();
+    const duplicateIds = [];
+
+    for (const doc of docs) {
+        const userIdStr = String(doc?.userId || '').trim();
+        const periodKey = String(doc?.periodKey || '').trim();
+        if (!userIdStr || !_isValidPeriodKey(periodKey)) {
+            duplicateIds.push(doc?._id);
+            continue;
+        }
+        const wsKey = doc?.workspaceId ? String(doc.workspaceId) : 'null';
+        const strictKey = `${userIdStr}|${wsKey}|${periodKey}`;
+        if (keepByStrictKey.has(strictKey)) {
+            duplicateIds.push(doc._id);
+            continue;
+        }
+        keepByStrictKey.set(strictKey, doc);
+    }
+
+    const keepDocs = Array.from(keepByStrictKey.values());
+    const hasConcreteWorkspaceByUserPeriod = new Set();
+    for (const doc of keepDocs) {
+        const userIdStr = String(doc?.userId || '').trim();
+        const periodKey = String(doc?.periodKey || '').trim();
+        if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
+        if (doc?.workspaceId) {
+            hasConcreteWorkspaceByUserPeriod.add(`${userIdStr}|${periodKey}`);
+        }
+    }
+
+    const shadowedNullIds = [];
+    for (const doc of keepDocs) {
+        const userIdStr = String(doc?.userId || '').trim();
+        const periodKey = String(doc?.periodKey || '').trim();
+        if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
+        if (!doc?.workspaceId && hasConcreteWorkspaceByUserPeriod.has(`${userIdStr}|${periodKey}`)) {
+            shadowedNullIds.push(doc._id);
+        }
+    }
+
+    const allRemoveIds = Array.from(new Set([
+        ...duplicateIds.map((id) => String(id)),
+        ...shadowedNullIds.map((id) => String(id))
+    ])).map((id) => new mongoose.Types.ObjectId(id));
+
+    if (allRemoveIds.length > 0) {
+        await AiContextPacket.deleteMany({ _id: { $in: allRemoveIds } });
+    }
+
+    try {
+        await AiContextPacket.collection.createIndex(
+            { workspaceId: 1, userId: 1, periodKey: 1 },
+            { unique: true, name: 'workspaceId_1_userId_1_periodKey_1' }
+        );
+    } catch (err) {
+        console.error('[AI][context-packet] ensure unique index failed:', err?.message || err);
+    }
+
+    return {
+        deduped: duplicateIds.length,
+        removedNullShadowed: shadowedNullIds.length,
+        totalRemoved: allRemoveIds.length
+    };
+}
+
 async function prebuildAllContextPacketsOnStartup() {
     if (!aiPacketService?.enabled) return;
 
     console.log('[AI][context-packet] startup prebuild started');
+    const cleanup = await normalizeAiContextPacketsCollection();
+    console.log(`[AI][context-packet] cleanup done: deduped=${cleanup.deduped}, removedNullShadowed=${cleanup.removedNullShadowed}, totalRemoved=${cleanup.totalRemoved}`);
+
     const groups = await Event.aggregate([
         { $match: { date: { $type: 'date' } } },
         {
@@ -907,17 +983,60 @@ async function prebuildAllContextPacketsOnStartup() {
         { $sort: { '_id.periodKey': 1 } }
     ]);
 
-    let processed = 0;
+    const groupedByCanonicalKey = new Map();
     for (const g of groups) {
         const userIdRaw = g?._id?.userId;
         const userIdStr = String(userIdRaw || '').trim();
         const periodKey = String(g?._id?.periodKey || '').trim();
         if (!userIdStr || !_isValidPeriodKey(periodKey)) continue;
-        if ((Number(g?.operationsCount) || 0) <= 0) continue;
+        const wsRaw = g?._id?.workspaceId || null;
+        const wsCanonical = wsRaw ? String(wsRaw).trim() : null;
+        const wsKey = wsCanonical || 'null';
+        const key = `${userIdStr}|${wsKey}|${periodKey}`;
+
+        const prev = groupedByCanonicalKey.get(key);
+        if (!prev) {
+            groupedByCanonicalKey.set(key, {
+                userId: userIdStr,
+                workspaceId: wsCanonical,
+                periodKey,
+                operationsCount: Number(g?.operationsCount) || 0
+            });
+        } else {
+            prev.operationsCount += Number(g?.operationsCount) || 0;
+        }
+    }
+
+    const grouped = Array.from(groupedByCanonicalKey.values());
+    const hasConcreteWorkspaceByUserPeriod = new Set();
+    for (const row of grouped) {
+        if (row.workspaceId) {
+            hasConcreteWorkspaceByUserPeriod.add(`${row.userId}|${row.periodKey}`);
+        }
+    }
+
+    const prebuildRows = grouped
+        .filter((row) => {
+            if ((Number(row.operationsCount) || 0) <= 0) return false;
+            if (!row.workspaceId && hasConcreteWorkspaceByUserPeriod.has(`${row.userId}|${row.periodKey}`)) {
+                return false;
+            }
+            return true;
+        })
+        .sort((a, b) => {
+            if (a.periodKey < b.periodKey) return -1;
+            if (a.periodKey > b.periodKey) return 1;
+            if (String(a.userId) < String(b.userId)) return -1;
+            if (String(a.userId) > String(b.userId)) return 1;
+            return String(a.workspaceId || '').localeCompare(String(b.workspaceId || ''));
+        });
+
+    let processed = 0;
+    for (const row of prebuildRows) {
         await rebuildContextPacketForPeriod({
-            userId: userIdStr,
-            workspaceId: g?._id?.workspaceId || null,
-            periodKey,
+            userId: row.userId,
+            workspaceId: row.workspaceId || null,
+            periodKey: row.periodKey,
             reason: 'startup_prebuild'
         });
         processed += 1;
