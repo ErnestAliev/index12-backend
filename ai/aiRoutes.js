@@ -802,11 +802,14 @@ module.exports = function createAiRouter(deps) {
               return sum; // Transfers don't affect total balance
             }, 0);
 
-          // Compute future balance projection for forecasts
-          const futureBalance = financialCalculator.computeFutureBalance({
+          // Compute future balance projection ONLY if user asks for forecast
+          const qLower = q.toLowerCase();
+          const wantsForecast = /\b(прогноз|будет|планир|forecast|plan|на конец)\b/i.test(qLower);
+
+          const futureBalance = wantsForecast ? financialCalculator.computeFutureBalance({
             metrics: computed.metrics,
             currentBalance
-          });
+          }) : null;
 
           // 🟢 NEW: Split balance by open vs hidden accounts
           const openBalance = req.body?.accounts
@@ -841,7 +844,7 @@ module.exports = function createAiRouter(deps) {
             metrics: computed.metrics,
             period: computed.period,
             formatCurrency: _formatTenge,
-            futureBalance,  // 🟢 NEW: Pass future balance projection
+            futureBalance: wantsForecast ? futureBalance : null,  // 🟢 Only pass if user asks for forecast
             openBalance,  // 🟢 NEW: Balance on open accounts
             hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
             hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
