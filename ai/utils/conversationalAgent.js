@@ -17,6 +17,7 @@ async function generateConversationalResponse({
     history = [],
     metrics,
     period,
+    currentDate = null,
     formatCurrency,
     futureBalance = null,
     openBalance = null,
