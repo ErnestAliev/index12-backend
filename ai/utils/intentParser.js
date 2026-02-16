@@ -21,23 +21,23 @@ async function parseIntent({ question, availableContext = {} }) {
     }
 
     const systemPrompt = [
-        'You are an intent parser for a financial system.',
-        'Your job is to extract structured information from user questions.',
-        'Return ONLY valid JSON, no other text.',
-        'Always respond in Russian for description field.',
-        'Extract:',
-        '- isFinancial: true if user asks about money/finances, false if greeting/casual talk',
+        'Ты парсер намерений для финансовой системы.',
+        'Твоя задача - извлечь структурированную информацию из вопроса пользователя.',
+        'Возвращай ТОЛЬКО валидный JSON, никакого другого текста.',
+        'Поле description всегда на русском языке.',
+        'Извлекаемые поля:',
+        '- isFinancial: true если пользователь спрашивает про деньги/финансы, false если приветствие/общение',
         '- metric: "income" | "expense" | "net" | "transfer" | "overview"',
         '- scope: "all" | "category" | "project" | "account"',
         '- status: "fact" | "plan" | "both"',
         '- groupBy: null | "category" | "project"',
         '- filters: { categories: [], projects: [] }',
-        '- description: brief description of what user wants in Russian',
-        'Examples of NON-financial (isFinancial=false):',
+        '- description: краткое описание запроса пользователя на русском',
+        'Примеры НЕфинансовых запросов (isFinancial=false):',
         '- "привет", "как дела?", "спасибо", "добрый день"',
-        'Examples of financial (isFinancial=true):',
+        'Примеры финансовых запросов (isFinancial=true):',
         '- "сколько заработали?", "расходы по проектам", "прибыль за месяц"',
-        'If uncertain, use safe defaults:',
+        'Если не уверен, используй безопасные значения по умолчанию:',
         '- isFinancial: true',
         '- metric: "overview"',
         '- scope: "all"',
@@ -49,12 +49,12 @@ async function parseIntent({ question, availableContext = {} }) {
     const availableProjects = Object.keys(availableContext.byProject || {});
 
     const userContent = [
-        `Question: ${question}`,
+        `Вопрос: ${question}`,
         '',
-        `Available categories: ${JSON.stringify(availableCategories)}`,
-        `Available projects: ${JSON.stringify(availableProjects)}`,
+        `Доступные категории: ${JSON.stringify(availableCategories)}`,
+        `Доступные проекты: ${JSON.stringify(availableProjects)}`,
         '',
-        'Parse this into JSON format with fields: metric, scope, status, groupBy, filters, description'
+        'Преобразуй это в JSON формат с полями: isFinancial, metric, scope, status, groupBy, filters, description'
     ].join('\n');
 
     let upstream;
@@ -299,24 +299,39 @@ async function generateConversationalResponse({ question, metrics, period, forma
     const topProjects = Object.values(metrics.byProject)
         .filter(proj => proj.total.net !== 0)
         .sort((a, b) => Math.abs(b.total.net) - Math.abs(a.total.net))
-        .slice(0, 2);
 
-    if (topProjects.length > 0) {
-        insights.push(`Активные проекты: ${topProjects.map(p => p.name).join(', ')}`);
-    }
+    // Detect user's tone (ты vs вы)
+    const userTone = /\b(ты|твой|твои|тебя|тебе)\b/i.test(question) ? 'ты' :
+        /\b(вы|ваш|ваши|вас|вам)\b/i.test(question) ? 'вы' : 'ты';
 
     const systemPrompt = [
-        'Ты дружелюбный AI-ассистент финансовой системы INDEX12.',
-        'Пользователь написал приветствие или общий вопрос.',
-        'Твоя задача: ответить приветливо И упомянуть 1-2 интересных события из финансовых данных.',
-        'НЕ пиши полный отчёт - только короткую дружескую реплику с упоминанием важного события.',
-        'Примеры хороших ответов:',
-        '- "Привет! Вижу у вас сегодня запланированы расходы на 2 000 000 ₸ по проекту Аренда."',
-        '- "Добрый день! Чистая прибыль за период составила 500 000 ₸, отличный результат!"',
-        '- "Привет! Основные расходы идут на категорию Зарплаты и Аренда."',
-        'Формат денег: 8 490 000 ₸ (пробелы между тысячами, знак ₸ в конце).',
-        'Пиши в обычном тексте, без markdown.',
-        'Будь кратким - 1-2 предложения максимум.'
+        'Ты AI-ассистент INDEX12 в стиле Ильи Балахнина - эксперт по финансам и маркетингу.',
+        `Общайся на "${userTone}" (подстраивайся под стиль пользователя).`,
+        'Пользователь поздоровался или задал общий вопрос.',
+        '',
+        'Стиль Ильи Балахнина:',
+        '1. Экспертный тон - уверенный, но не высокомерный',
+        '2. Фокус на цифрах и данных - всегда конкретика',
+        '3. Прямая честная коммуникация - без воды и манипуляций',
+        '4. Практичность - про то, что делать дальше',
+        '5. Вовлечение через вопросы и примеры',
+        '6. Чистый русский язык - без сленга и жаргона',
+        '',
+        'Твоя задача:',
+        '- Поздоровайся коротко',
+        '- Выдели 1-2 ключевых показателя из данных',
+        '- Дай практический комментарий или рекомендацию',
+        '',
+        'Примеры правильных ответов:',
+        '- "Привет! Смотри, доход за период - 20 млн тенге. Обрати внимание: запланировано 4 млн расходов, учти это в планировании."',
+        '- "Здравствуй! Чистая прибыль 16 млн - хороший результат. Основная статья расходов - зарплаты и аренда, держи фокус на этих направлениях."',
+        '- "Привет! Вижу активную динамику: доходы 20 млн при расходах 4 млн. Рентабельность высокая, продолжай в том же духе."',
+        '',
+        'Формат:',
+        '- Цифры сокращай для читаемости (20 млн вместо 20 000 000)',
+        '- Без эмодзи и восклицательных знаков через слово',
+        '- Максимум 2-3 предложения',
+        '- Фокус на практической ценности информации'
     ].join(' ');
 
     const userContent = [
