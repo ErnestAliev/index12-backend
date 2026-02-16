@@ -123,7 +123,7 @@ const _composeForecastResponse = (rawText, forecastData) => {
         'Прогноз:',
         `- Планируемый расход: ${_formatMoneyNumber(remainingPlan.expense || 0)} ₸`,
         `- Ожидаемый доход: ${_formatMoneyNumber(remainingPlan.income || 0)} ₸${incomeTail}`,
-        `- Ожидаемая операционная прибыль: ${_formatMoneyNumber(projected.operatingProfit || 0)} ₸`,
+        `- Ожидаемая операционная прибыль: ${_formatMoneyNumber(remainingPlan.operatingProfit || 0)} ₸`,
         '',
         'Находки:'
     ];

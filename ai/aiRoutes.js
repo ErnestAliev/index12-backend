@@ -309,6 +309,16 @@ module.exports = function createAiRouter(deps) {
     return null;
   };
 
+  const _extractId = (value) => {
+    if (!value) return '';
+    if (typeof value === 'object') {
+      if (value._id) return String(value._id);
+      if (value.id) return String(value.id);
+      return '';
+    }
+    return String(value);
+  };
+
   const _computeForecastData = ({ rows, asOf, accounts }) => {
     const nowRef = (() => {
       if (asOf) {
@@ -382,12 +392,26 @@ module.exports = function createAiRouter(deps) {
       if (!accountList.length) return;
 
       if (kind === 'transfer') {
+        const fromIdDirect = _extractId(row?.fromAccountId);
+        const toIdDirect = _extractId(row?.toAccountId);
+        if (fromIdDirect) addDelta(fromIdDirect, -amountAbs);
+        if (toIdDirect) addDelta(toIdDirect, amountAbs);
+
+        if (fromIdDirect || toIdDirect) return;
+
         const transferParts = _splitTransferAccountLabel(row?.account);
         if (!transferParts) return;
         const fromAcc = _resolveAccountByLabel(transferParts.from, accountList, accountByName);
         const toAcc = _resolveAccountByLabel(transferParts.to, accountList, accountByName);
         if (fromAcc?._id) addDelta(fromAcc._id, -amountAbs);
         if (toAcc?._id) addDelta(toAcc._id, amountAbs);
+        return;
+      }
+
+      const accountIdDirect = _extractId(row?.accountId);
+      if (accountIdDirect) {
+        if (kind === 'income') addDelta(accountIdDirect, amountAbs);
+        if (kind === 'expense') addDelta(accountIdDirect, -amountAbs);
         return;
       }
 
