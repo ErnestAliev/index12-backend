@@ -92,14 +92,12 @@ async function generateConversationalResponse({
         '- Задавай уточняющие вопросы для лучшего понимания',
         '- Проводи расчёты на основе данных когда пользователь подтверждает гипотезу',
         '',
-        'Примеры диалога:',
-        'User: а что там с Эрнестом?',
-        'Assistant: Смотри, Эрнест видимо работает на тебя и судя по всему ты ему платишь 5% потому что в названии категории так записано. Давай проверим или уточни от какой суммы считаем 5%?',
+        'Примеры общей логики рассуждений:',
+        'User: что с категорией X?',
+        'Assistant: Смотри, судя по названию категории видимо это Y. В данных вижу [факт/план]. Давай проверим расчёты или уточни детали?',
         '',
-        'User: да, 5% от арендного потока',
-        'Assistant: Понял! Эрнест 5% - это комиссия за управление арендой. Сейчас проверю расчёты...',
-        '[AI собирает доходы по категории "аренда", вычисляет 5%]',
-        'Assistant: Я вижу что расчеты верны. Вот детали: доходы по аренде X, 5% = Y, выплачено Z.',
+        'User: да, нужно проверить расчёт',
+        'Assistant: Понял! Вижу в данных: факт A ₸, план B ₸, итого C ₸. [делает конкретный анализ]. Всё верно?',
         '',
         'Формат:',
         '- Используй ПОЛНЫЕ суммы: "18 789 195 ₸" (НЕ сокращения)',
@@ -108,18 +106,27 @@ async function generateConversationalResponse({
         '- Если нужна дополнительная информация - спроси'
     ].join(' ');
 
+    // Prepare detailed category data
+    const categoryDetails = [];
+    Object.entries(availableContext.byCategory || {}).forEach(([name, data]) => {
+        const parts = [];
+        if (data.fact.income > 0) parts.push(`факт доход ${formatCurrency(data.fact.income)}`);
+        if (data.fact.expense > 0) parts.push(`факт расход ${formatCurrency(data.fact.expense)}`);
+        if (data.plan.income > 0) parts.push(`план доход ${formatCurrency(data.plan.income)}`);
+        if (data.plan.expense > 0) parts.push(`план расход ${formatCurrency(data.plan.expense)}`);
+        if (parts.length > 0) {
+            categoryDetails.push(`${name}: ${parts.join(', ')}`);
+        }
+    });
+
     const userContent = [
         `Текущий вопрос: ${question}`,
         '',
         ...(insights.length > 0 ? ['Финансовый контекст:', ...insights, ''] : []),
         `Период: ${period.startLabel} — ${period.endLabel}`,
         '',
-        ...(Object.keys(availableContext.byCategory || {}).length > 0
-            ? [`Доступные категории: ${JSON.stringify(Object.keys(availableContext.byCategory))}`]
-            : []),
-        ...(Object.keys(availableContext.byProject || {}).length > 0
-            ? [`Доступные проекты: ${JSON.stringify(Object.keys(availableContext.byProject))}`]
-            : [])
+        ...(categoryDetails.length > 0 ? ['Данные по категориям:', ...categoryDetails, ''] : []),
+        'ВАЖНО: У тебя есть ВСЕ данные (факт + план) по категориям выше. Используй их для расчётов.'
     ].join('\n');
 
     try {
