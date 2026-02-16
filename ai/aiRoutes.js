@@ -618,9 +618,12 @@ module.exports = function createAiRouter(deps) {
     const openLiquidityNow = accountList
       .filter((a) => !a?.isHidden && !a?.isExcluded)
       .reduce((sum, a) => sum + Number(a?.balance || 0), 0);
+    const hiddenLiquidityNow = accountList
+      .filter((a) => a?.isHidden || a?.isExcluded)
+      .reduce((sum, a) => sum + Number(a?.balance || 0), 0);
+    const totalLiquidityNow = openLiquidityNow + hiddenLiquidityNow;
 
     const futurePlanOutflows = [];
-    const futurePlanInflows = [];
     const outflowByCategory = new Map();
     let transferOutflowTotal = 0;
 
@@ -636,29 +639,32 @@ module.exports = function createAiRouter(deps) {
       if (!kind) return;
       const amount = Math.abs(_toNum(row?.amount));
       const categoryName = String(row?.category || 'Без категории');
-      const label = kind === 'transfer'
-        ? (String(row?.account || '').trim() || 'Вывод средств')
-        : categoryName;
-      const rec = {
-        dateKey: dayKey,
-        dateLabel: _dayKeyToLabel(dayKey),
-        label,
-        amount
-      };
 
       if (kind === 'income') {
-        futurePlanInflows.push(rec);
         return;
       }
 
       if (kind === 'expense') {
-        futurePlanOutflows.push(rec);
+        futurePlanOutflows.push({
+          dateKey: dayKey,
+          dateLabel: _dayKeyToLabel(dayKey),
+          label: categoryName,
+          categoryKey: categoryName,
+          amount
+        });
         outflowByCategory.set(categoryName, (outflowByCategory.get(categoryName) || 0) + amount);
         return;
       }
 
       if (kind === 'transfer' && _isOutOfSystemTransferRow(row)) {
-        futurePlanOutflows.push(rec);
+        const transferLabel = String(row?.account || '').trim() || 'Вывод средств';
+        futurePlanOutflows.push({
+          dateKey: dayKey,
+          dateLabel: _dayKeyToLabel(dayKey),
+          label: transferLabel,
+          categoryKey: 'Вывод средств',
+          amount
+        });
         transferOutflowTotal += amount;
         outflowByCategory.set('Вывод средств', (outflowByCategory.get('Вывод средств') || 0) + amount);
       }
@@ -667,11 +673,35 @@ module.exports = function createAiRouter(deps) {
     const plannedIncome = Number(forecastData?.remainingPlan?.income || 0);
     const plannedExpenseBase = Number(forecastData?.remainingPlan?.expense || 0);
     const plannedExpense = plannedExpenseBase + transferOutflowTotal;
+    const hasPlannedFlows = plannedIncome > 0 || plannedExpense > 0;
+
+    // Liquidity views:
+    // 1) Plan-only: net effect of planned inflows/outflows for remaining period.
+    // 2) Plan + balances: expected month-end liquidity (use forecast snapshot when present).
+    // 3) Accounts-only: current liquidity on accounts without planned flows.
+    const planOnlyLiquidity = plannedIncome - plannedExpense;
+    const projectedOpenRaw = Number(forecastData?.projected?.openBalance);
+    const projectedHiddenRaw = Number(forecastData?.projected?.hiddenBalance);
+    const projectedTotalRaw = Number(forecastData?.projected?.totalBalance);
+    const planPlusOpenLiquidity = Number.isFinite(projectedOpenRaw)
+      ? projectedOpenRaw
+      : (openLiquidityNow + planOnlyLiquidity);
+    const planPlusHiddenLiquidity = Number.isFinite(projectedHiddenRaw)
+      ? projectedHiddenRaw
+      : hiddenLiquidityNow;
+    const planPlusTotalLiquidity = Number.isFinite(projectedTotalRaw)
+      ? projectedTotalRaw
+      : (planPlusOpenLiquidity + planPlusHiddenLiquidity);
+
     const plannedGap = plannedExpense - plannedIncome;
-    const safetyBuffer = Math.round(Math.max(0, plannedExpense) * 0.1);
-    const reserveNeed = Math.max(0, plannedGap) + safetyBuffer;
+    const safetyBuffer = hasPlannedFlows ? Math.round(Math.max(0, plannedExpense) * 0.1) : 0;
+    const reserveNeed = hasPlannedFlows ? (Math.max(0, plannedGap) + safetyBuffer) : 0;
     const safeSpend = Math.max(0, openLiquidityNow - reserveNeed);
-    const coverageRatio = plannedExpense > 0 ? (openLiquidityNow / plannedExpense) : null;
+
+    const planOnlyCoverageRatio = plannedExpense > 0 ? (plannedIncome / plannedExpense) : null;
+    const coverageRatioOpenNow = plannedExpense > 0 ? (openLiquidityNow / plannedExpense) : null;
+    const coverageRatioHiddenNow = plannedExpense > 0 ? (hiddenLiquidityNow / plannedExpense) : null;
+    const coverageRatioTotalNow = plannedExpense > 0 ? (totalLiquidityNow / plannedExpense) : null;
 
     const topOutflows = futurePlanOutflows
       .slice()
@@ -679,22 +709,26 @@ module.exports = function createAiRouter(deps) {
         if (a.dateKey !== b.dateKey) return a.dateKey.localeCompare(b.dateKey);
         return Number(b.amount || 0) - Number(a.amount || 0);
       })
-      .slice(0, 6);
+      .slice(0, 8)
+      .map((row) => ({
+        ...row,
+        categoryTotal: Number(outflowByCategory.get(String(row.categoryKey || row.label || '')) || 0)
+      }));
 
     const topExpenseCategories = Array.from(outflowByCategory.entries())
       .map(([name, amount]) => ({ name, amount: Number(amount || 0) }))
       .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
-      .slice(0, 6);
+      .slice(0, 8);
 
     const deterministicRisks = [];
-    if (plannedGap > 0) {
+    if (hasPlannedFlows && plannedGap > 0) {
       deterministicRisks.push(`Плановый разрыв до конца месяца: расходы выше доходов на ${_fmtMoneyPlain(plannedGap)} ₸.`);
     }
-    if (openLiquidityNow < reserveNeed) {
-      deterministicRisks.push(`Текущей ликвидности недостаточно для резерва периода: дефицит ${_fmtMoneyPlain(reserveNeed - openLiquidityNow)} ₸.`);
+    if (hasPlannedFlows && planOnlyCoverageRatio !== null && planOnlyCoverageRatio < 1) {
+      deterministicRisks.push(`Плановые доходы покрывают только ${Math.round(planOnlyCoverageRatio * 100)}% плановых расходов.`);
     }
-    if (coverageRatio !== null && coverageRatio < 1) {
-      deterministicRisks.push(`Покрытие плановых расходов открытой ликвидностью ниже 100% (${Math.round(coverageRatio * 100)}%).`);
+    if (hasPlannedFlows && coverageRatioOpenNow !== null && coverageRatioOpenNow < 1) {
+      deterministicRisks.push(`Покрытие плановых расходов открытой ликвидностью ниже 100% (${Math.round(coverageRatioOpenNow * 100)}%).`);
     }
     if (topOutflows.length) {
       const first = topOutflows[0];
@@ -702,13 +736,17 @@ module.exports = function createAiRouter(deps) {
     }
 
     const deterministicActions = [];
-    if (plannedGap > 0) {
+    if (hasPlannedFlows && plannedGap > 0) {
       deterministicActions.push(`Сократи или перенеси плановые расходы минимум на ${_fmtMoneyPlain(plannedGap)} ₸ до конца месяца.`);
     }
-    if (safeSpend <= 0) {
-      deterministicActions.push('Ограничь новые расходы до 0 ₸ до момента подтвержденных поступлений.');
+    if (hasPlannedFlows) {
+      if (safeSpend <= 0) {
+        deterministicActions.push('Ограничь новые расходы до 0 ₸ до момента подтвержденных поступлений.');
+      } else {
+        deterministicActions.push(`Зафиксируй лимит новых расходов не выше ${_fmtMoneyPlain(safeSpend)} ₸ на период до конца месяца.`);
+      }
     } else {
-      deterministicActions.push(`Зафиксируй лимит новых расходов не выше ${_fmtMoneyPlain(safeSpend)} ₸ на период до конца месяца.`);
+      deterministicActions.push('Плановых операций до конца месяца нет: контролируй остатки только по счетам.');
     }
     if (topOutflows.length) {
       deterministicActions.push(`Проверь и приоритизируй ближайшие списания начиная с ${topOutflows[0].dateLabel}.`);
@@ -717,14 +755,26 @@ module.exports = function createAiRouter(deps) {
     return {
       asOfLabel: _fmtDDMMYY(nowRef),
       periodEndLabel: _fmtDDMMYY(monthEndDate),
+      hasPlannedFlows,
       openLiquidityNow,
+      hiddenLiquidityNow,
+      totalLiquidityNow,
+      planOnlyLiquidity,
+      planPlusOpenLiquidity,
+      planPlusHiddenLiquidity,
+      planPlusTotalLiquidity,
       plannedIncome,
       plannedExpense,
       plannedGap,
       safetyBuffer,
       reserveNeed,
       safeSpend,
-      coverageRatio,
+      planOnlyCoverageRatio,
+      coverageRatioOpenNow,
+      coverageRatioHiddenNow,
+      coverageRatioTotalNow,
+      // Backward-compatible alias used by old formatter/debug consumers.
+      coverageRatio: coverageRatioOpenNow,
       topOutflows,
       topExpenseCategories,
       deterministicRisks,

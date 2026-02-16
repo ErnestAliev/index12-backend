@@ -172,10 +172,28 @@ const _composeRiskResponse = (rawText, riskData) => {
     const plannedExpense = Number(data?.plannedExpense || 0);
     const plannedGap = Number(data?.plannedGap || 0);
     const openLiquidityNow = Number(data?.openLiquidityNow || 0);
+    const hiddenLiquidityNow = Number(data?.hiddenLiquidityNow || 0);
+    const totalLiquidityNow = Number(data?.totalLiquidityNow || (openLiquidityNow + hiddenLiquidityNow));
+    const hasPlannedFlows = data?.hasPlannedFlows === true || plannedIncome > 0 || plannedExpense > 0;
+    const planOnlyLiquidity = Number(data?.planOnlyLiquidity ?? (plannedIncome - plannedExpense));
+    const planPlusOpenLiquidity = Number(data?.planPlusOpenLiquidity ?? (openLiquidityNow + planOnlyLiquidity));
+    const planPlusHiddenLiquidity = Number(data?.planPlusHiddenLiquidity ?? hiddenLiquidityNow);
+    const planPlusTotalLiquidity = Number(data?.planPlusTotalLiquidity ?? (planPlusOpenLiquidity + planPlusHiddenLiquidity));
     const reserveNeed = Number(data?.reserveNeed || 0);
     const safeSpend = Number(data?.safeSpend || 0);
-    const coverageRatio = Number.isFinite(Number(data?.coverageRatio))
-        ? Number(data.coverageRatio)
+    const planOnlyCoverageRatio = Number.isFinite(Number(data?.planOnlyCoverageRatio))
+        ? Number(data.planOnlyCoverageRatio)
+        : null;
+    const coverageRatioOpenNow = Number.isFinite(Number(data?.coverageRatioOpenNow))
+        ? Number(data.coverageRatioOpenNow)
+        : Number.isFinite(Number(data?.coverageRatio))
+            ? Number(data.coverageRatio)
+            : null;
+    const coverageRatioHiddenNow = Number.isFinite(Number(data?.coverageRatioHiddenNow))
+        ? Number(data.coverageRatioHiddenNow)
+        : null;
+    const coverageRatioTotalNow = Number.isFinite(Number(data?.coverageRatioTotalNow))
+        ? Number(data.coverageRatioTotalNow)
         : null;
     const topOutflows = Array.isArray(data?.topOutflows) ? data.topOutflows : [];
     const topCats = Array.isArray(data?.topExpenseCategories) ? data.topExpenseCategories : [];
@@ -199,21 +217,49 @@ const _composeRiskResponse = (rawText, riskData) => {
 
     lines.push('');
     lines.push('Контрольные точки:');
-    lines.push(`- План доходы до конца месяца: ${_formatMoneyNumber(plannedIncome)} ₸`);
-    lines.push(`- План расходы до конца месяца: ${_formatMoneyNumber(plannedExpense)} ₸`);
-    lines.push(`- Плановый разрыв: ${_formatSignedMoney(plannedGap)} ₸`);
-    lines.push(`- Текущая ликвидность (открытые): ${_formatMoneyNumber(openLiquidityNow)} ₸`);
-    lines.push(`- Резерв на период: ${_formatMoneyNumber(reserveNeed)} ₸`);
-    lines.push(`- Безопасный лимит доп. трат: ${_formatMoneyNumber(safeSpend)} ₸`);
-    if (coverageRatio !== null) {
-        lines.push(`- Покрытие плановых расходов ликвидностью: ${Math.round(coverageRatio * 100)}%`);
+
+    if (hasPlannedFlows) {
+        lines.push(`- План доходы до конца месяца: ${_formatMoneyNumber(plannedIncome)} ₸`);
+        lines.push(`- План расходы до конца месяца: ${_formatMoneyNumber(plannedExpense)} ₸`);
+        lines.push(`- Плановый разрыв: ${_formatSignedMoney(plannedGap)} ₸`);
+        lines.push(`- Ликвидность по плану (доходы - расходы): ${_formatSignedMoney(planOnlyLiquidity)} ₸`);
+        lines.push(`- Ликвидность по плану + счета (открытые): ${_formatSignedMoney(planPlusOpenLiquidity)} ₸`);
+        lines.push(`- Ликвидность по плану + счета (скрытые): ${_formatSignedMoney(planPlusHiddenLiquidity)} ₸`);
+        lines.push(`- Ликвидность по плану + счета (итого): ${_formatSignedMoney(planPlusTotalLiquidity)} ₸`);
+        lines.push(`- Ликвидность только по счетам (открытые): ${_formatSignedMoney(openLiquidityNow)} ₸`);
+        lines.push(`- Ликвидность только по счетам (скрытые): ${_formatSignedMoney(hiddenLiquidityNow)} ₸`);
+        lines.push(`- Ликвидность только по счетам (итого): ${_formatSignedMoney(totalLiquidityNow)} ₸`);
+        lines.push(`- Резерв на период: ${_formatMoneyNumber(reserveNeed)} ₸`);
+        lines.push(`- Безопасный лимит доп. трат: ${_formatMoneyNumber(safeSpend)} ₸`);
+        if (planOnlyCoverageRatio !== null) {
+            lines.push(`- Покрытие плановых расходов плановыми доходами: ${Math.round(planOnlyCoverageRatio * 100)}%`);
+        }
+        if (coverageRatioOpenNow !== null) {
+            lines.push(`- Покрытие плановых расходов открытыми счетами: ${Math.round(coverageRatioOpenNow * 100)}%`);
+        }
+        if (coverageRatioHiddenNow !== null) {
+            lines.push(`- Покрытие плановых расходов скрытыми счетами: ${Math.round(coverageRatioHiddenNow * 100)}%`);
+        }
+        if (coverageRatioTotalNow !== null) {
+            lines.push(`- Покрытие плановых расходов всеми счетами: ${Math.round(coverageRatioTotalNow * 100)}%`);
+        }
+    } else {
+        lines.push('- Плановых доходов/расходов до конца месяца нет.');
+        lines.push(`- Ликвидность только по счетам (открытые): ${_formatSignedMoney(openLiquidityNow)} ₸`);
+        lines.push(`- Ликвидность только по счетам (скрытые): ${_formatSignedMoney(hiddenLiquidityNow)} ₸`);
+        lines.push(`- Ликвидность только по счетам (итого): ${_formatSignedMoney(totalLiquidityNow)} ₸`);
     }
 
     if (topOutflows.length) {
         lines.push('');
         lines.push('Ближайшие плановые списания:');
-        topOutflows.slice(0, 3).forEach((row) => {
-            lines.push(`- ${row.dateLabel || '?'}: ${row.label || 'Расход'} — ${_formatMoneyNumber(row.amount || 0)} ₸`);
+        topOutflows.slice(0, 5).forEach((row) => {
+            const itemAmount = Number(row.amount || 0);
+            const categoryTotal = Number(row.categoryTotal || 0);
+            const totalTail = (categoryTotal > itemAmount)
+                ? ` (всего по категории: ${_formatMoneyNumber(categoryTotal)} ₸)`
+                : '';
+            lines.push(`- ${row.dateLabel || '?'}: ${row.label || 'Расход'} — ${_formatMoneyNumber(itemAmount)} ₸${totalTail}`);
         });
     }
 
