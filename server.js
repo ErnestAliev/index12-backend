@@ -332,6 +332,31 @@ eventSchema.index({ userId: 1, dateKey: 1 });
 
 const Event = mongoose.model('Event', eventSchema);
 
+// 🟢 NEW: ChatHistory Schema for Conversational AI
+const chatHistorySchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and composite String
+    timelineDate: { type: String, required: true, index: true }, // Format: "2026-02-16"
+    messages: [{
+        role: { type: String, enum: ['user', 'assistant'], required: true },
+        content: { type: String, required: true },
+        timestamp: { type: Date, default: Date.now },
+        metadata: {
+            intent: { type: Object, default: null },     // Parsed intent (for debugging)
+            metrics: { type: Object, default: null }     // Computed metrics (for debugging)
+        }
+    }],
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+});
+
+// 🟢 Unique index: one chat history per user per timeline date
+chatHistorySchema.index({ userId: 1, timelineDate: 1 }, { unique: true });
+
+// 🟢 TTL index: auto-delete entries older than 2 days (safety margin)
+chatHistorySchema.index({ createdAt: 1 }, { expireAfterSeconds: 172800 }); // 2 days = 48h
+
+const ChatHistory = mongoose.model('ChatHistory', chatHistorySchema);
+
 // AI deep/chat/context-packet models removed: QUICK-only mode
 
 // --- CONFIG ---
@@ -2867,7 +2892,7 @@ mongoose.connect(DB_URL, {
     serverSelectionTimeoutMS: 10000, // Timeout after 10 seconds
     socketTimeoutMS: 45000,
 })
-.then(async () => {
+    .then(async () => {
         console.log('✅ MongoDB подключена.');
         server.listen(PORT, () => {
             console.log(`✅ Сервер запущен на порту ${PORT}`);

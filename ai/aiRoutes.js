@@ -15,7 +15,7 @@ module.exports = function createAiRouter(deps) {
     getCompositeUserId,
   } = deps;
 
-  const { Event, Account, Company, Contractor, Individual, Project, Category } = models;
+  const { Event, Account, Company, Contractor, Individual, Project, Category, ChatHistory } = models;
 
   const createDataProvider = require('./dataProvider');
   const dataProvider = createDataProvider({
@@ -33,9 +33,10 @@ module.exports = function createAiRouter(deps) {
   const createQuickJournalAdapter = require('./quickJournalAdapter');
   const quickJournalAdapter = createQuickJournalAdapter({ Event });
 
-  // NEW: Import deterministic calculator and intent parser
+  // NEW: Import deterministic calculator, intent parser, and conversational agent
   const financialCalculator = require('./utils/financialCalculator');
   const intentParser = require('./utils/intentParser');
+  const conversationalAgent = require('./utils/conversationalAgent');
 
   const router = express.Router();
 
@@ -657,26 +658,53 @@ module.exports = function createAiRouter(deps) {
       const source = String(req?.body?.source || 'chat');
       const isQuickButton = source === 'quick_button';
 
-      // Chat/source=chat: NEW DETERMINISTIC PIPELINE
-      // 1. Compute metrics from tableContext.rows
-      // 2. Parse intent via LLM
-      // 3. Filter data by intent
-      // 4. Recalculate metrics on filtered data
-      // 5. Format answer
+      // Chat/source=chat: NEW PIPELINE WITH CHAT HISTORY
+      // 0. Load chat history for user + current timeline date
+      // 1. Save user message to history
+      // 2. Compute metrics from tableContext.rows
+      // 3. Parse intent via LLM  
+      // 4. Filter data by intent (for financial queries)
+      // 5. Use conversational agent (with history context)
+      // 6. Save agent response to history
+      // 7. Return response
       if (!isQuickButton) {
         const tableContext = req.body?.tableContext || null;
         const rows = Array.isArray(tableContext?.rows) ? tableContext.rows : [];
         const periodFilter = req.body?.periodFilter || tableContext?.periodFilter || null;
         const asOf = req.body?.asOf || null;
 
-        // Step 1: Compute all metrics deterministically
+        // Step 0: Get current timeline date and load/create chat history
+        const timelineDate = asOf ? new Date(asOf).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+
+        let chatHistory = await ChatHistory.findOne({
+          userId: userIdStr,
+          timelineDate
+        });
+
+        if (!chatHistory) {
+          chatHistory = new ChatHistory({
+            userId: userIdStr,
+            timelineDate,
+            messages: []
+          });
+        }
+
+        // Step 1: Save user message to history
+        chatHistory.messages.push({
+          role: 'user',
+          content: q,
+          timestamp: new Date()
+        });
+        chatHistory.updatedAt = new Date();
+
+        // Step 2: Compute all metrics deterministically
         const computed = financialCalculator.computeMetrics({
           rows,
           periodFilter,
           asOf
         });
 
-        // Step 2: Parse intent via LLM
+        // Step 3: Parse intent via LLM
         const intentResult = await intentParser.parseIntent({
           question: q,
           availableContext: {
@@ -703,6 +731,14 @@ module.exports = function createAiRouter(deps) {
             formatCurrency: _formatTenge
           });
 
+          // Save fallback response to history
+          chatHistory.messages.push({
+            role: 'assistant',
+            content: fallbackAnswer,
+            timestamp: new Date()
+          });
+          await chatHistory.save();
+
           return res.json({
             text: fallbackAnswer,
             ...(debugEnabled ? {
@@ -719,37 +755,51 @@ module.exports = function createAiRouter(deps) {
 
         const intent = intentResult.intent;
 
-        // NEW: Check if this is a non-financial query (greeting, casual talk)
-        if (!intent.isFinancial) {
-          // Use conversational LLM with computed metrics
-          const conversationalResult = await intentParser.generateConversationalResponse({
+        // Step 4: Check if conversational (non-financial OR has chat history)
+        const isConversational = !intent.isFinancial || chatHistory.messages.length > 1;
+
+        if (isConversational) {
+          // Use conversational agent with history context
+          const conversationalResult = await conversationalAgent.generateConversationalResponse({
             question: q,
+            history: chatHistory.messages.slice(0, -1), // Exclude current user message (already added)
             metrics: computed.metrics,
             period: computed.period,
-            formatCurrency: _formatTenge
+            formatCurrency: _formatTenge,
+            availableContext: {
+              byCategory: computed.metrics.byCategory,
+              byProject: computed.metrics.byProject
+            }
           });
 
-          if (!conversationalResult.ok) {
-            // Fallback: simple greeting
-            return res.json({
-              text: 'Привет! Чем могу помочь?',
-              ...(debugEnabled ? {
-                debug: {
-                  intent,
-                  conversationalError: conversationalResult.error,
-                  period: computed.period
-                }
-              } : {})
-            });
-          }
+          const responseText = conversationalResult.ok
+            ? conversationalResult.text
+            : `Привет! ${computed.metrics.total.income > 0 ? 'Доходы за период: ' + _formatTenge(computed.metrics.total.income) : 'Чем могу помочь?'}`;
+
+          // Save agent response to history
+          chatHistory.messages.push({
+            role: 'assistant',
+            content: responseText,
+            timestamp: new Date(),
+            metadata: {
+              intent,
+              metrics: {
+                fact: computed.metrics.fact,
+                plan: computed.metrics.plan,
+                total: computed.metrics.total
+              }
+            }
+          });
+          await chatHistory.save();
 
           return res.json({
-            text: conversationalResult.text,
+            text: responseText,
             ...(debugEnabled ? {
               debug: {
                 intent,
                 period: computed.period,
-                conversational: conversationalResult.debug || null
+                conversational: conversationalResult.debug || null,
+                historyLength: chatHistory.messages.length
               }
             } : {})
           });
@@ -787,6 +837,22 @@ module.exports = function createAiRouter(deps) {
           period: computed.period,
           formatCurrency: _formatTenge
         });
+
+        // Step 6: Save financial query response to history
+        chatHistory.messages.push({
+          role: 'assistant',
+          content: answer,
+          timestamp: new Date(),
+          metadata: {
+            intent,
+            metrics: {
+              fact: filteredMetrics.fact,
+              plan: filteredMetrics.plan,
+              total: filteredMetrics.total
+            }
+          }
+        });
+        await chatHistory.save();
 
         return res.json({
           text: answer,
