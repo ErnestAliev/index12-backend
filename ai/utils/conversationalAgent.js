@@ -1,6 +1,77 @@
 // ai/utils/conversationalAgent.js
 // Conversational AI agent with memory, hypothesis generation, and multi-turn dialogue
 
+const _extractMoney = (line) => {
+    const m = String(line || '').match(/:\s*([0-9][0-9\s]*)\s*₸/i);
+    if (!m) return null;
+    const compact = String(m[1] || '').replace(/\s+/g, '').trim();
+    if (!/^\d+$/.test(compact)) return null;
+    return {
+        formatted: String(m[1]).replace(/\s+/g, ' ').trim(),
+        numeric: Number(compact)
+    };
+};
+
+const _formatMoneyNumber = (value) => {
+    const n = Number(value || 0);
+    try {
+        return new Intl.NumberFormat('ru-RU')
+            .format(Math.round(Math.abs(n)))
+            .replace(/\u00A0/g, ' ');
+    } catch (_) {
+        return String(Math.round(Math.abs(n)));
+    }
+};
+
+const _normalizeBalanceBlock = (rawText) => {
+    const text = String(rawText || '').trim();
+    if (!text) return text;
+
+    const lines = text.split(/\r?\n/);
+    const balanceIdx = lines.findIndex((line) => /^\s*Баланс\s+на\b/i.test(line));
+    if (balanceIdx < 0) return text;
+
+    const balanceLine = String(lines[balanceIdx] || '').trim();
+    const m = balanceLine.match(/^Баланс\s+на\s+([0-9]{2}\.[0-9]{2}\.[0-9]{2,4})(?:\s*[:\-]\s*([0-9][0-9\s]*)\s*₸)?/i);
+    if (!m) return text;
+
+    const dateLabel = m[1];
+    const headerTotal = m[2] ? String(m[2]).replace(/\s+/g, ' ').trim() : null;
+
+    const openIdx = lines.findIndex((line, idx) => idx > balanceIdx && /^\s*-\s*Открытые\s*:/i.test(line));
+    const hiddenIdx = lines.findIndex((line, idx) => idx > balanceIdx && /^\s*-\s*Скрытые\s*:/i.test(line));
+    const totalIdx = lines.findIndex((line, idx) => idx > balanceIdx && /^\s*-\s*Итого\s*:/i.test(line));
+
+    lines[balanceIdx] = `Баланс на ${dateLabel}`;
+
+    if (openIdx < 0 || hiddenIdx < 0) {
+        return lines.join('\n').trim();
+    }
+
+    const openMoney = _extractMoney(lines[openIdx]);
+    const hiddenMoney = _extractMoney(lines[hiddenIdx]);
+    const totalMoney = totalIdx >= 0 ? _extractMoney(lines[totalIdx]) : null;
+
+    let totalFormatted = totalMoney?.formatted || headerTotal || null;
+    if (!totalFormatted && openMoney && hiddenMoney) {
+        totalFormatted = _formatMoneyNumber((openMoney.numeric || 0) + (hiddenMoney.numeric || 0));
+    }
+
+    if (!totalFormatted) {
+        return lines.join('\n').trim();
+    }
+
+    if (totalIdx >= 0) {
+        lines.splice(totalIdx, 1);
+    }
+
+    const hiddenIdxAfterDelete = lines.findIndex((line, idx) => idx > balanceIdx && /^\s*-\s*Скрытые\s*:/i.test(line));
+    const insertAt = hiddenIdxAfterDelete >= 0 ? hiddenIdxAfterDelete + 1 : balanceIdx + 1;
+    lines.splice(insertAt, 0, `- Итого: ${totalFormatted} ₸`);
+
+    return lines.join('\n').trim();
+};
+
 /**
  * Generate conversational response with context from chat history
  * @param {Object} params
@@ -99,9 +170,10 @@ async function generateConversationalResponse({
         'Ты финансовый аналитик. Отвечай КРАТКО, КОНКРЕТНО, БЕЗ ВОДЫ.',
         '',
         '🚨 ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА (НЕ ОТКЛОНЯЙСЯ):',
-        'Баланс на [текущую дату]: [общая сумма] ₸',
+        'Баланс на [текущую дату]',
         '- Открытые: [сумма] ₸',
         '- Скрытые: [сумма] ₸',
+        '- Итого: [общая сумма] ₸',
         '',
         'Метрики:',
         '- Маржа: [%] (доход [сумма], расход [сумма])',
@@ -120,9 +192,10 @@ async function generateConversationalResponse({
         '- Использовать сокращения чисел (50.378M, 164K) - ТОЛЬКО ПОЛНЫЕ ЧИСЛА!',
         '',
         '✅ ПРИМЕР ИДЕАЛЬНОГО ОТВЕТА:',
-        'Баланс на 16.02.26: 50 663 000 ₸',
+        'Баланс на 16.02.26',
         '- Открытые: 4 285 000 ₸',
         '- Скрытые: 46 378 000 ₸',
+        '- Итого: 50 663 000 ₸',
         '',
         'Метрики:',
         '- Маржа: 68% (доход 19 770 000, расход 6 212 000)',
@@ -225,7 +298,8 @@ async function generateConversationalResponse({
         }
 
         const data = await response.json();
-        const text = data.choices?.[0]?.message?.content?.trim();
+        const rawText = data.choices?.[0]?.message?.content?.trim();
+        const text = _normalizeBalanceBlock(rawText);
 
         if (!text) {
             return {
