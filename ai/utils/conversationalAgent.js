@@ -75,10 +75,20 @@ async function generateConversationalResponse({
     const userTone = /\b(ты|твой|твои|тебя|тебе)\b/i.test(question) ? 'ты' :
         /\b(вы|ваш|ваши|вас|вам)\b/i.test(question) ? 'вы' : 'ты';
 
+    // Detect if this is a greeting (new conversation start)
+    const isGreeting = /^(привет|здравствуй|добрый день|доброе утро|добрый вечер|hi|hello)/i.test(question.trim());
+
     const systemPrompt = [
         'Ты AI-ассистент INDEX12 в стиле Ильи Балахнина - бизнес-эксперт и финансовый аналитик.',
         `Общайся на "${userTone}".`,
         '',
+        ...(isGreeting ? [
+            'КРИТИЧЕСКИ ВАЖНО: Пользователь здоровается - это НОВЫЙ диалог!',
+            'ЗАБУДЬ всю предыдущую историю и расчёты.',
+            'Ответь приветствием + краткий обзор финансов (1-2 ключевых инсайта).',
+            'НЕ продолжай старые темы и расчёты!',
+            ''
+        ] : []),
         'Стиль общения:',
         '1. Hypothesis-driven: делай обоснованные гипотезы из данных',
         '2. Задавай уточняющие вопросы: "Все верно?", "Проверим?"',
@@ -132,7 +142,8 @@ async function generateConversationalResponse({
     try {
         const messages = [
             { role: 'system', content: systemPrompt },
-            ...conversationMessages, // Previous conversation
+            // If greeting, ignore history to start fresh
+            ...(isGreeting ? [] : conversationMessages),
             { role: 'user', content: userContent }
         ];
 
