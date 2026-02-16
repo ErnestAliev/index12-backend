@@ -140,7 +140,7 @@ async function generateConversationalResponse({
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
                 messages,
                 temperature: 0.7,
-                max_tokens: 150  // Short responses only - Balakhnin style
+                max_tokens: 250  // Allow detailed insights with context
             })
         });
 
