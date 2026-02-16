@@ -218,12 +218,47 @@ module.exports = function createAiRouter(deps) {
     return NaN;
   };
 
+  const _pad2 = (n) => String(Number(n || 0)).padStart(2, '0');
+
+  const _toDayKey = (dateLike) => {
+    const d = dateLike instanceof Date ? dateLike : new Date(dateLike);
+    if (Number.isNaN(d.getTime())) return '';
+    return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`;
+  };
+
+  const _parseRowDayKey = (row) => {
+    const rawDate = String(row?.date || '').trim();
+    const iso = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+    const rawLabel = String(row?.dateLabel || '').trim();
+    const ru = rawLabel.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+    if (ru) return `${ru[3]}-${ru[2]}-${ru[1]}`;
+
+    const ts = _parseRowTs(row);
+    if (!Number.isFinite(ts)) return '';
+    return _toDayKey(new Date(ts));
+  };
+
   const _normalizeKind = (typeValue) => {
     const t = String(typeValue || '').trim().toLowerCase();
-    if (t === 'доход') return 'income';
-    if (t === 'расход') return 'expense';
-    if (t === 'перевод' || t === 'вывод средств') return 'transfer';
+    if (t === 'доход' || t === 'income') return 'income';
+    if (t === 'предоплата' || t === 'prepayment') return 'income';
+    if (t === 'расход' || t === 'expense') return 'expense';
+    if (t === 'перевод' || t === 'transfer' || t === 'вывод средств' || t === 'withdrawal') return 'transfer';
     return null;
+  };
+
+  const _isOutOfSystemTransferRow = (row) => {
+    if (!row) return false;
+    if (row?.isWithdrawal === true) return true;
+
+    const purpose = String(row?.transferPurpose || '').toLowerCase().trim();
+    const reason = String(row?.transferReason || '').toLowerCase().trim();
+    if (purpose === 'personal' && reason === 'personal_use') return true;
+
+    const t = _normalizeToken(row?.type || '');
+    return t.includes('выводсредств') || t.includes('withdrawal');
   };
 
   const _normalizeStatus = (statusCode, statusLabel) => {
@@ -328,11 +363,19 @@ module.exports = function createAiRouter(deps) {
       return new Date();
     })();
 
-    const asOfTs = nowRef.getTime();
-    const monthStart = new Date(nowRef.getFullYear(), nowRef.getMonth(), 1, 0, 0, 0, 0);
-    const monthEnd = new Date(nowRef.getFullYear(), nowRef.getMonth() + 1, 0, 23, 59, 59, 999);
-    const effectiveStart = monthStart.getTime();
-    const effectiveEnd = monthEnd.getTime();
+    const rawAsOfDayKey = (() => {
+      const m = String(asOf || '').match(/^(\d{4}-\d{2}-\d{2})/);
+      return m ? m[1] : '';
+    })();
+    const asOfDayKey = rawAsOfDayKey || _toDayKey(nowRef);
+    const keyMatch = asOfDayKey.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const baseYear = keyMatch ? Number(keyMatch[1]) : nowRef.getFullYear();
+    const baseMonth = keyMatch ? Number(keyMatch[2]) : (nowRef.getMonth() + 1); // 1..12
+    const baseDay = keyMatch ? Number(keyMatch[3]) : nowRef.getDate();
+
+    const monthStartDayKey = `${baseYear}-${_pad2(baseMonth)}-01`;
+    const monthEndDate = new Date(baseYear, baseMonth, 0, 23, 59, 59, 999);
+    const monthEndDayKey = _toDayKey(monthEndDate);
 
     const actual = _mkBucket();
     const futureAll = _mkBucket();
@@ -362,9 +405,9 @@ module.exports = function createAiRouter(deps) {
     };
 
     rows.forEach((row) => {
-      const ts = _parseRowTs(row);
-      if (!Number.isFinite(ts)) return;
-      if (ts < effectiveStart || ts > effectiveEnd) return;
+      const dayKey = _parseRowDayKey(row);
+      if (!dayKey) return;
+      if (dayKey < monthStartDayKey || dayKey > monthEndDayKey) return;
 
       const kind = _normalizeKind(row?.type);
       if (!kind) return;
@@ -372,7 +415,8 @@ module.exports = function createAiRouter(deps) {
       const amountAbs = Math.abs(_toNum(row?.amount));
       const categoryName = String(row?.category || 'Без категории');
 
-      if (ts <= asOfTs) {
+      const isFutureDay = dayKey > asOfDayKey;
+      if (!isFutureDay) {
         _addToBucket(actual, kind, amountAbs);
         addCategoryFlow(factToDateByCategory, categoryName, kind, amountAbs);
         return;
@@ -392,10 +436,11 @@ module.exports = function createAiRouter(deps) {
       if (!accountList.length) return;
 
       if (kind === 'transfer') {
+        const isOutOfSystemTransfer = _isOutOfSystemTransferRow(row);
         const fromIdDirect = _extractId(row?.fromAccountId);
         const toIdDirect = _extractId(row?.toAccountId);
         if (fromIdDirect) addDelta(fromIdDirect, -amountAbs);
-        if (toIdDirect) addDelta(toIdDirect, amountAbs);
+        if (!isOutOfSystemTransfer && toIdDirect) addDelta(toIdDirect, amountAbs);
 
         if (fromIdDirect || toIdDirect) return;
 
@@ -404,7 +449,7 @@ module.exports = function createAiRouter(deps) {
         const fromAcc = _resolveAccountByLabel(transferParts.from, accountList, accountByName);
         const toAcc = _resolveAccountByLabel(transferParts.to, accountList, accountByName);
         if (fromAcc?._id) addDelta(fromAcc._id, -amountAbs);
-        if (toAcc?._id) addDelta(toAcc._id, amountAbs);
+        if (!isOutOfSystemTransfer && toAcc?._id) addDelta(toAcc._id, amountAbs);
         return;
       }
 
@@ -450,12 +495,6 @@ module.exports = function createAiRouter(deps) {
       else projectedOpen += delta;
     });
 
-    const projectedTotal = currentTotal + futureAll.net;
-    const classifiedTotal = projectedOpen + projectedHidden;
-    if (Math.abs(projectedTotal - classifiedTotal) > 0.5) {
-      projectedOpen += (projectedTotal - classifiedTotal);
-    }
-
     const topPlanIncome = Array.from(futurePlanIncomeByCategory.entries())
       .sort((a, b) => b[1] - a[1])[0] || null;
 
@@ -491,8 +530,8 @@ module.exports = function createAiRouter(deps) {
       findings.push(`До конца месяца плановые расходы выше плановых доходов на ${_fmtMoneyPlain(futurePlan.expense - futurePlan.income)} ₸`);
     }
 
-    const endDate = new Date(effectiveEnd);
-    const asOfDate = new Date(asOfTs);
+    const endDate = monthEndDate;
+    const asOfDate = new Date(baseYear, baseMonth - 1, baseDay, 12, 0, 0, 0);
 
     return {
       asOfLabel: _fmtDDMMYY(asOfDate),
