@@ -808,6 +808,19 @@ module.exports = function createAiRouter(deps) {
             currentBalance
           });
 
+          // 🟢 NEW: Split balance by open vs hidden accounts
+          const openBalance = req.body?.accounts
+            ? req.body.accounts
+              .filter(a => !a.isHidden && !a.isExcluded)
+              .reduce((s, a) => s + (Number(a.currentBalance) || 0), 0)
+            : currentBalance;
+
+          const hiddenBalance = req.body?.accounts
+            ? req.body.accounts
+              .filter(a => a.isHidden || a.isExcluded)
+              .reduce((s, a) => s + (Number(a.currentBalance) || 0), 0)
+            : 0;
+
           // Extract hidden accounts data for strategic reserves context
           const hiddenAccountsData = req.body?.accounts
             ? {
@@ -829,6 +842,8 @@ module.exports = function createAiRouter(deps) {
             period: computed.period,
             formatCurrency: _formatTenge,
             futureBalance,  // 🟢 NEW: Pass future balance projection
+            openBalance,  // 🟢 NEW: Balance on open accounts
+            hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
             hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
             availableContext: {
               byCategory: computed.metrics.byCategory,

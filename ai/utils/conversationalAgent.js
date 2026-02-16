@@ -19,6 +19,8 @@ async function generateConversationalResponse({
     period,
     formatCurrency,
     futureBalance = null,
+    openBalance = null,
+    hiddenBalance = null,
     hiddenAccountsData = null,
     availableContext = {}
 }) {
@@ -120,6 +122,15 @@ async function generateConversationalResponse({
         'Формула: Текущий баланс + План доходы - План расходы = Итоговый баланс',
         'Ответ: "На конец месяца баланс составит [точная сумма] ₸"',
         '',
+        'РЕКОМЕНДАЦИИ - ТОЛЬКО КОНКРЕТНЫЕ С ДОКАЗАТЕЛЬСТВАМИ:',
+        '❌ ЗАПРЕЩЕНО: "Следи за налогами", "Контролируй расходы", "Оптимизируй персонал"',
+        '✅ РАЗРЕШЕНО: Конкретные находки с цифрами и обоснованием',
+        'Примеры хороших рекомендаций:',
+        '- "Расходы на персонал выросли на 30% vs прошлый месяц (с 2M до 2.6M). Проверь причину"',
+        '- "Незапланированный платеж 500K на категорию X. Перенеси в план или исключи"',
+        '- "Доходы от аренды падают 3 месяца подряд. Пересмотри договоры"',
+        'НЕ давай советы без доказательств!',
+        '',
         'СТРАТЕГИЧЕСКИЕ РЕЗЕРВЫ (деликатная тема):',
         'Если видишь данные о резервном фонде:',
         '- Упоминай тактично: "стратегический резерв", "резервный фонд", "свободные средства"',
@@ -158,6 +169,8 @@ async function generateConversationalResponse({
         ...(futureBalance ? [
             'ПРОГНОЗ НА КОНЕЦ ПЕРИОДА:',
             `Текущий баланс: ${formatCurrency(futureBalance.current)}`,
+            `  - Открытые счета: ${formatCurrency(openBalance || 0)}`,
+            `  - Скрытые счета: ${formatCurrency(hiddenBalance || 0)}`,
             `План доходы: +${formatCurrency(futureBalance.plannedIncome)}`,
             `План расходы: -${formatCurrency(futureBalance.plannedExpense)}`,
             `Итоговый баланс: ${formatCurrency(futureBalance.projected)}`,
