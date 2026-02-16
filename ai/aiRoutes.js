@@ -787,6 +787,13 @@ module.exports = function createAiRouter(deps) {
         const isConversational = !intent.isFinancial || chatHistory.messages.length > 1;
 
         if (isConversational) {
+          // Compute future balance projection for forecasts
+          const currentBalance = req.body?.currentBalance || 0;
+          const futureBalance = financialCalculator.computeFutureBalance({
+            metrics: computed.metrics,
+            currentBalance
+          });
+
           // Use conversational agent with history context
           const conversationalResult = await conversationalAgent.generateConversationalResponse({
             question: q,
@@ -794,6 +801,7 @@ module.exports = function createAiRouter(deps) {
             metrics: computed.metrics,
             period: computed.period,
             formatCurrency: _formatTenge,
+            futureBalance,  // 🟢 NEW: Pass future balance projection
             availableContext: {
               byCategory: computed.metrics.byCategory,
               byProject: computed.metrics.byProject

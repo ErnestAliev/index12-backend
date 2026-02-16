@@ -18,6 +18,7 @@ async function generateConversationalResponse({
     metrics,
     period,
     formatCurrency,
+    futureBalance = null,
     availableContext = {}
 }) {
     const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -113,9 +114,15 @@ async function generateConversationalResponse({
         '2. ОТВЕЧАЙ выводами и рекомендациями',
         '3. НЕ показывай промежуточные расчеты - только итог',
         '',
+        'ПРОГНОЗ/ИТОГ на конец периода:',
+        'Вопросы "какой итог?", "прогноз на конец месяца?" → нужна КОНКРЕТНАЯ цифра баланса',
+        'Формула: Текущий баланс + План доходы - План расходы = Итоговый баланс',
+        'Ответ: "На конец месяца баланс составит [точная сумма] ₸"',
+        '',
         'Примеры:',
         '❌ ПЛОХО: "Аренда: факт 18 600 000 ₸ + план 3 600 000 ₸ = 22 200 000 ₸"',
         '✅ ХОРОШО: "Основной доход — аренда (22 200 000 ₸). Крупные расходы: налоги и коммуналка (~6 млн ₸)"',
+        '✅ НА ПРОГНОЗ: "На конец февраля баланс составит 1 554 388 ₸"',
         '',
         'Стиль: краткость, выводы, рекомендации'
     ].join(' ');
@@ -139,6 +146,14 @@ async function generateConversationalResponse({
         ...(insights.length > 0 ? ['Финансовый контекст:', ...insights, ''] : []),
         `Период: ${period.startLabel} — ${period.endLabel}`,
         '',
+        ...(futureBalance ? [
+            'ПРОГНОЗ НА КОНЕЦ ПЕРИОДА:',
+            `Текущий баланс: ${formatCurrency(futureBalance.current)}`,
+            `План доходы: +${formatCurrency(futureBalance.plannedIncome)}`,
+            `План расходы: -${formatCurrency(futureBalance.plannedExpense)}`,
+            `Итоговый баланс: ${formatCurrency(futureBalance.projected)}`,
+            ''
+        ] : []),
         ...(categoryDetails.length > 0 ? [
             'НАПОМИНАНИЕ: факт = УЖЕ случилось, план = БУДЕТ в будущем',
             'Данные по категориям:',

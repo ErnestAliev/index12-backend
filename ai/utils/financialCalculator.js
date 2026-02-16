@@ -329,8 +329,29 @@ function resolvePeriod(periodFilter, asOf) {
     };
 }
 
+/**
+ * Compute future balance projection
+ * @param {Object} params
+ * @param {Object} params.metrics - Computed metrics from calculateAggregates
+ * @param {number} params.currentBalance - Current total balance across all accounts
+ * @returns {Object} Future balance projection
+ */
+function computeFutureBalance({ metrics, currentBalance = 0 }) {
+    // Future balance = Current balance + Planned income - Planned expense
+    const futureBalance = currentBalance + metrics.plan.income - metrics.plan.expense;
+
+    return {
+        current: currentBalance,
+        plannedIncome: metrics.plan.income,
+        plannedExpense: metrics.plan.expense,
+        projected: futureBalance,
+        change: futureBalance - currentBalance
+    };
+}
+
 module.exports = {
     computeMetrics,
+    computeFutureBalance,
     getTopMovers,
     normalizeAmount,
     normalizeStatus,
