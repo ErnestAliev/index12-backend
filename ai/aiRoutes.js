@@ -644,7 +644,9 @@ module.exports = function createAiRouter(deps) {
   // 🟢 GET /api/ai/history - Load chat history for current timeline date  
   router.get('/history', isAuthenticated, async (req, res) => {
     try {
-      const userIdStr = getCompositeUserId(req);
+      const userId = req.user?._id || req.user?.id;
+      const userIdStr = String(userId || '');
+      if (!userIdStr) return res.status(401).json({ error: 'Пользователь не найден' });
       const asOf = req.query.asOf;
       const timelineDate = asOf
         ? new Date(asOf).toISOString().split('T')[0]
