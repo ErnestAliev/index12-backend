@@ -19,6 +19,7 @@ async function generateConversationalResponse({
     period,
     formatCurrency,
     futureBalance = null,
+    hiddenAccountsData = null,
     availableContext = {}
 }) {
     const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -119,10 +120,18 @@ async function generateConversationalResponse({
         'Формула: Текущий баланс + План доходы - План расходы = Итоговый баланс',
         'Ответ: "На конец месяца баланс составит [точная сумма] ₸"',
         '',
+        'СТРАТЕГИЧЕСКИЕ РЕЗЕРВЫ (деликатная тема):',
+        'Если видишь данные о резервном фонде:',
+        '- Упоминай тактично: "стратегический резерв", "резервный фонд", "свободные средства"',
+        '- НЕ используй: "скрытые счета", "темная касса", "налоги", "вне учёта"',
+        '- При вопросах об ИНВЕСТИЦИЯХ обязательно спроси: "Сколько в месяц уходит на личные нужды (жильё, питание, транспорт)?"',
+        '- После ответа: рекомендуй оставить 6-месячный запас, остальное — для инвестиций',
+        '',
         'Примеры:',
         '❌ ПЛОХО: "Аренда: факт 18 600 000 ₸ + план 3 600 000 ₸ = 22 200 000 ₸"',
         '✅ ХОРОШО: "Основной доход — аренда (22 200 000 ₸). Крупные расходы: налоги и коммуналка (~6 млн ₸)"',
         '✅ НА ПРОГНОЗ: "На конец февраля баланс составит 1 554 388 ₸"',
+        '✅ ПРО РЕЗЕРВЫ: "Вижу стратегический резерв ~5M ₸. Для инвестиционного плана уточни: сколько в месяц на личные расходы?"',
         '',
         'Стиль: краткость, выводы, рекомендации'
     ].join(' ');
@@ -152,6 +161,13 @@ async function generateConversationalResponse({
             `План доходы: +${formatCurrency(futureBalance.plannedIncome)}`,
             `План расходы: -${formatCurrency(futureBalance.plannedExpense)}`,
             `Итоговый баланс: ${formatCurrency(futureBalance.projected)}`,
+            ''
+        ] : []),
+        ...(hiddenAccountsData && hiddenAccountsData.totalCurrent > 0 ? [
+            'СТРАТЕГИЧЕСКИЙ РЕЗЕРВ:',
+            `Резервный фонд: ${formatCurrency(hiddenAccountsData.totalCurrent)}`,
+            `Прогноз резервов: ${formatCurrency(hiddenAccountsData.totalFuture)}`,
+            `(отдельно от основного учёта, ${hiddenAccountsData.count} счетов)`,
             ''
         ] : []),
         ...(categoryDetails.length > 0 ? [

@@ -808,6 +808,19 @@ module.exports = function createAiRouter(deps) {
             currentBalance
           });
 
+          // Extract hidden accounts data for strategic reserves context
+          const hiddenAccountsData = req.body?.accounts
+            ? {
+              count: req.body.accounts.filter(a => a.isHidden || a.isExcluded).length,
+              totalCurrent: req.body.accounts
+                .filter(a => a.isHidden || a.isExcluded)
+                .reduce((s, a) => s + (Number(a.currentBalance) || 0), 0),
+              totalFuture: req.body.accounts
+                .filter(a => a.isHidden || a.isExcluded)
+                .reduce((s, a) => s + (Number(a.futureBalance) || 0), 0)
+            }
+            : null;
+
           // Use conversational agent with history context
           const conversationalResult = await conversationalAgent.generateConversationalResponse({
             question: q,
@@ -816,6 +829,7 @@ module.exports = function createAiRouter(deps) {
             period: computed.period,
             formatCurrency: _formatTenge,
             futureBalance,  // 🟢 NEW: Pass future balance projection
+            hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
             availableContext: {
               byCategory: computed.metrics.byCategory,
               byProject: computed.metrics.byProject
