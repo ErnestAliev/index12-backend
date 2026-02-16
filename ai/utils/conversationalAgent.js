@@ -72,6 +72,71 @@ const _normalizeBalanceBlock = (rawText) => {
     return lines.join('\n').trim();
 };
 
+const _extractFindingsFromText = (rawText) => {
+    const text = String(rawText || '').trim();
+    if (!text) return [];
+
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex((line) => /^\s*Находки\s*:/i.test(line));
+    if (start < 0) return [];
+
+    const findings = [];
+    for (let i = start + 1; i < lines.length; i++) {
+        const ln = String(lines[i] || '').trim();
+        if (!ln) {
+            if (findings.length) break;
+            continue;
+        }
+        if (/^[A-Za-zА-Яа-я0-9 _-]+\s*:$/.test(ln) && !ln.startsWith('-')) break;
+        if (/^-+\s+/.test(ln)) {
+            findings.push(ln.replace(/^-+\s*/, '').trim());
+        }
+    }
+    return findings.filter(Boolean);
+};
+
+const _composeForecastResponse = (rawText, forecastData) => {
+    if (!forecastData || typeof forecastData !== 'object') {
+        return _normalizeBalanceBlock(rawText);
+    }
+
+    const projected = forecastData.projected || {};
+    const remainingPlan = forecastData.remainingPlan || {};
+    const findingsFromLlm = _extractFindingsFromText(rawText);
+    const findingsFallback = Array.isArray(forecastData.findings) ? forecastData.findings.filter(Boolean) : [];
+    const findings = findingsFromLlm.length ? findingsFromLlm : findingsFallback;
+
+    const topIncomeCategory = String(remainingPlan.topIncomeCategory || '').trim();
+    const incomeTail = topIncomeCategory ? ` (${topIncomeCategory})` : '';
+
+    const lines = [
+        `Баланс на ${forecastData.periodEndLabel || '?'}`,
+        `- Открытые: ${_formatMoneyNumber(projected.openBalance || 0)} ₸`,
+        `- Скрытые: ${_formatMoneyNumber(projected.hiddenBalance || 0)} ₸`,
+        `- Итого: ${_formatMoneyNumber(projected.totalBalance || 0)} ₸`,
+        '',
+        'Метрики:',
+        `- Маржа: ${Math.round(Number(projected.marginPercent || 0))}% (доход ${_formatMoneyNumber(projected.income || 0)}, расход ${_formatMoneyNumber(projected.expense || 0)})`,
+        `- Ликвидность: ${_formatMoneyNumber(projected.liquidityOpen || 0)} на открытых счетах`,
+        `- Операционная прибыль: ${_formatMoneyNumber(projected.operatingProfit || 0)}`,
+        '',
+        'Прогноз:',
+        `- Планируемый расход: ${_formatMoneyNumber(remainingPlan.expense || 0)} ₸`,
+        `- Ожидаемый доход: ${_formatMoneyNumber(remainingPlan.income || 0)} ₸${incomeTail}`,
+        `- Ожидаемая операционная прибыль: ${_formatMoneyNumber(projected.operatingProfit || 0)} ₸`,
+        '',
+        'Находки:'
+    ];
+
+    if (findings.length) {
+        findings.forEach((item) => lines.push(`- ${item}`));
+    } else {
+        lines.push('- Критичных аномалий не найдено.');
+    }
+
+    return lines.join('\n').trim();
+};
+
 /**
  * Generate conversational response with context from chat history
  * @param {Object} params
@@ -81,6 +146,7 @@ const _normalizeBalanceBlock = (rawText) => {
  * @param {Object} params.period - Period info
  * @param {Function} params.formatCurrency - Currency formatter
  * @param {Object} params.availableContext - Available categories, projects, etc
+ * @param {Object|null} params.forecastData - Deterministic forecast snapshot
  * @returns {Promise<{ok: boolean, text: string, debug: Object}>}
  */
 async function generateConversationalResponse({
@@ -95,6 +161,7 @@ async function generateConversationalResponse({
     hiddenBalance = null,
     hiddenAccountsData = null,
     accounts = null,
+    forecastData = null,
     availableContext = {}
 }) {
     const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -168,6 +235,7 @@ async function generateConversationalResponse({
         '- "Факт доход 18 600 000 ₸" = уже получили деньги',
         '- "План доход 3 600 000 ₸" = ожидаем получить в будущем',
         'Ты финансовый аналитик. Отвечай КРАТКО, КОНКРЕТНО, БЕЗ ВОДЫ.',
+        'Если ниже передан блок FORECAST_DATA, используй его значения как единственный источник чисел для блоков Баланс/Метрики/Прогноз.',
         '',
         '🚨 ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА (НЕ ОТКЛОНЯЙСЯ):',
         'Баланс на [текущую дату]',
@@ -256,6 +324,11 @@ async function generateConversationalResponse({
             `Итоговый баланс: ${formatCurrency(futureBalance.projected)}`,
             ''
         ] : []),
+        ...(forecastData ? [
+            'FORECAST_DATA (используй числа без изменений):',
+            JSON.stringify(forecastData, null, 2),
+            ''
+        ] : []),
         ...(categoryDetails.length > 0 ? [
             'НАПОМИНАНИЕ: факт = УЖЕ случилось, план = БУДЕТ в будущем',
             'Данные по категориям:',
@@ -299,7 +372,9 @@ async function generateConversationalResponse({
 
         const data = await response.json();
         const rawText = data.choices?.[0]?.message?.content?.trim();
-        const text = _normalizeBalanceBlock(rawText);
+        const text = forecastData
+            ? _composeForecastResponse(rawText, forecastData)
+            : _normalizeBalanceBlock(rawText);
 
         if (!text) {
             return {

@@ -257,6 +257,248 @@ module.exports = function createAiRouter(deps) {
     return bucket.net;
   };
 
+  const _fmtMoneyPlain = (value) => {
+    const n = Number(value || 0);
+    try {
+      return new Intl.NumberFormat('ru-RU')
+        .format(Math.round(Math.abs(n)))
+        .replace(/\u00A0/g, ' ');
+    } catch (_) {
+      return String(Math.round(Math.abs(n)));
+    }
+  };
+
+  const _isForecastQuery = (question) => {
+    const q = String(question || '').toLowerCase();
+    return /(прогноз|прогнозир|до конца месяца|на конец|конец месяца|концу месяца|что будет|ожидаем)/i.test(q);
+  };
+
+  const _splitTransferAccountLabel = (label) => {
+    const raw = String(label || '').trim();
+    if (!raw) return null;
+    const parts = raw.split(/\s*(?:->|→|=>|➡)\s*/);
+    if (parts.length !== 2) return null;
+    return {
+      from: String(parts[0] || '').trim(),
+      to: String(parts[1] || '').trim()
+    };
+  };
+
+  const _buildAccountNameIndex = (accounts) => {
+    const byToken = new Map();
+    (accounts || []).forEach((acc) => {
+      const token = _normalizeToken(acc?.name || '');
+      if (!token) return;
+      if (!byToken.has(token)) byToken.set(token, []);
+      byToken.get(token).push(acc);
+    });
+    return byToken;
+  };
+
+  const _resolveAccountByLabel = (label, accounts, byToken) => {
+    const token = _normalizeToken(label);
+    if (!token) return null;
+
+    const exact = byToken.get(token);
+    if (exact && exact.length) return exact[0];
+
+    for (const acc of (accounts || [])) {
+      const accToken = _normalizeToken(acc?.name || '');
+      if (_tokenLooksLike(token, accToken)) return acc;
+    }
+    return null;
+  };
+
+  const _computeForecastData = ({ rows, asOf, accounts }) => {
+    const nowRef = (() => {
+      if (asOf) {
+        const d = new Date(asOf);
+        if (!Number.isNaN(d.getTime())) return d;
+      }
+      return new Date();
+    })();
+
+    const asOfTs = nowRef.getTime();
+    const monthStart = new Date(nowRef.getFullYear(), nowRef.getMonth(), 1, 0, 0, 0, 0);
+    const monthEnd = new Date(nowRef.getFullYear(), nowRef.getMonth() + 1, 0, 23, 59, 59, 999);
+    const effectiveStart = monthStart.getTime();
+    const effectiveEnd = monthEnd.getTime();
+
+    const actual = _mkBucket();
+    const futureAll = _mkBucket();
+    const futurePlan = _mkBucket();
+
+    const futurePlanIncomeByCategory = new Map();
+    const futurePlanExpenseByCategory = new Map();
+    const factToDateByCategory = new Map();
+    const accountDeltaById = new Map();
+    const accountList = Array.isArray(accounts) ? accounts : [];
+    const accountByName = _buildAccountNameIndex(accountList);
+
+    const addCategoryFlow = (map, categoryName, kind, amountAbs) => {
+      const key = String(categoryName || 'Без категории');
+      if (!map.has(key)) {
+        map.set(key, { income: 0, expense: 0 });
+      }
+      const rec = map.get(key);
+      if (kind === 'income') rec.income += amountAbs;
+      if (kind === 'expense') rec.expense += amountAbs;
+    };
+
+    const addDelta = (accountId, delta) => {
+      const id = String(accountId || '');
+      if (!id) return;
+      accountDeltaById.set(id, (accountDeltaById.get(id) || 0) + Number(delta || 0));
+    };
+
+    rows.forEach((row) => {
+      const ts = _parseRowTs(row);
+      if (!Number.isFinite(ts)) return;
+      if (ts < effectiveStart || ts > effectiveEnd) return;
+
+      const kind = _normalizeKind(row?.type);
+      if (!kind) return;
+      const status = _normalizeStatus(row?.statusCode, row?.status);
+      const amountAbs = Math.abs(_toNum(row?.amount));
+      const categoryName = String(row?.category || 'Без категории');
+
+      if (ts <= asOfTs) {
+        _addToBucket(actual, kind, amountAbs);
+        addCategoryFlow(factToDateByCategory, categoryName, kind, amountAbs);
+        return;
+      }
+
+      _addToBucket(futureAll, kind, amountAbs);
+      if (status === 'plan') {
+        _addToBucket(futurePlan, kind, amountAbs);
+        if (kind === 'income') {
+          futurePlanIncomeByCategory.set(categoryName, (futurePlanIncomeByCategory.get(categoryName) || 0) + amountAbs);
+        }
+        if (kind === 'expense') {
+          futurePlanExpenseByCategory.set(categoryName, (futurePlanExpenseByCategory.get(categoryName) || 0) + amountAbs);
+        }
+      }
+
+      if (!accountList.length) return;
+
+      if (kind === 'transfer') {
+        const transferParts = _splitTransferAccountLabel(row?.account);
+        if (!transferParts) return;
+        const fromAcc = _resolveAccountByLabel(transferParts.from, accountList, accountByName);
+        const toAcc = _resolveAccountByLabel(transferParts.to, accountList, accountByName);
+        if (fromAcc?._id) addDelta(fromAcc._id, -amountAbs);
+        if (toAcc?._id) addDelta(toAcc._id, amountAbs);
+        return;
+      }
+
+      const acc = _resolveAccountByLabel(row?.account, accountList, accountByName);
+      if (!acc?._id) return;
+      if (kind === 'income') addDelta(acc._id, amountAbs);
+      if (kind === 'expense') addDelta(acc._id, -amountAbs);
+    });
+
+    _finalizeBucket(actual);
+    _finalizeBucket(futureAll);
+    _finalizeBucket(futurePlan);
+
+    const projectedIncome = actual.income + futureAll.income;
+    const projectedExpense = actual.expense + futureAll.expense;
+    const projectedOperatingProfit = projectedIncome - projectedExpense;
+    const projectedMargin = projectedIncome > 0
+      ? Math.round((projectedOperatingProfit / projectedIncome) * 100)
+      : 0;
+
+    const currentOpen = accountList
+      .filter((a) => !a?.isHidden && !a?.isExcluded)
+      .reduce((s, a) => s + Number(a?.balance || 0), 0);
+    const currentHidden = accountList
+      .filter((a) => a?.isHidden || a?.isExcluded)
+      .reduce((s, a) => s + Number(a?.balance || 0), 0);
+    const currentTotal = currentOpen + currentHidden;
+
+    let projectedOpen = currentOpen;
+    let projectedHidden = currentHidden;
+    accountList.forEach((acc) => {
+      const id = String(acc?._id || '');
+      if (!id) return;
+      const delta = accountDeltaById.get(id) || 0;
+      if (acc?.isHidden || acc?.isExcluded) projectedHidden += delta;
+      else projectedOpen += delta;
+    });
+
+    const projectedTotal = currentTotal + futureAll.net;
+    const classifiedTotal = projectedOpen + projectedHidden;
+    if (Math.abs(projectedTotal - classifiedTotal) > 0.5) {
+      projectedOpen += (projectedTotal - classifiedTotal);
+    }
+
+    const topPlanIncome = Array.from(futurePlanIncomeByCategory.entries())
+      .sort((a, b) => b[1] - a[1])[0] || null;
+
+    const factUtilities = (() => {
+      let income = 0;
+      let expense = 0;
+      for (const [name, rec] of factToDateByCategory.entries()) {
+        const token = _normalizeToken(name);
+        if (!token.includes('коммун')) continue;
+        income += Number(rec.income || 0);
+        expense += Number(rec.expense || 0);
+      }
+      return { income, expense };
+    })();
+
+    const plannedTaxes = (() => {
+      let total = 0;
+      for (const [name, amount] of futurePlanExpenseByCategory.entries()) {
+        const token = _normalizeToken(name);
+        if (token.includes('налог')) total += Number(amount || 0);
+      }
+      return total;
+    })();
+
+    const findings = [];
+    if (factUtilities.expense > factUtilities.income) {
+      findings.push(`Факт расход на коммуналку превышает факт доход на ${_fmtMoneyPlain(factUtilities.expense - factUtilities.income)} ₸`);
+    }
+    if (plannedTaxes > 0) {
+      findings.push(`Планируемые налоги ${_fmtMoneyPlain(plannedTaxes)} ₸ значительно повлияют на будущие расходы`);
+    }
+    if (futurePlan.expense > futurePlan.income) {
+      findings.push(`До конца месяца плановые расходы выше плановых доходов на ${_fmtMoneyPlain(futurePlan.expense - futurePlan.income)} ₸`);
+    }
+
+    const endDate = new Date(effectiveEnd);
+    const asOfDate = new Date(asOfTs);
+
+    return {
+      asOfLabel: _fmtDDMMYY(asOfDate),
+      periodEndLabel: _fmtDDMMYY(endDate),
+      current: {
+        openBalance: currentOpen,
+        hiddenBalance: currentHidden,
+        totalBalance: currentTotal
+      },
+      projected: {
+        openBalance: projectedOpen,
+        hiddenBalance: projectedHidden,
+        totalBalance: projectedOpen + projectedHidden,
+        income: projectedIncome,
+        expense: projectedExpense,
+        operatingProfit: projectedOperatingProfit,
+        marginPercent: projectedMargin,
+        liquidityOpen: projectedOpen
+      },
+      remainingPlan: {
+        income: futurePlan.income,
+        expense: futurePlan.expense,
+        operatingProfit: futurePlan.net,
+        topIncomeCategory: topPlanIncome ? String(topPlanIncome[0]) : null,
+        topIncomeAmount: topPlanIncome ? Number(topPlanIncome[1] || 0) : 0
+      },
+      findings
+    };
+  };
+
   const _summarizeRows = (rows) => {
     const summary = {
       fact: _mkBucket(),
@@ -758,7 +1000,7 @@ module.exports = function createAiRouter(deps) {
 
         // Step 4: Chat mode always uses conversational LLM branch.
         // Deterministic calculations remain as context + fallback.
-        const currentBalance = rows
+        const currentBalanceFromRows = rows
           .filter(r => {
             const status = String(r?.statusCode || r?.status || '').toLowerCase();
             return status === 'fact' || status.includes('исполнено');
@@ -772,43 +1014,72 @@ module.exports = function createAiRouter(deps) {
             return sum; // Transfers don't affect total balance
           }, 0);
 
-        const qLower = q.toLowerCase();
-        const wantsForecast = /\b(прогноз|будет|планир|forecast|plan|на конец)\b/i.test(qLower);
-
-        const futureBalance = wantsForecast ? financialCalculator.computeFutureBalance({
-          metrics: computed.metrics,
-          currentBalance
-        }) : null;
-
-        // 🟢 NEW: Split balance by open vs hidden accounts
-        const openBalance = req.body?.accounts
-          ? req.body.accounts
+        const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
+        const currentOpenBalance = accounts.length
+          ? accounts
             .filter(a => !a.isHidden && !a.isExcluded)
             .reduce((s, a) => s + (Number(a.balance) || 0), 0)
-          : currentBalance;
+          : currentBalanceFromRows;
 
-        const hiddenBalance = req.body?.accounts
-          ? req.body.accounts
+        const currentHiddenBalance = accounts.length
+          ? accounts
             .filter(a => a.isHidden || a.isExcluded)
             .reduce((s, a) => s + (Number(a.balance) || 0), 0)
           : 0;
 
-        // Extract hidden accounts data for strategic reserves context
-        const hiddenAccountsData = req.body?.accounts
+        const currentTotalBalance = currentOpenBalance + currentHiddenBalance;
+
+        const qLower = q.toLowerCase();
+        const wantsForecast = _isForecastQuery(qLower);
+        const forecastData = wantsForecast
+          ? _computeForecastData({
+            rows,
+            asOf,
+            accounts
+          })
+          : null;
+
+        const futureBalance = wantsForecast
           ? {
-            count: req.body.accounts.filter(a => a.isHidden || a.isExcluded).length,
-            totalCurrent: req.body.accounts
+            current: forecastData?.current?.totalBalance ?? currentTotalBalance,
+            plannedIncome: forecastData?.remainingPlan?.income ?? 0,
+            plannedExpense: forecastData?.remainingPlan?.expense ?? 0,
+            projected: forecastData?.projected?.totalBalance ?? currentTotalBalance,
+            change: (forecastData?.projected?.totalBalance ?? currentTotalBalance) - (forecastData?.current?.totalBalance ?? currentTotalBalance)
+          }
+          : financialCalculator.computeFutureBalance({
+            metrics: computed.metrics,
+            currentBalance: currentTotalBalance
+          });
+
+        const openBalance = wantsForecast
+          ? (forecastData?.projected?.openBalance ?? currentOpenBalance)
+          : currentOpenBalance;
+
+        const hiddenBalance = wantsForecast
+          ? (forecastData?.projected?.hiddenBalance ?? currentHiddenBalance)
+          : currentHiddenBalance;
+
+        // Extract hidden accounts data for strategic reserves context
+        const hiddenAccountsData = accounts.length
+          ? {
+            count: accounts.filter(a => a.isHidden || a.isExcluded).length,
+            totalCurrent: accounts
               .filter(a => a.isHidden || a.isExcluded)
               .reduce((s, a) => s + (Number(a.balance) || 0), 0),
-            totalFuture: req.body.accounts
-              .filter(a => a.isHidden || a.isExcluded)
-              .reduce((s, a) => s + (Number(a.futureBalance) || 0), 0)
+            totalFuture: wantsForecast
+              ? (forecastData?.projected?.hiddenBalance ?? currentHiddenBalance)
+              : accounts
+                .filter(a => a.isHidden || a.isExcluded)
+                .reduce((s, a) => s + (Number(a.futureBalance) || Number(a.balance) || 0), 0)
           }
           : null;
 
         // Format current date for greeting responses
         const now = new Date();
-        const currentDate = now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
+        const currentDate = wantsForecast && forecastData?.periodEndLabel
+          ? forecastData.periodEndLabel
+          : now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
 
         // Use conversational agent with history context
         const conversationalResult = await conversationalAgent.generateConversationalResponse({
@@ -822,7 +1093,8 @@ module.exports = function createAiRouter(deps) {
           openBalance,  // 🟢 NEW: Balance on open accounts
           hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
           hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
-          accounts: req.body?.accounts || null,  // 🟢 NEW: Full accounts array for individual balances
+          accounts: accounts || null,  // 🟢 NEW: Full accounts array for individual balances
+          forecastData: wantsForecast ? forecastData : null,
           availableContext: {
             byCategory: computed.metrics.byCategory,
             byProject: computed.metrics.byProject
@@ -863,6 +1135,7 @@ module.exports = function createAiRouter(deps) {
                   error: intentResult.error || 'Intent parser failed',
                   details: intentResult.debug || null
                 },
+              forecast: wantsForecast ? forecastData : null,
               historyLength: chatHistory.messages.length
             }
           } : {})
