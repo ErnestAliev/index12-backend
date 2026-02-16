@@ -815,13 +815,13 @@ module.exports = function createAiRouter(deps) {
           const openBalance = req.body?.accounts
             ? req.body.accounts
               .filter(a => !a.isHidden && !a.isExcluded)
-              .reduce((s, a) => s + (Number(a.currentBalance) || 0), 0)
+              .reduce((s, a) => s + (Number(a.balance) || 0), 0)
             : currentBalance;
 
           const hiddenBalance = req.body?.accounts
             ? req.body.accounts
               .filter(a => a.isHidden || a.isExcluded)
-              .reduce((s, a) => s + (Number(a.currentBalance) || 0), 0)
+              .reduce((s, a) => s + (Number(a.balance) || 0), 0)
             : 0;
 
           // Extract hidden accounts data for strategic reserves context
@@ -830,12 +830,16 @@ module.exports = function createAiRouter(deps) {
               count: req.body.accounts.filter(a => a.isHidden || a.isExcluded).length,
               totalCurrent: req.body.accounts
                 .filter(a => a.isHidden || a.isExcluded)
-                .reduce((s, a) => s + (Number(a.currentBalance) || 0), 0),
+                .reduce((s, a) => s + (Number(a.balance) || 0), 0),
               totalFuture: req.body.accounts
                 .filter(a => a.isHidden || a.isExcluded)
                 .reduce((s, a) => s + (Number(a.futureBalance) || 0), 0)
             }
             : null;
+
+          // Format current date for greeting responses
+          const now = new Date();
+          const currentDate = now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
 
           // Use conversational agent with history context
           const conversationalResult = await conversationalAgent.generateConversationalResponse({
@@ -843,6 +847,7 @@ module.exports = function createAiRouter(deps) {
             history: chatHistory.messages.slice(0, -1), // Exclude current user message (already added)
             metrics: computed.metrics,
             period: computed.period,
+            currentDate,  // 🟢 NEW: Pass formatted current date
             formatCurrency: _formatTenge,
             futureBalance: wantsForecast ? futureBalance : null,  // 🟢 Only pass if user asks for forecast
             openBalance,  // 🟢 NEW: Balance on open accounts

@@ -163,7 +163,7 @@ async function generateConversationalResponse({
 
     const userContent = [
         `Текущий вопрос: ${question}`,
-        `Текущая дата: ${period.endLabel}`,  // Current date for "как дела?" responses
+        `Текущая дата: ${currentDate || period.endLabel}`,  // Use passed currentDate or fallback to period end
         '',
         ...(insights.length > 0 ? ['Финансовый контекст:', ...insights, ''] : []),
         `Период данных: ${period.startLabel} — ${period.endLabel}`,
