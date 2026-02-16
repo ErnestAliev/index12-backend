@@ -129,7 +129,12 @@ async function generateConversationalResponse({
         ...(insights.length > 0 ? ['Финансовый контекст:', ...insights, ''] : []),
         `Период: ${period.startLabel} — ${period.endLabel}`,
         '',
-        ...(categoryDetails.length > 0 ? ['Данные по категориям:', ...categoryDetails, ''] : []),
+        ...(categoryDetails.length > 0 ? [
+            'НАПОМИНАНИЕ: факт = УЖЕ случилось, план = БУДЕТ в будущем',
+            'Данные по категориям:',
+            ...categoryDetails,
+            ''
+        ] : []),
         'ВАЖНО: У тебя есть ВСЕ данные (факт + план) по категориям выше. Используй их для расчётов.'
     ].join('\n');
 
