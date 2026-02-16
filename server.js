@@ -1936,7 +1936,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // =================================================================
 app.use('/api/ai', createAiRouter({
     mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category },
+    models: { Event, Account, Company, Contractor, Individual, Project, Category, ChatHistory },
     FRONTEND_URL,
     isAuthenticated,
     getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation
