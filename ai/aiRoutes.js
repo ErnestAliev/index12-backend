@@ -308,6 +308,29 @@ module.exports = function createAiRouter(deps) {
     return /(прогноз|прогнозир|до конца месяца|на конец|конец месяца|концу месяца|что будет|ожидаем)/i.test(q);
   };
 
+  const _isRiskQuery = (question) => {
+    const q = String(question || '').toLowerCase();
+    return /(что\s+может\s+пойти\s+не\s+так|риски?|угроз|слаб(ые|ых)\s+мест|узкие\s+места|worst|негатив|проблем)/i.test(q);
+  };
+
+  const _isStrategyQuery = (question) => {
+    const q = String(question || '').toLowerCase();
+    return /(что\s+делать|план\s+действ|как\s+улучш|оптимиз|рекомендац|стратег)/i.test(q);
+  };
+
+  const _isOverviewQuery = (question) => {
+    const q = String(question || '').toLowerCase();
+    return /(как\s+дела|обзор|сводк|текущее\s+состояние|что\s+по\s+финансам|итоги|покажи\s+состояние)/i.test(q);
+  };
+
+  const _detectResponseMode = (question) => {
+    if (_isForecastQuery(question)) return 'forecast';
+    if (_isRiskQuery(question)) return 'risk';
+    if (_isStrategyQuery(question)) return 'strategy';
+    if (_isOverviewQuery(question)) return 'overview';
+    return 'analysis';
+  };
+
   const _splitTransferAccountLabel = (label) => {
     const raw = String(label || '').trim();
     if (!raw) return null;
@@ -570,6 +593,142 @@ module.exports = function createAiRouter(deps) {
         topIncomeAmount: topPlanIncome ? Number(topPlanIncome[1] || 0) : 0
       },
       findings
+    };
+  };
+
+  const _dayKeyToLabel = (dayKey) => {
+    const m = String(dayKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return String(dayKey || '?');
+    return `${m[3]}.${m[2]}.${String(m[1]).slice(-2)}`;
+  };
+
+  const _computeRiskData = ({ rows, asOf, accounts, forecastData }) => {
+    const nowRef = (() => {
+      if (asOf) {
+        const d = new Date(asOf);
+        if (!Number.isNaN(d.getTime())) return d;
+      }
+      return new Date();
+    })();
+    const asOfDayKey = _toDayKey(nowRef);
+    const monthEndDate = new Date(nowRef.getFullYear(), nowRef.getMonth() + 1, 0, 23, 59, 59, 999);
+    const monthEndDayKey = _toDayKey(monthEndDate);
+
+    const accountList = Array.isArray(accounts) ? accounts : [];
+    const openLiquidityNow = accountList
+      .filter((a) => !a?.isHidden && !a?.isExcluded)
+      .reduce((sum, a) => sum + Number(a?.balance || 0), 0);
+
+    const futurePlanOutflows = [];
+    const futurePlanInflows = [];
+    const outflowByCategory = new Map();
+    let transferOutflowTotal = 0;
+
+    rows.forEach((row) => {
+      const dayKey = _parseRowDayKey(row);
+      if (!dayKey) return;
+      if (dayKey <= asOfDayKey || dayKey > monthEndDayKey) return;
+
+      const status = _normalizeStatus(row?.statusCode, row?.status);
+      if (status !== 'plan') return;
+
+      const kind = _normalizeKind(row?.type);
+      if (!kind) return;
+      const amount = Math.abs(_toNum(row?.amount));
+      const categoryName = String(row?.category || 'Без категории');
+      const label = kind === 'transfer'
+        ? (String(row?.account || '').trim() || 'Вывод средств')
+        : categoryName;
+      const rec = {
+        dateKey: dayKey,
+        dateLabel: _dayKeyToLabel(dayKey),
+        label,
+        amount
+      };
+
+      if (kind === 'income') {
+        futurePlanInflows.push(rec);
+        return;
+      }
+
+      if (kind === 'expense') {
+        futurePlanOutflows.push(rec);
+        outflowByCategory.set(categoryName, (outflowByCategory.get(categoryName) || 0) + amount);
+        return;
+      }
+
+      if (kind === 'transfer' && _isOutOfSystemTransferRow(row)) {
+        futurePlanOutflows.push(rec);
+        transferOutflowTotal += amount;
+        outflowByCategory.set('Вывод средств', (outflowByCategory.get('Вывод средств') || 0) + amount);
+      }
+    });
+
+    const plannedIncome = Number(forecastData?.remainingPlan?.income || 0);
+    const plannedExpenseBase = Number(forecastData?.remainingPlan?.expense || 0);
+    const plannedExpense = plannedExpenseBase + transferOutflowTotal;
+    const plannedGap = plannedExpense - plannedIncome;
+    const safetyBuffer = Math.round(Math.max(0, plannedExpense) * 0.1);
+    const reserveNeed = Math.max(0, plannedGap) + safetyBuffer;
+    const safeSpend = Math.max(0, openLiquidityNow - reserveNeed);
+    const coverageRatio = plannedExpense > 0 ? (openLiquidityNow / plannedExpense) : null;
+
+    const topOutflows = futurePlanOutflows
+      .slice()
+      .sort((a, b) => {
+        if (a.dateKey !== b.dateKey) return a.dateKey.localeCompare(b.dateKey);
+        return Number(b.amount || 0) - Number(a.amount || 0);
+      })
+      .slice(0, 6);
+
+    const topExpenseCategories = Array.from(outflowByCategory.entries())
+      .map(([name, amount]) => ({ name, amount: Number(amount || 0) }))
+      .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
+      .slice(0, 6);
+
+    const deterministicRisks = [];
+    if (plannedGap > 0) {
+      deterministicRisks.push(`Плановый разрыв до конца месяца: расходы выше доходов на ${_fmtMoneyPlain(plannedGap)} ₸.`);
+    }
+    if (openLiquidityNow < reserveNeed) {
+      deterministicRisks.push(`Текущей ликвидности недостаточно для резерва периода: дефицит ${_fmtMoneyPlain(reserveNeed - openLiquidityNow)} ₸.`);
+    }
+    if (coverageRatio !== null && coverageRatio < 1) {
+      deterministicRisks.push(`Покрытие плановых расходов открытой ликвидностью ниже 100% (${Math.round(coverageRatio * 100)}%).`);
+    }
+    if (topOutflows.length) {
+      const first = topOutflows[0];
+      deterministicRisks.push(`Ближайшее крупное списание: ${first.dateLabel} — ${first.label} на ${_fmtMoneyPlain(first.amount)} ₸.`);
+    }
+
+    const deterministicActions = [];
+    if (plannedGap > 0) {
+      deterministicActions.push(`Сократи или перенеси плановые расходы минимум на ${_fmtMoneyPlain(plannedGap)} ₸ до конца месяца.`);
+    }
+    if (safeSpend <= 0) {
+      deterministicActions.push('Ограничь новые расходы до 0 ₸ до момента подтвержденных поступлений.');
+    } else {
+      deterministicActions.push(`Зафиксируй лимит новых расходов не выше ${_fmtMoneyPlain(safeSpend)} ₸ на период до конца месяца.`);
+    }
+    if (topOutflows.length) {
+      deterministicActions.push(`Проверь и приоритизируй ближайшие списания начиная с ${topOutflows[0].dateLabel}.`);
+    }
+
+    return {
+      asOfLabel: _fmtDDMMYY(nowRef),
+      periodEndLabel: _fmtDDMMYY(monthEndDate),
+      openLiquidityNow,
+      plannedIncome,
+      plannedExpense,
+      plannedGap,
+      safetyBuffer,
+      reserveNeed,
+      safeSpend,
+      coverageRatio,
+      topOutflows,
+      topExpenseCategories,
+      deterministicRisks,
+      deterministicActions
     };
   };
 
@@ -1104,12 +1263,22 @@ module.exports = function createAiRouter(deps) {
         const currentTotalBalance = currentOpenBalance + currentHiddenBalance;
 
         const qLower = q.toLowerCase();
-        const wantsForecast = _isForecastQuery(qLower);
-        const forecastData = wantsForecast
+        const responseMode = _detectResponseMode(qLower);
+        const wantsForecast = responseMode === 'forecast';
+        const needsProjection = wantsForecast || responseMode === 'risk';
+        const forecastData = needsProjection
           ? _computeForecastData({
             rows,
             asOf,
             accounts
+          })
+          : null;
+        const riskData = responseMode === 'risk'
+          ? _computeRiskData({
+            rows,
+            asOf,
+            accounts,
+            forecastData
           })
           : null;
 
@@ -1121,10 +1290,7 @@ module.exports = function createAiRouter(deps) {
             projected: forecastData?.projected?.totalBalance ?? currentTotalBalance,
             change: (forecastData?.projected?.totalBalance ?? currentTotalBalance) - (forecastData?.current?.totalBalance ?? currentTotalBalance)
           }
-          : financialCalculator.computeFutureBalance({
-            metrics: computed.metrics,
-            currentBalance: currentTotalBalance
-          });
+          : null;
 
         const openBalance = wantsForecast
           ? (forecastData?.projected?.openBalance ?? currentOpenBalance)
@@ -1168,6 +1334,8 @@ module.exports = function createAiRouter(deps) {
           hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
           hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
           accounts: accounts || null,  // 🟢 NEW: Full accounts array for individual balances
+          responseMode,
+          riskData,
           forecastData: wantsForecast ? forecastData : null,
           availableContext: {
             byCategory: computed.metrics.byCategory,
@@ -1186,6 +1354,7 @@ module.exports = function createAiRouter(deps) {
           timestamp: new Date(),
           metadata: {
             intent,
+            responseMode,
             metrics: {
               fact: computed.metrics.fact,
               plan: computed.metrics.plan,
@@ -1209,6 +1378,8 @@ module.exports = function createAiRouter(deps) {
                   error: intentResult.error || 'Intent parser failed',
                   details: intentResult.debug || null
                 },
+              responseMode,
+              risk: responseMode === 'risk' ? riskData : null,
               forecast: wantsForecast ? forecastData : null,
               historyLength: chatHistory.messages.length
             }

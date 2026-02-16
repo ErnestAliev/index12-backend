@@ -23,6 +23,12 @@ const _formatMoneyNumber = (value) => {
     }
 };
 
+const _formatSignedMoney = (value) => {
+    const n = Number(value || 0);
+    const sign = n < 0 ? '-': '';
+    return `${sign}${_formatMoneyNumber(Math.abs(n))}`;
+};
+
 const _normalizeBalanceBlock = (rawText) => {
     const text = String(rawText || '').trim();
     if (!text) return text;
@@ -95,6 +101,26 @@ const _extractFindingsFromText = (rawText) => {
     return findings.filter(Boolean);
 };
 
+const _extractBulletsFromSection = (rawText, sectionRe) => {
+    const text = String(rawText || '').trim();
+    if (!text) return [];
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex((line) => sectionRe.test(String(line || '').trim()));
+    if (start < 0) return [];
+
+    const out = [];
+    for (let i = start + 1; i < lines.length; i++) {
+        const ln = String(lines[i] || '').trim();
+        if (!ln) {
+            if (out.length) break;
+            continue;
+        }
+        if (/^[A-Za-zА-Яа-я0-9 _-]+\s*:$/.test(ln) && !ln.startsWith('-')) break;
+        if (/^-+\s+/.test(ln)) out.push(ln.replace(/^-+\s*/, '').trim());
+    }
+    return out.filter(Boolean);
+};
+
 const _composeForecastResponse = (rawText, forecastData) => {
     if (!forecastData || typeof forecastData !== 'object') {
         return _normalizeBalanceBlock(rawText);
@@ -137,6 +163,81 @@ const _composeForecastResponse = (rawText, forecastData) => {
     return lines.join('\n').trim();
 };
 
+const _composeRiskResponse = (rawText, riskData) => {
+    const data = (riskData && typeof riskData === 'object') ? riskData : {};
+    const llmRiskBullets = _extractBulletsFromSection(rawText, /^\s*(риски?|что\s+может\s+пойти\s+не\s+так)\s*:/i);
+    const llmActionBullets = _extractBulletsFromSection(rawText, /^\s*(действия|что\s+делать|шаги)\s*:/i);
+
+    const plannedIncome = Number(data?.plannedIncome || 0);
+    const plannedExpense = Number(data?.plannedExpense || 0);
+    const plannedGap = Number(data?.plannedGap || 0);
+    const openLiquidityNow = Number(data?.openLiquidityNow || 0);
+    const reserveNeed = Number(data?.reserveNeed || 0);
+    const safeSpend = Number(data?.safeSpend || 0);
+    const coverageRatio = Number.isFinite(Number(data?.coverageRatio))
+        ? Number(data.coverageRatio)
+        : null;
+    const topOutflows = Array.isArray(data?.topOutflows) ? data.topOutflows : [];
+    const topCats = Array.isArray(data?.topExpenseCategories) ? data.topExpenseCategories : [];
+    const deterministicRisks = Array.isArray(data?.deterministicRisks) ? data.deterministicRisks : [];
+    const deterministicActions = Array.isArray(data?.deterministicActions) ? data.deterministicActions : [];
+
+    const risks = llmRiskBullets.length ? llmRiskBullets : deterministicRisks;
+    const actions = llmActionBullets.length ? llmActionBullets : deterministicActions;
+
+    const lines = [
+        `Риск-профиль на ${data?.asOfLabel || '?'} (до ${data?.periodEndLabel || '?'})`,
+        '',
+        'Риски:'
+    ];
+
+    if (risks.length) {
+        risks.slice(0, 5).forEach((item) => lines.push(`- ${item}`));
+    } else {
+        lines.push('- Критичных рисков на текущем срезе не выявлено.');
+    }
+
+    lines.push('');
+    lines.push('Контрольные точки:');
+    lines.push(`- План доходы до конца месяца: ${_formatMoneyNumber(plannedIncome)} ₸`);
+    lines.push(`- План расходы до конца месяца: ${_formatMoneyNumber(plannedExpense)} ₸`);
+    lines.push(`- Плановый разрыв: ${_formatSignedMoney(plannedGap)} ₸`);
+    lines.push(`- Текущая ликвидность (открытые): ${_formatMoneyNumber(openLiquidityNow)} ₸`);
+    lines.push(`- Резерв на период: ${_formatMoneyNumber(reserveNeed)} ₸`);
+    lines.push(`- Безопасный лимит доп. трат: ${_formatMoneyNumber(safeSpend)} ₸`);
+    if (coverageRatio !== null) {
+        lines.push(`- Покрытие плановых расходов ликвидностью: ${Math.round(coverageRatio * 100)}%`);
+    }
+
+    if (topOutflows.length) {
+        lines.push('');
+        lines.push('Ближайшие плановые списания:');
+        topOutflows.slice(0, 3).forEach((row) => {
+            lines.push(`- ${row.dateLabel || '?'}: ${row.label || 'Расход'} — ${_formatMoneyNumber(row.amount || 0)} ₸`);
+        });
+    }
+
+    if (topCats.length) {
+        lines.push('');
+        lines.push('Крупные расходные категории:');
+        topCats.slice(0, 3).forEach((row) => {
+            lines.push(`- ${row.name || 'Без категории'}: ${_formatMoneyNumber(row.amount || 0)} ₸`);
+        });
+    }
+
+    lines.push('');
+    lines.push('Действия:');
+    if (actions.length) {
+        actions.slice(0, 4).forEach((item, idx) => lines.push(`${idx + 1}. ${item}`));
+    } else {
+        lines.push('1. Закрой разрыв плана: перенеси/сократи расходы минимум на сумму планового разрыва.');
+        lines.push('2. Зафиксируй лимит новых трат не выше "безопасного лимита".');
+        lines.push('3. Проверь ближайшие списания и подтвердить критичные платежи по датам.');
+    }
+
+    return lines.join('\n').trim();
+};
+
 /**
  * Generate conversational response with context from chat history
  * @param {Object} params
@@ -147,6 +248,8 @@ const _composeForecastResponse = (rawText, forecastData) => {
  * @param {Function} params.formatCurrency - Currency formatter
  * @param {Object} params.availableContext - Available categories, projects, etc
  * @param {Object|null} params.forecastData - Deterministic forecast snapshot
+ * @param {string} params.responseMode - overview | forecast | risk | strategy | analysis
+ * @param {Object|null} params.riskData - Deterministic risk snapshot
  * @returns {Promise<{ok: boolean, text: string, debug: Object}>}
  */
 async function generateConversationalResponse({
@@ -162,6 +265,8 @@ async function generateConversationalResponse({
     hiddenAccountsData = null,
     accounts = null,
     forecastData = null,
+    responseMode = 'analysis',
+    riskData = null,
     availableContext = {}
 }) {
     const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -221,6 +326,68 @@ async function generateConversationalResponse({
 
     // Detect if this is a greeting (new conversation start)
     const isGreeting = /^(привет|здравствуй|добрый день|доброе утро|добрый вечер|hi|hello)/i.test(question.trim());
+    const mode = (() => {
+        const v = String(responseMode || '').trim().toLowerCase();
+        return ['overview', 'forecast', 'risk', 'strategy', 'analysis'].includes(v) ? v : 'analysis';
+    })();
+
+    const modeInstructions = (() => {
+        if (mode === 'overview') {
+            return [
+                'РЕЖИМ: OVERVIEW.',
+                'Верни структурный ответ строго в формате:',
+                'Баланс на [дата]',
+                '- Открытые: [сумма] ₸',
+                '- Скрытые: [сумма] ₸',
+                '- Итого: [сумма] ₸',
+                '',
+                'Метрики:',
+                '- Маржа: [%] (доход [сумма], расход [сумма])',
+                '- Ликвидность: [сумма] на открытых счетах',
+                '- Операционная прибыль: [сумма]',
+                '',
+                'Находки:',
+                '- [конкретные аномалии с цифрами]'
+            ];
+        }
+        if (mode === 'forecast') {
+            return [
+                'РЕЖИМ: FORECAST.',
+                'Сфокусируйся на прогнозе конца месяца.',
+                'Используй FORECAST_DATA как единственный источник чисел.',
+                'Не добавляй лишних секций.'
+            ];
+        }
+        if (mode === 'risk') {
+            return [
+                'РЕЖИМ: RISK.',
+                'НЕ используй блоки "Баланс/Метрики/Находки".',
+                'Верни только практический риск-отчёт с секциями:',
+                'Риски:',
+                '- [риск с числом и датой]',
+                '',
+                'Контрольные точки:',
+                '- [метрика и порог]',
+                '',
+                'Действия:',
+                '1. [конкретный шаг]',
+                '2. [конкретный шаг]',
+                'Каждый риск и шаг должен быть применим на практике сегодня.'
+            ];
+        }
+        if (mode === 'strategy') {
+            return [
+                'РЕЖИМ: STRATEGY.',
+                'Дай стратегические действия с цифрами и ожидаемым эффектом.',
+                'Без шаблона "Баланс/Метрики/Находки".'
+            ];
+        }
+        return [
+            'РЕЖИМ: ANALYSIS.',
+            'Отвечай по сути вопроса пользователя, без обязательного универсального шаблона.',
+            'Если нужен список действий — давай конкретные шаги и цифры.'
+        ];
+    })();
 
     const systemPrompt = [
         'Ты AI-финансист INDEX12. Стиль: эксперт, аналитик, краткий.',
@@ -235,21 +402,8 @@ async function generateConversationalResponse({
         '- "Факт доход 18 600 000 ₸" = уже получили деньги',
         '- "План доход 3 600 000 ₸" = ожидаем получить в будущем',
         'Ты финансовый аналитик. Отвечай КРАТКО, КОНКРЕТНО, БЕЗ ВОДЫ.',
-        'Если ниже передан блок FORECAST_DATA, используй его значения как единственный источник чисел для блоков Баланс/Метрики/Прогноз.',
-        '',
-        '🚨 ОБЯЗАТЕЛЬНЫЙ ФОРМАТ ОТВЕТА (НЕ ОТКЛОНЯЙСЯ):',
-        'Баланс на [текущую дату]',
-        '- Открытые: [сумма] ₸',
-        '- Скрытые: [сумма] ₸',
-        '- Итого: [общая сумма] ₸',
-        '',
-        'Метрики:',
-        '- Маржа: [%] (доход [сумма], расход [сумма])',
-        '- Ликвидность: [сумма] на открытых счетах',
-        '- Операционная прибыль: [сумма]',
-        '',
-        'Находки:',
-        '- [только если есть аномалии, которые можно исправить]',
+        'Следуй режиму ответа, переданному ниже.',
+        ...modeInstructions,
         '',
         '❌ СТРОГО ЗАПРЕЩЕНО:',
         '- "все идет хорошо", "стабильность", "положительная динамика" - ПУСТЫЕ СЛОВА',
@@ -258,32 +412,6 @@ async function generateConversationalResponse({
         '- Любые фразы без ЦИФР и ДОКАЗАТЕЛЬСТВ',
         '- Упоминать факторы, на которые пользователь не может повлиять',
         '- Использовать сокращения чисел (50.378M, 164K) - ТОЛЬКО ПОЛНЫЕ ЧИСЛА!',
-        '',
-        '✅ ПРИМЕР ИДЕАЛЬНОГО ОТВЕТА:',
-        'Баланс на 16.02.26',
-        '- Открытые: 4 285 000 ₸',
-        '- Скрытые: 46 378 000 ₸',
-        '- Итого: 50 663 000 ₸',
-        '',
-        'Метрики:',
-        '- Маржа: 68% (доход 19 770 000, расход 6 212 000)',
-        '- Ликвидность: 4 285 000 на открытых счетах',
-        '- Операционная прибыль: 15 097 000',
-        '',
-        'Находки:',
-        '- Расход на коммуналку превышает доход на 1 666 000 ₸',
-        '',
-        '❌ ПРИМЕР ПЛОХОГО ОТВЕТА:',
-        '"У тебя все идет хорошо... стабильность поступлений... налоги могут повлиять..."',
-        '',
-        'ВАЖНО О БАЛАНСАХ:',
-        'Открытые счета = НЕ isHidden И НЕ isExcluded',
-        'Скрытые счета = isHidden ИЛИ isExcluded',
-        'ВСЕГДА показывай каждый счет отдельно с его текущим балансом!',
-        '',
-        'СТРАТЕГИЧЕСКИЕ РЕЗЕРВЫ:',
-        'Если видишь скрытые счета → называй "стратегический резерв" или просто их название',
-        'При вопросах об инвестициях → спроси про месячные расходы',
         ''
     ].join(' ');
 
@@ -306,6 +434,7 @@ async function generateConversationalResponse({
     const userContent = [
         `Текущий вопрос: ${question}`,
         `Текущая дата: ${currentDate || period.endLabel}`,  // Use passed currentDate or fallback to period end
+        `Режим ответа: ${mode}`,
         '',
         ...(insights.length > 0 ? ['Финансовый контекст:', ...insights, ''] : []),
         `Период данных: ${period.startLabel} — ${period.endLabel}`,
@@ -329,6 +458,11 @@ async function generateConversationalResponse({
             JSON.stringify(forecastData, null, 2),
             ''
         ] : []),
+        ...(riskData ? [
+            'RISK_DATA (используй для риск-оценки и действий):',
+            JSON.stringify(riskData, null, 2),
+            ''
+        ] : []),
         ...(categoryDetails.length > 0 ? [
             'НАПОМИНАНИЕ: факт = УЖЕ случилось, план = БУДЕТ в будущем',
             'Данные по категориям:',
@@ -339,10 +473,15 @@ async function generateConversationalResponse({
     ].join('\n');
 
     try {
+        const historyForModel = (() => {
+            if (isGreeting) return [];
+            if (mode === 'overview' || mode === 'forecast') return conversationMessages;
+            return conversationMessages.filter((m) => m.role === 'user').slice(-8);
+        })();
+
         const messages = [
             { role: 'system', content: systemPrompt },
-            // If greeting, ignore history to start fresh
-            ...(isGreeting ? [] : conversationMessages),
+            ...historyForModel,
             { role: 'user', content: userContent }
         ];
 
@@ -372,9 +511,18 @@ async function generateConversationalResponse({
 
         const data = await response.json();
         const rawText = data.choices?.[0]?.message?.content?.trim();
-        const text = forecastData
-            ? _composeForecastResponse(rawText, forecastData)
-            : _normalizeBalanceBlock(rawText);
+        const text = (() => {
+            if (mode === 'forecast' && forecastData) {
+                return _composeForecastResponse(rawText, forecastData);
+            }
+            if (mode === 'risk') {
+                return _composeRiskResponse(rawText, riskData);
+            }
+            if (mode === 'overview') {
+                return _normalizeBalanceBlock(rawText);
+            }
+            return String(rawText || '').trim();
+        })();
 
         if (!text) {
             return {
@@ -390,7 +538,8 @@ async function generateConversationalResponse({
             debug: {
                 model: data.model,
                 usage: data.usage,
-                historyLength: conversationMessages.length
+                historyLength: historyForModel.length,
+                responseMode: mode
             }
         };
     } catch (err) {
