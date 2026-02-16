@@ -413,6 +413,5 @@ async function generateConversationalResponse({ question, metrics, period, forma
 module.exports = {
     parseIntent,
     normalizeIntent,
-    formatAnswer,
-    generateConversationalResponse
+    formatAnswer
 };
