@@ -179,14 +179,14 @@ async function generateConversationalResponse({
             'Открытые счета:',
             ...accounts
                 .filter(a => !a.isHidden && !a.isExcluded)
-                .map(a => `  - ${a.name}: ${formatCurrency(a.currentBalance || 0)}`),
+                .map(a => `  - ${a.name}: ${formatCurrency(a.balance || 0)}`),
             `  Итого открытые: ${formatCurrency(openBalance || 0)}`,
             '',
             ...(accounts.filter(a => a.isHidden || a.isExcluded).length > 0 ? [
                 'Скрытые счета:',
                 ...accounts
                     .filter(a => a.isHidden || a.isExcluded)
-                    .map(a => `  - ${a.name}: ${formatCurrency(a.currentBalance || 0)}`),
+                    .map(a => `  - ${a.name}: ${formatCurrency(a.balance || 0)}`),
                 `  Итого скрытые: ${formatCurrency(hiddenBalance || 0)}`,
                 ''
             ] : ['Скрытых счетов нет', ''])
