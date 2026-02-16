@@ -845,6 +845,7 @@ module.exports = function createAiRouter(deps) {
             openBalance,  // 🟢 NEW: Balance on open accounts
             hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
             hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
+            accounts: req.body?.accounts || null,  // 🟢 NEW: Full accounts array for individual balances
             availableContext: {
               byCategory: computed.metrics.byCategory,
               byProject: computed.metrics.byProject
