@@ -26,13 +26,19 @@ async function parseIntent({ question, availableContext = {} }) {
         'Return ONLY valid JSON, no other text.',
         'Always respond in Russian for description field.',
         'Extract:',
+        '- isFinancial: true if user asks about money/finances, false if greeting/casual talk',
         '- metric: "income" | "expense" | "net" | "transfer" | "overview"',
         '- scope: "all" | "category" | "project" | "account"',
         '- status: "fact" | "plan" | "both"',
         '- groupBy: null | "category" | "project"',
         '- filters: { categories: [], projects: [] }',
         '- description: brief description of what user wants in Russian',
+        'Examples of NON-financial (isFinancial=false):',
+        '- "привет", "как дела?", "спасибо", "добрый день"',
+        'Examples of financial (isFinancial=true):',
+        '- "сколько заработали?", "расходы по проектам", "прибыль за месяц"',
         'If uncertain, use safe defaults:',
+        '- isFinancial: true',
         '- metric: "overview"',
         '- scope: "all"',
         '- status: "both"',
@@ -132,6 +138,7 @@ function normalizeIntent(intent) {
     const allowedGroupBy = [null, 'category', 'project'];
 
     return {
+        isFinancial: typeof intent?.isFinancial === 'boolean' ? intent.isFinancial : true,
         metric: allowedMetrics.includes(intent?.metric) ? intent.metric : 'overview',
         scope: allowedScopes.includes(intent?.scope) ? intent.scope : 'all',
         status: allowedStatuses.includes(intent?.status) ? intent.status : 'both',
@@ -239,8 +246,154 @@ function formatAnswer({ intent, metrics, period, formatCurrency }) {
     return lines.join('\n');
 }
 
+/**
+ * Generate conversational response for non-financial queries (greetings, etc.)
+ * Uses LLM to create friendly response while mentioning interesting financial events
+ * @param {Object} params
+ * @param {string} params.question - User's question (greeting)
+ * @param {Object} params.metrics - Computed financial metrics
+ * @param {Object} params.period - Period info
+ * @param {Function} params.formatCurrency - Currency formatter
+ * @returns {Promise<Object>} Response with text or error
+ */
+async function generateConversationalResponse({ question, metrics, period, formatCurrency }) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+
+    if (!apiKey) {
+        return {
+            ok: false,
+            error: 'AI temporarily unavailable: missing OPENAI_API_KEY'
+        };
+    }
+
+    // Prepare interesting insights from metrics
+    const insights = [];
+
+    // Today's or tomorrow's planned expenses
+    if (metrics.plan.expense > 0) {
+        insights.push(`Запланированные расходы: ${formatCurrency(metrics.plan.expense)}`);
+    }
+
+    // Recent income
+    if (metrics.fact.income > 0) {
+        insights.push(`Доходы за период: ${formatCurrency(metrics.fact.income)}`);
+    }
+
+    // Net profit/loss
+    if (metrics.fact.net !== 0) {
+        insights.push(`Чистый результат: ${formatCurrency(metrics.fact.net)}`);
+    }
+
+    // Top categories by expense
+    const topExpenseCategories = Object.values(metrics.byCategory)
+        .filter(cat => cat.total.expense > 0)
+        .sort((a, b) => b.total.expense - a.total.expense)
+        .slice(0, 2);
+
+    if (topExpenseCategories.length > 0) {
+        insights.push(`Основные расходы: ${topExpenseCategories.map(c => c.name).join(', ')}`);
+    }
+
+    // Top projects
+    const topProjects = Object.values(metrics.byProject)
+        .filter(proj => proj.total.net !== 0)
+        .sort((a, b) => Math.abs(b.total.net) - Math.abs(a.total.net))
+        .slice(0, 2);
+
+    if (topProjects.length > 0) {
+        insights.push(`Активные проекты: ${topProjects.map(p => p.name).join(', ')}`);
+    }
+
+    const systemPrompt = [
+        'Ты дружелюбный AI-ассистент финансовой системы INDEX12.',
+        'Пользователь написал приветствие или общий вопрос.',
+        'Твоя задача: ответить приветливо И упомянуть 1-2 интересных события из финансовых данных.',
+        'НЕ пиши полный отчёт - только короткую дружескую реплику с упоминанием важного события.',
+        'Примеры хороших ответов:',
+        '- "Привет! Вижу у вас сегодня запланированы расходы на 2 000 000 ₸ по проекту Аренда."',
+        '- "Добрый день! Чистая прибыль за период составила 500 000 ₸, отличный результат!"',
+        '- "Привет! Основные расходы идут на категорию Зарплаты и Аренда."',
+        'Формат денег: 8 490 000 ₸ (пробелы между тысячами, знак ₸ в конце).',
+        'Пиши в обычном тексте, без markdown.',
+        'Будь кратким - 1-2 предложения максимум.'
+    ].join(' ');
+
+    const userContent = [
+        `Вопрос пользователя: ${question}`,
+        '',
+        `Период: ${period.startLabel} — ${period.endLabel}`,
+        '',
+        'Интересные события:',
+        ...insights,
+        '',
+        'Ответь приветливо и упомяни 1-2 интересных события из списка выше.'
+    ].join('\n');
+
+    let upstream;
+    try {
+        upstream = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${apiKey}`
+            },
+            body: JSON.stringify({
+                model,
+                temperature: 0.7,
+                max_tokens: 200,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: userContent }
+                ]
+            })
+        });
+    } catch (error) {
+        return {
+            ok: false,
+            error: 'Network error while calling AI',
+            debug: { message: error?.message || String(error) }
+        };
+    }
+
+    let payload = null;
+    try {
+        payload = await upstream.json();
+    } catch (_) {
+        payload = null;
+    }
+
+    if (!upstream.ok) {
+        return {
+            ok: false,
+            error: 'AI service returned error',
+            debug: payload
+        };
+    }
+
+    const choice = payload?.choices?.[0] || null;
+    const content = choice?.message?.content;
+    const text = typeof content === 'string' ? content.trim() : '';
+
+    if (!text) {
+        // Fallback
+        return {
+            ok: true,
+            text: `Привет! ${insights[0] || 'Все в порядке.'}`,
+            debug: { model, usage: payload?.usage || null }
+        };
+    }
+
+    return {
+        ok: true,
+        text,
+        debug: { model, usage: payload?.usage || null }
+    };
+}
+
 module.exports = {
     parseIntent,
     normalizeIntent,
-    formatAnswer
+    formatAnswer,
+    generateConversationalResponse
 };

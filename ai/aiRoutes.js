@@ -719,6 +719,42 @@ module.exports = function createAiRouter(deps) {
 
         const intent = intentResult.intent;
 
+        // NEW: Check if this is a non-financial query (greeting, casual talk)
+        if (!intent.isFinancial) {
+          // Use conversational LLM with computed metrics
+          const conversationalResult = await intentParser.generateConversationalResponse({
+            question: q,
+            metrics: computed.metrics,
+            period: computed.period,
+            formatCurrency: _formatTenge
+          });
+
+          if (!conversationalResult.ok) {
+            // Fallback: simple greeting
+            return res.json({
+              text: 'Привет! Чем могу помочь?',
+              ...(debugEnabled ? {
+                debug: {
+                  intent,
+                  conversationalError: conversationalResult.error,
+                  period: computed.period
+                }
+              } : {})
+            });
+          }
+
+          return res.json({
+            text: conversationalResult.text,
+            ...(debugEnabled ? {
+              debug: {
+                intent,
+                period: computed.period,
+                conversational: conversationalResult.debug || null
+              }
+            } : {})
+          });
+        }
+
         // Step 3: Filter rows by intent (categories/projects)
         const filteredRows = rows.filter((row) => {
           // Filter by period first
