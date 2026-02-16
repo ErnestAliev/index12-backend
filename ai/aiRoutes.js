@@ -641,6 +641,30 @@ module.exports = function createAiRouter(deps) {
     res.json({ ok: true, mode: 'hybrid', version: AIROUTES_VERSION });
   });
 
+  // 🟢 GET /api/ai/history - Load chat history for current timeline date  
+  router.get('/history', isAuthenticated, async (req, res) => {
+    try {
+      const userIdStr = getCompositeUserId(req);
+      const asOf = req.query.asOf;
+      const timelineDate = asOf
+        ? new Date(asOf).toISOString().split('T')[0]
+        : new Date().toISOString().split('T')[0];
+
+      const history = await ChatHistory.findOne({
+        userId: userIdStr,
+        timelineDate
+      });
+
+      return res.json({
+        messages: history?.messages || [],
+        timelineDate
+      });
+    } catch (error) {
+      console.error('[AI History] Load error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+  });
+
   router.post('/query', isAuthenticated, async (req, res) => {
     try {
       const userId = req.user?._id || req.user?.id;
@@ -657,6 +681,10 @@ module.exports = function createAiRouter(deps) {
 
       const source = String(req?.body?.source || 'chat');
       const isQuickButton = source === 'quick_button';
+
+      // 🟢 NEW: Chat history endpoint - GET /api/ai/history
+      // Loads messages for current timeline date
+      // Used by frontend to restore conversation on page load
 
       // Chat/source=chat: NEW PIPELINE WITH CHAT HISTORY
       // 0. Load chat history for user + current timeline date
