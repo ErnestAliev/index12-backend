@@ -384,9 +384,14 @@ module.exports = function createAiRouter(deps) {
     const futurePlanIncomeByCategory = new Map();
     const futurePlanExpenseByCategory = new Map();
     const factToDateByCategory = new Map();
-    const accountDeltaById = new Map();
     const accountList = Array.isArray(accounts) ? accounts : [];
     const accountByName = _buildAccountNameIndex(accountList);
+    const projectedBalanceByAccountId = new Map();
+    accountList.forEach((acc) => {
+      const id = String(acc?._id || '');
+      if (!id) return;
+      projectedBalanceByAccountId.set(id, Number(acc?.initialBalance || 0));
+    });
 
     const addCategoryFlow = (map, categoryName, kind, amountAbs) => {
       const key = String(categoryName || 'Без категории');
@@ -400,20 +405,55 @@ module.exports = function createAiRouter(deps) {
 
     const addDelta = (accountId, delta) => {
       const id = String(accountId || '');
-      if (!id) return;
-      accountDeltaById.set(id, (accountDeltaById.get(id) || 0) + Number(delta || 0));
+      if (!id || !projectedBalanceByAccountId.has(id)) return;
+      projectedBalanceByAccountId.set(id, Number(projectedBalanceByAccountId.get(id) || 0) + Number(delta || 0));
     };
 
     rows.forEach((row) => {
       const dayKey = _parseRowDayKey(row);
       if (!dayKey) return;
-      if (dayKey < monthStartDayKey || dayKey > monthEndDayKey) return;
 
       const kind = _normalizeKind(row?.type);
       if (!kind) return;
       const status = _normalizeStatus(row?.statusCode, row?.status);
       const amountAbs = Math.abs(_toNum(row?.amount));
       const categoryName = String(row?.category || 'Без категории');
+
+      // Month-end account balances: apply all known ops up to end of month (same principle as graph tooltip).
+      if (dayKey <= monthEndDayKey && accountList.length) {
+        if (kind === 'transfer') {
+          const isOutOfSystemTransfer = _isOutOfSystemTransferRow(row);
+          const fromIdDirect = _extractId(row?.fromAccountId);
+          const toIdDirect = _extractId(row?.toAccountId);
+
+          if (fromIdDirect) addDelta(fromIdDirect, -amountAbs);
+          if (!isOutOfSystemTransfer && toIdDirect) addDelta(toIdDirect, amountAbs);
+
+          if (!fromIdDirect && !toIdDirect) {
+            const transferParts = _splitTransferAccountLabel(row?.account);
+            if (transferParts) {
+              const fromAcc = _resolveAccountByLabel(transferParts.from, accountList, accountByName);
+              const toAcc = _resolveAccountByLabel(transferParts.to, accountList, accountByName);
+              if (fromAcc?._id) addDelta(fromAcc._id, -amountAbs);
+              if (!isOutOfSystemTransfer && toAcc?._id) addDelta(toAcc._id, amountAbs);
+            }
+          }
+        } else {
+          const accountIdDirect = _extractId(row?.accountId);
+          if (accountIdDirect) {
+            if (kind === 'income') addDelta(accountIdDirect, amountAbs);
+            if (kind === 'expense') addDelta(accountIdDirect, -amountAbs);
+          } else {
+            const acc = _resolveAccountByLabel(row?.account, accountList, accountByName);
+            if (acc?._id) {
+              if (kind === 'income') addDelta(acc._id, amountAbs);
+              if (kind === 'expense') addDelta(acc._id, -amountAbs);
+            }
+          }
+        }
+      }
+
+      if (dayKey < monthStartDayKey || dayKey > monthEndDayKey) return;
 
       const isFutureDay = dayKey > asOfDayKey;
       if (!isFutureDay) {
@@ -434,36 +474,6 @@ module.exports = function createAiRouter(deps) {
       }
 
       if (!accountList.length) return;
-
-      if (kind === 'transfer') {
-        const isOutOfSystemTransfer = _isOutOfSystemTransferRow(row);
-        const fromIdDirect = _extractId(row?.fromAccountId);
-        const toIdDirect = _extractId(row?.toAccountId);
-        if (fromIdDirect) addDelta(fromIdDirect, -amountAbs);
-        if (!isOutOfSystemTransfer && toIdDirect) addDelta(toIdDirect, amountAbs);
-
-        if (fromIdDirect || toIdDirect) return;
-
-        const transferParts = _splitTransferAccountLabel(row?.account);
-        if (!transferParts) return;
-        const fromAcc = _resolveAccountByLabel(transferParts.from, accountList, accountByName);
-        const toAcc = _resolveAccountByLabel(transferParts.to, accountList, accountByName);
-        if (fromAcc?._id) addDelta(fromAcc._id, -amountAbs);
-        if (!isOutOfSystemTransfer && toAcc?._id) addDelta(toAcc._id, amountAbs);
-        return;
-      }
-
-      const accountIdDirect = _extractId(row?.accountId);
-      if (accountIdDirect) {
-        if (kind === 'income') addDelta(accountIdDirect, amountAbs);
-        if (kind === 'expense') addDelta(accountIdDirect, -amountAbs);
-        return;
-      }
-
-      const acc = _resolveAccountByLabel(row?.account, accountList, accountByName);
-      if (!acc?._id) return;
-      if (kind === 'income') addDelta(acc._id, amountAbs);
-      if (kind === 'expense') addDelta(acc._id, -amountAbs);
     });
 
     _finalizeBucket(actual);
@@ -485,14 +495,15 @@ module.exports = function createAiRouter(deps) {
       .reduce((s, a) => s + Number(a?.balance || 0), 0);
     const currentTotal = currentOpen + currentHidden;
 
-    let projectedOpen = currentOpen;
-    let projectedHidden = currentHidden;
+    let projectedOpen = 0;
+    let projectedHidden = 0;
     accountList.forEach((acc) => {
       const id = String(acc?._id || '');
       if (!id) return;
-      const delta = accountDeltaById.get(id) || 0;
-      if (acc?.isHidden || acc?.isExcluded) projectedHidden += delta;
-      else projectedOpen += delta;
+      const endBalanceRaw = Number(projectedBalanceByAccountId.get(id));
+      const endBalance = Math.max(0, Number.isFinite(endBalanceRaw) ? endBalanceRaw : Number(acc?.initialBalance || 0));
+      if (acc?.isHidden || acc?.isExcluded) projectedHidden += endBalance;
+      else projectedOpen += endBalance;
     });
 
     const topPlanIncome = Array.from(futurePlanIncomeByCategory.entries())
