@@ -787,8 +787,22 @@ module.exports = function createAiRouter(deps) {
         const isConversational = !intent.isFinancial || chatHistory.messages.length > 1;
 
         if (isConversational) {
+          // Compute current balance from all completed (fact) operations
+          const currentBalance = rows
+            .filter(r => {
+              const status = String(r?.statusCode || r?.status || '').toLowerCase();
+              return status === 'fact' || status.includes('исполнено');
+            })
+            .reduce((sum, row) => {
+              const type = String(row?.type || '').toLowerCase();
+              const amount = Math.abs(Number(row?.amount) || 0);
+
+              if (type === 'доход' || type === 'income') return sum + amount;
+              if (type === 'расход' || type === 'expense') return sum - amount;
+              return sum; // Transfers don't affect total balance
+            }, 0);
+
           // Compute future balance projection for forecasts
-          const currentBalance = req.body?.currentBalance || 0;
           const futureBalance = financialCalculator.computeFutureBalance({
             metrics: computed.metrics,
             currentBalance
