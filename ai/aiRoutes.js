@@ -732,7 +732,7 @@ module.exports = function createAiRouter(deps) {
           asOf
         });
 
-        // Step 3: Parse intent via LLM
+        // Step 3: Parse intent via LLM (for context/metadata only)
         const intentResult = await intentParser.parseIntent({
           question: q,
           availableContext: {
@@ -742,222 +742,126 @@ module.exports = function createAiRouter(deps) {
         });
 
         const debugEnabled = req?.body?.debugAi === true;
+        const intent = intentResult.ok
+          ? intentResult.intent
+          : {
+            isFinancial: true,
+            metric: 'overview',
+            scope: 'all',
+            status: 'both',
+            groupBy: null,
+            filters: { categories: [], projects: [] },
+            description: 'Финансовый запрос'
+          };
 
-        if (!intentResult.ok) {
-          // Fallback: return metrics without intent
-          const fallbackAnswer = intentParser.formatAnswer({
-            intent: {
-              metric: 'overview',
-              scope: 'all',
-              status: 'both',
-              groupBy: null,
-              filters: { categories: [], projects: [] },
-              description: 'Финансовый запрос'
-            },
-            metrics: computed.metrics,
-            period: computed.period,
-            formatCurrency: _formatTenge
-          });
+        // Step 4: Chat mode always uses conversational LLM branch.
+        // Deterministic calculations remain as context + fallback.
+        const currentBalance = rows
+          .filter(r => {
+            const status = String(r?.statusCode || r?.status || '').toLowerCase();
+            return status === 'fact' || status.includes('исполнено');
+          })
+          .reduce((sum, row) => {
+            const type = String(row?.type || '').toLowerCase();
+            const amount = Math.abs(Number(row?.amount) || 0);
 
-          // Save fallback response to history
-          chatHistory.messages.push({
-            role: 'assistant',
-            content: fallbackAnswer,
-            timestamp: new Date()
-          });
-          await chatHistory.save();
+            if (type === 'доход' || type === 'income') return sum + amount;
+            if (type === 'расход' || type === 'expense') return sum - amount;
+            return sum; // Transfers don't affect total balance
+          }, 0);
 
-          return res.json({
-            text: fallbackAnswer,
-            ...(debugEnabled ? {
-              debug: {
-                intentError: intentResult.error,
-                computed: {
-                  period: computed.period,
-                  rowCounts: computed.rowCounts
-                }
-              }
-            } : {})
-          });
-        }
+        const qLower = q.toLowerCase();
+        const wantsForecast = /\b(прогноз|будет|планир|forecast|plan|на конец)\b/i.test(qLower);
 
-        const intent = intentResult.intent;
+        const futureBalance = wantsForecast ? financialCalculator.computeFutureBalance({
+          metrics: computed.metrics,
+          currentBalance
+        }) : null;
 
-        // Step 4: Check if conversational (non-financial OR has chat history)
-        const isConversational = !intent.isFinancial || chatHistory.messages.length > 1;
+        // 🟢 NEW: Split balance by open vs hidden accounts
+        const openBalance = req.body?.accounts
+          ? req.body.accounts
+            .filter(a => !a.isHidden && !a.isExcluded)
+            .reduce((s, a) => s + (Number(a.balance) || 0), 0)
+          : currentBalance;
 
-        if (isConversational) {
-          // Compute current balance from all completed (fact) operations
-          const currentBalance = rows
-            .filter(r => {
-              const status = String(r?.statusCode || r?.status || '').toLowerCase();
-              return status === 'fact' || status.includes('исполнено');
-            })
-            .reduce((sum, row) => {
-              const type = String(row?.type || '').toLowerCase();
-              const amount = Math.abs(Number(row?.amount) || 0);
+        const hiddenBalance = req.body?.accounts
+          ? req.body.accounts
+            .filter(a => a.isHidden || a.isExcluded)
+            .reduce((s, a) => s + (Number(a.balance) || 0), 0)
+          : 0;
 
-              if (type === 'доход' || type === 'income') return sum + amount;
-              if (type === 'расход' || type === 'expense') return sum - amount;
-              return sum; // Transfers don't affect total balance
-            }, 0);
-
-          // Compute future balance projection ONLY if user asks for forecast
-          const qLower = q.toLowerCase();
-          const wantsForecast = /\b(прогноз|будет|планир|forecast|plan|на конец)\b/i.test(qLower);
-
-          const futureBalance = wantsForecast ? financialCalculator.computeFutureBalance({
-            metrics: computed.metrics,
-            currentBalance
-          }) : null;
-
-          // 🟢 NEW: Split balance by open vs hidden accounts
-          const openBalance = req.body?.accounts
-            ? req.body.accounts
-              .filter(a => !a.isHidden && !a.isExcluded)
-              .reduce((s, a) => s + (Number(a.balance) || 0), 0)
-            : currentBalance;
-
-          const hiddenBalance = req.body?.accounts
-            ? req.body.accounts
+        // Extract hidden accounts data for strategic reserves context
+        const hiddenAccountsData = req.body?.accounts
+          ? {
+            count: req.body.accounts.filter(a => a.isHidden || a.isExcluded).length,
+            totalCurrent: req.body.accounts
               .filter(a => a.isHidden || a.isExcluded)
-              .reduce((s, a) => s + (Number(a.balance) || 0), 0)
-            : 0;
-
-          // Extract hidden accounts data for strategic reserves context
-          const hiddenAccountsData = req.body?.accounts
-            ? {
-              count: req.body.accounts.filter(a => a.isHidden || a.isExcluded).length,
-              totalCurrent: req.body.accounts
-                .filter(a => a.isHidden || a.isExcluded)
-                .reduce((s, a) => s + (Number(a.balance) || 0), 0),
-              totalFuture: req.body.accounts
-                .filter(a => a.isHidden || a.isExcluded)
-                .reduce((s, a) => s + (Number(a.futureBalance) || 0), 0)
-            }
-            : null;
-
-          // Format current date for greeting responses
-          const now = new Date();
-          const currentDate = now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
-
-          // Use conversational agent with history context
-          const conversationalResult = await conversationalAgent.generateConversationalResponse({
-            question: q,
-            history: chatHistory.messages.slice(0, -1), // Exclude current user message (already added)
-            metrics: computed.metrics,
-            period: computed.period,
-            currentDate,  // 🟢 NEW: Pass formatted current date
-            formatCurrency: _formatTenge,
-            futureBalance: wantsForecast ? futureBalance : null,  // 🟢 Only pass if user asks for forecast
-            openBalance,  // 🟢 NEW: Balance on open accounts
-            hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
-            hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
-            accounts: req.body?.accounts || null,  // 🟢 NEW: Full accounts array for individual balances
-            availableContext: {
-              byCategory: computed.metrics.byCategory,
-              byProject: computed.metrics.byProject
-            }
-          });
-
-          const responseText = conversationalResult.ok
-            ? conversationalResult.text
-            : `Привет! ${computed.metrics.total.income > 0 ? 'Доходы за период: ' + _formatTenge(computed.metrics.total.income) : 'Чем могу помочь?'}`;
-
-          // Save agent response to history
-          chatHistory.messages.push({
-            role: 'assistant',
-            content: responseText,
-            timestamp: new Date(),
-            metadata: {
-              intent,
-              metrics: {
-                fact: computed.metrics.fact,
-                plan: computed.metrics.plan,
-                total: computed.metrics.total
-              }
-            }
-          });
-          await chatHistory.save();
-
-          return res.json({
-            text: responseText,
-            ...(debugEnabled ? {
-              debug: {
-                intent,
-                period: computed.period,
-                conversational: conversationalResult.debug || null,
-                historyLength: chatHistory.messages.length
-              }
-            } : {})
-          });
-        }
-
-        // Step 3: Filter rows by intent (categories/projects)
-        const filteredRows = rows.filter((row) => {
-          // Filter by period first
-          const ts = financialCalculator.parseRowTimestamp(row);
-          if (!Number.isFinite(ts)) return false;
-          if (ts < computed.period.startTs || ts > computed.period.endTs) return false;
-
-          // Filter by categories if specified
-          if (intent.filters.categories.length > 0) {
-            const category = String(row?.category || '');
-            if (!intent.filters.categories.includes(category)) return false;
+              .reduce((s, a) => s + (Number(a.balance) || 0), 0),
+            totalFuture: req.body.accounts
+              .filter(a => a.isHidden || a.isExcluded)
+              .reduce((s, a) => s + (Number(a.futureBalance) || 0), 0)
           }
+          : null;
 
-          // Filter by projects if specified
-          if (intent.filters.projects.length > 0) {
-            const project = String(row?.project || '');
-            if (!intent.filters.projects.includes(project)) return false;
-          }
+        // Format current date for greeting responses
+        const now = new Date();
+        const currentDate = now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
 
-          return true;
-        });
-
-        // Step 4: Recalculate metrics on filtered rows
-        const filteredMetrics = financialCalculator.calculateAggregates(filteredRows);
-
-        // Step 5: Format answer using intent and computed metrics
-        const answer = intentParser.formatAnswer({
-          intent,
-          metrics: filteredMetrics,
+        // Use conversational agent with history context
+        const conversationalResult = await conversationalAgent.generateConversationalResponse({
+          question: q,
+          history: chatHistory.messages.slice(0, -1), // Exclude current user message (already added)
+          metrics: computed.metrics,
           period: computed.period,
-          formatCurrency: _formatTenge
+          currentDate,  // 🟢 NEW: Pass formatted current date
+          formatCurrency: _formatTenge,
+          futureBalance: wantsForecast ? futureBalance : null,  // 🟢 Only pass if user asks for forecast
+          openBalance,  // 🟢 NEW: Balance on open accounts
+          hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
+          hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
+          accounts: req.body?.accounts || null,  // 🟢 NEW: Full accounts array for individual balances
+          availableContext: {
+            byCategory: computed.metrics.byCategory,
+            byProject: computed.metrics.byProject
+          }
         });
 
-        // Step 6: Save financial query response to history
+        const responseText = conversationalResult.ok
+          ? conversationalResult.text
+          : (conversationalResult?.text || `Привет! ${computed.metrics.total.income > 0 ? 'Доходы за период: ' + _formatTenge(computed.metrics.total.income) : 'Чем могу помочь?'}`);
+
+        // Save agent response to history
         chatHistory.messages.push({
           role: 'assistant',
-          content: answer,
+          content: responseText,
           timestamp: new Date(),
           metadata: {
             intent,
             metrics: {
-              fact: filteredMetrics.fact,
-              plan: filteredMetrics.plan,
-              total: filteredMetrics.total
+              fact: computed.metrics.fact,
+              plan: computed.metrics.plan,
+              total: computed.metrics.total
             }
           }
         });
         await chatHistory.save();
 
         return res.json({
-          text: answer,
+          text: responseText,
           ...(debugEnabled ? {
             debug: {
               intent,
               period: computed.period,
-              rowCounts: {
-                input: rows.length,
-                afterPeriodFilter: computed.rowCounts.afterPeriodFilter,
-                afterIntentFilter: filteredRows.length
-              },
-              metrics: {
-                fact: filteredMetrics.fact,
-                plan: filteredMetrics.plan,
-                total: filteredMetrics.total
-              }
+              rowCounts: computed.rowCounts,
+              conversational: conversationalResult.debug || null,
+              intentParser: intentResult.ok
+                ? (intentResult.debug || null)
+                : {
+                  error: intentResult.error || 'Intent parser failed',
+                  details: intentResult.debug || null
+                },
+              historyLength: chatHistory.messages.length
             }
           } : {})
         });
