@@ -11,15 +11,64 @@
  * @param {Function} params.formatTenge - Currency formatter
  * @returns {string|null} Formatted response or null if not handled
  */
-function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
+function handleQuickQuery({ action, query, dbData, snapshot, formatTenge }) {
+    // NEW: If explicit action provided (from quick button), route directly
+    if (action) {
+        console.log('[quickMode] Action-based routing:', action);
+
+        switch (action) {
+            case 'analysis':
+                return handleAnalysisQuery({ dbData });
+
+            case 'forecast':
+                return handleForecastQuery({ dbData });
+
+            case 'accounts':
+                return handleAccountsQuery({ dbData, formatTenge });
+
+            case 'income':
+                return handleIncomeQuery({ dbData, formatTenge });
+
+            case 'expense':
+                return handleExpenseQuery({ dbData, formatTenge });
+
+            case 'transfers':
+                return handleTransfersQuery({ dbData, formatTenge, withdrawalsOnly: false });
+
+            case 'withdrawals':
+                return handleTransfersQuery({ dbData, formatTenge, withdrawalsOnly: true });
+
+            case 'companies':
+                return handleCompaniesQuery({ dbData, formatTenge });
+
+            case 'projects':
+                return handleProjectsQuery({ dbData, formatTenge, query: '' });
+
+            case 'contractors':
+                return handleContractorsQuery({ dbData });
+
+            case 'individuals':
+                return handleIndividualsQuery({ dbData });
+
+            case 'categories':
+                return handleCategoriesQuery({ dbData });
+
+            default:
+                console.log('[quickMode] Unknown action:', action);
+                return null;
+        }
+    }
+
+    // FALLBACK: Legacy text-based routing for backwards compatibility
+    // (Used when users type queries in chat mode or old API calls)
     const qLower = String(query || '').toLowerCase().trim();
+    console.log('[quickMode] Text-based routing (fallback):', qLower);
+
     const asksTransfers = /(перевод|трансфер|transfer)/i.test(qLower);
-    const asksWithdrawals = /(вывод\s+средств|сняти[ея]|личн(ая|ый|ую)\s+(карт|счет))/i.test(qLower);
-    const asksDeterministicAnalysis = /^(как\s+дела\??|анализ|сделай\s+анализ|анализ\s+состояния)$/i.test(qLower);
+    const asksWithdrawals = /(вывод\s+средств|снят[иея]|личн(ая|ый|ую)\s+(карт|счет))/i.test(qLower);
+    const asksDeterministicAnalysis = /^(анализ|сделай\s+анализ|анализ\s+состояния)$/i.test(qLower);
     const asksDeterministicForecast = /^(прогноз|сделай\s+прогноз|прогноз\s+на\s+конец\s+месяца)$/i.test(qLower)
         || /(до\s+конца\s+месяца|конец\s+месяца)/i.test(qLower);
-
-    console.log('[quickMode] query:', qLower);
 
     // =====================
     // DETERMINISTIC ANALYSIS / FORECAST
@@ -279,6 +328,23 @@ function _fmtMoneyTenge(value, { signed = false } = {}) {
     return `${_fmtMoneyPlain(value, { signed })} ₸`;
 }
 
+// Smart context formatting: use "млн" for millions to improve readability
+function _fmtMoneyContext(value) {
+    const n = Number(value || 0);
+    const abs = Math.abs(n);
+
+    if (abs >= 1000000) {
+        // Display as millions with 1 decimal place
+        const millions = abs / 1000000;
+        const formatted = millions.toFixed(1).replace('.', ',');
+        return `${formatted} млн`;
+    }
+
+    // Below 1M, use regular formatting without ₸ symbol
+    return _fmtMoneyPlain(abs);
+}
+
+
 function _collectUtilitiesFact(dbData) {
     let income = 0;
     let expense = 0;
@@ -318,37 +384,124 @@ function handleAnalysisQuery({ dbData }) {
     const asOfLabel = dbData.meta?.today || '?';
     const summary = dbData.operationsSummary || {};
 
+    // Fact data
     const factIncome = Number(summary?.income?.fact?.total || 0);
     const factExpense = Number(summary?.expense?.fact?.total || 0);
-    const operatingProfit = factIncome - factExpense;
-    const margin = factIncome > 0 ? Math.round((operatingProfit / factIncome) * 100) : 0;
+    const factProfit = factIncome - factExpense;
 
+    // Plan data (remaining forecast)
+    const plannedIncome = Number(summary?.income?.forecast?.total || 0);
+    const plannedExpense = Number(summary?.expense?.forecast?.total || 0);
+    const plannedGap = plannedExpense - plannedIncome;
+
+    // Totals (projected full period: fact + plan)
+    const totalIncome = factIncome + plannedIncome;
+    const totalExpense = factExpense + plannedExpense;
+    const totalProfit = totalIncome - totalExpense;
+
+    // Balances
     const openBalance = Number(dbData?.totals?.open?.current || 0);
     const hiddenBalance = Number(dbData?.totals?.hidden?.current || 0);
     const totalBalance = Number(dbData?.totals?.all?.current || (openBalance + hiddenBalance));
 
-    const utilities = _collectUtilitiesFact(dbData);
-    const findings = [];
-    if (utilities.expense > utilities.income) {
-        findings.push(`Расход на коммуналку превышает доход на ${_fmtMoneyPlain(utilities.expense - utilities.income)} ₸.`);
+    // Percentages
+    const margin = totalIncome > 0 ? Math.round((totalProfit / totalIncome) * 100) : 0;
+    const expenseRatio = totalIncome > 0 ? Math.round((totalExpense / totalIncome) * 100) : 0;
+
+    // Greeting
+    lines.push('Привет.');
+    lines.push('');
+
+    // 1. P&L Section with logical chains
+    lines.push('1. Финансовый результат (P&L)');
+
+    if (totalIncome > 0) {
+        const incomeChain = [];
+        incomeChain.push(`Факт доходов (${_fmtMoneyPlain(factIncome)} ₸)`);
+        if (plannedIncome > 0) {
+            incomeChain.push(`План остатка (${_fmtMoneyPlain(plannedIncome)} ₸)`);
+            incomeChain.push(`Прогноз выручки ${_fmtMoneyPlain(totalIncome)} ₸`);
+        }
+
+        const expenseChain = [];
+        if (factExpense > 0 && plannedExpense > 0) {
+            expenseChain.push(`Расходы (Факт ${_fmtMoneyContext(factExpense)} + План ${_fmtMoneyContext(plannedExpense)}) составляют ${expenseRatio}% от выручки`);
+        } else if (factExpense > 0) {
+            expenseChain.push(`Расходы ${_fmtMoneyPlain(factExpense)} ₸ составляют ${expenseRatio}% от выручки`);
+        }
+
+        expenseChain.push(`Прогноз чистой прибыли ${_fmtMoneyPlain(totalProfit)} ₸`);
+        expenseChain.push(`Рентабельность месяца ${margin > 50 ? 'высокая' : margin > 30 ? 'средняя' : 'низкая'} (${margin}%)`);
+
+        lines.push(incomeChain.join(' + ') + ' = ' + incomeChain[incomeChain.length - 1] + ' > ' + expenseChain.join(' > ') + '.');
+    } else {
+        lines.push(`Текущий баланс ${_fmtMoneyTenge(totalBalance)}`);
     }
 
-    lines.push(`Баланс на ${asOfLabel}`);
-    lines.push(`- Открытые: ${_fmtMoneyTenge(openBalance)}`);
-    lines.push(`- Скрытые: ${_fmtMoneyTenge(hiddenBalance)}`);
-    lines.push(`- Итого: ${_fmtMoneyTenge(totalBalance)}`);
     lines.push('');
-    lines.push('Метрики:');
-    lines.push(`- Маржа: ${margin}% (доход ${_fmtMoneyPlain(factIncome)}, расход ${_fmtMoneyPlain(factExpense)})`);
-    lines.push(`- Ликвидность: ${_fmtMoneyPlain(openBalance)} на открытых счетах`);
-    lines.push(`- Операционная прибыль: ${_fmtMoneyPlain(operatingProfit, { signed: true })}`);
-    lines.push('');
-    lines.push('Находки:');
-    if (findings.length) {
-        findings.forEach((item) => lines.push(`- ${item}`));
+
+    // 2. Cash Flow Section with contextualization
+    lines.push('2. Динамика Cash Flow');
+
+    if (plannedIncome > 0 || plannedExpense > 0) {
+        const cashFlowChain = [];
+
+        if (plannedGap > 0) {
+            cashFlowChain.push(`Плановые расходы (${_fmtMoneyPlain(plannedExpense)} ₸) превышают плановые поступления (${_fmtMoneyPlain(plannedIncome)} ₸) на ${_fmtMoneyPlain(plannedGap)} ₸`);
+            cashFlowChain.push('Формируется технический дефицит');
+
+            // Contextualization: check if gap is covered by existing surplus
+            if (factProfit > plannedGap) {
+                cashFlowChain.push(`Разрыв перекрывается накопленным фактическим профицитом месяца (${_fmtMoneyContext(factProfit)})`);
+                cashFlowChain.push('Вмешательство и урезание костов не требуются');
+            } else {
+                cashFlowChain.push(`Накопленный профицит (${_fmtMoneyContext(factProfit)}) НЕ перекрывает разрыв`);
+                cashFlowChain.push(`Требуется оптимизация расходов минимум на ${_fmtMoneyPlain(plannedGap - factProfit)} ₸`);
+            }
+        } else if (plannedGap < 0) {
+            cashFlowChain.push(`Плановые поступления (${_fmtMoneyPlain(plannedIncome)} ₸) превышают расходы (${_fmtMoneyPlain(plannedExpense)} ₸) на ${_fmtMoneyPlain(Math.abs(plannedGap))} ₸`);
+            cashFlowChain.push('Формируется плановый профицит');
+            cashFlowChain.push('Финансовое состояние стабильное');
+        } else {
+            cashFlowChain.push('Плановые поступления и расходы сбалансированы');
+        }
+
+        lines.push(cashFlowChain.join(' > ') + '.');
     } else {
-        lines.push('- Критичных аномалий не найдено.');
+        lines.push('Плановых операций до конца периода нет.');
     }
+
+    lines.push('');
+
+    // 3. Liquidity Focus
+    lines.push('3. Фокус внимания (Ликвидность)');
+
+    const liquidityChain = [];
+    liquidityChain.push(`Текущий общий баланс ${_fmtMoneyPlain(totalBalance)} ₸ (открытые ${_fmtMoneyPlain(openBalance)} ₸, скрытые ${_fmtMoneyPlain(hiddenBalance)} ₸)`);
+
+    // Check for upcoming large expenses from operations
+    const upcomingExpenses = (dbData.operations || [])
+        .filter(op => !op.isFact && op.kind === 'expense' && op.amount > 500000)
+        .sort((a, b) => new Date(a.date) - new Date(b.date))
+        .slice(0, 3);
+
+    if (upcomingExpenses.length > 0) {
+        const firstExpense = upcomingExpenses[0];
+        const dateStr = firstExpense.dateLabel || new Date(firstExpense.date).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+        liquidityChain.push(`Ближайшее крупное списание: ${dateStr} — ${firstExpense.categoryName || 'расход'} на ${_fmtMoneyPlain(firstExpense.amount)} ₸`);
+
+        if (openBalance > firstExpense.amount * 1.2) {
+            liquidityChain.push('Денег достаточно с запасом');
+        } else if (openBalance > firstExpense.amount) {
+            liquidityChain.push('Денег достаточно, но с запасом впритык');
+        } else {
+            liquidityChain.push('Недостаточно средств на открытых счетах');
+        }
+    } else {
+        liquidityChain.push('Крупных списаний в ближайшее время не запланировано');
+    }
+
+    lines.push(liquidityChain.join(' > ') + '.');
 
     return lines.join('\n');
 }

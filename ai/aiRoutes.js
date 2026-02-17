@@ -1448,7 +1448,11 @@ module.exports = function createAiRouter(deps) {
       _applyRawSnapshotAccounts(dbData, req?.body?.snapshot || null);
       _applyRawSnapshotCompanies(dbData, req?.body?.snapshot || null);
 
+      // Extract explicit action for quick buttons (new action-based routing)
+      const quickAction = req.body?.action || null;
+
       const quickResponse = quickMode.handleQuickQuery({
+        action: quickAction,
         query: q.toLowerCase(),
         dbData,
         snapshot: req?.body?.snapshot || null,
