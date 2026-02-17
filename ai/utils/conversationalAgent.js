@@ -22,6 +22,178 @@ async function dumpLlmInputSnapshot(payload) {
     }
 }
 
+const toNum = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+};
+
+const formatT = (value) => {
+    const n = Math.round(Math.abs(toNum(value)));
+    const formatted = new Intl.NumberFormat('ru-RU').format(n).replace(/\u00A0/g, ' ');
+    const sign = toNum(value) < 0 ? '- ' : '';
+    return `${sign}${formatted} т`;
+};
+
+const normalizeQuestion = (value) => String(value || '').toLowerCase().replace(/ё/g, 'е').trim();
+
+const detectQuestionProfile = (question) => {
+    const q = normalizeQuestion(question);
+    const simpleTokens = [
+        'что будет',
+        'сколько',
+        'баланс',
+        'на открытых счетах',
+        'на конец февраля',
+        'на конец месяца'
+    ];
+    const deepTokens = [
+        'как дела',
+        'почему',
+        'риски',
+        'что делать',
+        'лучше',
+        'инвест',
+        'ремонт',
+        'совет',
+        'анализ',
+        'прогноз',
+        'колебания'
+    ];
+
+    const simpleScore = simpleTokens.reduce((sum, token) => (q.includes(token) ? sum + 1 : sum), 0);
+    const deepScore = deepTokens.reduce((sum, token) => (q.includes(token) ? sum + 1 : sum), 0);
+
+    if (deepScore > 0) return 'deep_analysis';
+    if (simpleScore > 0 && q.length <= 90) return 'simple_fact';
+    return 'standard';
+};
+
+const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta }) => {
+    const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+    if (!days.length) {
+        return {
+            hasData: false,
+            message: 'Нет данных в snapshot.'
+        };
+    }
+
+    const timelineDate = String(snapshotMeta?.timelineDate || '');
+
+    const dayRows = days.map((day) => {
+        const balances = Array.isArray(day?.accountBalances) ? day.accountBalances : [];
+        const openBalance = balances
+            .filter((acc) => acc?.isOpen === true)
+            .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+        const hiddenBalance = balances
+            .filter((acc) => acc?.isOpen !== true)
+            .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+        const income = toNum(day?.totals?.income);
+        const expense = toNum(day?.totals?.expense);
+        return {
+            dateKey: String(day?.dateKey || ''),
+            dateLabel: String(day?.dateLabel || day?.dateKey || '?'),
+            income,
+            expense,
+            net: income - expense,
+            openBalance,
+            hiddenBalance,
+            totalBalance: openBalance + hiddenBalance,
+            expenseItems: [
+                ...(Array.isArray(day?.lists?.expense) ? day.lists.expense : []),
+                ...(Array.isArray(day?.lists?.withdrawal) ? day.lists.withdrawal : [])
+            ]
+        };
+    });
+
+    const minOpenDay = dayRows.reduce((min, row) => (min === null || row.openBalance < min.openBalance ? row : min), null);
+    const maxExpenseDay = dayRows.reduce((max, row) => (max === null || row.expense > max.expense ? row : max), null);
+    const cashGapDays = dayRows.filter((row) => row.expense > 0 && row.openBalance < row.expense);
+
+    const peakCategory = (() => {
+        if (!maxExpenseDay || !Array.isArray(maxExpenseDay.expenseItems) || !maxExpenseDay.expenseItems.length) return null;
+        const byCategory = new Map();
+        maxExpenseDay.expenseItems.forEach((item) => {
+            const key = String(item?.catName || 'Без категории');
+            byCategory.set(key, (byCategory.get(key) || 0) + Math.abs(toNum(item?.amount)));
+        });
+        let topName = null;
+        let topAmount = 0;
+        byCategory.forEach((amount, name) => {
+            if (amount > topAmount) {
+                topAmount = amount;
+                topName = name;
+            }
+        });
+        if (!topName) return null;
+        return { name: topName, amount: topAmount, amountFmt: formatT(topAmount) };
+    })();
+
+    const nextExpenseAfterTimeline = (() => {
+        if (!timelineDate) return null;
+        const sorted = [...dayRows].sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)));
+        return sorted.find((row) => row.dateKey > timelineDate && row.expense > 0) || null;
+    })();
+
+    const totals = deterministicFacts?.totals || {};
+    const endBalances = deterministicFacts?.endBalances || {};
+    const anomalies = Array.isArray(deterministicFacts?.anomalies) ? deterministicFacts.anomalies : [];
+
+    return {
+        hasData: true,
+        period: deterministicFacts?.range || null,
+        totals: {
+            income: toNum(totals.income),
+            expense: toNum(totals.expense),
+            net: toNum(totals.net),
+            incomeFmt: formatT(totals.income),
+            expenseFmt: formatT(totals.expense),
+            netFmt: formatT(totals.net)
+        },
+        endBalances: {
+            open: toNum(endBalances.open),
+            hidden: toNum(endBalances.hidden),
+            total: toNum(endBalances.total),
+            openFmt: formatT(endBalances.open),
+            hiddenFmt: formatT(endBalances.hidden),
+            totalFmt: formatT(endBalances.total)
+        },
+        minOpenDay: minOpenDay ? {
+            dateKey: minOpenDay.dateKey,
+            dateLabel: minOpenDay.dateLabel,
+            openBalance: minOpenDay.openBalance,
+            openBalanceFmt: formatT(minOpenDay.openBalance)
+        } : null,
+        maxExpenseDay: maxExpenseDay ? {
+            dateKey: maxExpenseDay.dateKey,
+            dateLabel: maxExpenseDay.dateLabel,
+            expense: maxExpenseDay.expense,
+            expenseFmt: formatT(maxExpenseDay.expense),
+            topExpenseCategory: peakCategory
+        } : null,
+        cashGap: {
+            hasGap: cashGapDays.length > 0,
+            daysCount: cashGapDays.length,
+            sample: cashGapDays.slice(0, 3).map((row) => ({
+                dateKey: row.dateKey,
+                dateLabel: row.dateLabel,
+                openBalanceFmt: formatT(row.openBalance),
+                expenseFmt: formatT(row.expense)
+            }))
+        },
+        nextExpenseAfterTimeline: nextExpenseAfterTimeline ? {
+            dateKey: nextExpenseAfterTimeline.dateKey,
+            dateLabel: nextExpenseAfterTimeline.dateLabel,
+            expense: nextExpenseAfterTimeline.expense,
+            expenseFmt: formatT(nextExpenseAfterTimeline.expense)
+        } : null,
+        anomalies: anomalies.map((row) => ({
+            name: row?.name || 'Без категории',
+            gap: toNum(row?.gap),
+            gapFmt: formatT(row?.gap)
+        }))
+    };
+};
+
 /**
  * Generate conversational response with context from chat history
  */
@@ -414,24 +586,38 @@ async function generateSnapshotChatResponse({
         }))
         .filter((msg) => msg.content);
 
+    const questionProfile = detectQuestionProfile(question);
+    const advisoryFacts = buildSnapshotAdvisoryFacts({
+        snapshot,
+        deterministicFacts,
+        snapshotMeta
+    });
+
     const systemPrompt = [
-        'Ты CFO-советник INDEX12.',
-        'Отвечай как финансовый партнер: рассуждение, риски, действия.',
-        'Не используй детерминированные шаблоны и технические заголовки.',
-        'Цифры бери только из FACTS_JSON и SNAPSHOT_JSON ниже.',
-        'Если данных не хватает для точного вывода — прямо скажи, чего не хватает.',
-        'Логика ответа:',
-        '1) Сначала короткий прямой ответ на вопрос.',
-        '2) Затем 3-6 строк с анализом и причинами.',
-        '3) В конце 1-2 практических шага.',
-        'Запрещено придумывать суммы, даты или операции.'
+        'Ты CFO-советник INDEX12 в стиле Ильи Балахнина: data-driven, жестко по сути, без воды.',
+        'Отвечай разговорно, но строго по цифрам и причинно-следственным связям.',
+        'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_JSON.',
+        'Запрещено придумывать суммы, даты, операции, категории.',
+        'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
+        'Если вопрос простой про один показатель, ответ должен быть коротким:',
+        '- 1-я строка: прямой ответ с числом.',
+        '- 2-я строка (опционально): краткий контекст.',
+        'Если вопрос про анализ/совет/почему/когда лучше:',
+        '- сначала вывод в 1 строке;',
+        '- потом 3-6 строк с фактами и выводами;',
+        '- обязательно, если есть данные: пик расхода (дата, сумма, категория) и факт кассового разрыва (был/не был).',
+        'Не используй общие фразы вроде "в целом все хорошо" без конкретных чисел.'
     ].join(' ');
 
     const userContent = [
         `Вопрос пользователя: ${String(question || '').trim()}`,
+        `QUESTION_PROFILE: ${questionProfile}`,
         '',
         'FACTS_JSON:',
         JSON.stringify(deterministicFacts || {}, null, 2),
+        '',
+        'ADVISORY_FACTS_JSON:',
+        JSON.stringify(advisoryFacts || {}, null, 2),
         '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
@@ -452,7 +638,7 @@ async function generateSnapshotChatResponse({
                 { role: 'user', content: userContent }
             ],
             temperature: 0.2,
-            max_tokens: 700
+            max_tokens: 650
         };
 
         const snapshotInfo = await dumpLlmInputSnapshot({
@@ -466,6 +652,8 @@ async function generateSnapshotChatResponse({
                 request: llmRequest
             },
             deterministicFacts,
+            advisoryFacts,
+            questionProfile,
             snapshotMeta,
             snapshot
         });
@@ -486,7 +674,7 @@ async function generateSnapshotChatResponse({
 
         return {
             ok: true,
-            text,
+            text: String(text).replace(/\u00A0/g, ' '),
             debug: {
                 model: data.model,
                 usage: data.usage,
