@@ -714,11 +714,75 @@ async function generateSnapshotChatResponse({
         deterministicFacts,
         snapshotMeta
     });
+    const snapshotSlice = (() => {
+        const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+        const sorted = [...days].sort((a, b) => String(a?.dateKey || '').localeCompare(String(b?.dateKey || '')));
+        const timelineDate = String(snapshotMeta?.timelineDate || '');
+        const todayKey = DATE_KEY_RE.test(timelineDate)
+            ? timelineDate
+            : String(sorted[sorted.length - 1]?.dateKey || '');
+        const currentDay = sorted.filter((day) => String(day?.dateKey || '') <= todayKey).slice(-1)[0] || null;
+        const endDay = sorted[sorted.length - 1] || null;
+        const normalizeBalances = (day) => {
+            const balances = Array.isArray(day?.accountBalances) ? day.accountBalances : [];
+            const open = balances
+                .filter((acc) => acc?.isOpen === true)
+                .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+            const hidden = balances
+                .filter((acc) => acc?.isOpen !== true)
+                .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+            return {
+                open,
+                hidden,
+                total: open + hidden
+            };
+        };
+        const toDayMini = (day) => {
+            const balances = normalizeBalances(day);
+            return {
+                dateKey: String(day?.dateKey || ''),
+                dateLabel: String(day?.dateLabel || day?.dateKey || '?'),
+                totals: {
+                    income: toNum(day?.totals?.income),
+                    expense: toNum(day?.totals?.expense),
+                    net: toNum(day?.totals?.income) - toNum(day?.totals?.expense)
+                },
+                balances
+            };
+        };
+        const toDayDetailed = (day) => {
+            if (!day) return null;
+            const mini = toDayMini(day);
+            const accounts = (Array.isArray(day?.accountBalances) ? day.accountBalances : [])
+                .map((acc) => ({
+                    name: String(acc?.name || 'Счет'),
+                    balance: toNum(acc?.balance),
+                    isOpen: Boolean(acc?.isOpen)
+                }));
+            return {
+                ...mini,
+                accountBalances: accounts
+            };
+        };
+
+        return {
+            range: snapshot?.range || null,
+            todayKey: todayKey || null,
+            current: toDayDetailed(currentDay),
+            end: toDayDetailed(endDay),
+            daysMini: sorted.map(toDayMini),
+            pointers: {
+                currentBalancePath: 'SNAPSHOT_SLICE_JSON.current.balances',
+                endBalancePath: 'SNAPSHOT_SLICE_JSON.end.balances',
+                dailyTimelinePath: 'SNAPSHOT_SLICE_JSON.daysMini[]'
+            }
+        };
+    })();
 
     const systemPrompt = [
         'Ты CFO-советник INDEX12 в стиле Ильи Балахнина: data-driven, жестко по сути, без воды.',
         'Отвечай разговорно, но строго по цифрам и причинно-следственным связям.',
-        'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_JSON.',
+        'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_SLICE_JSON.',
         'Запрещено придумывать суммы, даты, операции, категории.',
         'КРИТИЧНО ПО ДАТАМ: today = SNAPSHOT_META.timelineDate.',
         'ФАКТ = операции/показатели на датах <= today.',
@@ -760,8 +824,8 @@ async function generateSnapshotChatResponse({
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
         '',
-        'SNAPSHOT_JSON:',
-        JSON.stringify(snapshot || {}, null, 2),
+        'SNAPSHOT_SLICE_JSON:',
+        JSON.stringify(snapshotSlice || {}, null, 2),
         '',
         'Дай содержательный CFO-ответ по вопросу пользователя.'
     ].join('\n');
@@ -791,6 +855,7 @@ async function generateSnapshotChatResponse({
             },
             deterministicFacts,
             advisoryFacts,
+            snapshotSlice,
             questionProfile,
             snapshotMeta,
             snapshot
@@ -805,7 +870,16 @@ async function generateSnapshotChatResponse({
             body: JSON.stringify(llmRequest)
         });
 
-        if (!response.ok) throw new Error(`API Status ${response.status}`);
+        if (!response.ok) {
+            let detail = '';
+            try {
+                const payload = await response.json();
+                detail = String(payload?.error?.message || payload?.error || '').trim();
+            } catch (_) {
+                // ignore
+            }
+            throw new Error(`API Status ${response.status}${detail ? `: ${detail}` : ''}`);
+        }
         const data = await response.json();
         const text = String(data?.choices?.[0]?.message?.content || '').trim();
         if (!text) throw new Error('Empty response');
@@ -823,7 +897,7 @@ async function generateSnapshotChatResponse({
         console.error('[conversationalAgent][snapshotChat] Error:', err);
         return {
             ok: false,
-            text: 'Ошибка генерации ответа CFO.',
+            text: `Ошибка генерации ответа CFO: ${String(err?.message || 'unknown error')}`,
             debug: { error: err.message }
         };
     }

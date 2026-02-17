@@ -1621,7 +1621,7 @@ module.exports = function createAiRouter(deps) {
 
         const responseText = llmResult?.ok
           ? String(llmResult?.text || '').trim()
-          : 'Не удалось сформировать ответ. Проверьте данные snapshot.';
+          : (String(llmResult?.text || '').trim() || 'Не удалось сформировать ответ. Проверьте данные snapshot.');
         const responseMode = 'llm_snapshot_chat';
 
         const llmInputSnapshot = await _dumpLlmInputSnapshot({
