@@ -272,9 +272,124 @@ async function generateConversationalResponse({
     }
 }
 
+/**
+ * LLM narrative for snapshot-first pipeline.
+ * Numbers source of truth stays deterministic on backend.
+ */
+async function generateSnapshotInsightsResponse({
+    question,
+    history = [],
+    deterministicBlock,
+    deterministicFacts = null,
+    snapshotMeta = null
+}) {
+    const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
+    if (!OPENAI_KEY) {
+        return {
+            ok: false,
+            text: 'AI временно недоступен: не найден API ключ.',
+            debug: { error: 'No API key' }
+        };
+    }
+
+    const conversationMessages = (Array.isArray(history) ? history : [])
+        .slice(-6)
+        .map((msg) => ({
+            role: msg?.role === 'assistant' ? 'assistant' : 'user',
+            content: String(msg?.content || '')
+        }))
+        .filter((msg) => msg.content);
+
+    const systemPrompt = [
+        'Ты финансовый аналитик INDEX12.',
+        'Твоя задача: дать короткую интерпретацию детерминированных фактов.',
+        'КРИТИЧНО: числа в ответе не должны противоречить блоку FACTS_BLOCK.',
+        'Если используешь число, бери его только из FACTS_BLOCK.',
+        'Не выдумывай новые операции, даты или суммы.',
+        'Если данных недостаточно, так и скажи.',
+        'Стиль: по делу, 3-6 строк.'
+    ].join(' ');
+
+    const userContent = [
+        `Вопрос пользователя: ${String(question || '').trim()}`,
+        '',
+        'FACTS_BLOCK (источник чисел):',
+        String(deterministicBlock || '').trim(),
+        '',
+        'FACTS_JSON:',
+        JSON.stringify(deterministicFacts || {}, null, 2),
+        '',
+        'SNAPSHOT_META:',
+        JSON.stringify(snapshotMeta || {}, null, 2),
+        '',
+        'Дай только интерпретацию и риски/наблюдения. Не повторяй весь FACTS_BLOCK.'
+    ].join('\n');
+
+    try {
+        const model = process.env.OPENAI_MODEL || 'gpt-4o';
+        const llmRequest = {
+            model,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                ...conversationMessages,
+                { role: 'user', content: userContent }
+            ],
+            temperature: 0.15,
+            max_tokens: 350
+        };
+
+        const snapshotInfo = await dumpLlmInputSnapshot({
+            generatedAt: new Date().toISOString(),
+            mode: 'snapshot_insights',
+            question,
+            llmInput: {
+                systemPrompt,
+                userContent,
+                conversationMessagesUsed: conversationMessages,
+                request: llmRequest
+            },
+            deterministicBlock,
+            deterministicFacts,
+            snapshotMeta
+        });
+
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${OPENAI_KEY}`
+            },
+            body: JSON.stringify(llmRequest)
+        });
+
+        if (!response.ok) throw new Error(`API Status ${response.status}`);
+        const data = await response.json();
+        const text = String(data?.choices?.[0]?.message?.content || '').trim();
+        if (!text) throw new Error('Empty response');
+
+        return {
+            ok: true,
+            text,
+            debug: {
+                model: data.model,
+                usage: data.usage,
+                llmInputSnapshot: snapshotInfo
+            }
+        };
+    } catch (err) {
+        console.error('[conversationalAgent][snapshotInsights] Error:', err);
+        return {
+            ok: false,
+            text: 'Ошибка генерации аналитического комментария.',
+            debug: { error: err.message }
+        };
+    }
+}
+
 function verifyCalculation() { return ''; }
 
 module.exports = {
     generateConversationalResponse,
+    generateSnapshotInsightsResponse,
     verifyCalculation
 };

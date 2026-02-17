@@ -35,13 +35,28 @@ module.exports = function createAiRouter(deps) {
   const createQuickJournalAdapter = require('./quickJournalAdapter');
   const quickJournalAdapter = createQuickJournalAdapter({ Event });
 
-  // NEW: Import deterministic calculator, intent parser, and conversational agent
-  const financialCalculator = require('./utils/financialCalculator');
-  const intentParser = require('./utils/intentParser');
   const conversationalAgent = require('./utils/conversationalAgent');
+  const { parseSnapshotIntent } = require('./utils/snapshotIntentParser');
+  const snapshotAnswerEngine = require('./utils/snapshotAnswerEngine');
 
   const router = express.Router();
   const LLM_SNAPSHOT_DIR = path.resolve(__dirname, 'debug');
+
+  const _dumpLlmInputSnapshot = async (payload) => {
+    try {
+      await fs.mkdir(LLM_SNAPSHOT_DIR, { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const latestPath = path.join(LLM_SNAPSHOT_DIR, 'llm-input-latest.json');
+      const archivePath = path.join(LLM_SNAPSHOT_DIR, `llm-input-${stamp}.json`);
+      const body = JSON.stringify(payload, null, 2);
+      await fs.writeFile(latestPath, body, 'utf8');
+      await fs.writeFile(archivePath, body, 'utf8');
+      return { latestPath, archivePath };
+    } catch (error) {
+      console.error('[AI Snapshot] dump error:', error);
+      return null;
+    }
+  };
 
   const _applyRawSnapshotAccounts = (dbData, rawSnapshot) => {
     const rawAccounts = Array.isArray(rawSnapshot?.accounts) ? rawSnapshot.accounts : [];
@@ -1490,32 +1505,26 @@ module.exports = function createAiRouter(deps) {
       const source = String(req?.body?.source || 'chat');
       const isQuickButton = source === 'quick_button';
 
-      // 🟢 NEW: Chat history endpoint - GET /api/ai/history
-      // Loads messages for current timeline date
-      // Used by frontend to restore conversation on page load
-
-      // Chat/source=chat: NEW PIPELINE WITH CHAT HISTORY
-      // 0. Load chat history for user + current timeline date
-      // 1. Save user message to history
-      // 2. Compute metrics from tableContext.rows
-      // 3. Parse intent via LLM  
-      // 4. Filter data by intent (for financial queries)
-      // 5. Use conversational agent (with history context)
-      // 6. Save agent response to history
-      // 7. Return response
       if (!isQuickButton) {
-        const tableContext = req.body?.tableContext || null;
-        const rows = Array.isArray(tableContext?.rows) ? tableContext.rows : [];
-        const periodFilter = req.body?.periodFilter || tableContext?.periodFilter || null;
-        const asOf = req.body?.asOf || null;
+        const debugEnabled = req?.body?.debugAi === true;
+        const tooltipSnapshotRaw = req?.body?.tooltipSnapshot;
+        const validation = snapshotAnswerEngine.validateTooltipSnapshot(tooltipSnapshotRaw);
+        if (!validation.ok) {
+          return res.status(400).json({
+            error: `Некорректный tooltipSnapshot: ${validation.error}`
+          });
+        }
 
-        // Step 0: Get current timeline date and load/create chat history
-        // FIX: safe date parsing to avoid invalid asOf crashes
-        const isValidDate = (d) => d instanceof Date && !Number.isNaN(d.getTime());
-        const asOfDate = asOf ? new Date(asOf) : new Date();
-        const timelineDate = isValidDate(asOfDate)
-          ? asOfDate.toISOString().split('T')[0]
-          : new Date().toISOString().split('T')[0];
+        const snapshot = validation.snapshot;
+        const asOf = req.body?.asOf || null;
+        const timelineDateRaw = String(req?.body?.timelineDate || '').trim();
+        const timelineDate = (() => {
+          const direct = timelineDateRaw.match(/^(\d{4}-\d{2}-\d{2})/);
+          if (direct) return direct[1];
+          const fromAsOf = String(asOf || '').match(/^(\d{4}-\d{2}-\d{2})/);
+          if (fromAsOf) return fromAsOf[1];
+          return new Date().toISOString().slice(0, 10);
+        })();
 
         let chatHistory = await ChatHistory.findOne({
           userId: userIdStr,
@@ -1530,7 +1539,6 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
-        // Step 1: Save user message to history
         chatHistory.messages.push({
           role: 'user',
           content: q,
@@ -1538,146 +1546,75 @@ module.exports = function createAiRouter(deps) {
         });
         chatHistory.updatedAt = new Date();
 
-        // Step 2: Compute all metrics deterministically
-        const computed = financialCalculator.computeMetrics({
-          rows,
-          periodFilter,
-          asOf
-        });
-
-        // Step 3: Parse intent via LLM (for context/metadata only)
-        const intentResult = await intentParser.parseIntent({
+        const intent = parseSnapshotIntent({
           question: q,
-          availableContext: {
-            byCategory: computed.metrics.byCategory,
-            byProject: computed.metrics.byProject
-          }
+          timelineDateKey: timelineDate,
+          snapshot
         });
 
-        const debugEnabled = req?.body?.debugAi === true;
-        const intent = intentResult.ok
-          ? intentResult.intent
-          : {
-            isFinancial: true,
-            metric: 'overview',
-            scope: 'all',
-            status: 'both',
-            groupBy: null,
-            filters: { categories: [], projects: [] },
-            description: 'Финансовый запрос'
-          };
-
-        // Step 4: Chat mode always uses conversational LLM branch.
-        // Deterministic calculations remain as context + fallback.
-        const currentBalanceFromRows = rows
-          .filter(r => {
-            const status = String(r?.statusCode || r?.status || '').toLowerCase();
-            return status === 'fact' || status.includes('исполнено');
-          })
-          .reduce((sum, row) => {
-            const type = String(row?.type || '').toLowerCase();
-            const amount = Math.abs(Number(row?.amount) || 0);
-
-            if (type === 'доход' || type === 'income') return sum + amount;
-            if (type === 'расход' || type === 'expense') return sum - amount;
-            return sum; // Transfers don't affect total balance
-          }, 0);
-
-        const accounts = Array.isArray(req.body?.accounts) ? req.body.accounts : [];
-        const currentOpenBalance = accounts.length
-          ? accounts
-            .filter(a => !a.isHidden && !a.isExcluded)
-            .reduce((s, a) => s + (Number(a.balance) || 0), 0)
-          : currentBalanceFromRows;
-
-        const currentHiddenBalance = accounts.length
-          ? accounts
-            .filter(a => a.isHidden || a.isExcluded)
-            .reduce((s, a) => s + (Number(a.balance) || 0), 0)
-          : 0;
-
-        const currentTotalBalance = currentOpenBalance + currentHiddenBalance;
-
-        const responseMode = 'analysis';
-        const forecastData = _computeForecastData({
-          rows,
-          asOf,
-          accounts
-        });
-        const graphTooltipData = _buildGraphTooltipData({
-          rows,
-          accounts,
-          periodFilter,
-          asOf
-        });
-        const riskData = _computeRiskData({
-          rows,
-          asOf,
-          accounts,
-          forecastData
+        const deterministic = snapshotAnswerEngine.answerFromSnapshot({
+          snapshot,
+          intent,
+          timelineDateKey: timelineDate
         });
 
-        const futureBalance = {
-          current: forecastData?.current?.totalBalance ?? currentTotalBalance,
-          plannedIncome: forecastData?.remainingPlan?.income ?? 0,
-          plannedExpense: forecastData?.remainingPlan?.expense ?? 0,
-          projected: forecastData?.projected?.totalBalance ?? currentTotalBalance,
-          change: (forecastData?.projected?.totalBalance ?? currentTotalBalance) - (forecastData?.current?.totalBalance ?? currentTotalBalance)
-        };
+        const numericIntent = intent?.numeric === true;
+        let llmResult = null;
+        let responseText = String(deterministic?.text || '').trim();
+        let responseMode = 'deterministic';
 
-        const openBalance = currentOpenBalance;
-        const hiddenBalance = currentHiddenBalance;
+        if (!numericIntent) {
+          responseMode = 'insights';
+          const deterministicBlock = String(
+            deterministic?.deterministicBlock
+            || deterministic?.text
+            || ''
+          ).trim();
 
-        // Extract hidden accounts data for strategic reserves context
-        const hiddenAccountsData = accounts.length
-          ? {
-            count: accounts.filter(a => a.isHidden || a.isExcluded).length,
-            totalCurrent: accounts
-              .filter(a => a.isHidden || a.isExcluded)
-              .reduce((s, a) => s + (Number(a.balance) || 0), 0),
-            totalFuture: Number.isFinite(Number(forecastData?.projected?.hiddenBalance))
-              ? Number(forecastData.projected.hiddenBalance)
-              : currentHiddenBalance
-          }
-          : null;
+          llmResult = await conversationalAgent.generateSnapshotInsightsResponse({
+            question: q,
+            history: chatHistory.messages.slice(0, -1),
+            deterministicBlock,
+            deterministicFacts: deterministic?.facts || null,
+            snapshotMeta: {
+              range: snapshot.range,
+              visibilityMode: snapshot.visibilityMode,
+              timelineDate,
+              intentType: intent?.type || 'INSIGHTS'
+            }
+          });
 
-        // Format current date for greeting responses
-        const currentDate = (() => {
-          if (asOf) {
-            const d = new Date(asOf);
-            if (!Number.isNaN(d.getTime())) return _fmtDDMMYY(d);
-          }
-          const now = new Date();
-          return now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
-        })();
+          responseText = llmResult?.ok
+            ? `${deterministicBlock}\n\n${String(llmResult?.text || '').trim()}`.trim()
+            : deterministicBlock;
+        }
 
-        // Use conversational agent with history context
-        const conversationalResult = await conversationalAgent.generateConversationalResponse({
+        const llmInputSnapshot = await _dumpLlmInputSnapshot({
+          generatedAt: new Date().toISOString(),
+          mode: 'snapshot_first_chat',
           question: q,
-          history: chatHistory.messages.slice(0, -1), // Exclude current user message (already added)
-          metrics: computed.metrics,
-          period: computed.period,
-          currentDate,
-          formatCurrency: _formatTenge,
-          futureBalance,
-          openBalance,
-          hiddenBalance,
-          hiddenAccountsData,
-          accounts: accounts || null,
-          riskData,
-          forecastData,
-          graphTooltipData,
-          availableContext: {
-            byCategory: computed.metrics.byCategory,
-            byProject: computed.metrics.byProject
-          }
+          source,
+          timelineDate,
+          intent,
+          deterministic,
+          llm: llmResult ? {
+            ok: llmResult.ok,
+            text: llmResult.text,
+            debug: llmResult.debug || null
+          } : null,
+          requestMeta: {
+            asOf,
+            periodFilter: req?.body?.periodFilter || null,
+            tableContextSummary: {
+              hasTableContext: !!req?.body?.tableContext,
+              rowCount: Array.isArray(req?.body?.tableContext?.rows)
+                ? req.body.tableContext.rows.length
+                : 0
+            }
+          },
+          tooltipSnapshot: snapshot
         });
 
-        const responseText = conversationalResult.ok
-          ? conversationalResult.text
-          : (conversationalResult?.text || 'Не удалось получить ответ модели. Повторите запрос.');
-
-        // Save agent response to history
         chatHistory.messages.push({
           role: 'assistant',
           content: responseText,
@@ -1685,11 +1622,9 @@ module.exports = function createAiRouter(deps) {
           metadata: {
             intent,
             responseMode,
-            metrics: {
-              fact: computed.metrics.fact,
-              plan: computed.metrics.plan,
-              total: computed.metrics.total
-            }
+            numericIntent,
+            deterministicMeta: deterministic?.meta || null,
+            llm: llmResult?.debug || null
           }
         });
         await chatHistory.save();
@@ -1698,21 +1633,13 @@ module.exports = function createAiRouter(deps) {
           text: responseText,
           ...(debugEnabled ? {
             debug: {
+              timelineDate,
               intent,
-              period: computed.period,
-              rowCounts: computed.rowCounts,
-              conversational: conversationalResult.debug || null,
-              intentParser: intentResult.ok
-                ? (intentResult.debug || null)
-                : {
-                  error: intentResult.error || 'Intent parser failed',
-                  details: intentResult.debug || null
-                },
+              deterministic,
+              llm: llmResult?.debug || null,
               responseMode,
-              risk: riskData,
-              forecast: forecastData,
-              graphTooltip: graphTooltipData,
-              historyLength: chatHistory.messages.length
+              historyLength: chatHistory.messages.length,
+              llmInputSnapshot
             }
           } : {})
         });
