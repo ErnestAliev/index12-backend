@@ -1,5 +1,26 @@
 // ai/utils/conversationalAgent.js
 // Conversational AI agent with memory and context-first financial analysis
+const fs = require('fs/promises');
+const path = require('path');
+
+async function dumpLlmInputSnapshot(payload) {
+    try {
+        const dir = path.resolve(__dirname, '..', 'debug');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const latestPath = path.join(dir, 'llm-input-latest.json');
+        const archivePath = path.join(dir, `llm-input-${stamp}.json`);
+
+        await fs.mkdir(dir, { recursive: true });
+        const body = JSON.stringify(payload, null, 2);
+        await fs.writeFile(latestPath, body, 'utf8');
+        await fs.writeFile(archivePath, body, 'utf8');
+
+        return { latestPath, archivePath };
+    } catch (err) {
+        console.error('[conversationalAgent] Snapshot dump error:', err?.message || err);
+        return null;
+    }
+}
 
 /**
  * Generate conversational response with context from chat history
@@ -133,18 +154,51 @@ async function generateConversationalResponse({
             { role: 'user', content: userContent }
         ];
 
+        const model = process.env.OPENAI_MODEL || 'gpt-4o';
+        const llmRequest = {
+            model,
+            messages,
+            temperature: 0.1,
+            max_tokens: 450
+        };
+
+        const snapshotInfo = await dumpLlmInputSnapshot({
+            generatedAt: new Date().toISOString(),
+            question,
+            period,
+            currentDate,
+            llmInput: {
+                systemPrompt,
+                userContent,
+                conversationMessagesUsed: conversationMessages,
+                request: llmRequest
+            },
+            serviceData: {
+                metrics,
+                futureBalance,
+                openBalance,
+                hiddenBalance,
+                hiddenAccountsData,
+                accounts,
+                forecastData,
+                riskData,
+                availableContext
+            },
+            computedFacts: {
+                safeSpend,
+                hiddenTotal,
+                investPotential,
+                projectedBal
+            }
+        });
+
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${OPENAI_KEY}`
             },
-            body: JSON.stringify({
-                model: process.env.OPENAI_MODEL || 'gpt-4o',
-                messages,
-                temperature: 0.1, // Низкая температура для точности данных
-                max_tokens: 450
-            })
+            body: JSON.stringify(llmRequest)
         });
 
         if (!response.ok) throw new Error(`API Status ${response.status}`);
@@ -156,7 +210,11 @@ async function generateConversationalResponse({
         return {
             ok: true,
             text,
-            debug: { model: data.model, usage: data.usage }
+            debug: {
+                model: data.model,
+                usage: data.usage,
+                llmInputSnapshot: snapshotInfo
+            }
         };
     } catch (err) {
         console.error('[conversationalAgent] Error:', err);

@@ -4,6 +4,8 @@
 // - chat         -> LLM agent with journal packet context
 
 const express = require('express');
+const path = require('path');
+const fs = require('fs/promises');
 
 const AIROUTES_VERSION = 'hybrid-v2.1';
 
@@ -39,6 +41,7 @@ module.exports = function createAiRouter(deps) {
   const conversationalAgent = require('./utils/conversationalAgent');
 
   const router = express.Router();
+  const LLM_SNAPSHOT_DIR = path.resolve(__dirname, 'debug');
 
   const _applyRawSnapshotAccounts = (dbData, rawSnapshot) => {
     const rawAccounts = Array.isArray(rawSnapshot?.accounts) ? rawSnapshot.accounts : [];
@@ -1163,6 +1166,78 @@ module.exports = function createAiRouter(deps) {
     } catch (error) {
       console.error('[AI History] Load error:', error);
       return res.status(500).json({ error: error.message });
+    }
+  });
+
+  // GET /api/ai/llm-input/latest - Download latest LLM input snapshot JSON
+  router.get('/llm-input/latest', isAuthenticated, async (req, res) => {
+    try {
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      const filePath = path.join(LLM_SNAPSHOT_DIR, 'llm-input-latest.json');
+      try {
+        await fs.access(filePath);
+      } catch (_) {
+        return res.status(404).json({ error: 'Снапшот не найден. Сначала выполните запрос к агенту.' });
+      }
+
+      return res.download(filePath, 'llm-input-latest.json');
+    } catch (error) {
+      console.error('[AI Snapshot] Download latest error:', error);
+      return res.status(500).json({ error: 'Ошибка скачивания снапшота' });
+    }
+  });
+
+  // GET /api/ai/llm-input/archive - List available archived snapshots
+  router.get('/llm-input/archive', isAuthenticated, async (req, res) => {
+    try {
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      let files = [];
+      try {
+        files = await fs.readdir(LLM_SNAPSHOT_DIR);
+      } catch (_) {
+        files = [];
+      }
+
+      const archiveFiles = files
+        .filter((name) => /^llm-input-[0-9]{4}-[0-9]{2}-[0-9]{2}T.*\.json$/.test(name))
+        .sort((a, b) => b.localeCompare(a));
+
+      return res.json({ files: archiveFiles });
+    } catch (error) {
+      console.error('[AI Snapshot] List archive error:', error);
+      return res.status(500).json({ error: 'Ошибка получения списка снапшотов' });
+    }
+  });
+
+  // GET /api/ai/llm-input/archive/:file - Download archived snapshot by filename
+  router.get('/llm-input/archive/:file', isAuthenticated, async (req, res) => {
+    try {
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      const fileName = String(req.params?.file || '').trim();
+      if (!/^llm-input-[0-9]{4}-[0-9]{2}-[0-9]{2}T.*\.json$/.test(fileName)) {
+        return res.status(400).json({ error: 'Неверное имя файла снапшота' });
+      }
+
+      const filePath = path.join(LLM_SNAPSHOT_DIR, fileName);
+      try {
+        await fs.access(filePath);
+      } catch (_) {
+        return res.status(404).json({ error: 'Снапшот не найден' });
+      }
+
+      return res.download(filePath, fileName);
+    } catch (error) {
+      console.error('[AI Snapshot] Download archive error:', error);
+      return res.status(500).json({ error: 'Ошибка скачивания снапшота' });
     }
   });
 
