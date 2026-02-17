@@ -39,6 +39,7 @@ async function generateConversationalResponse({
     accounts = null,
     forecastData = null,
     riskData = null,
+    graphTooltipData = null,
     availableContext = {}
 }) {
     const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -66,6 +67,45 @@ async function generateConversationalResponse({
     const hiddenTotal = Number(hiddenBalance || 0);
     const investPotential = hiddenTotal + safeSpend;
     const projectedBal = futureBalance?.projected || 0;
+    const graphTooltipDigest = (() => {
+        if (!graphTooltipData || typeof graphTooltipData !== 'object') return null;
+
+        const daily = Array.isArray(graphTooltipData.daily) ? graphTooltipData.daily : [];
+        const balancesByDay = Array.isArray(graphTooltipData.accountBalancesByDay)
+            ? graphTooltipData.accountBalancesByDay
+            : [];
+        const operationsByDay = Array.isArray(graphTooltipData.operationsByDay)
+            ? graphTooltipData.operationsByDay
+            : [];
+
+        return {
+            period: graphTooltipData.period || null,
+            asOfDayKey: graphTooltipData.asOfDayKey || null,
+            dayCount: daily.length,
+            daily,
+            accountBalancesByDay: balancesByDay,
+            operationsByDay: operationsByDay.map((day) => ({
+                dayKey: day?.dayKey || '',
+                dateLabel: day?.dateLabel || '',
+                opCount: Array.isArray(day?.items) ? day.items.length : 0,
+                income: (Array.isArray(day?.items) ? day.items : [])
+                    .filter((item) => item?.kind === 'income')
+                    .reduce((sum, item) => sum + Number(item?.amount || 0), 0),
+                expense: (Array.isArray(day?.items) ? day.items : [])
+                    .filter((item) => item?.kind === 'expense')
+                    .reduce((sum, item) => sum + Number(item?.amount || 0), 0),
+                transfer: (Array.isArray(day?.items) ? day.items : [])
+                    .filter((item) => item?.kind === 'transfer')
+                    .reduce((sum, item) => sum + Number(item?.amount || 0), 0)
+            })),
+            accountBalancesAtAsOf: Array.isArray(graphTooltipData.accountBalancesAtAsOf)
+                ? graphTooltipData.accountBalancesAtAsOf
+                : [],
+            accountBalancesAtPeriodEnd: Array.isArray(graphTooltipData.accountBalancesAtPeriodEnd)
+                ? graphTooltipData.accountBalancesAtPeriodEnd
+                : []
+        };
+    })();
 
     // Аномалии для контекста (если есть)
     const anomalies = [];
@@ -136,6 +176,11 @@ async function generateConversationalResponse({
             `Резервы (Скрытые): ${formatCurrency(hiddenBalance || 0)}`,
             ''
         ] : []),
+        ...(graphTooltipDigest ? [
+            '--- ДАННЫЕ ИЗ ГРАФИКОВЫХ ТУЛТИПОВ (АГРЕГАЦИИ И БАЛАНСЫ) ---',
+            JSON.stringify(graphTooltipDigest, null, 2),
+            ''
+        ] : []),
         ...(Object.keys(metrics?.byCategory || {}).length ? [
             '--- ДАННЫЕ ПО КАТЕГОРИЯМ (ИСКАТЬ АНОМАЛИИ ЗДЕСЬ) ---',
             JSON.stringify(metrics.byCategory, (key, value) => {
@@ -182,6 +227,7 @@ async function generateConversationalResponse({
                 accounts,
                 forecastData,
                 riskData,
+                graphTooltipData,
                 availableContext
             },
             computedFacts: {

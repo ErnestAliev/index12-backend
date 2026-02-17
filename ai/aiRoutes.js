@@ -757,6 +757,238 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _buildGraphTooltipData = ({ rows, accounts, periodFilter, asOf }) => {
+    const safeRows = Array.isArray(rows) ? rows : [];
+    const accountList = Array.isArray(accounts) ? accounts : [];
+    const range = _resolveRange(periodFilter, asOf);
+
+    const startDate = new Date(range.startTs);
+    const endDate = new Date(range.endTs);
+    startDate.setHours(0, 0, 0, 0);
+    endDate.setHours(0, 0, 0, 0);
+
+    const startDayKey = _toDayKey(startDate);
+    const endDayKey = _toDayKey(endDate);
+
+    const asOfDate = (() => {
+      if (asOf) {
+        const d = new Date(asOf);
+        if (!Number.isNaN(d.getTime())) return d;
+      }
+      return new Date();
+    })();
+    const asOfDayKey = _toDayKey(asOfDate);
+
+    const accountById = new Map();
+    const accountNameIndex = _buildAccountNameIndex(accountList);
+    const runningByAccountId = new Map();
+
+    accountList.forEach((acc) => {
+      const id = String(acc?._id || '');
+      if (!id) return;
+      accountById.set(id, acc);
+      const startBalance = Number(acc?.initialBalance ?? acc?.balance ?? 0);
+      runningByAccountId.set(id, Number.isFinite(startBalance) ? startBalance : 0);
+    });
+
+    const dayAggByKey = new Map();
+    const opsByDayKey = new Map();
+
+    const ensureAgg = (dayKey) => {
+      if (!dayAggByKey.has(dayKey)) {
+        dayAggByKey.set(dayKey, {
+          income: 0,
+          expense: 0,
+          transferOut: 0,
+          transferInternal: 0,
+          opCount: 0
+        });
+      }
+      return dayAggByKey.get(dayKey);
+    };
+
+    const ensureOps = (dayKey) => {
+      if (!opsByDayKey.has(dayKey)) opsByDayKey.set(dayKey, []);
+      return opsByDayKey.get(dayKey);
+    };
+
+    safeRows.forEach((row) => {
+      const dayKey = _parseRowDayKey(row);
+      if (!dayKey) return;
+      if (dayKey < startDayKey || dayKey > endDayKey) return;
+
+      const kind = _normalizeKind(row?.type);
+      if (!kind) return;
+
+      const amountAbs = Math.abs(_toNum(row?.amount));
+      const status = _normalizeStatus(row?.statusCode, row?.status);
+      const outOfSystemTransfer = kind === 'transfer' && _isOutOfSystemTransferRow(row);
+
+      const agg = ensureAgg(dayKey);
+      agg.opCount += 1;
+      if (kind === 'income') agg.income += amountAbs;
+      if (kind === 'expense') agg.expense += amountAbs;
+      if (kind === 'transfer' && outOfSystemTransfer) {
+        agg.transferOut += amountAbs;
+        agg.expense += amountAbs;
+      }
+      if (kind === 'transfer' && !outOfSystemTransfer) {
+        agg.transferInternal += amountAbs;
+      }
+
+      ensureOps(dayKey).push({
+        id: String(row?.id || row?._id || ''),
+        kind,
+        status,
+        amount: amountAbs,
+        account: String(row?.account || ''),
+        accountId: _extractId(row?.accountId),
+        fromAccountId: _extractId(row?.fromAccountId),
+        toAccountId: _extractId(row?.toAccountId),
+        category: String(row?.category || 'Без категории'),
+        project: String(row?.project || 'Без проекта'),
+        contractor: String(row?.contractor || ''),
+        owner: String(row?.owner || ''),
+        outOfSystemTransfer
+      });
+    });
+
+    const dayKeys = [];
+    for (let dt = new Date(startDate); dt.getTime() <= endDate.getTime(); dt.setDate(dt.getDate() + 1)) {
+      dayKeys.push(_toDayKey(dt));
+    }
+
+    const addDelta = (accountId, delta) => {
+      const id = String(accountId || '');
+      if (!id || !runningByAccountId.has(id)) return;
+      runningByAccountId.set(id, Number(runningByAccountId.get(id) || 0) + Number(delta || 0));
+    };
+
+    const applyOperationToBalances = (op) => {
+      if (!op || !accountList.length) return;
+      const amount = Math.abs(Number(op.amount || 0));
+      if (!amount) return;
+
+      if (op.kind === 'transfer') {
+        const fromId = String(op.fromAccountId || '');
+        const toId = String(op.toAccountId || '');
+
+        if (fromId) addDelta(fromId, -amount);
+        if (!op.outOfSystemTransfer && toId) addDelta(toId, amount);
+
+        if (!fromId && !toId) {
+          const transferParts = _splitTransferAccountLabel(op.account);
+          if (!transferParts) return;
+          const fromAcc = _resolveAccountByLabel(transferParts.from, accountList, accountNameIndex);
+          const toAcc = _resolveAccountByLabel(transferParts.to, accountList, accountNameIndex);
+          if (fromAcc?._id) addDelta(fromAcc._id, -amount);
+          if (!op.outOfSystemTransfer && toAcc?._id) addDelta(toAcc._id, amount);
+        }
+        return;
+      }
+
+      const accountId = String(op.accountId || '');
+      const accountResolved = accountId
+        ? accountById.get(accountId)
+        : _resolveAccountByLabel(op.account, accountList, accountNameIndex);
+      if (!accountResolved?._id) return;
+
+      if (op.kind === 'income') addDelta(accountResolved._id, amount);
+      if (op.kind === 'expense') addDelta(accountResolved._id, -amount);
+    };
+
+    const daily = [];
+    const accountBalancesByDay = [];
+
+    dayKeys.forEach((dayKey) => {
+      const dayOps = opsByDayKey.get(dayKey) || [];
+      dayOps.forEach((op) => applyOperationToBalances(op));
+
+      const balances = [];
+      let openBalance = 0;
+      let hiddenBalance = 0;
+      accountList.forEach((acc) => {
+        const id = String(acc?._id || '');
+        if (!id) return;
+        const raw = Number(runningByAccountId.get(id) || 0);
+        const balance = Math.max(0, raw);
+        const isHidden = !!(acc?.isHidden || acc?.isExcluded);
+        if (isHidden) hiddenBalance += balance;
+        else openBalance += balance;
+
+        balances.push({
+          accountId: id,
+          name: String(acc?.name || 'Счет'),
+          isHidden: !!acc?.isHidden,
+          isExcluded: !!acc?.isExcluded,
+          balance
+        });
+      });
+
+      const agg = dayAggByKey.get(dayKey) || {
+        income: 0,
+        expense: 0,
+        transferOut: 0,
+        transferInternal: 0,
+        opCount: 0
+      };
+
+      daily.push({
+        dayKey,
+        dateLabel: _dayKeyToLabel(dayKey),
+        income: Number(agg.income || 0),
+        expense: Number(agg.expense || 0),
+        transferOut: Number(agg.transferOut || 0),
+        transferInternal: Number(agg.transferInternal || 0),
+        opCount: Number(agg.opCount || 0),
+        net: Number(agg.income || 0) - Number(agg.expense || 0),
+        balanceOpen: openBalance,
+        balanceHidden: hiddenBalance,
+        balanceTotal: openBalance + hiddenBalance
+      });
+
+      accountBalancesByDay.push({
+        dayKey,
+        dateLabel: _dayKeyToLabel(dayKey),
+        accounts: balances
+      });
+    });
+
+    const pickByDayKey = (targetDayKey) => {
+      const exact = accountBalancesByDay.find((x) => x.dayKey === targetDayKey);
+      if (exact) return exact.accounts;
+      if (targetDayKey < startDayKey) return [];
+      if (targetDayKey > endDayKey) {
+        const last = accountBalancesByDay[accountBalancesByDay.length - 1];
+        return Array.isArray(last?.accounts) ? last.accounts : [];
+      }
+      return [];
+    };
+
+    const operationsByDay = dayKeys
+      .map((dayKey) => ({
+        dayKey,
+        dateLabel: _dayKeyToLabel(dayKey),
+        items: (opsByDayKey.get(dayKey) || []).slice().sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
+      }))
+      .filter((x) => x.items.length > 0);
+
+    return {
+      period: {
+        startDayKey,
+        endDayKey,
+        startLabel: range.startLabel,
+        endLabel: range.endLabel
+      },
+      asOfDayKey,
+      daily,
+      accountBalancesByDay,
+      operationsByDay,
+      accountBalancesAtAsOf: pickByDayKey(asOfDayKey),
+      accountBalancesAtPeriodEnd: pickByDayKey(endDayKey)
+    };
+  };
+
   const _summarizeRows = (rows) => {
     const summary = {
       fact: _mkBucket(),
@@ -1372,6 +1604,12 @@ module.exports = function createAiRouter(deps) {
           asOf,
           accounts
         });
+        const graphTooltipData = _buildGraphTooltipData({
+          rows,
+          accounts,
+          periodFilter,
+          asOf
+        });
         const riskData = _computeRiskData({
           rows,
           asOf,
@@ -1428,6 +1666,7 @@ module.exports = function createAiRouter(deps) {
           accounts: accounts || null,
           riskData,
           forecastData,
+          graphTooltipData,
           availableContext: {
             byCategory: computed.metrics.byCategory,
             byProject: computed.metrics.byProject
@@ -1472,6 +1711,7 @@ module.exports = function createAiRouter(deps) {
               responseMode,
               risk: riskData,
               forecast: forecastData,
+              graphTooltip: graphTooltipData,
               historyLength: chatHistory.messages.length
             }
           } : {})
