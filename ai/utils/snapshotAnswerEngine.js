@@ -81,6 +81,35 @@ const startOfMonthDateKey = (year, month) => {
 
 const normalizeList = (value) => (Array.isArray(value) ? value : []);
 
+const computeTotalsFromLists = (lists) => {
+  const incomeList = normalizeList(lists?.income);
+  const expenseList = normalizeList(lists?.expense);
+  const withdrawalList = normalizeList(lists?.withdrawal);
+  const transferList = normalizeList(lists?.transfer);
+
+  const income = incomeList.reduce((sum, item) => {
+    return sum + Math.abs(toNum(item?.amount));
+  }, 0);
+
+  const expenseBase = expenseList.reduce((sum, item) => {
+    return sum + Math.abs(toNum(item?.amount));
+  }, 0);
+
+  const withdrawalExpense = withdrawalList.reduce((sum, item) => {
+    return sum + Math.abs(toNum(item?.amount));
+  }, 0);
+
+  // Out-of-system transfers are treated as cash outflow in UI totals.
+  const transferOutExpense = transferList.reduce((sum, item) => {
+    return item?.isOutOfSystemTransfer ? (sum + Math.abs(toNum(item?.amount))) : sum;
+  }, 0);
+
+  return {
+    income,
+    expense: expenseBase + withdrawalExpense + transferOutExpense
+  };
+};
+
 const normalizeDay = (day) => {
   const accountBalancesRaw = Array.isArray(day?.accountBalances) ? day.accountBalances : [];
   const accountBalances = accountBalancesRaw.map((acc) => ({
@@ -97,15 +126,30 @@ const normalizeDay = (day) => {
     transfer: normalizeList(day?.lists?.transfer),
   };
 
-  const totalsIncome = toNum(day?.totals?.income);
-  const totalsExpense = toNum(day?.totals?.expense);
+  const totalsIncomeRaw = toNum(day?.totals?.income);
+  const totalsExpenseRaw = toNum(day?.totals?.expense);
+  const totalsFromLists = computeTotalsFromLists(lists);
+  const hasAnyListItems = (
+    normalizeList(lists?.income).length
+    + normalizeList(lists?.expense).length
+    + normalizeList(lists?.withdrawal).length
+    + normalizeList(lists?.transfer).length
+  ) > 0;
+  const totalsIncome = (totalsIncomeRaw === 0 && hasAnyListItems)
+    ? totalsFromLists.income
+    : totalsIncomeRaw;
+  const totalsExpense = (totalsExpenseRaw === 0 && hasAnyListItems)
+    ? totalsFromLists.expense
+    : totalsExpenseRaw;
 
   const fallbackTotal = accountBalances.reduce((sum, acc) => sum + toNum(acc.balance), 0);
+  const totalBalanceRaw = Number(day?.totalBalance);
+  const totalBalance = Number.isFinite(totalBalanceRaw) ? totalBalanceRaw : fallbackTotal;
 
   return {
     dateKey: String(day?.dateKey || ''),
     dateLabel: String(day?.dateLabel || '') || toRuDateLabel(String(day?.dateKey || '')),
-    totalBalance: toNum(day?.totalBalance) || fallbackTotal,
+    totalBalance,
     accountBalances,
     totals: {
       income: totalsIncome,
