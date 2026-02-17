@@ -48,6 +48,26 @@ const fmtPercent = (value) => {
   return `${Math.round(n)}%`;
 };
 
+const normalizeScope = (scope, fallback = 'all') => {
+  const raw = String(scope || fallback || 'all').toLowerCase();
+  if (raw === 'open' || raw === 'hidden' || raw === 'all') return raw;
+  return 'all';
+};
+
+const scopeLabelRu = (scope) => {
+  const s = normalizeScope(scope);
+  if (s === 'open') return 'открытые счета';
+  if (s === 'hidden') return 'скрытые счета';
+  return 'все счета';
+};
+
+const filterBalancesByScope = (balances, scope) => {
+  const s = normalizeScope(scope);
+  if (s === 'open') return normalizeList(balances).filter((acc) => acc?.isOpen === true);
+  if (s === 'hidden') return normalizeList(balances).filter((acc) => acc?.isOpen !== true);
+  return normalizeList(balances);
+};
+
 const dateFromKey = (dateKey) => {
   const m = String(dateKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
@@ -275,11 +295,11 @@ const renderSection = (title, items, kind) => {
   return lines;
 };
 
-const renderDayBlock = ({ day, onlyOpen = false }) => {
+const renderDayBlock = ({ day, onlyOpen = false, scope = null }) => {
   const dayLabel = String(day?.dateLabel || toRuDateLabel(day?.dateKey));
 
-  const balances = normalizeList(day?.accountBalances)
-    .filter((acc) => (onlyOpen ? acc?.isOpen === true : true));
+  const effectiveScope = normalizeScope(scope || (onlyOpen ? 'open' : 'all'));
+  const balances = filterBalancesByScope(day?.accountBalances, effectiveScope);
 
   const totalBalance = balances.reduce((sum, acc) => sum + toNum(acc?.balance), 0);
   const income = toNum(day?.totals?.income);
@@ -358,10 +378,11 @@ const pickTopOp = (items = [], kind = 'income') => {
   return { amount, cat, acc };
 };
 
-const renderDayInsightsBlock = ({ day, onlyOpen = false }) => {
+const renderDayInsightsBlock = ({ day, onlyOpen = false, scope = null }) => {
   const income = toNum(day?.totals?.income);
   const expense = toNum(day?.totals?.expense);
   const net = income - expense;
+  const effectiveScope = normalizeScope(scope || (onlyOpen ? 'open' : 'all'));
 
   const openBalance = normalizeList(day?.accountBalances)
     .filter((acc) => acc?.isOpen === true)
@@ -369,7 +390,9 @@ const renderDayInsightsBlock = ({ day, onlyOpen = false }) => {
   const hiddenBalance = normalizeList(day?.accountBalances)
     .filter((acc) => acc?.isOpen !== true)
     .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
-  const relevantBalance = onlyOpen ? openBalance : (openBalance + hiddenBalance);
+  const relevantBalance = effectiveScope === 'open'
+    ? openBalance
+    : (effectiveScope === 'hidden' ? hiddenBalance : (openBalance + hiddenBalance));
 
   const topIncome = pickTopOp(day?.lists?.income, 'income');
   const expenseRows = [
@@ -404,7 +427,7 @@ const renderDayInsightsBlock = ({ day, onlyOpen = false }) => {
     lines.push('- Покрытие расходов доходами дня: движения по доходам/расходам не было');
   }
 
-  lines.push(`- Ликвидность на конец дня (${onlyOpen ? 'открытые счета' : 'все счета'}): ${fmtT(relevantBalance)}`);
+  lines.push(`- Ликвидность на конец дня (${scopeLabelRu(effectiveScope)}): ${fmtT(relevantBalance)}`);
 
   if (topIncome) {
     lines.push(`- Крупнейший доход: ${topIncome.amount} (${topIncome.cat}, ${topIncome.acc})`);
@@ -505,7 +528,7 @@ const renderUpcomingOps = ({ snapshot, nowDateKey, limit = 5 }) => {
   return lines.join('\n');
 };
 
-const renderForecastOpenEndOfMonth = ({ snapshot, targetMonth, timelineDateKey }) => {
+const renderForecastEndOfMonth = ({ snapshot, targetMonth, timelineDateKey, scope = 'all' }) => {
   let year;
   let month;
 
@@ -532,11 +555,13 @@ const renderForecastOpenEndOfMonth = ({ snapshot, targetMonth, timelineDateKey }
     };
   }
 
+  const effectiveScope = normalizeScope(scope, 'all');
+
   return {
     ok: true,
     text: [
-      `Прогноз балансов на конец месяца (${String(targetDay.dateLabel || toRuDateLabel(targetDayKey))}, открытые счета):`,
-      renderDayBlock({ day: targetDay, onlyOpen: true })
+      `Прогноз балансов на конец месяца (${String(targetDay.dateLabel || toRuDateLabel(targetDayKey))}, ${scopeLabelRu(effectiveScope)}):`,
+      renderDayBlock({ day: targetDay, scope: effectiveScope })
     ].join('\n\n'),
     meta: { targetDayKey }
   };
@@ -733,11 +758,15 @@ function answerFromSnapshot({ snapshot, intent, timelineDateKey }) {
     };
   }
 
-  if (type === 'FORECAST_OPEN_END_OF_MONTH') {
-    const forecast = renderForecastOpenEndOfMonth({
+  if (type === 'FORECAST_END_OF_MONTH' || type === 'FORECAST_OPEN_END_OF_MONTH') {
+    const scope = type === 'FORECAST_OPEN_END_OF_MONTH'
+      ? 'open'
+      : normalizeScope(intent?.scope, 'all');
+    const forecast = renderForecastEndOfMonth({
       snapshot,
       targetMonth: intent?.targetMonth || null,
-      timelineDateKey: timelineDateKey || snapshot.range.endDateKey
+      timelineDateKey: timelineDateKey || snapshot.range.endDateKey,
+      scope
     });
 
     return {

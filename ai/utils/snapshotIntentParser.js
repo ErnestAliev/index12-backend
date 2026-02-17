@@ -143,6 +143,7 @@ function parseSnapshotIntent({ question, timelineDateKey = null, snapshot = null
   const upcomingRe = /(ближайш[^\n]*операц|какие[^\n]*операц[^\n]*когда|что[^\n]*впереди)/i;
   const forecastRe = /(прогноз|сделай\s+прогноз|кон(ец|цу)[^\n]*месяц)/i;
   const openRe = /(открыт[^\n]*счет|на открытых счетах)/i;
+  const hiddenRe = /(скрыт[^\n]*счет|на скрытых счетах|резерв)/i;
   const balanceRe = /(сколько[^\n]*денег|что было|баланс|сколько было)/i;
 
   if (upcomingRe.test(norm)) {
@@ -156,10 +157,12 @@ function parseSnapshotIntent({ question, timelineDateKey = null, snapshot = null
   }
 
   if (forecastRe.test(norm)) {
+    const scope = hiddenRe.test(norm) ? 'hidden' : (openRe.test(norm) ? 'open' : 'all');
     return {
-      type: 'FORECAST_OPEN_END_OF_MONTH',
+      type: 'FORECAST_END_OF_MONTH',
       dateKey: null,
       targetMonth,
+      scope,
       numeric: true,
       needsLlm: false
     };
