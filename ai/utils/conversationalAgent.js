@@ -36,6 +36,15 @@ const formatT = (value) => {
     return `${sign}${formatted} т`;
 };
 
+const formatSignedT = (value) => {
+    const n = Math.round(toNum(value));
+    const formatted = new Intl.NumberFormat('ru-RU')
+        .format(Math.abs(n))
+        .replace(/\u00A0/g, ' ');
+    const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
+    return `${sign}${formatted} т`;
+};
+
 const normalizeCfoOutput = (raw) => {
     let out = String(raw || '').replace(/\u00A0/g, ' ').trim();
     if (!out) return out;
@@ -758,6 +767,80 @@ async function generateSnapshotChatResponse({
         deterministicFacts,
         snapshotMeta
     });
+    const derivedSemantics = (() => {
+        const factNet = toNum(deterministicFacts?.fact?.totals?.net);
+        const planRemainderNet = toNum(deterministicFacts?.plan?.totals?.net);
+        const monthForecastNet = factNet + planRemainderNet;
+
+        const currentBalanceTotal = toNum(
+            deterministicFacts?.fact?.balances?.total
+            ?? advisoryFacts?.balancePointers?.currentDay?.total
+            ?? 0
+        );
+        const endBalanceTotal = toNum(
+            deterministicFacts?.plan?.toEndBalances?.total
+            ?? deterministicFacts?.endBalances?.total
+            ?? advisoryFacts?.balancePointers?.endDay?.total
+            ?? 0
+        );
+        const balanceDeltaToEnd = endBalanceTotal - currentBalanceTotal;
+
+        const eventLiquidity = advisoryFacts?.nextExpenseLiquidity || null;
+        const eventPostOpen = toNum(eventLiquidity?.postExpenseOpen);
+        const hasCashGapOnEventDay = Boolean(eventLiquidity?.hasCashGap);
+        const compressionByEventDay = eventLiquidity
+            ? (eventPostOpen < currentBalanceTotal)
+            : false;
+        const recoveryByMonthEndAbs = endBalanceTotal - eventPostOpen;
+        const hasRecoveryByMonthEnd = eventLiquidity
+            ? (recoveryByMonthEndAbs > 0)
+            : false;
+        const compressionPersistsToMonthEnd = eventLiquidity
+            ? (endBalanceTotal <= eventPostOpen)
+            : false;
+        const liquidityConclusionCode = (() => {
+            if (!eventLiquidity) return 'no_upcoming_expense_event';
+            if (hasCashGapOnEventDay) return 'cash_gap_on_event_day';
+            if (!compressionByEventDay) return 'stable_after_event';
+            if (hasRecoveryByMonthEnd) return 'temporary_compression_recovered_by_month_end';
+            return 'compression_persists_to_month_end';
+        })();
+
+        return {
+            factNet,
+            factNetFmt: formatSignedT(factNet),
+            planRemainderNet,
+            planRemainderNetFmt: formatSignedT(planRemainderNet),
+            monthForecastNet,
+            monthForecastNetFmt: formatSignedT(monthForecastNet),
+            monthIsProfitable: monthForecastNet >= 0,
+            currentBalanceTotal,
+            currentBalanceTotalFmt: formatT(currentBalanceTotal),
+            endBalanceTotal,
+            endBalanceTotalFmt: formatT(endBalanceTotal),
+            balanceDeltaToEnd,
+            balanceDeltaToEndFmt: formatSignedT(balanceDeltaToEnd),
+            liquidityPath: {
+                eventDateKey: eventLiquidity?.dateKey || null,
+                eventDateLabel: eventLiquidity?.dateLabel || null,
+                eventExpense: toNum(eventLiquidity?.expense),
+                eventExpenseFmt: eventLiquidity?.expenseFmt || formatT(eventLiquidity?.expense || 0),
+                openBeforeEvent: toNum(eventLiquidity?.availableBeforeExpense),
+                openBeforeEventFmt: eventLiquidity?.availableBeforeExpenseFmt || formatT(eventLiquidity?.availableBeforeExpense || 0),
+                openAfterEvent: eventPostOpen,
+                openAfterEventFmt: eventLiquidity?.postExpenseOpenFmt || formatT(eventPostOpen),
+                openAtMonthEnd: endBalanceTotal,
+                openAtMonthEndFmt: formatT(endBalanceTotal),
+                recoveryByMonthEndAbs,
+                recoveryByMonthEndAbsFmt: formatSignedT(recoveryByMonthEndAbs),
+                hasCashGapOnEventDay,
+                compressionByEventDay,
+                hasRecoveryByMonthEnd,
+                compressionPersistsToMonthEnd,
+                liquidityConclusionCode
+            }
+        };
+    })();
     const snapshotSlice = (() => {
         const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
         const sorted = [...days].sort((a, b) => String(a?.dateKey || '').localeCompare(String(b?.dateKey || '')));
@@ -836,6 +919,15 @@ async function generateSnapshotChatResponse({
         'ПЛАН здесь означает запланированные будущие операции, а не целевой KPI.',
         'Запрещено описывать ПЛАН как уже случившийся ФАКТ.',
         'Если упоминаешь будущую дату, явно маркируй это как "план".',
+        'КРИТИЧНО ПО ТЕРМИНАМ:',
+        '- FACTS_JSON.plan.totals.net — это плановый результат остатка периода, а НЕ "убыток месяца".',
+        '- Финрезультат месяца = FACTS_JSON.fact.totals.net + FACTS_JSON.plan.totals.net (см. DERIVED_SEMANTICS_JSON.monthForecastNet).',
+        '- Термин "месяц убыточный" разрешен только если monthForecastNet < 0.',
+        '- Если monthForecastNet >= 0, пиши "месяц прибыльный", даже если plan.totals.net отрицательный.',
+        '- Положительный баланс на конец периода не называть убытком.',
+        '- "Сжатие ликвидности" оценивай ТОЛЬКО по траектории DERIVED_SEMANTICS_JSON.liquidityPath: остаток после дня списания -> остаток на конец месяца.',
+        '- Запрещено делать вывод о сжатии ликвидности только по разнице плановых доходов и расходов.',
+        '- Если на дне списания нет дефицита и к концу месяца есть восстановление, формулировка: "временная просадка ликвидности, к концу месяца восстановление".',
         'Термин "кассовый разрыв" используй ТОЛЬКО если ADVISORY_FACTS_JSON.nextExpenseLiquidity.hasCashGap = true.',
         'Если hasCashGap = false и остаток после списания положительный, пиши: "сжатие ликвидности", а не "разрыв".',
         'Текущие балансы бери из FACTS_JSON.fact.balances и ADVISORY_FACTS_JSON.balancePointers.currentDay.',
@@ -862,6 +954,9 @@ async function generateSnapshotChatResponse({
         'ADVISORY_FACTS_JSON:',
         JSON.stringify(advisoryFacts || {}, null, 2),
         '',
+        'DERIVED_SEMANTICS_JSON:',
+        JSON.stringify(derivedSemantics || {}, null, 2),
+        '',
         'КАРТА ПОЛЕЙ ДЛЯ ОТВЕТА:',
         '- Факт итоги: FACTS_JSON.fact.totals',
         '- План итоги до конца периода: FACTS_JSON.plan.totals',
@@ -869,6 +964,8 @@ async function generateSnapshotChatResponse({
         '- Баланс на конец периода: FACTS_JSON.plan.toEndBalances или ADVISORY_FACTS_JSON.balancePointers.endDay',
         '- Ближайшее плановое списание: FACTS_JSON.plan.nextObligation или ADVISORY_FACTS_JSON.nextExpenseAfterTimeline',
         '- Проверка кассового разрыва на ближайшее списание: ADVISORY_FACTS_JSON.nextExpenseLiquidity',
+        '- Корректная формулировка прибыли/убытка месяца: DERIVED_SEMANTICS_JSON.monthForecastNet и DERIVED_SEMANTICS_JSON.monthIsProfitable',
+        '- Корректная формулировка ликвидности: DERIVED_SEMANTICS_JSON.liquidityPath',
         '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
@@ -904,6 +1001,7 @@ async function generateSnapshotChatResponse({
             },
             deterministicFacts,
             advisoryFacts,
+            derivedSemantics,
             snapshotSlice,
             questionProfile,
             snapshotMeta,
