@@ -386,10 +386,128 @@ async function generateSnapshotInsightsResponse({
     }
 }
 
+/**
+ * Main LLM chat for snapshot-first flow (no deterministic/hybrid output format).
+ * LLM receives full snapshot + computed facts and returns advisory response.
+ */
+async function generateSnapshotChatResponse({
+    question,
+    history = [],
+    snapshot,
+    deterministicFacts = null,
+    snapshotMeta = null
+}) {
+    const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
+    if (!OPENAI_KEY) {
+        return {
+            ok: false,
+            text: 'AI временно недоступен: не найден API ключ.',
+            debug: { error: 'No API key' }
+        };
+    }
+
+    const conversationMessages = (Array.isArray(history) ? history : [])
+        .slice(-8)
+        .map((msg) => ({
+            role: msg?.role === 'assistant' ? 'assistant' : 'user',
+            content: String(msg?.content || '')
+        }))
+        .filter((msg) => msg.content);
+
+    const systemPrompt = [
+        'Ты CFO-советник INDEX12.',
+        'Отвечай как финансовый партнер: рассуждение, риски, действия.',
+        'Не используй детерминированные шаблоны и технические заголовки.',
+        'Цифры бери только из FACTS_JSON и SNAPSHOT_JSON ниже.',
+        'Если данных не хватает для точного вывода — прямо скажи, чего не хватает.',
+        'Логика ответа:',
+        '1) Сначала короткий прямой ответ на вопрос.',
+        '2) Затем 3-6 строк с анализом и причинами.',
+        '3) В конце 1-2 практических шага.',
+        'Запрещено придумывать суммы, даты или операции.'
+    ].join(' ');
+
+    const userContent = [
+        `Вопрос пользователя: ${String(question || '').trim()}`,
+        '',
+        'FACTS_JSON:',
+        JSON.stringify(deterministicFacts || {}, null, 2),
+        '',
+        'SNAPSHOT_META:',
+        JSON.stringify(snapshotMeta || {}, null, 2),
+        '',
+        'SNAPSHOT_JSON:',
+        JSON.stringify(snapshot || {}, null, 2),
+        '',
+        'Дай содержательный CFO-ответ по вопросу пользователя.'
+    ].join('\n');
+
+    try {
+        const model = process.env.OPENAI_MODEL || 'gpt-4o';
+        const llmRequest = {
+            model,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                ...conversationMessages,
+                { role: 'user', content: userContent }
+            ],
+            temperature: 0.2,
+            max_tokens: 700
+        };
+
+        const snapshotInfo = await dumpLlmInputSnapshot({
+            generatedAt: new Date().toISOString(),
+            mode: 'snapshot_chat',
+            question,
+            llmInput: {
+                systemPrompt,
+                userContent,
+                conversationMessagesUsed: conversationMessages,
+                request: llmRequest
+            },
+            deterministicFacts,
+            snapshotMeta,
+            snapshot
+        });
+
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${OPENAI_KEY}`
+            },
+            body: JSON.stringify(llmRequest)
+        });
+
+        if (!response.ok) throw new Error(`API Status ${response.status}`);
+        const data = await response.json();
+        const text = String(data?.choices?.[0]?.message?.content || '').trim();
+        if (!text) throw new Error('Empty response');
+
+        return {
+            ok: true,
+            text,
+            debug: {
+                model: data.model,
+                usage: data.usage,
+                llmInputSnapshot: snapshotInfo
+            }
+        };
+    } catch (err) {
+        console.error('[conversationalAgent][snapshotChat] Error:', err);
+        return {
+            ok: false,
+            text: 'Ошибка генерации ответа CFO.',
+            debug: { error: err.message }
+        };
+    }
+}
+
 function verifyCalculation() { return ''; }
 
 module.exports = {
     generateConversationalResponse,
     generateSnapshotInsightsResponse,
+    generateSnapshotChatResponse,
     verifyCalculation
 };

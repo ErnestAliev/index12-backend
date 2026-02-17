@@ -36,7 +36,6 @@ module.exports = function createAiRouter(deps) {
   const quickJournalAdapter = createQuickJournalAdapter({ Event });
 
   const conversationalAgent = require('./utils/conversationalAgent');
-  const { parseSnapshotIntent } = require('./utils/snapshotIntentParser');
   const snapshotAnswerEngine = require('./utils/snapshotAnswerEngine');
 
   const router = express.Router();
@@ -1567,57 +1566,35 @@ module.exports = function createAiRouter(deps) {
         });
         chatHistory.updatedAt = new Date();
 
-        const intent = parseSnapshotIntent({
-          question: q,
-          timelineDateKey: timelineDate,
-          snapshot
-        });
-
-        const deterministic = snapshotAnswerEngine.answerFromSnapshot({
+        const deterministicFacts = snapshotAnswerEngine.computeDeterministicFacts({
           snapshot,
-          intent,
-          timelineDateKey: timelineDate
+          timelineDateKey: timelineDate,
         });
 
-        const numericIntent = intent?.numeric === true;
-        let llmResult = null;
-        let responseText = String(deterministic?.text || '').trim();
-        let responseMode = 'deterministic';
+        const llmResult = await conversationalAgent.generateSnapshotChatResponse({
+          question: q,
+          history: chatHistory.messages.slice(0, -1),
+          snapshot,
+          deterministicFacts,
+          snapshotMeta: {
+            range: snapshot.range,
+            visibilityMode: snapshot.visibilityMode,
+            timelineDate
+          }
+        });
 
-        if (!numericIntent) {
-          responseMode = 'insights';
-          const deterministicBlock = String(
-            deterministic?.deterministicBlock
-            || deterministic?.text
-            || ''
-          ).trim();
-
-          llmResult = await conversationalAgent.generateSnapshotInsightsResponse({
-            question: q,
-            history: chatHistory.messages.slice(0, -1),
-            deterministicBlock,
-            deterministicFacts: deterministic?.facts || null,
-            snapshotMeta: {
-              range: snapshot.range,
-              visibilityMode: snapshot.visibilityMode,
-              timelineDate,
-              intentType: intent?.type || 'INSIGHTS'
-            }
-          });
-
-          responseText = llmResult?.ok
-            ? `${deterministicBlock}\n\n${String(llmResult?.text || '').trim()}`.trim()
-            : deterministicBlock;
-        }
+        const responseText = llmResult?.ok
+          ? String(llmResult?.text || '').trim()
+          : 'Не удалось сформировать ответ. Проверьте данные snapshot.';
+        const responseMode = 'llm_snapshot_chat';
 
         const llmInputSnapshot = await _dumpLlmInputSnapshot({
           generatedAt: new Date().toISOString(),
-          mode: 'snapshot_first_chat',
+          mode: 'snapshot_llm_chat',
           question: q,
           source,
           timelineDate,
-          intent,
-          deterministic,
+          deterministicFacts,
           llm: llmResult ? {
             ok: llmResult.ok,
             text: llmResult.text,
@@ -1641,10 +1618,8 @@ module.exports = function createAiRouter(deps) {
           content: responseText,
           timestamp: new Date(),
           metadata: {
-            intent,
             responseMode,
-            numericIntent,
-            deterministicMeta: deterministic?.meta || null,
+            deterministicFacts,
             llm: llmResult?.debug || null
           }
         });
@@ -1655,8 +1630,7 @@ module.exports = function createAiRouter(deps) {
           ...(debugEnabled ? {
             debug: {
               timelineDate,
-              intent,
-              deterministic,
+              deterministicFacts,
               llm: llmResult?.debug || null,
               responseMode,
               historyLength: chatHistory.messages.length,

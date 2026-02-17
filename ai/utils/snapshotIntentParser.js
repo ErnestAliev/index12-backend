@@ -44,6 +44,44 @@ const normalizeText = (text) => String(text || '')
   .replace(/\s+/g, ' ')
   .trim();
 
+const parseScopeFromQuestion = (norm) => {
+  const text = String(norm || '');
+  if (/(скрыт[^\n]*счет|на скрытых счетах|резерв)/i.test(text)) return 'hidden';
+  if (/(открыт[^\n]*счет|на открытых счетах|операцион)/i.test(text)) return 'open';
+  return 'all';
+};
+
+const parseRequestedAmount = (question) => {
+  const text = normalizeText(question);
+
+  // 2 млн / 2.5 млн / 2,5 млн
+  const unitMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|m|тыс|тысяч[аи]?|k)(?=\s|$|[?!.,;:])/i);
+  if (unitMatch) {
+    const raw = Number(String(unitMatch[1]).replace(',', '.'));
+    if (!Number.isFinite(raw)) return null;
+    const unit = String(unitMatch[2]).toLowerCase();
+    const multiplier = /млн|миллион|m/i.test(unit) ? 1_000_000 : 1_000;
+    return Math.round(raw * multiplier);
+  }
+
+  // 2 000 000 / 2000000 (берем только достаточно большие числа, чтобы не поймать день/месяц)
+  const plainMatch = text.match(/\b(\d[\d\s]{3,})\b/);
+  if (plainMatch) {
+    const normalized = String(plainMatch[1]).replace(/\s+/g, '');
+    const n = Number(normalized);
+    if (Number.isFinite(n) && n >= 1000) return Math.round(n);
+  }
+
+  return null;
+};
+
+const shouldUseLlmAdvisor = (norm) => {
+  const text = String(norm || '');
+  const forceDeterministicRe = /(только\s+цифр|без\s+анализ|без\s+рассужден|кратко\s+цифр|одной\s+цифр|только\s+детерминирован)/i;
+  if (forceDeterministicRe.test(text)) return false;
+  return true;
+};
+
 const parseMonthWord = (text) => {
   for (const month of MONTHS_RU) {
     if (month.re.test(text)) return month.key;
@@ -145,6 +183,33 @@ function parseSnapshotIntent({ question, timelineDateKey = null, snapshot = null
   const openRe = /(открыт[^\n]*счет|на открытых счетах)/i;
   const hiddenRe = /(скрыт[^\n]*счет|на скрытых счетах|резерв)/i;
   const balanceRe = /(сколько[^\n]*денег|что было|баланс|сколько было)/i;
+  const investRe = /(инвест|инвести|инветс|влож)/i;
+  const expensePlanRe = /(могу ли|можно ли|запланир|планир|потянем|хватит|достаточно)/i;
+  const expenseWordRe = /(расход|трата|затрат)/i;
+
+  if (investRe.test(norm)) {
+    return {
+      type: 'INVEST_CAPACITY',
+      dateKey: dateKey || timelineDateKey || null,
+      targetMonth,
+      scope: parseScopeFromQuestion(norm),
+      basis: /поступлен/i.test(norm) ? 'inflows' : 'balance',
+      numeric: true,
+      needsLlm: shouldUseLlmAdvisor(norm)
+    };
+  }
+
+  if (expensePlanRe.test(norm) && expenseWordRe.test(norm)) {
+    return {
+      type: 'EXPENSE_FEASIBILITY',
+      dateKey: dateKey || timelineDateKey || null,
+      targetMonth,
+      scope: parseScopeFromQuestion(norm),
+      requestedAmount: parseRequestedAmount(q),
+      numeric: true,
+      needsLlm: shouldUseLlmAdvisor(norm)
+    };
+  }
 
   if (upcomingRe.test(norm)) {
     return {
@@ -220,5 +285,6 @@ function parseSnapshotIntent({ question, timelineDateKey = null, snapshot = null
 module.exports = {
   parseSnapshotIntent,
   parseDateKeyFromQuestion,
-  parseTargetMonth
+  parseTargetMonth,
+  parseRequestedAmount
 };

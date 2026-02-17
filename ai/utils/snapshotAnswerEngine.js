@@ -68,6 +68,71 @@ const filterBalancesByScope = (balances, scope) => {
   return normalizeList(balances);
 };
 
+const sumBalancesByScope = (day, scope) => {
+  return filterBalancesByScope(day?.accountBalances, scope)
+    .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+};
+
+const resolveTargetDay = ({ snapshot, intent, timelineDateKey }) => {
+  if (intent?.targetMonth && Number.isFinite(Number(intent.targetMonth.year)) && Number.isFinite(Number(intent.targetMonth.month))) {
+    const year = Number(intent.targetMonth.year);
+    const month = Number(intent.targetMonth.month);
+    const targetDayKey = endOfMonthDateKey(year, month);
+    const targetDay = findDay(snapshot, targetDayKey);
+    if (!targetDay) {
+      const monthStart = startOfMonthDateKey(year, month);
+      return {
+        ok: false,
+        text: `Нет dayKey ${targetDayKey} в snapshot; нужен диапазон ${monthStart} — ${targetDayKey}.`
+      };
+    }
+    return { ok: true, day: targetDay };
+  }
+
+  if (DATE_KEY_RE.test(String(intent?.dateKey || ''))) {
+    const byIntentDate = findDay(snapshot, intent.dateKey);
+    if (byIntentDate) return { ok: true, day: byIntentDate };
+  }
+
+  if (DATE_KEY_RE.test(String(timelineDateKey || ''))) {
+    const byTimeline = findDay(snapshot, timelineDateKey);
+    if (byTimeline) return { ok: true, day: byTimeline };
+  }
+
+  const fallback = snapshot.days[snapshot.days.length - 1] || null;
+  if (!fallback) {
+    return { ok: false, text: 'В snapshot нет доступных дней для расчета.' };
+  }
+  return { ok: true, day: fallback };
+};
+
+const sumInflowsByScope = ({ snapshot, fromDateKey, toDateKey, scope, targetDay }) => {
+  const effectiveScope = normalizeScope(scope, 'all');
+  const targetNames = new Set(
+    filterBalancesByScope(targetDay?.accountBalances, effectiveScope)
+      .map((acc) => String(acc?.name || '').trim())
+      .filter(Boolean)
+  );
+
+  const inRange = (dayKey) => {
+    if (!DATE_KEY_RE.test(String(dayKey || ''))) return false;
+    if (DATE_KEY_RE.test(String(fromDateKey || '')) && String(dayKey) <= String(fromDateKey)) return false;
+    if (DATE_KEY_RE.test(String(toDateKey || '')) && String(dayKey) > String(toDateKey)) return false;
+    return true;
+  };
+
+  return snapshot.days
+    .filter((day) => inRange(day?.dateKey))
+    .reduce((sum, day) => {
+      return sum + normalizeList(day?.lists?.income).reduce((acc, item) => {
+        const amount = Math.abs(toNum(item?.amount));
+        if (effectiveScope === 'all') return acc + amount;
+        const accName = String(item?.accName || '').trim();
+        return targetNames.has(accName) ? (acc + amount) : acc;
+      }, 0);
+    }, 0);
+};
+
 const dateFromKey = (dateKey) => {
   const m = String(dateKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
@@ -567,6 +632,94 @@ const renderForecastEndOfMonth = ({ snapshot, targetMonth, timelineDateKey, scop
   };
 };
 
+const renderInvestCapacity = ({ snapshot, intent, timelineDateKey }) => {
+  const resolved = resolveTargetDay({ snapshot, intent, timelineDateKey });
+  if (!resolved.ok) return { ok: false, text: resolved.text };
+
+  const targetDay = resolved.day;
+  const scope = normalizeScope(intent?.scope, 'all');
+  const basis = String(intent?.basis || 'balance').toLowerCase() === 'inflows' ? 'inflows' : 'balance';
+
+  const nowKey = DATE_KEY_RE.test(String(timelineDateKey || ''))
+    ? String(timelineDateKey)
+    : String(snapshot?.range?.startDateKey || '');
+
+  const byBalance = sumBalancesByScope(targetDay, scope);
+  const byInflows = sumInflowsByScope({
+    snapshot,
+    fromDateKey: nowKey,
+    toDateKey: targetDay.dateKey,
+    scope,
+    targetDay
+  });
+
+  const result = basis === 'inflows' ? byInflows : byBalance;
+  const basisLabel = basis === 'inflows'
+    ? `по поступлениям до ${String(targetDay.dateLabel || toRuDateLabel(targetDay.dateKey))}`
+    : `по ликвидности на ${String(targetDay.dateLabel || toRuDateLabel(targetDay.dateKey))}`;
+
+  const lines = [
+    `Потенциал инвестиций (${scopeLabelRu(scope)}): ${fmtT(result)}`,
+    `> База расчета: ${basisLabel}`,
+    `> Ликвидность на целевую дату: ${fmtT(byBalance)}`
+  ];
+
+  if (basis === 'inflows') {
+    lines.push(`> Поступления в горизонте: ${fmtT(byInflows)}`);
+  }
+
+  return {
+    ok: true,
+    text: lines.join('\n'),
+    meta: {
+      targetDateKey: targetDay.dateKey,
+      scope,
+      basis
+    }
+  };
+};
+
+const renderExpenseFeasibility = ({ snapshot, intent, timelineDateKey }) => {
+  const requestedAmount = toNum(intent?.requestedAmount);
+  if (requestedAmount <= 0) {
+    return {
+      ok: false,
+      text: 'Не удалось определить сумму расхода. Укажи сумму явно, например: 2 000 000.'
+    };
+  }
+
+  const resolved = resolveTargetDay({ snapshot, intent, timelineDateKey });
+  if (!resolved.ok) return { ok: false, text: resolved.text };
+
+  const targetDay = resolved.day;
+  const scope = normalizeScope(intent?.scope, 'all');
+  const available = sumBalancesByScope(targetDay, scope);
+  const delta = available - requestedAmount;
+  const canPlan = delta >= 0;
+
+  const lines = [
+    `Запланировать расход ${fmtT(requestedAmount)} на ${String(targetDay.dateLabel || toRuDateLabel(targetDay.dateKey))} (${scopeLabelRu(scope)}): ${canPlan ? 'ДА' : 'НЕТ'}.`,
+    `> Доступно на дату: ${fmtT(available)}`
+  ];
+
+  if (canPlan) {
+    lines.push(`> Остаток после расхода: ${fmtT(delta)}`);
+  } else {
+    lines.push(`> Дефицит: ${fmtT(Math.abs(delta))}`);
+  }
+
+  return {
+    ok: true,
+    text: lines.join('\n'),
+    meta: {
+      targetDateKey: targetDay.dateKey,
+      scope,
+      requestedAmount,
+      available
+    }
+  };
+};
+
 const accumulateCategoryFlows = (snapshot) => {
   const map = new Map();
 
@@ -755,6 +908,26 @@ function answerFromSnapshot({ snapshot, intent, timelineDateKey }) {
         nowDateKey: intent?.dateKey || timelineDateKey || snapshot.range.startDateKey,
         limit: 5
       })
+    };
+  }
+
+  if (type === 'INVEST_CAPACITY') {
+    const result = renderInvestCapacity({ snapshot, intent, timelineDateKey });
+    return {
+      ok: result.ok,
+      numeric: true,
+      text: result.text,
+      meta: result.meta || null
+    };
+  }
+
+  if (type === 'EXPENSE_FEASIBILITY') {
+    const result = renderExpenseFeasibility({ snapshot, intent, timelineDateKey });
+    return {
+      ok: result.ok,
+      numeric: true,
+      text: result.text,
+      meta: result.meta || null
     };
   }
 
