@@ -1387,18 +1387,26 @@ module.exports = function createAiRouter(deps) {
     res.json({ ok: true, mode: 'hybrid', version: AIROUTES_VERSION });
   });
 
+  const _extractTimelineDate = (raw) => {
+    const value = String(raw || '').trim();
+    const direct = value.match(/^(\d{4}-\d{2}-\d{2})$/);
+    if (direct) return direct[1];
+    const fromIso = value.match(/^(\d{4}-\d{2}-\d{2})T/);
+    if (fromIso) return fromIso[1];
+    return null;
+  };
+
   // 🟢 GET /api/ai/history - Load chat history for current timeline date  
   router.get('/history', isAuthenticated, async (req, res) => {
     try {
       const userId = req.user?._id || req.user?.id;
       const userIdStr = String(userId || '');
       if (!userIdStr) return res.status(401).json({ error: 'Пользователь не найден' });
-      const asOf = req.query.asOf;
-      const isValidDate = (d) => d instanceof Date && !Number.isNaN(d.getTime());
-      const asOfDate = asOf ? new Date(asOf) : new Date();
-      const timelineDate = isValidDate(asOfDate)
-        ? asOfDate.toISOString().split('T')[0]
-        : new Date().toISOString().split('T')[0];
+
+      const timelineDate =
+        _extractTimelineDate(req.query?.timelineDate) ||
+        _extractTimelineDate(req.query?.asOf) ||
+        new Date().toISOString().slice(0, 10);
 
       const history = await ChatHistory.findOne({
         userId: userIdStr,
@@ -1411,6 +1419,34 @@ module.exports = function createAiRouter(deps) {
       });
     } catch (error) {
       console.error('[AI History] Load error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+  });
+
+  // DELETE /api/ai/history - reset chat history (all or keep one day)
+  router.delete('/history', isAuthenticated, async (req, res) => {
+    try {
+      const userId = req.user?._id || req.user?.id;
+      const userIdStr = String(userId || '');
+      if (!userIdStr) return res.status(401).json({ error: 'Пользователь не найден' });
+
+      const keepDate =
+        _extractTimelineDate(req.query?.keepDate) ||
+        _extractTimelineDate(req.query?.timelineDate) ||
+        null;
+
+      const filter = keepDate
+        ? { userId: userIdStr, timelineDate: { $ne: keepDate } }
+        : { userId: userIdStr };
+
+      const result = await ChatHistory.deleteMany(filter);
+      return res.json({
+        ok: true,
+        deletedCount: Number(result?.deletedCount || 0),
+        keepDate: keepDate || null
+      });
+    } catch (error) {
+      console.error('[AI History] Reset error:', error);
       return res.status(500).json({ error: error.message });
     }
   });
