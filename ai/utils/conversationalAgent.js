@@ -191,18 +191,33 @@ const _composeRiskResponse = (rawText, riskData, userQuestion = '') => {
     const questionText = String(userQuestion || '').trim() || 'Что может пойти не так?';
     const summaryAnswer = (() => {
         if (!hasPlannedFlows) {
-            return 'Коротко: критичных рисков до конца месяца не видно, плановых операций больше нет.';
+            return 'Критичных рисков до конца месяца не видно: плановых операций больше нет, ориентир только на остаток открытых счетов.';
         }
-        if (plannedGap <= 0 && openLiquidityNow >= plannedExpense) {
-            return 'Коротко: до конца месяца доживем комфортно, открытая ликвидность покрывает план.';
+
+        const firstOutflow = topOutflows.length ? topOutflows[0] : null;
+        const firstOutflowText = firstOutflow
+            ? `${firstOutflow.dateLabel || '?'} — ${firstOutflow.label || 'платеж'} ${_formatMoneyNumber(firstOutflow.amount || 0)} ₸`
+            : '';
+        const riskSignals = [];
+
+        if (plannedGap > 0) {
+            riskSignals.push(`плановый разрыв ${_formatMoneyNumber(plannedGap)} ₸`);
         }
-        if (openLiquidityNow >= plannedExpense) {
-            return 'Коротко: до конца месяца доживем, но только при жестком контроле новых трат.';
+        if (planOnlyCoverageRatio !== null && planOnlyCoverageRatio < 1) {
+            riskSignals.push(`плановые доходы покрывают только ${Math.round(planOnlyCoverageRatio * 100)}% плановых расходов`);
         }
-        if ((openLiquidityNow + plannedIncome) >= plannedExpense) {
-            return 'Коротко: доживем, если плановые поступления придут вовремя и без сдвига дат.';
+        if (coverageRatioOpenNow !== null && coverageRatioOpenNow < 1) {
+            riskSignals.push(`открытая ликвидность покрывает ${Math.round(coverageRatioOpenNow * 100)}% плановых выплат`);
         }
-        return 'Коротко: есть риск кассового разрыва до конца месяца, если план не скорректировать.';
+        if (firstOutflowText) {
+            riskSignals.push(`первый пик списаний: ${firstOutflowText}`);
+        }
+
+        if (riskSignals.length) {
+            return `Ключевая уязвимость месяца в кассовом зазоре: ${riskSignals.join('; ')}.`;
+        }
+
+        return 'Негативный сценарий сейчас слабый: открытая ликвидность и плановые поступления покрывают плановые списания.';
     })();
 
     const lines = [
