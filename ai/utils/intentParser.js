@@ -11,7 +11,7 @@
  */
 async function parseIntent({ question, availableContext = {} }) {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
 
     if (!apiKey) {
         return {
@@ -257,7 +257,7 @@ function formatAnswer({ intent, metrics, period, formatCurrency }) {
  */
 async function generateConversationalResponse({ question, metrics, period, formatCurrency }) {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
 
     if (!apiKey) {
         return {

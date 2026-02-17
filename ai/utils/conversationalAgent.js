@@ -138,7 +138,7 @@ async function generateConversationalResponse({
                 'Authorization': `Bearer ${OPENAI_KEY}`
             },
             body: JSON.stringify({
-                model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+                model: process.env.OPENAI_MODEL || 'gpt-4o',
                 messages,
                 temperature: 0.1, // Низкая температура для точности данных
                 max_tokens: 1000

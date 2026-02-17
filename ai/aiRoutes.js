@@ -981,7 +981,7 @@ module.exports = function createAiRouter(deps) {
 
   const _callLlmAgent = async ({ question, context }) => {
     const apiKey = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
 
     if (!apiKey) {
       return {
