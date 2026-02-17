@@ -27,6 +27,8 @@ const toNum = (value) => {
     return Number.isFinite(n) ? n : 0;
 };
 
+const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
 const formatT = (value) => {
     const n = Math.round(Math.abs(toNum(value)));
     const formatted = new Intl.NumberFormat('ru-RU').format(n).replace(/\u00A0/g, ' ');
@@ -105,6 +107,29 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
         };
     });
 
+    const sortedRows = [...dayRows].sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)));
+    const todayKey = DATE_KEY_RE.test(timelineDate)
+        ? timelineDate
+        : (sortedRows[sortedRows.length - 1]?.dateKey || '');
+
+    const currentDay = sortedRows
+        .filter((row) => row.dateKey <= todayKey)
+        .slice(-1)[0] || null;
+
+    const endDay = sortedRows[sortedRows.length - 1] || null;
+    const currentDayKey = currentDay?.dateKey || todayKey;
+    const factRows = sortedRows.filter((row) => currentDayKey && row.dateKey <= currentDayKey);
+    const planRows = sortedRows.filter((row) => currentDayKey && row.dateKey > currentDayKey);
+
+    const sumRows = (rows) => rows.reduce((acc, row) => ({
+        income: acc.income + toNum(row?.income),
+        expense: acc.expense + toNum(row?.expense),
+        net: acc.net + toNum(row?.net)
+    }), { income: 0, expense: 0, net: 0 });
+
+    const factTotals = sumRows(factRows);
+    const planTotals = sumRows(planRows);
+
     const minOpenDay = dayRows.reduce((min, row) => (min === null || row.openBalance < min.openBalance ? row : min), null);
     const maxExpenseDay = dayRows.reduce((max, row) => (max === null || row.expense > max.expense ? row : max), null);
     const cashGapDays = dayRows.filter((row) => row.expense > 0 && row.openBalance < row.expense);
@@ -128,10 +153,61 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
         return { name: topName, amount: topAmount, amountFmt: formatT(topAmount) };
     })();
 
+    const peakFactCategory = (() => {
+        const maxFactExpenseDay = factRows.reduce((max, row) => (max === null || row.expense > max.expense ? row : max), null);
+        if (!maxFactExpenseDay || !Array.isArray(maxFactExpenseDay.expenseItems) || !maxFactExpenseDay.expenseItems.length) return null;
+        const byCategory = new Map();
+        maxFactExpenseDay.expenseItems.forEach((item) => {
+            const key = String(item?.catName || 'Без категории');
+            byCategory.set(key, (byCategory.get(key) || 0) + Math.abs(toNum(item?.amount)));
+        });
+        let topName = null;
+        let topAmount = 0;
+        byCategory.forEach((amount, name) => {
+            if (amount > topAmount) {
+                topAmount = amount;
+                topName = name;
+            }
+        });
+        if (!topName) return null;
+        return {
+            dateKey: maxFactExpenseDay.dateKey,
+            dateLabel: maxFactExpenseDay.dateLabel,
+            name: topName,
+            amount: topAmount,
+            amountFmt: formatT(topAmount)
+        };
+    })();
+
+    const peakPlanCategory = (() => {
+        const maxPlanExpenseDay = planRows.reduce((max, row) => (max === null || row.expense > max.expense ? row : max), null);
+        if (!maxPlanExpenseDay || !Array.isArray(maxPlanExpenseDay.expenseItems) || !maxPlanExpenseDay.expenseItems.length) return null;
+        const byCategory = new Map();
+        maxPlanExpenseDay.expenseItems.forEach((item) => {
+            const key = String(item?.catName || 'Без категории');
+            byCategory.set(key, (byCategory.get(key) || 0) + Math.abs(toNum(item?.amount)));
+        });
+        let topName = null;
+        let topAmount = 0;
+        byCategory.forEach((amount, name) => {
+            if (amount > topAmount) {
+                topAmount = amount;
+                topName = name;
+            }
+        });
+        if (!topName) return null;
+        return {
+            dateKey: maxPlanExpenseDay.dateKey,
+            dateLabel: maxPlanExpenseDay.dateLabel,
+            name: topName,
+            amount: topAmount,
+            amountFmt: formatT(topAmount)
+        };
+    })();
+
     const nextExpenseAfterTimeline = (() => {
-        if (!timelineDate) return null;
-        const sorted = [...dayRows].sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)));
-        return sorted.find((row) => row.dateKey > timelineDate && row.expense > 0) || null;
+        if (!todayKey) return null;
+        return sortedRows.find((row) => row.dateKey > todayKey && row.expense > 0) || null;
     })();
 
     const totals = deterministicFacts?.totals || {};
@@ -141,6 +217,10 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
     return {
         hasData: true,
         period: deterministicFacts?.range || null,
+        timeline: {
+            todayKey: todayKey || null,
+            todayLabel: currentDay?.dateLabel || todayKey || null
+        },
         totals: {
             income: toNum(totals.income),
             expense: toNum(totals.expense),
@@ -148,6 +228,46 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
             incomeFmt: formatT(totals.income),
             expenseFmt: formatT(totals.expense),
             netFmt: formatT(totals.net)
+        },
+        splitTotals: {
+            fact: {
+                income: factTotals.income,
+                expense: factTotals.expense,
+                net: factTotals.net,
+                incomeFmt: formatT(factTotals.income),
+                expenseFmt: formatT(factTotals.expense),
+                netFmt: formatT(factTotals.net)
+            },
+            plan: {
+                income: planTotals.income,
+                expense: planTotals.expense,
+                net: planTotals.net,
+                incomeFmt: formatT(planTotals.income),
+                expenseFmt: formatT(planTotals.expense),
+                netFmt: formatT(planTotals.net)
+            }
+        },
+        balancePointers: {
+            currentDay: currentDay ? {
+                dateKey: currentDay.dateKey,
+                dateLabel: currentDay.dateLabel,
+                open: currentDay.openBalance,
+                hidden: currentDay.hiddenBalance,
+                total: currentDay.totalBalance,
+                openFmt: formatT(currentDay.openBalance),
+                hiddenFmt: formatT(currentDay.hiddenBalance),
+                totalFmt: formatT(currentDay.totalBalance)
+            } : null,
+            endDay: endDay ? {
+                dateKey: endDay.dateKey,
+                dateLabel: endDay.dateLabel,
+                open: endDay.openBalance,
+                hidden: endDay.hiddenBalance,
+                total: endDay.totalBalance,
+                openFmt: formatT(endDay.openBalance),
+                hiddenFmt: formatT(endDay.hiddenBalance),
+                totalFmt: formatT(endDay.totalBalance)
+            } : null
         },
         endBalances: {
             open: toNum(endBalances.open),
@@ -186,6 +306,8 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
             expense: nextExpenseAfterTimeline.expense,
             expenseFmt: formatT(nextExpenseAfterTimeline.expense)
         } : null,
+        peakFactCategory,
+        peakPlanCategory,
         anomalies: anomalies.map((row) => ({
             name: row?.name || 'Без категории',
             gap: toNum(row?.gap),
@@ -598,6 +720,14 @@ async function generateSnapshotChatResponse({
         'Отвечай разговорно, но строго по цифрам и причинно-следственным связям.',
         'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_JSON.',
         'Запрещено придумывать суммы, даты, операции, категории.',
+        'КРИТИЧНО ПО ДАТАМ: today = SNAPSHOT_META.timelineDate.',
+        'ФАКТ = операции/показатели на датах <= today.',
+        'ПЛАН = операции/показатели на датах > today.',
+        'ПЛАН здесь означает запланированные будущие операции, а не целевой KPI.',
+        'Запрещено описывать ПЛАН как уже случившийся ФАКТ.',
+        'Если упоминаешь будущую дату, явно маркируй это как "план".',
+        'Текущие балансы бери из FACTS_JSON.fact.balances и ADVISORY_FACTS_JSON.balancePointers.currentDay.',
+        'Будущие/конечные балансы бери из FACTS_JSON.plan.toEndBalances и ADVISORY_FACTS_JSON.balancePointers.endDay.',
         'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
         'Если вопрос простой про один показатель, ответ должен быть коротким:',
         '- 1-я строка: прямой ответ с числом.',
@@ -612,12 +742,20 @@ async function generateSnapshotChatResponse({
     const userContent = [
         `Вопрос пользователя: ${String(question || '').trim()}`,
         `QUESTION_PROFILE: ${questionProfile}`,
+        `TODAY_KEY: ${String(snapshotMeta?.timelineDate || '')}`,
         '',
         'FACTS_JSON:',
         JSON.stringify(deterministicFacts || {}, null, 2),
         '',
         'ADVISORY_FACTS_JSON:',
         JSON.stringify(advisoryFacts || {}, null, 2),
+        '',
+        'КАРТА ПОЛЕЙ ДЛЯ ОТВЕТА:',
+        '- Факт итоги: FACTS_JSON.fact.totals',
+        '- План итоги до конца периода: FACTS_JSON.plan.totals',
+        '- Текущий баланс (на today): FACTS_JSON.fact.balances или ADVISORY_FACTS_JSON.balancePointers.currentDay',
+        '- Баланс на конец периода: FACTS_JSON.plan.toEndBalances или ADVISORY_FACTS_JSON.balancePointers.endDay',
+        '- Ближайшее плановое списание: FACTS_JSON.plan.nextObligation или ADVISORY_FACTS_JSON.nextExpenseAfterTimeline',
         '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),

@@ -747,6 +747,48 @@ const accumulateCategoryFlows = (snapshot) => {
 };
 
 const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
+  const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+  if (!days.length) {
+    return {
+      range: {
+        startDateKey: snapshot?.range?.startDateKey || '',
+        endDateKey: snapshot?.range?.endDateKey || '',
+        startDateLabel: toRuDateLabel(snapshot?.range?.startDateKey || ''),
+        endDateLabel: toRuDateLabel(snapshot?.range?.endDateKey || ''),
+        dayCount: 0
+      },
+      totals: { income: 0, expense: 0, net: 0 },
+      endBalances: { open: 0, hidden: 0, total: 0 },
+      anomalies: [],
+      upcomingCount: 0,
+      nextObligation: null,
+      topExpenseDays: [],
+      timeline: {
+        requestedDateKey: DATE_KEY_RE.test(String(timelineDateKey || '')) ? String(timelineDateKey) : null,
+        asOfDateKey: null,
+        asOfDateLabel: null,
+        hasAsOfInSnapshot: false
+      },
+      fact: {
+        dayCount: 0,
+        totals: { income: 0, expense: 0, net: 0 },
+        balances: { open: 0, hidden: 0, total: 0 }
+      },
+      plan: {
+        dayCount: 0,
+        totals: { income: 0, expense: 0, net: 0 },
+        toEndBalances: { open: 0, hidden: 0, total: 0 },
+        nextObligation: null
+      }
+    };
+  }
+
+  const sumTotals = (rows) => {
+    const income = rows.reduce((sum, day) => sum + toNum(day?.totals?.income), 0);
+    const expense = rows.reduce((sum, day) => sum + toNum(day?.totals?.expense), 0);
+    return { income, expense, net: income - expense };
+  };
+
   const totalIncome = snapshot.days.reduce((sum, day) => sum + toNum(day?.totals?.income), 0);
   const totalExpense = snapshot.days.reduce((sum, day) => sum + toNum(day?.totals?.expense), 0);
   const totalNet = totalIncome - totalExpense;
@@ -775,7 +817,29 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     ? String(timelineDateKey)
     : String(snapshot.range.startDateKey || snapshot.days[0]?.dateKey || '');
 
-  const upcoming = snapshot.days
+  const asOfDay = snapshot.days
+    .filter((day) => String(day?.dateKey || '') <= now)
+    .slice(-1)[0] || null;
+
+  const asOfKey = String(asOfDay?.dateKey || '');
+  const factDays = asOfKey
+    ? snapshot.days.filter((day) => String(day?.dateKey || '') <= asOfKey)
+    : [];
+  const planDays = asOfKey
+    ? snapshot.days.filter((day) => String(day?.dateKey || '') > asOfKey)
+    : snapshot.days;
+
+  const factTotals = sumTotals(factDays);
+  const planTotals = sumTotals(planDays);
+
+  const asOfOpen = normalizeList(asOfDay?.accountBalances)
+    .filter((acc) => acc?.isOpen === true)
+    .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+  const asOfHidden = normalizeList(asOfDay?.accountBalances)
+    .filter((acc) => acc?.isOpen !== true)
+    .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+
+  const upcoming = planDays
     .filter((day) => day.dateKey > now)
     .filter(dayHasActivity)
     .sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)));
@@ -825,7 +889,32 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     anomalies,
     upcomingCount: upcoming.length,
     nextObligation,
-    topExpenseDays: expenseDaysTop
+    topExpenseDays: expenseDaysTop,
+    timeline: {
+      requestedDateKey: DATE_KEY_RE.test(String(timelineDateKey || '')) ? String(timelineDateKey) : null,
+      asOfDateKey: asOfKey || null,
+      asOfDateLabel: asOfDay?.dateLabel || (asOfKey ? toRuDateLabel(asOfKey) : null),
+      hasAsOfInSnapshot: Boolean(asOfDay && asOfKey === now)
+    },
+    fact: {
+      dayCount: factDays.length,
+      totals: factTotals,
+      balances: {
+        open: asOfOpen,
+        hidden: asOfHidden,
+        total: asOfOpen + asOfHidden
+      }
+    },
+    plan: {
+      dayCount: planDays.length,
+      totals: planTotals,
+      toEndBalances: {
+        open: endOpen,
+        hidden: endHidden,
+        total: endOpen + endHidden
+      },
+      nextObligation
+    }
   };
 };
 
@@ -838,6 +927,16 @@ const buildDeterministicInsightsBlock = (facts) => {
     `- Нетто: ${fmtSignedT(facts.totals.net)}`,
     `- Баланс на конец диапазона: ${fmtT(facts.endBalances.total)} (открытые ${fmtT(facts.endBalances.open)}, скрытые ${fmtT(facts.endBalances.hidden)})`
   ];
+
+  if (facts?.timeline?.asOfDateLabel) {
+    lines.push(`- Сегодня (asOf): ${facts.timeline.asOfDateLabel}`);
+  }
+  if (facts?.fact?.totals) {
+    lines.push(`- Факт до today: доход +${fmtT(facts.fact.totals.income)}, расход -${fmtT(facts.fact.totals.expense)}, нетто ${fmtSignedT(facts.fact.totals.net)}`);
+  }
+  if (facts?.plan?.totals) {
+    lines.push(`- План после today: доход +${fmtT(facts.plan.totals.income)}, расход -${fmtT(facts.plan.totals.expense)}, нетто ${fmtSignedT(facts.plan.totals.net)}`);
+  }
 
   if (facts.nextObligation) {
     lines.push(`- Ближайшее обязательство: ${facts.nextObligation.dateLabel} — ${fmtT(facts.nextObligation.amount)}`);
