@@ -1145,8 +1145,10 @@ module.exports = function createAiRouter(deps) {
       const userIdStr = String(userId || '');
       if (!userIdStr) return res.status(401).json({ error: 'Пользователь не найден' });
       const asOf = req.query.asOf;
-      const timelineDate = asOf
-        ? new Date(asOf).toISOString().split('T')[0]
+      const isValidDate = (d) => d instanceof Date && !Number.isNaN(d.getTime());
+      const asOfDate = asOf ? new Date(asOf) : new Date();
+      const timelineDate = isValidDate(asOfDate)
+        ? asOfDate.toISOString().split('T')[0]
         : new Date().toISOString().split('T')[0];
 
       const history = await ChatHistory.findOne({
@@ -1201,7 +1203,12 @@ module.exports = function createAiRouter(deps) {
         const asOf = req.body?.asOf || null;
 
         // Step 0: Get current timeline date and load/create chat history
-        const timelineDate = asOf ? new Date(asOf).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+        // FIX: safe date parsing to avoid invalid asOf crashes
+        const isValidDate = (d) => d instanceof Date && !Number.isNaN(d.getTime());
+        const asOfDate = asOf ? new Date(asOf) : new Date();
+        const timelineDate = isValidDate(asOfDate)
+          ? asOfDate.toISOString().split('T')[0]
+          : new Date().toISOString().split('T')[0];
 
         let chatHistory = await ChatHistory.findOne({
           userId: userIdStr,
