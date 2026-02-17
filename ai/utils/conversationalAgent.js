@@ -3,8 +3,6 @@
 
 /**
  * Generate conversational response with context from chat history
- * @param {Object} params
- * @returns {Promise<{ok: boolean, text: string, debug: Object}>}
  */
 async function generateConversationalResponse({
     question,
@@ -33,118 +31,111 @@ async function generateConversationalResponse({
     }
 
     const conversationMessages = history
-        .slice(-10) // Ограничиваем контекст чтобы не путать модель
+        .slice(-8) // Короче контекст — меньше галлюцинаций
         .map((msg) => ({
             role: msg.role,
             content: msg.content
         }));
 
-    // Подготовка контекста данных (insights, topCategories и т.д.)
     const insights = [];
     if (metrics?.plan?.expense > 0) insights.push(`План расходов: ${formatCurrency(metrics.plan.expense)}`);
-    if (metrics?.plan?.income > 0) insights.push(`План доходов: ${formatCurrency(metrics.plan.income)}`);
     if (metrics?.fact?.income > 0) insights.push(`Факт доходов: ${formatCurrency(metrics.fact.income)}`);
-    if (metrics?.fact?.expense > 0) insights.push(`Факт расходов: ${formatCurrency(metrics.fact.expense)}`);
     if ((metrics?.total?.net || 0) !== 0) insights.push(`Чистый результат: ${formatCurrency(metrics.total.net)}`);
 
     const userTone = /\b(ты|твой|твои|тебя|тебе)\b/i.test(question) ? 'ты' : 'вы';
 
-    // === ФИНАЛЬНАЯ ВЕРСИЯ СИСТЕМНОГО ПРОМПТА ===
+    // --- HARD MATH CALCULATION (JS SIDE) ---
+    // Считаем здесь, чтобы не доверять LLM арифметику
+    const safeSpend = Number(riskData?.safeSpend || 0);
+    const hiddenTotal = Number(hiddenBalance || 0);
+    const investPotential = hiddenTotal + safeSpend;
+    const projectedBal = futureBalance?.projected || 0;
+    const nextBillDate = riskData?.topOutflows?.[0]?.dateLabel || 'Не определено';
+    const nextBillAmount = riskData?.topOutflows?.[0]?.amount || 0;
+
     const systemPrompt = [
         // --- 1. РОЛЬ ---
         'ТЫ — AI-ФИНАНСОВЫЙ ДИРЕКТОР (CFO). Твой стиль: Илья Балахнин.',
-        'Твои качества: Математическая точность, жесткость, отсутствие "воды".',
+        'Твои качества: Жесткость, точность, только факты.',
         'Твой язык: Деловой русский.',
         `Общайся на "${userTone}".`,
 
-        // --- 2. ПРАВИЛА ОТОБРАЖЕНИЯ ---
-        '1. ЧИСЛА: НИКОГДА не сокращай (Запрещено: "20 млн"). ВСЕГДА: `20 252 195 ₸`.',
+        // --- 2. ФОРМАТ ---
+        'ПРАВИЛА:',
+        '1. ЧИСЛА: Полные, с пробелами (20 252 195 ₸). Без сокращений.',
         '2. СТРУКТУРА: Каждая мысль (символ ">") — С НОВОЙ СТРОКИ.',
 
-        // --- 3. АЛГОРИТМ ДЕЙСТВИЙ (ГЛАВНЫЙ МОЗГ) ---
-        'ПЕРЕД ОТВЕТОМ ТЫ ОБЯЗАН ВЫПОЛНИТЬ ЭТИ ШАГИ:',
+        // --- 3. ЛОГИКА ОТВЕТА ---
+        'АЛГОРИТМ:',
+        'ШАГ 1: ОПРЕДЕЛИ ТИП ВОПРОСА.',
+        '   TYPE_STATUS ("Как дела?", "Отчет") -> ИСПОЛЬЗУЙ ШАБЛОН "DETAILED".',
+        '   TYPE_SPECIFIC ("Сколько инвестировать?", "Какой прогноз?", "Хватит ли денег?") -> ИСПОЛЬЗУЙ ШАБЛОН "DIRECT".',
+        '   TYPE_EXPLAIN ("Обоснуй", "Почему?") -> Объясни предыдущий ответ.',
+
+        // --- 4. ШАБЛОНЫ ---
         '',
-        'ШАГ 1: ОПРЕДЕЛИ ТИП ВОПРОСА',
-        '   TYPE_STATUS ("Как дела?", "Статус", "Отчет") -> Нужен полный операционный отчет.',
-        '   TYPE_SPECIFIC ("Сколько инвестировать?", "Какой прогноз?", "Есть ли риски?") -> Нужен ТОЛЬКО прямой ответ.',
-        '   TYPE_EXPLAIN ("Обоснуй", "Почему?", "Расшифруй") -> Нужен детальный разбор предыдущего вывода.',
-        '',
-        'ШАГ 2: ВЫБЕРИ ШАБЛОН (И СТРОГО СЛЕДУЙ ЕМУ)',
-        '',
-        '--- ЕСЛИ TYPE_STATUS или TYPE_EXPLAIN (Полный отчет) ---',
-        'ИСПОЛЬЗУЙ ШАБЛОН "DETAILED":',
+        '=== ШАБЛОН "DETAILED" (Только для общих вопросов) ===',
         '1. Финансовый результат (P&L)',
         'Факт доходов: [Число] ₸',
         '> Расходы: [Число] ₸ ([%] от выручки)',
         '> Чистая прибыль: [Число] ₸ (Маржинальность: [NPM]%)',
         '> Эффективность: [Вывод]',
         '',
-        '2. Динамика Cash Flow и Аномалии',
+        '2. Динамика Cash Flow',
         'Плановый разрыв: [Число] ₸',
-        '> Аномалии: [Если есть транзитные убытки в Комуналке/Аренде - укажи. Если нет - пропусти]',
+        '> Аномалии: [Если в данных есть транзитные убытки - укажи. Если нет - пропусти]',
         '> Покрытие: [Источник]',
         '> Вывод: [Риск есть / Риск игнорируем]',
         '',
         '3. Структура Ликвидности',
-        'Ближайшее списание: [Дата] — [Категории] — [Сумма] ₸',
-        '> Операционные (Рабочие): [Число] ₸',
-        '> Резервы (Скрытые): [Число] ₸',
+        'Ближайшее списание: [Дата] — [Сумма] ₸',
+        '> Операционные: [Число] ₸',
+        '> Резервы: [Число] ₸',
         '> Вывод: [Хватит или Дефицит]',
         '',
         'Итог:',
-        '[Вывод одной фразой].',
+        '[Одна фраза].',
         '',
-        '--- ЕСЛИ TYPE_SPECIFIC (Точечный вопрос) ---',
-        'ИСПОЛЬЗУЙ ШАБЛОН "DIRECT" (ЗАПРЕЩЕНО выводить P&L, CashFlow таблицы):',
+        '=== ШАБЛОН "DIRECT" (Для конкретных вопросов) ===',
         'Ответ:',
-        '[Прямой ответ цифрой или фактом].',
+        '[Прямая цифра из блока "ВЫЧИСЛЕННЫЕ ФАКТЫ" или прямой ответ "Да/Нет"].',
         '',
         'Обоснование:',
-        '> [Краткая цепочка рассуждений. Например: "Резервы (46 млн) + Профицит (1 млн) = 47 млн"].',
+        '> [Факт 1]',
+        '> [Факт 2]',
         '',
-        // --- 4. БИЗНЕС-ЛОГИКА ---
-        'ЛОГИЧЕСКИЕ ФУНКЦИИ:',
-        'FUNC INVEST_POTENTIAL():',
-        '   // Для ответа на "Сколько инвестировать?"',
-        '   Potential = (Скрытые_Резервы) + (Операционные_Деньги - Ближайшие_Обязательства)',
-        '   RETURN Potential',
-        '',
-        'FUNC CHECK_ANOMALIES():',
-        '   // Для "Комуналка", "Аренда": Если (Доход < Расход) -> АНОМАЛИЯ.'
+        // --- 5. ИНСТРУКЦИИ ПО ДАННЫМ ---
+        'ИСТОЧНИКИ ДАННЫХ ДЛЯ ВОПРОСОВ:',
+        '1. Если вопрос про ИНВЕСТИЦИИ -> Бери цифру "CALC_INVEST_POTENTIAL". Обоснование: "Резервы + Свободная операционка".',
+        '2. Если вопрос про ПРОГНОЗ НА КОНЕЦ МЕСЯЦА -> Бери цифру "CALC_PROJECTED_BALANCE". Не путай с плановым разрывом!',
+        '3. Если вопрос про ЛИКВИДНОСТЬ -> Сравнивай "Операционные" с "Ближайшим списанием".'
     ].join('\n');
 
     const userContent = [
         `Вопрос: ${question}`,
-        `Сегодня: ${currentDate || period?.endLabel || '?'}`,
+        `Дата: ${currentDate || period?.endLabel || '?'}`,
+        '',
+        '--- ВЫЧИСЛЕННЫЕ ФАКТЫ (ИСПОЛЬЗОВАТЬ ПРИОРИТЕТНО) ---',
+        `CALC_INVEST_POTENTIAL: ${formatCurrency(investPotential)} (Это сумма: Скрытые Резервы + Свободная операционка)`,
+        `CALC_PROJECTED_BALANCE: ${formatCurrency(projectedBal)} (Прогноз общего остатка на конец периода)`,
+        `CALC_SAFE_SPEND: ${formatCurrency(safeSpend)} (Доступно из операционки без риска кассового разрыва)`,
+        `CALC_NEXT_BILL: ${formatCurrency(nextBillAmount)} (Дата: ${nextBillDate})`,
         '',
         ...(accounts && accounts.length ? [
-            '--- ДАННЫЕ СЧЕТОВ ---',
-            `Операционные (isExcluded=false): ${formatCurrency(openBalance || 0)}`,
-            `Резервы/Скрытые (isExcluded=true): ${formatCurrency(hiddenBalance || 0)}`,
-            `ВСЕГО ДЕНЕГ: ${formatCurrency(Number(openBalance || 0) + Number(hiddenBalance || 0))}`,
-            ''
-        ] : []),
-        ...(futureBalance ? [
-            '--- ПРОГНОЗ ДО КОНЦА ПЕРИОДА ---',
-            `План Доходов: +${formatCurrency(futureBalance.plannedIncome || 0)}`,
-            `План Расходов: -${formatCurrency(futureBalance.plannedExpense || 0)}`,
-            `Плановый Разрыв: ${formatCurrency((futureBalance.plannedExpense || 0) - (futureBalance.plannedIncome || 0))}`,
-            ''
-        ] : []),
-        ...(riskData ? [
-            '--- РИСКИ И СПИСАНИЯ ---',
-            JSON.stringify(riskData.topOutflows || [], null, 2),
+            '--- СЧЕТА ---',
+            `Операционные (Рабочие): ${formatCurrency(openBalance || 0)}`,
+            `Скрытые (Резервы): ${formatCurrency(hiddenBalance || 0)}`,
             ''
         ] : []),
         ...(Object.keys(metrics?.byCategory || {}).length ? [
-            '--- КАТЕГОРИИ (P&L) ---',
+            '--- P&L КАТЕГОРИИ ---',
             JSON.stringify(metrics.byCategory, (key, value) => {
-                if (['all', 'count', 'name'].includes(key)) return undefined; // Сокращаем JSON
+                if (['all', 'count', 'name'].includes(key)) return undefined;
                 return value;
             }, 2),
             ''
         ] : []),
-        'Ответь строго по шаблону, соответствующему типу вопроса.'
+        'Ответь строго по шаблону.'
     ].join('\n');
 
     try {
@@ -163,16 +154,16 @@ async function generateConversationalResponse({
             body: JSON.stringify({
                 model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
                 messages,
-                temperature: 0.1, // Минимум фантазии
+                temperature: 0.1, // Строгий режим
                 max_tokens: 1000
             })
         });
 
-        if (!response.ok) throw new Error(`OpenAI API error: ${response.status}`);
+        if (!response.ok) throw new Error(`Status ${response.status}`);
         const data = await response.json();
         const text = String(data?.choices?.[0]?.message?.content || '').trim();
 
-        if (!text) throw new Error('Empty LLM response');
+        if (!text) throw new Error('Empty response');
 
         return {
             ok: true,
@@ -183,14 +174,14 @@ async function generateConversationalResponse({
         console.error('[conversationalAgent] Error:', err);
         return {
             ok: false,
-            text: 'Ошибка анализа данных. Попробуйте переформулировать вопрос.',
+            text: 'Ошибка анализа. Проверьте данные.',
             debug: { error: err.message }
         };
     }
 }
 
 function verifyCalculation(categoryName, metrics, formatCurrency) {
-    return `Функция проверки для ${categoryName} не используется в текущем контексте.`;
+    return `Функция проверки отключена для оптимизации.`;
 }
 
 module.exports = {
