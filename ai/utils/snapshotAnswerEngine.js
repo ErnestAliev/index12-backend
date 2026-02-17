@@ -42,6 +42,12 @@ const fmtSignedT = (value) => {
 
 const fmtT = (value) => `${fmtAbsInt(value)} т`;
 
+const fmtPercent = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0%';
+  return `${Math.round(n)}%`;
+};
+
 const dateFromKey = (dateKey) => {
   const m = String(dateKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return null;
@@ -309,6 +315,123 @@ const renderDayBlock = ({ day, onlyOpen = false }) => {
   return lines.join('\n');
 };
 
+const computeCategoryFlowsForDay = (day) => {
+  const map = new Map();
+  const ensure = (name) => {
+    const key = String(name || 'Без категории');
+    if (!map.has(key)) map.set(key, { income: 0, expense: 0 });
+    return map.get(key);
+  };
+
+  normalizeList(day?.lists?.income).forEach((item) => {
+    ensure(item?.catName).income += Math.abs(toNum(item?.amount));
+  });
+
+  normalizeList(day?.lists?.expense).forEach((item) => {
+    ensure(item?.catName).expense += Math.abs(toNum(item?.amount));
+  });
+
+  normalizeList(day?.lists?.withdrawal).forEach((item) => {
+    ensure(item?.catName || 'Вывод средств').expense += Math.abs(toNum(item?.amount));
+  });
+
+  return map;
+};
+
+const pickTopOp = (items = [], kind = 'income') => {
+  const safe = normalizeList(items)
+    .map((item) => ({
+      item,
+      amountAbs: Math.abs(toNum(item?.amount))
+    }))
+    .filter((row) => row.amountAbs > 0)
+    .sort((a, b) => Number(b.amountAbs || 0) - Number(a.amountAbs || 0));
+
+  if (!safe.length) return null;
+  const top = safe[0].item;
+  const amount = kind === 'expense'
+    ? fmtSignedT(-Math.abs(toNum(top?.amount)))
+    : fmtSignedT(Math.abs(toNum(top?.amount)));
+
+  const cat = String(top?.catName || (kind === 'expense' ? 'Расход' : 'Доход'));
+  const acc = String(top?.accName || '???');
+  return { amount, cat, acc };
+};
+
+const renderDayInsightsBlock = ({ day, onlyOpen = false }) => {
+  const income = toNum(day?.totals?.income);
+  const expense = toNum(day?.totals?.expense);
+  const net = income - expense;
+
+  const openBalance = normalizeList(day?.accountBalances)
+    .filter((acc) => acc?.isOpen === true)
+    .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+  const hiddenBalance = normalizeList(day?.accountBalances)
+    .filter((acc) => acc?.isOpen !== true)
+    .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+  const relevantBalance = onlyOpen ? openBalance : (openBalance + hiddenBalance);
+
+  const topIncome = pickTopOp(day?.lists?.income, 'income');
+  const expenseRows = [
+    ...normalizeList(day?.lists?.expense),
+    ...normalizeList(day?.lists?.withdrawal)
+  ];
+  const topExpense = pickTopOp(expenseRows, 'expense');
+
+  const categoryFlows = computeCategoryFlowsForDay(day);
+  const anomalies = Array.from(categoryFlows.entries())
+    .map(([name, rec]) => ({
+      name,
+      income: toNum(rec?.income),
+      expense: toNum(rec?.expense),
+      gap: toNum(rec?.expense) - toNum(rec?.income)
+    }))
+    .filter((row) => row.income > 0 && row.expense > row.income)
+    .sort((a, b) => Number(b.gap || 0) - Number(a.gap || 0))
+    .slice(0, 2);
+
+  const lines = [
+    '----------------',
+    'ВЫВОДЫ ПО ДНЮ',
+    `- Нетто дня: ${fmtSignedT(net)}`
+  ];
+
+  if (expense > 0) {
+    lines.push(`- Покрытие расходов доходами дня: ${fmtPercent((income / expense) * 100)}`);
+  } else if (income > 0) {
+    lines.push('- Покрытие расходов доходами дня: расходов в этот день не было');
+  } else {
+    lines.push('- Покрытие расходов доходами дня: движения по доходам/расходам не было');
+  }
+
+  lines.push(`- Ликвидность на конец дня (${onlyOpen ? 'открытые счета' : 'все счета'}): ${fmtT(relevantBalance)}`);
+
+  if (topIncome) {
+    lines.push(`- Крупнейший доход: ${topIncome.amount} (${topIncome.cat}, ${topIncome.acc})`);
+  }
+
+  if (topExpense) {
+    lines.push(`- Крупнейший расход: ${topExpense.amount} (${topExpense.cat}, ${topExpense.acc})`);
+  }
+
+  if (anomalies.length) {
+    const text = anomalies.map((row) => `${row.name}: ${fmtT(row.gap)}`).join('; ');
+    lines.push(`- Аномалии (расход > компенсации): ${text}`);
+  } else {
+    lines.push('- Аномалии (расход > компенсации): не обнаружены');
+  }
+
+  if (expense > income && relevantBalance > 0) {
+    lines.push('- Совет: день убыточный по потоку, но ликвидность покрывает разрыв.');
+  } else if (expense > income && relevantBalance <= 0) {
+    lines.push('- Совет: день убыточный по потоку и без ликвидности, нужен перенос/покрытие.');
+  } else {
+    lines.push('- Совет: критических действий не требуется.');
+  }
+
+  return lines.join('\n');
+};
+
 const flattenDayOperations = (day) => {
   const output = [];
 
@@ -570,7 +693,10 @@ function answerFromSnapshot({ snapshot, intent, timelineDateKey }) {
     return {
       ok: true,
       numeric: true,
-      text: renderDayBlock({ day, onlyOpen: false }),
+      text: [
+        renderDayBlock({ day, onlyOpen: false }),
+        renderDayInsightsBlock({ day, onlyOpen: false })
+      ].join('\n'),
       meta: { dateKey: day.dateKey }
     };
   }
@@ -587,7 +713,10 @@ function answerFromSnapshot({ snapshot, intent, timelineDateKey }) {
     return {
       ok: true,
       numeric: true,
-      text: renderDayBlock({ day, onlyOpen: true }),
+      text: [
+        renderDayBlock({ day, onlyOpen: true }),
+        renderDayInsightsBlock({ day, onlyOpen: true })
+      ].join('\n'),
       meta: { dateKey: day.dateKey }
     };
   }
