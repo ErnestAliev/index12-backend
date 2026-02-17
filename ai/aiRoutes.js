@@ -1507,7 +1507,28 @@ module.exports = function createAiRouter(deps) {
 
       if (!isQuickButton) {
         const debugEnabled = req?.body?.debugAi === true;
-        const tooltipSnapshotRaw = req?.body?.tooltipSnapshot;
+        const tooltipSnapshotRaw = (() => {
+          if (req?.body?.tooltipSnapshot) return req.body.tooltipSnapshot;
+          if (req?.body?.snapshot?.tooltipSnapshot) return req.body.snapshot.tooltipSnapshot;
+          if (req?.body?.tableContext?.tooltipSnapshot) return req.body.tableContext.tooltipSnapshot;
+          if (req?.body?.snapshot?.schemaVersion && Array.isArray(req?.body?.snapshot?.days)) return req.body.snapshot;
+          return null;
+        })();
+        if (!tooltipSnapshotRaw) {
+          const bodyKeys = Object.keys(req?.body || {});
+          const snapshotKeys = req?.body?.snapshot && typeof req.body.snapshot === 'object'
+            ? Object.keys(req.body.snapshot)
+            : [];
+          return res.status(400).json({
+            error: 'Отсутствует tooltipSnapshot. Обновите страницу и повторите запрос.',
+            debug: {
+              source,
+              bodyKeys,
+              hasSnapshot: !!req?.body?.snapshot,
+              snapshotKeys
+            }
+          });
+        }
         const validation = snapshotAnswerEngine.validateTooltipSnapshot(tooltipSnapshotRaw);
         if (!validation.ok) {
           return res.status(400).json({
