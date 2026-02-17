@@ -15,8 +15,23 @@ function handleQuickQuery({ query, dbData, snapshot, formatTenge }) {
     const qLower = String(query || '').toLowerCase().trim();
     const asksTransfers = /(перевод|трансфер|transfer)/i.test(qLower);
     const asksWithdrawals = /(вывод\s+средств|сняти[ея]|личн(ая|ый|ую)\s+(карт|счет))/i.test(qLower);
+    const asksDeterministicAnalysis = /^(как\s+дела\??|анализ|сделай\s+анализ|анализ\s+состояния)$/i.test(qLower);
+    const asksDeterministicForecast = /^(прогноз|сделай\s+прогноз|прогноз\s+на\s+конец\s+месяца)$/i.test(qLower)
+        || /(до\s+конца\s+месяца|конец\s+месяца)/i.test(qLower);
 
     console.log('[quickMode] query:', qLower);
+
+    // =====================
+    // DETERMINISTIC ANALYSIS / FORECAST
+    // =====================
+    if (asksDeterministicForecast) {
+        console.log('[quickMode] Matched: FORECAST');
+        return handleForecastQuery({ dbData });
+    }
+    if (asksDeterministicAnalysis) {
+        console.log('[quickMode] Matched: ANALYSIS');
+        return handleAnalysisQuery({ dbData });
+    }
 
     // =====================
     // ACCOUNTS QUERY
@@ -245,77 +260,153 @@ function handleExpenseQuery({ dbData, formatTenge }) {
 // =====================
 // FINANCIAL ANALYSIS
 // =====================
-function handleAnalysisQuery({ dbData, formatTenge }) {
+function _normalizeToken(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/ё/g, 'е')
+        .replace(/[^a-zа-я0-9]+/gi, '');
+}
+
+function _fmtMoneyPlain(value, { signed = false } = {}) {
+    const n = Number(value || 0);
+    const abs = Math.round(Math.abs(n));
+    const base = new Intl.NumberFormat('ru-RU').format(abs).replace(/\u00A0/g, ' ');
+    if (!signed) return base;
+    return n < 0 ? `-${base}` : base;
+}
+
+function _fmtMoneyTenge(value, { signed = false } = {}) {
+    return `${_fmtMoneyPlain(value, { signed })} ₸`;
+}
+
+function _collectUtilitiesFact(dbData) {
+    let income = 0;
+    let expense = 0;
+    (dbData.operations || []).forEach((op) => {
+        if (!op?.isFact) return;
+        if (op?.kind !== 'income' && op?.kind !== 'expense') return;
+        const token = _normalizeToken(op?.categoryName || '');
+        if (!token.includes('коммун')) return;
+        if (op.kind === 'income') income += Number(op.amount || 0);
+        if (op.kind === 'expense') expense += Number(op.amount || 0);
+    });
+    return { income, expense };
+}
+
+function _collectPlannedTaxes(dbData) {
+    let total = 0;
+    (dbData.operations || []).forEach((op) => {
+        if (op?.isFact) return;
+        if (op?.kind !== 'expense') return;
+        const token = _normalizeToken(op?.categoryName || '');
+        if (!token.includes('налог')) return;
+        total += Number(op.amount || 0);
+    });
+    return total;
+}
+
+function _getTopForecastIncomeCategory(dbData) {
+    const rows = Array.isArray(dbData.categorySummary) ? dbData.categorySummary : [];
+    const top = rows
+        .filter((row) => Number(row?.incomeForecast || 0) > 0)
+        .sort((a, b) => Number(b.incomeForecast || 0) - Number(a.incomeForecast || 0))[0];
+    return top?.name ? String(top.name) : '';
+}
+
+function handleAnalysisQuery({ dbData }) {
     const lines = [];
-    const periodStart = dbData.meta?.periodStart || '?';
-    const periodEnd = dbData.meta?.periodEnd || '?';
+    const asOfLabel = dbData.meta?.today || '?';
     const summary = dbData.operationsSummary || {};
 
-    lines.push(`Анализ (${periodStart} — ${periodEnd})`);
-    lines.push('==============');
+    const factIncome = Number(summary?.income?.fact?.total || 0);
+    const factExpense = Number(summary?.expense?.fact?.total || 0);
+    const operatingProfit = factIncome - factExpense;
+    const margin = factIncome > 0 ? Math.round((operatingProfit / factIncome) * 100) : 0;
+
+    const openBalance = Number(dbData?.totals?.open?.current || 0);
+    const hiddenBalance = Number(dbData?.totals?.hidden?.current || 0);
+    const totalBalance = Number(dbData?.totals?.all?.current || (openBalance + hiddenBalance));
+
+    const utilities = _collectUtilitiesFact(dbData);
+    const findings = [];
+    if (utilities.expense > utilities.income) {
+        findings.push(`Расход на коммуналку превышает доход на ${_fmtMoneyPlain(utilities.expense - utilities.income)} ₸.`);
+    }
+
+    lines.push(`Баланс на ${asOfLabel}`);
+    lines.push(`- Открытые: ${_fmtMoneyTenge(openBalance)}`);
+    lines.push(`- Скрытые: ${_fmtMoneyTenge(hiddenBalance)}`);
+    lines.push(`- Итого: ${_fmtMoneyTenge(totalBalance)}`);
     lines.push('');
-
-    // Get accounts
-    const allAccounts = dbData.accounts || [];
-    const openAccountIds = new Set(
-        allAccounts.filter(a => !a.isHidden && !a.isExcluded).map(a => String(a._id))
-    );
-    const hiddenAccountIds = new Set(
-        allAccounts.filter(a => a.isHidden || a.isExcluded).map(a => String(a._id))
-    );
-
-    // Calculate for open accounts
-    const openIncome = (dbData.operations || [])
-        .filter(op => op.kind === 'income' && op.isFact && op.accountId && openAccountIds.has(String(op.accountId)))
-        .reduce((sum, op) => sum + (op.amount || 0), 0);
-
-    const openExpense = (dbData.operations || [])
-        .filter(op => op.kind === 'expense' && op.isFact && op.accountId && openAccountIds.has(String(op.accountId)))
-        .reduce((sum, op) => sum + Math.abs(op.rawAmount || op.amount || 0), 0);
-
-    const openProfit = openIncome - openExpense;
-    const openMargin = openIncome > 0 ? Math.round((openProfit / openIncome) * 100) : 0;
-
-    // Calculate for hidden accounts
-    const hiddenIncome = (dbData.operations || [])
-        .filter(op => op.kind === 'income' && op.isFact && op.accountId && hiddenAccountIds.has(String(op.accountId)))
-        .reduce((sum, op) => sum + (op.amount || 0), 0);
-
-    const hiddenExpense = (dbData.operations || [])
-        .filter(op => op.kind === 'expense' && op.isFact && op.accountId && hiddenAccountIds.has(String(op.accountId)))
-        .reduce((sum, op) => sum + Math.abs(op.rawAmount || op.amount || 0), 0);
-
-    const hiddenProfit = hiddenIncome - hiddenExpense;
-    const hiddenMargin = hiddenIncome > 0 ? Math.round((hiddenProfit / hiddenIncome) * 100) : 0;
-
-    // Totals
-    const totalIncome = openIncome + hiddenIncome;
-    const totalExpense = openExpense + hiddenExpense;
-    const totalProfit = totalIncome - totalExpense;
-    const totalMargin = totalIncome > 0 ? Math.round((totalProfit / totalIncome) * 100) : 0;
-
-    // Build response
-    lines.push('Открытые счета:');
-    lines.push(`Доходы = ${formatTenge(openIncome)}`);
-    lines.push(`Расходы = ${formatTenge(openExpense)}`);
-    lines.push(`Прибыль = ${formatTenge(openProfit)}`);
-    lines.push(`Маржа = ${openMargin}%`);
+    lines.push('Метрики:');
+    lines.push(`- Маржа: ${margin}% (доход ${_fmtMoneyPlain(factIncome)}, расход ${_fmtMoneyPlain(factExpense)})`);
+    lines.push(`- Ликвидность: ${_fmtMoneyPlain(openBalance)} на открытых счетах`);
+    lines.push(`- Операционная прибыль: ${_fmtMoneyPlain(operatingProfit, { signed: true })}`);
     lines.push('');
-    lines.push('==============');
+    lines.push('Находки:');
+    if (findings.length) {
+        findings.forEach((item) => lines.push(`- ${item}`));
+    } else {
+        lines.push('- Критичных аномалий не найдено.');
+    }
+
+    return lines.join('\n');
+}
+
+function handleForecastQuery({ dbData }) {
+    const lines = [];
+    const endLabel = dbData.meta?.periodEnd || '?';
+    const summary = dbData.operationsSummary || {};
+
+    const projectedIncome = Number(summary?.income?.total || 0);
+    const projectedExpense = Number(summary?.expense?.total || 0);
+    const projectedProfit = projectedIncome - projectedExpense;
+    const projectedMargin = projectedIncome > 0 ? Math.round((projectedProfit / projectedIncome) * 100) : 0;
+
+    const plannedIncome = Number(summary?.income?.forecast?.total || 0);
+    const plannedExpense = Number(summary?.expense?.forecast?.total || 0);
+    const plannedProfit = plannedIncome - plannedExpense;
+
+    const projectedOpen = Number((dbData?.totals?.open?.future ?? dbData?.totals?.open?.current ?? 0));
+    const projectedHidden = Number((dbData?.totals?.hidden?.future ?? dbData?.totals?.hidden?.current ?? 0));
+    const projectedTotal = Number(dbData?.totals?.all?.future ?? (projectedOpen + projectedHidden));
+
+    const topIncomeCategory = _getTopForecastIncomeCategory(dbData);
+    const utilities = _collectUtilitiesFact(dbData);
+    const plannedTaxes = _collectPlannedTaxes(dbData);
+    const findings = [];
+
+    if (utilities.expense > utilities.income) {
+        findings.push(`Факт расход на коммуналку превышает факт доход на ${_fmtMoneyPlain(utilities.expense - utilities.income)} ₸.`);
+    }
+    if (plannedTaxes > 0) {
+        findings.push(`Планируемые налоги ${_fmtMoneyPlain(plannedTaxes)} ₸ значительно повлияют на будущие расходы.`);
+    }
+    if (plannedExpense > plannedIncome) {
+        findings.push(`До конца месяца плановые расходы превышают плановые доходы на ${_fmtMoneyPlain(plannedExpense - plannedIncome)} ₸.`);
+    }
+
+    lines.push(`Баланс на ${endLabel}`);
+    lines.push(`- Открытые: ${_fmtMoneyTenge(projectedOpen)}`);
+    lines.push(`- Скрытые: ${_fmtMoneyTenge(projectedHidden)}`);
+    lines.push(`- Итого: ${_fmtMoneyTenge(projectedTotal)}`);
     lines.push('');
-    lines.push('Скрытые счета:');
-    lines.push(`Доходы = ${formatTenge(hiddenIncome)}`);
-    lines.push(`Расходы = ${formatTenge(hiddenExpense)}`);
-    lines.push(`Прибыль = ${formatTenge(hiddenProfit)}`);
-    lines.push(`Маржа = ${hiddenMargin}%`);
+    lines.push('Метрики:');
+    lines.push(`- Маржа: ${projectedMargin}% (доход ${_fmtMoneyPlain(projectedIncome)}, расход ${_fmtMoneyPlain(projectedExpense)})`);
+    lines.push(`- Ликвидность: ${_fmtMoneyPlain(projectedOpen)} на открытых счетах`);
+    lines.push(`- Операционная прибыль: ${_fmtMoneyPlain(projectedProfit, { signed: true })}`);
     lines.push('');
-    lines.push('==============');
+    lines.push('Прогноз:');
+    lines.push(`- Планируемый расход: ${_fmtMoneyTenge(plannedExpense)}`);
+    lines.push(`- Ожидаемый доход: ${_fmtMoneyTenge(plannedIncome)}${topIncomeCategory ? ` (${topIncomeCategory})` : ''}`);
+    lines.push(`- Ожидаемая операционная прибыль: ${_fmtMoneyTenge(plannedProfit, { signed: true })}`);
     lines.push('');
-    lines.push('Суммарно:');
-    lines.push(`Доходы = ${formatTenge(totalIncome)}`);
-    lines.push(`Расходы = ${formatTenge(totalExpense)}`);
-    lines.push(`Прибыль = ${formatTenge(totalProfit)}`);
-    lines.push(`Маржа = ${totalMargin}%`);
+    lines.push('Находки:');
+    if (findings.length) {
+        findings.forEach((item) => lines.push(`- ${item}`));
+    } else {
+        lines.push('- Критичных аномалий не найдено.');
+    }
 
     return lines.join('\n');
 }

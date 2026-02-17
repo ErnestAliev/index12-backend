@@ -303,34 +303,6 @@ module.exports = function createAiRouter(deps) {
     }
   };
 
-  const _isForecastQuery = (question) => {
-    const q = String(question || '').toLowerCase();
-    return /(прогноз|прогнозир|до конца месяца|на конец|конец месяца|концу месяца|что будет|ожидаем)/i.test(q);
-  };
-
-  const _isRiskQuery = (question) => {
-    const q = String(question || '').toLowerCase();
-    return /(что\s+может\s+пойти\s+не\s+так|риски?|угроз|слаб(ые|ых)\s+мест|узкие\s+места|worst|негатив|проблем)/i.test(q);
-  };
-
-  const _isStrategyQuery = (question) => {
-    const q = String(question || '').toLowerCase();
-    return /(что\s+делать|план\s+действ|как\s+улучш|оптимиз|рекомендац|стратег)/i.test(q);
-  };
-
-  const _isOverviewQuery = (question) => {
-    const q = String(question || '').toLowerCase();
-    return /(как\s+дела|обзор|сводк|текущее\s+состояние|что\s+по\s+финансам|итоги|покажи\s+состояние)/i.test(q);
-  };
-
-  const _detectResponseMode = (question) => {
-    if (_isForecastQuery(question)) return 'forecast';
-    if (_isRiskQuery(question)) return 'risk';
-    if (_isStrategyQuery(question)) return 'strategy';
-    if (_isOverviewQuery(question)) return 'overview';
-    return 'analysis';
-  };
-
   const _splitTransferAccountLabel = (label) => {
     const raw = String(label || '').trim();
     if (!raw) return null;
@@ -1312,43 +1284,29 @@ module.exports = function createAiRouter(deps) {
 
         const currentTotalBalance = currentOpenBalance + currentHiddenBalance;
 
-        const qLower = q.toLowerCase();
-        const responseMode = _detectResponseMode(qLower);
-        const wantsForecast = responseMode === 'forecast';
-        const needsProjection = wantsForecast || responseMode === 'risk';
-        const forecastData = needsProjection
-          ? _computeForecastData({
-            rows,
-            asOf,
-            accounts
-          })
-          : null;
-        const riskData = responseMode === 'risk'
-          ? _computeRiskData({
-            rows,
-            asOf,
-            accounts,
-            forecastData
-          })
-          : null;
+        const responseMode = 'analysis';
+        const forecastData = _computeForecastData({
+          rows,
+          asOf,
+          accounts
+        });
+        const riskData = _computeRiskData({
+          rows,
+          asOf,
+          accounts,
+          forecastData
+        });
 
-        const futureBalance = wantsForecast
-          ? {
-            current: forecastData?.current?.totalBalance ?? currentTotalBalance,
-            plannedIncome: forecastData?.remainingPlan?.income ?? 0,
-            plannedExpense: forecastData?.remainingPlan?.expense ?? 0,
-            projected: forecastData?.projected?.totalBalance ?? currentTotalBalance,
-            change: (forecastData?.projected?.totalBalance ?? currentTotalBalance) - (forecastData?.current?.totalBalance ?? currentTotalBalance)
-          }
-          : null;
+        const futureBalance = {
+          current: forecastData?.current?.totalBalance ?? currentTotalBalance,
+          plannedIncome: forecastData?.remainingPlan?.income ?? 0,
+          plannedExpense: forecastData?.remainingPlan?.expense ?? 0,
+          projected: forecastData?.projected?.totalBalance ?? currentTotalBalance,
+          change: (forecastData?.projected?.totalBalance ?? currentTotalBalance) - (forecastData?.current?.totalBalance ?? currentTotalBalance)
+        };
 
-        const openBalance = wantsForecast
-          ? (forecastData?.projected?.openBalance ?? currentOpenBalance)
-          : currentOpenBalance;
-
-        const hiddenBalance = wantsForecast
-          ? (forecastData?.projected?.hiddenBalance ?? currentHiddenBalance)
-          : currentHiddenBalance;
+        const openBalance = currentOpenBalance;
+        const hiddenBalance = currentHiddenBalance;
 
         // Extract hidden accounts data for strategic reserves context
         const hiddenAccountsData = accounts.length
@@ -1357,19 +1315,21 @@ module.exports = function createAiRouter(deps) {
             totalCurrent: accounts
               .filter(a => a.isHidden || a.isExcluded)
               .reduce((s, a) => s + (Number(a.balance) || 0), 0),
-            totalFuture: wantsForecast
-              ? (forecastData?.projected?.hiddenBalance ?? currentHiddenBalance)
-              : accounts
-                .filter(a => a.isHidden || a.isExcluded)
-                .reduce((s, a) => s + (Number(a.futureBalance) || Number(a.balance) || 0), 0)
+            totalFuture: Number.isFinite(Number(forecastData?.projected?.hiddenBalance))
+              ? Number(forecastData.projected.hiddenBalance)
+              : currentHiddenBalance
           }
           : null;
 
         // Format current date for greeting responses
-        const now = new Date();
-        const currentDate = wantsForecast && forecastData?.periodEndLabel
-          ? forecastData.periodEndLabel
-          : now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
+        const currentDate = (() => {
+          if (asOf) {
+            const d = new Date(asOf);
+            if (!Number.isNaN(d.getTime())) return _fmtDDMMYY(d);
+          }
+          const now = new Date();
+          return now.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' }).replace(/\./g, '.');
+        })();
 
         // Use conversational agent with history context
         const conversationalResult = await conversationalAgent.generateConversationalResponse({
@@ -1377,16 +1337,15 @@ module.exports = function createAiRouter(deps) {
           history: chatHistory.messages.slice(0, -1), // Exclude current user message (already added)
           metrics: computed.metrics,
           period: computed.period,
-          currentDate,  // 🟢 NEW: Pass formatted current date
+          currentDate,
           formatCurrency: _formatTenge,
-          futureBalance: wantsForecast ? futureBalance : null,  // 🟢 Only pass if user asks for forecast
-          openBalance,  // 🟢 NEW: Balance on open accounts
-          hiddenBalance,  // 🟢 NEW: Balance on hidden accounts
-          hiddenAccountsData,  // 🟢 NEW: Pass hidden accounts for strategic reserves
-          accounts: accounts || null,  // 🟢 NEW: Full accounts array for individual balances
-          responseMode,
+          futureBalance,
+          openBalance,
+          hiddenBalance,
+          hiddenAccountsData,
+          accounts: accounts || null,
           riskData,
-          forecastData: wantsForecast ? forecastData : null,
+          forecastData,
           availableContext: {
             byCategory: computed.metrics.byCategory,
             byProject: computed.metrics.byProject
@@ -1395,7 +1354,7 @@ module.exports = function createAiRouter(deps) {
 
         const responseText = conversationalResult.ok
           ? conversationalResult.text
-          : (conversationalResult?.text || `Привет! ${computed.metrics.total.income > 0 ? 'Доходы за период: ' + _formatTenge(computed.metrics.total.income) : 'Чем могу помочь?'}`);
+          : (conversationalResult?.text || 'Не удалось получить ответ модели. Повторите запрос.');
 
         // Save agent response to history
         chatHistory.messages.push({
@@ -1429,8 +1388,8 @@ module.exports = function createAiRouter(deps) {
                   details: intentResult.debug || null
                 },
               responseMode,
-              risk: responseMode === 'risk' ? riskData : null,
-              forecast: wantsForecast ? forecastData : null,
+              risk: riskData,
+              forecast: forecastData,
               historyLength: chatHistory.messages.length
             }
           } : {})
@@ -1499,7 +1458,7 @@ module.exports = function createAiRouter(deps) {
       if (quickResponse) return res.json({ text: quickResponse });
 
       return res.json({
-        text: 'Режим QUICK: этот запрос не поддержан предустановками. Используйте запросы по счетам, доходам, расходам, переводам, компаниям, проектам, категориям, контрагентам или физлицам.'
+        text: 'Режим QUICK: этот запрос не поддержан предустановками. Используйте запросы: анализ, прогноз, счета, доходы, расходы, переводы, компании, проекты, категории, контрагенты, физлица.'
       });
     } catch (error) {
       console.error('AI Query Error:', error);
