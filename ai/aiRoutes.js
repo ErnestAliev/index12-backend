@@ -1619,10 +1619,25 @@ module.exports = function createAiRouter(deps) {
           }
         });
 
+        const llmErrorText = String(llmResult?.text || '').trim();
+        const llmErrorCode = String(llmResult?.debug?.code || '').trim();
+        const isQuotaError = !llmResult?.ok && (
+          llmErrorCode === 'quota_exceeded'
+          || /(^|[\s:])429([\s:]|$)/i.test(llmErrorText)
+          || /quota|billing/i.test(llmErrorText)
+        );
+
+        const fallbackDeterministicText = snapshotAnswerEngine.buildDeterministicInsightsBlock(deterministicFacts);
         const responseText = llmResult?.ok
           ? String(llmResult?.text || '').trim()
-          : (String(llmResult?.text || '').trim() || 'Не удалось сформировать ответ. Проверьте данные snapshot.');
-        const responseMode = 'llm_snapshot_chat';
+          : (
+              isQuotaError
+                ? `${fallbackDeterministicText}\n\nLLM временно недоступен (лимит API 429). Проверьте billing/квоту OpenAI.`
+                : (llmErrorText || 'Не удалось сформировать ответ. Проверьте данные snapshot.')
+            );
+        const responseMode = llmResult?.ok
+          ? 'llm_snapshot_chat'
+          : (isQuotaError ? 'snapshot_fallback_quota' : 'llm_snapshot_chat_error');
 
         const llmInputSnapshot = await _dumpLlmInputSnapshot({
           generatedAt: new Date().toISOString(),

@@ -36,6 +36,21 @@ const formatT = (value) => {
     return `${sign}${formatted} т`;
 };
 
+const normalizeCfoOutput = (raw) => {
+    let out = String(raw || '').replace(/\u00A0/g, ' ').trim();
+    if (!out) return out;
+
+    out = out.replace(/\*\*(.*?)\*\*/g, '$1');
+    out = out.replace(/\*(.*?)\*/g, '$1');
+    out = out.replace(/`([^`]+)`/g, '$1');
+    out = out.replace(/^\s*\d+\.\s+/gm, '');
+    out = out.replace(/\b\d{1,3}(?:,\d{3})+\b/g, (m) => m.replace(/,/g, ' '));
+    out = out.replace(/\s*₸/g, ' т');
+    out = out.replace(/[ \t]{2,}/g, ' ');
+
+    return out.trim();
+};
+
 const normalizeQuestion = (value) => String(value || '').toLowerCase().replace(/ё/g, 'е').trim();
 
 const detectQuestionProfile = (question) => {
@@ -210,6 +225,34 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
         return sortedRows.find((row) => row.dateKey > todayKey && row.expense > 0) || null;
     })();
 
+    const nextExpenseLiquidity = (() => {
+        if (!nextExpenseAfterTimeline) return null;
+
+        const idx = sortedRows.findIndex((row) => row.dateKey === nextExpenseAfterTimeline.dateKey);
+        const prevDay = idx > 0 ? sortedRows[idx - 1] : null;
+
+        const availableBeforeExpense = prevDay
+            ? (toNum(prevDay.openBalance) + toNum(nextExpenseAfterTimeline.income))
+            : (toNum(nextExpenseAfterTimeline.openBalance) + toNum(nextExpenseAfterTimeline.expense));
+
+        const postExpenseOpen = availableBeforeExpense - toNum(nextExpenseAfterTimeline.expense);
+        const hasCashGap = postExpenseOpen < 0;
+
+        return {
+            dateKey: nextExpenseAfterTimeline.dateKey,
+            dateLabel: nextExpenseAfterTimeline.dateLabel,
+            availableBeforeExpense,
+            availableBeforeExpenseFmt: formatT(availableBeforeExpense),
+            expense: toNum(nextExpenseAfterTimeline.expense),
+            expenseFmt: formatT(nextExpenseAfterTimeline.expense),
+            postExpenseOpen,
+            postExpenseOpenFmt: formatT(postExpenseOpen),
+            hasCashGap,
+            shortfall: hasCashGap ? Math.abs(postExpenseOpen) : 0,
+            shortfallFmt: hasCashGap ? formatT(Math.abs(postExpenseOpen)) : formatT(0)
+        };
+    })();
+
     const totals = deterministicFacts?.totals || {};
     const endBalances = deterministicFacts?.endBalances || {};
     const anomalies = Array.isArray(deterministicFacts?.anomalies) ? deterministicFacts.anomalies : [];
@@ -306,6 +349,7 @@ const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta
             expense: nextExpenseAfterTimeline.expense,
             expenseFmt: formatT(nextExpenseAfterTimeline.expense)
         } : null,
+        nextExpenseLiquidity,
         peakFactCategory,
         peakPlanCategory,
         anomalies: anomalies.map((row) => ({
@@ -782,6 +826,8 @@ async function generateSnapshotChatResponse({
     const systemPrompt = [
         'Ты CFO-советник INDEX12 в стиле Ильи Балахнина: data-driven, жестко по сути, без воды.',
         'Отвечай разговорно, но строго по цифрам и причинно-следственным связям.',
+        'Формат ответа: 5-7 строк, короткие фразы, без лишних абзацев.',
+        'Не используй markdown: без **жирного**, без нумерации 1), без длинных списков.',
         'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_SLICE_JSON.',
         'Запрещено придумывать суммы, даты, операции, категории.',
         'КРИТИЧНО ПО ДАТАМ: today = SNAPSHOT_META.timelineDate.',
@@ -790,16 +836,18 @@ async function generateSnapshotChatResponse({
         'ПЛАН здесь означает запланированные будущие операции, а не целевой KPI.',
         'Запрещено описывать ПЛАН как уже случившийся ФАКТ.',
         'Если упоминаешь будущую дату, явно маркируй это как "план".',
+        'Термин "кассовый разрыв" используй ТОЛЬКО если ADVISORY_FACTS_JSON.nextExpenseLiquidity.hasCashGap = true.',
+        'Если hasCashGap = false и остаток после списания положительный, пиши: "сжатие ликвидности", а не "разрыв".',
         'Текущие балансы бери из FACTS_JSON.fact.balances и ADVISORY_FACTS_JSON.balancePointers.currentDay.',
         'Будущие/конечные балансы бери из FACTS_JSON.plan.toEndBalances и ADVISORY_FACTS_JSON.balancePointers.endDay.',
         'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
         'Если вопрос простой про один показатель, ответ должен быть коротким:',
         '- 1-я строка: прямой ответ с числом.',
         '- 2-я строка (опционально): краткий контекст.',
-        'Если вопрос про анализ/совет/почему/когда лучше:',
+        'Если вопрос "как дела?" или вопрос про анализ/совет/почему/когда лучше:',
         '- сначала вывод в 1 строке;',
-        '- потом 3-6 строк с фактами и выводами;',
-        '- обязательно, если есть данные: пик расхода (дата, сумма, категория) и факт кассового разрыва (был/не был).',
+        '- потом 4-6 строк с фактами и выводами;',
+        '- обязательно, если есть данные: пик расхода (дата, сумма, категория) и оценка ликвидности ближайшего списания;',
         'Не используй общие фразы вроде "в целом все хорошо" без конкретных чисел.'
     ].join(' ');
 
@@ -820,6 +868,7 @@ async function generateSnapshotChatResponse({
         '- Текущий баланс (на today): FACTS_JSON.fact.balances или ADVISORY_FACTS_JSON.balancePointers.currentDay',
         '- Баланс на конец периода: FACTS_JSON.plan.toEndBalances или ADVISORY_FACTS_JSON.balancePointers.endDay',
         '- Ближайшее плановое списание: FACTS_JSON.plan.nextObligation или ADVISORY_FACTS_JSON.nextExpenseAfterTimeline',
+        '- Проверка кассового разрыва на ближайшее списание: ADVISORY_FACTS_JSON.nextExpenseLiquidity',
         '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
@@ -886,7 +935,7 @@ async function generateSnapshotChatResponse({
 
         return {
             ok: true,
-            text: String(text).replace(/\u00A0/g, ' '),
+            text: normalizeCfoOutput(text),
             debug: {
                 model: data.model,
                 usage: data.usage,
@@ -895,10 +944,17 @@ async function generateSnapshotChatResponse({
         };
     } catch (err) {
         console.error('[conversationalAgent][snapshotChat] Error:', err);
+        const errorMessage = String(err?.message || 'unknown error');
+        const isQuotaError = /(^|[\s:])429([\s:]|$)/i.test(errorMessage) || /quota|billing/i.test(errorMessage);
         return {
             ok: false,
-            text: `Ошибка генерации ответа CFO: ${String(err?.message || 'unknown error')}`,
-            debug: { error: err.message }
+            text: isQuotaError
+                ? 'LLM временно недоступен: исчерпан лимит API (429).'
+                : `Ошибка генерации ответа CFO: ${errorMessage}`,
+            debug: {
+                error: errorMessage,
+                code: isQuotaError ? 'quota_exceeded' : 'llm_error'
+            }
         };
     }
 }
