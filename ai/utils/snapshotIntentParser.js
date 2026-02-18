@@ -44,6 +44,19 @@ const normalizeText = (text) => String(text || '')
   .replace(/\s+/g, ' ')
   .trim();
 
+const parseCategoryFromQuestion = (normText) => {
+  const norm = String(normText || '');
+  if (!norm) return null;
+
+  const m1 = norm.match(/(?:по\s+)?категори(?:я|и)\s+["«]?([^"»]+?)["»]?(?:\s+за|\s+на|\s+по|\s*$)/i);
+  if (m1?.[1]) return String(m1[1]).trim();
+
+  const m2 = norm.match(/категори(?:я|и)\s+["«]?([^"»]+?)["»]?$/i);
+  if (m2?.[1]) return String(m2[1]).trim();
+
+  return null;
+};
+
 const parseScopeFromQuestion = (norm) => {
   const text = String(norm || '');
   if (/(скрыт[^\n]*счет|на скрытых счетах|резерв)/i.test(text)) return 'hidden';
@@ -186,6 +199,24 @@ function parseSnapshotIntent({ question, timelineDateKey = null, snapshot = null
   const investRe = /(инвест|инвести|инветс|влож)/i;
   const expensePlanRe = /(могу ли|можно ли|запланир|планир|потянем|хватит|достаточно)/i;
   const expenseWordRe = /(расход|трата|затрат)/i;
+  const factCategoryRe = /(фактическ|факт)/i;
+  const incomeWordRe = /(доход|доходы|поступлен)/i;
+  const categoryWordRe = /категори/i;
+
+  if (factCategoryRe.test(norm) && categoryWordRe.test(norm) && (incomeWordRe.test(norm) || expenseWordRe.test(norm))) {
+    const categoryRaw = parseCategoryFromQuestion(norm);
+    if (categoryRaw) {
+      return {
+        type: 'CATEGORY_FACT_BY_CATEGORY',
+        dateKey: dateKey || timelineDateKey || null,
+        targetMonth,
+        metric: incomeWordRe.test(norm) ? 'income' : 'expense',
+        categoryRaw,
+        numeric: true,
+        needsLlm: false
+      };
+    }
+  }
 
   if (investRe.test(norm)) {
     return {

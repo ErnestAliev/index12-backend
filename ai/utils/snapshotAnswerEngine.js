@@ -158,6 +158,15 @@ const toRuDateLabel = (dateKey) => {
   return `${wd}, ${dd} ${mm} ${yyyy} г.`;
 };
 
+const toRuDateShort = (dateKey) => {
+  const d = dateFromKey(dateKey);
+  if (!d) return String(dateKey || '?');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  return `${dd}.${mm}.${yyyy}`;
+};
+
 const endOfMonthDateKey = (year, month) => {
   if (!Number.isFinite(Number(year)) || !Number.isFinite(Number(month))) return '';
   const end = new Date(Number(year), Number(month), 0, 12, 0, 0, 0);
@@ -171,6 +180,20 @@ const startOfMonthDateKey = (year, month) => {
 };
 
 const normalizeList = (value) => (Array.isArray(value) ? value : []);
+
+const normalizeCategoryKey = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/ё/g, 'е')
+  .replace(/[^a-zа-я0-9]+/gi, '')
+  .replace(/(.)\1+/g, '$1')
+  .trim();
+
+const categoryMatches = (left, right) => {
+  const l = normalizeCategoryKey(left);
+  const r = normalizeCategoryKey(right);
+  if (!l || !r) return false;
+  return l === r || l.includes(r) || r.includes(l);
+};
 
 const computeTotalsFromLists = (lists) => {
   const incomeList = normalizeList(lists?.income);
@@ -317,6 +340,112 @@ const dayHasActivity = (day) => {
   if (!day) return false;
   if (toNum(day?.totals?.income) !== 0 || toNum(day?.totals?.expense) !== 0) return true;
   return opCountForDay(day) > 0;
+};
+
+const resolveFactPeriodDays = ({ snapshot, timelineDateKey, targetMonth }) => {
+  const sortedDays = [...snapshot.days].sort((a, b) => String(a.dateKey).localeCompare(String(b.dateKey)));
+  const asOfKey = DATE_KEY_RE.test(String(timelineDateKey || ''))
+    ? String(timelineDateKey)
+    : String(snapshot?.range?.endDateKey || sortedDays[sortedDays.length - 1]?.dateKey || '');
+
+  if (!sortedDays.length || !DATE_KEY_RE.test(asOfKey)) {
+    return { ok: false, error: 'Недостаточно данных для расчета фактического периода.' };
+  }
+
+  let periodDays = sortedDays;
+  let periodStart = sortedDays[0].dateKey;
+  let periodEnd = sortedDays[sortedDays.length - 1].dateKey;
+
+  if (targetMonth && Number.isFinite(Number(targetMonth.year)) && Number.isFinite(Number(targetMonth.month))) {
+    const monthStart = startOfMonthDateKey(Number(targetMonth.year), Number(targetMonth.month));
+    const monthEnd = endOfMonthDateKey(Number(targetMonth.year), Number(targetMonth.month));
+    periodDays = sortedDays.filter((day) => day.dateKey >= monthStart && day.dateKey <= monthEnd);
+    if (!periodDays.length) {
+      return {
+        ok: false,
+        error: `Нет данных за ${monthStart} — ${monthEnd} в snapshot.`
+      };
+    }
+    periodStart = periodDays[0].dateKey;
+    periodEnd = periodDays[periodDays.length - 1].dateKey;
+  }
+
+  const factEnd = asOfKey < periodStart
+    ? ''
+    : (asOfKey < periodEnd ? asOfKey : periodEnd);
+
+  if (!factEnd) {
+    return {
+      ok: true,
+      periodStart,
+      periodEnd: periodStart,
+      factEnd: null,
+      days: []
+    };
+  }
+
+  return {
+    ok: true,
+    periodStart,
+    periodEnd: factEnd,
+    factEnd,
+    days: periodDays.filter((day) => day.dateKey <= factEnd)
+  };
+};
+
+const renderCategoryFactByCategory = ({ snapshot, intent, timelineDateKey }) => {
+  const metric = String(intent?.metric || 'income').toLowerCase() === 'expense' ? 'expense' : 'income';
+  const categoryRaw = String(intent?.categoryRaw || '').trim();
+  if (!categoryRaw) {
+    return { ok: false, text: 'Не удалось определить категорию в запросе.' };
+  }
+
+  const period = resolveFactPeriodDays({
+    snapshot,
+    timelineDateKey,
+    targetMonth: intent?.targetMonth || null
+  });
+  if (!period.ok) {
+    return { ok: false, text: period.error };
+  }
+
+  const listKeys = metric === 'income' ? ['income'] : ['expense', 'withdrawal'];
+  let total = 0;
+  let opCount = 0;
+  let categoryDisplay = categoryRaw;
+
+  period.days.forEach((day) => {
+    listKeys.forEach((key) => {
+      normalizeList(day?.lists?.[key]).forEach((item) => {
+        if (!categoryMatches(item?.catName, categoryRaw)) return;
+        if (item?.catName && !categoryDisplay) categoryDisplay = String(item.catName);
+        if (item?.catName && categoryDisplay === categoryRaw) categoryDisplay = String(item.catName);
+        total += Math.abs(toNum(item?.amount));
+        opCount += 1;
+      });
+    });
+  });
+
+  const startLabel = toRuDateShort(period.periodStart);
+  const endLabel = toRuDateShort(period.periodEnd);
+  const suffix = period.factEnd
+    ? `за период ${startLabel} — ${endLabel}`
+    : `за период ${startLabel} — ${startLabel}`;
+
+  const text = `${metric === 'income' ? 'Факт доходов' : 'Факт расходов'} по категории "${categoryDisplay}" ${suffix}: ${fmtT(total)}. Операций: ${opCount}.`;
+
+  return {
+    ok: true,
+    text,
+    meta: {
+      metric,
+      category: categoryDisplay,
+      periodStart: period.periodStart,
+      periodEnd: period.periodEnd,
+      total,
+      opCount
+    }
+  };
 };
 
 const fmtListOperation = (item, kind) => {
@@ -957,6 +1086,16 @@ const buildDeterministicInsightsBlock = (facts) => {
 
 function answerFromSnapshot({ snapshot, intent, timelineDateKey }) {
   const type = String(intent?.type || 'INSIGHTS');
+
+  if (type === 'CATEGORY_FACT_BY_CATEGORY') {
+    const result = renderCategoryFactByCategory({ snapshot, intent, timelineDateKey });
+    return {
+      ok: result.ok,
+      numeric: true,
+      text: result.text,
+      meta: result.meta || null
+    };
+  }
 
   if (type === 'BALANCE_ON_DATE') {
     const day = findDay(snapshot, intent?.dateKey);

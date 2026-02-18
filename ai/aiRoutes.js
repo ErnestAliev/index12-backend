@@ -37,6 +37,7 @@ module.exports = function createAiRouter(deps) {
 
   const conversationalAgent = require('./utils/conversationalAgent');
   const snapshotAnswerEngine = require('./utils/snapshotAnswerEngine');
+  const snapshotIntentParser = require('./utils/snapshotIntentParser');
 
   const router = express.Router();
   const LLM_SNAPSHOT_DIR = path.resolve(__dirname, 'debug');
@@ -1606,6 +1607,69 @@ module.exports = function createAiRouter(deps) {
           snapshot,
           timelineDateKey: timelineDate,
         });
+
+        const parsedIntent = snapshotIntentParser.parseSnapshotIntent({
+          question: q,
+          timelineDateKey: timelineDate,
+          snapshot
+        });
+
+        if (parsedIntent?.type === 'CATEGORY_FACT_BY_CATEGORY') {
+          const deterministic = snapshotAnswerEngine.answerFromSnapshot({
+            snapshot,
+            intent: parsedIntent,
+            timelineDateKey: timelineDate
+          });
+
+          const responseText = deterministic?.ok
+            ? String(deterministic?.text || '').trim()
+            : (String(deterministic?.text || '').trim() || 'Не удалось рассчитать показатель по категории.');
+          const responseMode = 'snapshot_category_fact';
+
+          const llmInputSnapshot = await _dumpLlmInputSnapshot({
+            generatedAt: new Date().toISOString(),
+            mode: 'snapshot_deterministic_category_fact',
+            question: q,
+            source,
+            timelineDate,
+            parsedIntent,
+            deterministicFacts,
+            deterministicResult: {
+              ok: deterministic?.ok === true,
+              text: deterministic?.text || '',
+              meta: deterministic?.meta || null
+            },
+            tooltipSnapshot: snapshot
+          });
+
+          chatHistory.messages.push({
+            role: 'assistant',
+            content: responseText,
+            timestamp: new Date(),
+            metadata: {
+              responseMode,
+              intent: parsedIntent,
+              deterministicFacts,
+              deterministicMeta: deterministic?.meta || null
+            }
+          });
+          await chatHistory.save();
+
+          return res.json({
+            text: responseText,
+            ...(debugEnabled ? {
+              debug: {
+                timelineDate,
+                responseMode,
+                parsedIntent,
+                deterministicFacts,
+                deterministicMeta: deterministic?.meta || null,
+                historyLength: chatHistory.messages.length,
+                llmInputSnapshot
+              }
+            } : {})
+          });
+        }
 
         const llmResult = await conversationalAgent.generateSnapshotChatResponse({
           question: q,
