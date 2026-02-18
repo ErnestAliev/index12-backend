@@ -136,13 +136,32 @@ function auditStructuredCfoResponse({
     : null;
   const lifeSpend = toNum(scenario?.lifeSpend);
   const freeCapital = toNum(scenario?.freeCapital);
+  const ownerCashNetHidden = toNum(scenario?.ownerCashNetHidden);
   const hasLifeSpendConstraint = Boolean(scenario?.hasLifeSpendConstraint);
   const scenarioEnabled = Boolean(scenario?.enabled);
+  const transferForbiddenForPersonalSpend = Boolean(
+    scenario?.ownerCashView?.transferAdviceForbiddenForPersonalSpend
+  );
+  expected.scenario = {
+    enabled: scenarioEnabled,
+    hasLifeSpendConstraint,
+    lifeSpend,
+    freeCapital,
+    ownerCashNetHidden,
+    transferForbiddenForPersonalSpend
+  };
 
   if (scenarioEnabled && hasLifeSpendConstraint) {
     const scenarioMentioned = /(на жизнь|жили|жили-были|личн\w*\s+расход|услови)/i.test(answerText);
     if (!scenarioMentioned) {
       errors.push('scenario_rule_violation:life_spend_constraint_ignored_in_text');
+    }
+
+    if (figures?.free_capital == null || figures?.free_capital === '') {
+      errors.push('scenario_rule_violation:free_capital_missing_in_audit');
+    }
+    if (figures?.life_spend == null || figures?.life_spend === '') {
+      errors.push('scenario_rule_violation:life_spend_missing_in_audit');
     }
 
     const freeCapitalClaim = toNum(figures?.free_capital);
@@ -153,6 +172,19 @@ function auditStructuredCfoResponse({
     const lifeSpendClaim = toNum(figures?.life_spend);
     if (figures?.life_spend != null && figures?.life_spend !== '' && !almostEqual(lifeSpendClaim, lifeSpend)) {
       errors.push(`scenario_mismatch:life_spend:${lifeSpendClaim}!=${lifeSpend}`);
+    }
+
+    const ownerCashClaim = toNum(figures?.owner_cash_hidden_net);
+    if (figures?.owner_cash_hidden_net != null && figures?.owner_cash_hidden_net !== '' && !almostEqual(ownerCashClaim, ownerCashNetHidden)) {
+      errors.push(`scenario_mismatch:owner_cash_hidden_net:${ownerCashClaim}!=${ownerCashNetHidden}`);
+    }
+
+    if (transferForbiddenForPersonalSpend) {
+      const hasForbiddenTransferAdvice = /(нужен|потребу|подготов|сдела|выполн|перевед)[^.\n]{0,80}(трансфер|перевод)[^.\n]{0,120}(скрыт|резерв|кубышк|hidden)/i.test(answerText)
+        || /(трансфер|перевод)[^.\n]{0,120}(из|со)\s*(скрыт|резерв|кубышк|hidden)[^.\n]{0,120}(в|на)\s*(открыт|операцион|open)/i.test(answerText);
+      if (hasForbiddenTransferAdvice) {
+        errors.push('scenario_rule_violation:forbidden_hidden_to_open_transfer_for_personal_spend');
+      }
     }
   }
 
@@ -186,7 +218,8 @@ function buildRepairInstruction({
     '      "next_obligation_amount": number|null,',
     '      "open_after_next_obligation": number|null,',
     '      "life_spend": number|null,',
-    '      "free_capital": number|null',
+    '      "free_capital": number|null,',
+    '      "owner_cash_hidden_net": number|null',
     '    },',
     '    "verdicts": {',
     '      "can_cover_next_obligation": boolean|null,',

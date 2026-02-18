@@ -87,7 +87,164 @@ const parseRequestedAmount = (question) => {
     return null;
 };
 
-const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContext }) => {
+const normalizeAccountName = (value) => String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const buildAccountScopeMap = (balances) => {
+    const map = new Map();
+    (Array.isArray(balances) ? balances : []).forEach((acc) => {
+        const key = normalizeAccountName(acc?.name);
+        if (!key) return;
+        map.set(key, Boolean(acc?.isOpen));
+    });
+    return map;
+};
+
+const resolveIsOpenByName = (name, dayScopeMap, fallbackScopeMap) => {
+    const key = normalizeAccountName(name);
+    if (!key) return null;
+    if (dayScopeMap?.has(key)) return Boolean(dayScopeMap.get(key));
+    if (fallbackScopeMap?.has(key)) return Boolean(fallbackScopeMap.get(key));
+    return null;
+};
+
+const addHiddenFlowByList = (bucket, list, kind, dayScopeMap, fallbackScopeMap, unknownCounterRef) => {
+    (Array.isArray(list) ? list : []).forEach((item) => {
+        const isOpen = resolveIsOpenByName(item?.accName, dayScopeMap, fallbackScopeMap);
+        if (isOpen === null) {
+            unknownCounterRef.count += 1;
+            return;
+        }
+
+        const amount = Math.abs(toNum(item?.amount));
+        if (amount <= 0 || isOpen) return;
+
+        if (kind === 'income') bucket.hiddenIncome += amount;
+        else bucket.hiddenExpense += amount;
+    });
+};
+
+const addHiddenFlowByTransfers = (bucket, transferList, dayScopeMap, fallbackScopeMap, unknownCounterRef) => {
+    (Array.isArray(transferList) ? transferList : []).forEach((item) => {
+        const amount = Math.abs(toNum(item?.amount));
+        if (amount <= 0) return;
+
+        const fromOpen = resolveIsOpenByName(item?.fromAccName, dayScopeMap, fallbackScopeMap);
+        const toOpen = resolveIsOpenByName(item?.toAccName, dayScopeMap, fallbackScopeMap);
+        const outOfSystem = Boolean(item?.isOutOfSystemTransfer);
+
+        if (outOfSystem) {
+            if (fromOpen === null) {
+                unknownCounterRef.count += 1;
+                return;
+            }
+            if (!fromOpen) bucket.hiddenExpense += amount;
+            return;
+        }
+
+        if (fromOpen === null || toOpen === null) {
+            unknownCounterRef.count += 1;
+            return;
+        }
+
+        if (fromOpen && !toOpen) bucket.hiddenIncome += amount;
+        if (!fromOpen && toOpen) bucket.hiddenExpense += amount;
+    });
+};
+
+const buildOwnerCashContextFromSnapshot = ({ snapshot, snapshotMeta }) => {
+    const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+    if (!days.length) {
+        return {
+            hasData: false,
+            message: 'no_snapshot_days',
+            hidden: {
+                period: { income: 0, expense: 0, net: 0, incomeFmt: formatT(0), expenseFmt: formatT(0), netFmt: formatSignedT(0) },
+                fact: { income: 0, expense: 0, net: 0, incomeFmt: formatT(0), expenseFmt: formatT(0), netFmt: formatSignedT(0) },
+                plan: { income: 0, expense: 0, net: 0, incomeFmt: formatT(0), expenseFmt: formatT(0), netFmt: formatSignedT(0) },
+                balances: { current: 0, end: 0, currentFmt: formatT(0), endFmt: formatT(0) }
+            }
+        };
+    }
+
+    const sorted = [...days].sort((a, b) => String(a?.dateKey || '').localeCompare(String(b?.dateKey || '')));
+    const timelineDate = String(snapshotMeta?.timelineDate || '');
+    const todayKey = DATE_KEY_RE.test(timelineDate)
+        ? timelineDate
+        : String(sorted[sorted.length - 1]?.dateKey || '');
+    const lastDay = sorted[sorted.length - 1] || null;
+    const currentDay = sorted.filter((day) => String(day?.dateKey || '') <= todayKey).slice(-1)[0] || null;
+    const fallbackScopeMap = buildAccountScopeMap(lastDay?.accountBalances);
+
+    const period = { hiddenIncome: 0, hiddenExpense: 0 };
+    const fact = { hiddenIncome: 0, hiddenExpense: 0 };
+    const plan = { hiddenIncome: 0, hiddenExpense: 0 };
+    const unknownRefs = { count: 0 };
+
+    sorted.forEach((day) => {
+        const dayScopeMap = buildAccountScopeMap(day?.accountBalances);
+        const bucket = { hiddenIncome: 0, hiddenExpense: 0 };
+
+        addHiddenFlowByList(bucket, day?.lists?.income, 'income', dayScopeMap, fallbackScopeMap, unknownRefs);
+        addHiddenFlowByList(bucket, day?.lists?.expense, 'expense', dayScopeMap, fallbackScopeMap, unknownRefs);
+        addHiddenFlowByList(bucket, day?.lists?.withdrawal, 'expense', dayScopeMap, fallbackScopeMap, unknownRefs);
+        addHiddenFlowByTransfers(bucket, day?.lists?.transfer, dayScopeMap, fallbackScopeMap, unknownRefs);
+
+        period.hiddenIncome += bucket.hiddenIncome;
+        period.hiddenExpense += bucket.hiddenExpense;
+
+        if (String(day?.dateKey || '') <= todayKey) {
+            fact.hiddenIncome += bucket.hiddenIncome;
+            fact.hiddenExpense += bucket.hiddenExpense;
+        } else {
+            plan.hiddenIncome += bucket.hiddenIncome;
+            plan.hiddenExpense += bucket.hiddenExpense;
+        }
+    });
+
+    const toSection = (income, expense) => {
+        const net = income - expense;
+        return {
+            income,
+            expense,
+            net,
+            incomeFmt: formatT(income),
+            expenseFmt: formatT(expense),
+            netFmt: formatSignedT(net)
+        };
+    };
+
+    const currentHiddenBalance = (Array.isArray(currentDay?.accountBalances) ? currentDay.accountBalances : [])
+        .filter((acc) => acc?.isOpen !== true)
+        .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+    const endHiddenBalance = (Array.isArray(lastDay?.accountBalances) ? lastDay.accountBalances : [])
+        .filter((acc) => acc?.isOpen !== true)
+        .reduce((sum, acc) => sum + toNum(acc?.balance), 0);
+
+    return {
+        hasData: true,
+        todayKey,
+        currentDayKey: String(currentDay?.dateKey || ''),
+        hidden: {
+            period: toSection(period.hiddenIncome, period.hiddenExpense),
+            fact: toSection(fact.hiddenIncome, fact.hiddenExpense),
+            plan: toSection(plan.hiddenIncome, plan.hiddenExpense),
+            balances: {
+                current: currentHiddenBalance,
+                end: endHiddenBalance,
+                currentFmt: formatT(currentHiddenBalance),
+                endFmt: formatT(endHiddenBalance)
+            }
+        },
+        mappingQuality: {
+            unknownAccountRefs: unknownRefs.count
+        }
+    };
+};
+
+const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContext, ownerCashContext, accountContext }) => {
     const q = normalizeQuestion(question);
     const hasInvestIntent = /(инвест|инвести|влож|ремонт)/i.test(q);
     const hasLifeSpendPhrase = /(жили|на\s+жизн|личн\w*\s+расход|забираем|выводим|берем\s+себе|на\s+себя)/i.test(q);
@@ -95,7 +252,12 @@ const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContex
     const lifeSpend = hasLifeSpendPhrase && Number.isFinite(Number(spendAmount)) ? Number(spendAmount) : null;
 
     const monthProfit = Number(derivedSemantics?.monthForecastNet || 0);
-    const freeCapitalRaw = lifeSpend == null ? null : (monthProfit - lifeSpend);
+    const ownerCashNetHidden = Number(ownerCashContext?.hidden?.period?.net ?? monthProfit);
+    const ownerCashNetHiddenSource = ownerCashContext?.hasData ? 'hidden_period_net_flow' : 'month_forecast_net_fallback';
+    const investmentBase = ownerCashNetHidden;
+    const freeCapitalRaw = hasInvestIntent
+        ? (investmentBase - (lifeSpend || 0))
+        : null;
     const freeCapital = freeCapitalRaw == null ? null : Math.max(0, freeCapitalRaw);
 
     const conservative10 = freeCapital == null ? null : Math.round(freeCapital * 0.10);
@@ -105,15 +267,18 @@ const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContex
     const openAfterObligation = Number(accountViewContext?.liquidityView?.openAfterNextObligation || 0);
     const openNow = Number(accountViewContext?.liquidityView?.openNow || 0);
     const nextObligationAmount = Number(accountViewContext?.liquidityView?.nextObligationAmount || 0);
-
-    const needsHiddenTransferForLifeSpend = lifeSpend == null ? null : (openAfterObligation < lifeSpend);
-    const minHiddenTransferForLifeSpend = lifeSpend == null ? null : Math.max(0, lifeSpend - openAfterObligation);
+    const canCoverByOpen = Boolean(accountViewContext?.liquidityView?.canCoverByOpen);
+    const criticalOpenCashGap = nextObligationAmount > 0 && !canCoverByOpen;
+    const allowHiddenToOpenTransferAdvice = accountContext?.mode === 'liquidity' && criticalOpenCashGap;
 
     return {
         enabled: hasInvestIntent,
         hasLifeSpendConstraint: lifeSpend != null,
         lifeSpend,
         monthProfit,
+        ownerCashNetHidden,
+        ownerCashNetHiddenFmt: formatSignedT(ownerCashNetHidden),
+        ownerCashNetHiddenSource,
         freeCapital,
         freeCapitalRaw,
         scenarios: {
@@ -121,12 +286,26 @@ const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContex
             moderate20,
             aggressive50
         },
+        ownerCashView: {
+            primarySourceForPersonalSpend: 'hidden',
+            personalSpendUsesHiddenByDefault: hasLifeSpendPhrase,
+            transferAdviceForbiddenForPersonalSpend: hasLifeSpendPhrase && !allowHiddenToOpenTransferAdvice,
+            hiddenBalanceNow: Number(ownerCashContext?.hidden?.balances?.current || accountViewContext?.performanceView?.hiddenNow || 0),
+            hiddenBalanceNowFmt: formatT(ownerCashContext?.hidden?.balances?.current || accountViewContext?.performanceView?.hiddenNow || 0),
+            hiddenBalanceEnd: Number(ownerCashContext?.hidden?.balances?.end || accountViewContext?.performanceView?.hiddenEnd || 0),
+            hiddenBalanceEndFmt: formatT(ownerCashContext?.hidden?.balances?.end || accountViewContext?.performanceView?.hiddenEnd || 0)
+        },
         liquidityContext: {
             openNow,
             nextObligationAmount,
             openAfterObligation,
-            needsHiddenTransferForLifeSpend,
-            minHiddenTransferForLifeSpend
+            canCoverByOpen,
+            criticalOpenCashGap
+        },
+        meta: {
+            accountMode: accountContext?.mode || 'performance',
+            accountModeReason: accountContext?.reason || '',
+            allowHiddenToOpenTransferAdvice
         }
     };
 };
@@ -1148,10 +1327,16 @@ async function generateSnapshotChatResponse({
             }
         };
     })();
+    const ownerCashContext = buildOwnerCashContextFromSnapshot({
+        snapshot,
+        snapshotMeta
+    });
     const scenarioCalculator = buildScenarioCalculator({
         question,
         derivedSemantics,
-        accountViewContext
+        accountViewContext,
+        ownerCashContext,
+        accountContext
     });
     const snapshotSlice = (() => {
         const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
@@ -1295,11 +1480,14 @@ async function generateSnapshotChatResponse({
         'Для STATUS запрещен сплошной абзац. Для FACT запрещена длинная простыня.',
         'SCENARIO CALCULATOR (обязательно для вопросов про инвестиции/ремонт/изъятие на жизнь):',
         '- Если SCENARIO_CALC_JSON.hasLifeSpendConstraint=true, обязательно учитывай это как условие пользователя.',
-        '- Формула инвестиционного ядра: freeCapital = monthProfit - lifeSpend.',
+        '- Режим Owner Cash View: для "жили-были/на жизнь" источник по умолчанию = hidden.',
+        '- Формула инвестиционного ядра: freeCapital = ownerCashNetHidden - lifeSpend.',
         '- Если freeCapital < 0, использовать 0 и явно написать, что свободного капитала из прибыли нет.',
         '- Не игнорируй ввод "на жизнь/жили-были/забираем X".',
         '- Для инвестиционных вопросов дай число freeCapital и 3 сценария: 10%, 20%, 50% от freeCapital.',
-        '- Отдельно укажи источник денег: если openAfterObligation < lifeSpend, нужен трансфер из hidden минимум на minHiddenTransferForLifeSpend.',
+        '- Запрещено советовать трансфер hidden -> open для личных трат пользователя.',
+        '- Трансфер допустим только при критическом кассовом разрыве бизнеса по обязательствам (liquidity mode + criticalOpenCashGap=true).',
+        '- Если SCENARIO_CALC_JSON.hasLifeSpendConstraint=true, обязательно заполняй audit.figures.life_spend и audit.figures.free_capital.',
         'ФИНАЛЬНЫЙ ОТВЕТ ВЕРНИ СТРОГО В JSON (БЕЗ ТЕКСТА ВНЕ JSON):',
         '{',
         '  "answer_text": "готовый ответ для пользователя",',
@@ -1310,7 +1498,8 @@ async function generateSnapshotChatResponse({
         '      "next_obligation_amount": number|null,',
         '      "open_after_next_obligation": number|null,',
         '      "life_spend": number|null,',
-        '      "free_capital": number|null',
+        '      "free_capital": number|null,',
+        '      "owner_cash_hidden_net": number|null',
         '    },',
         '    "verdicts": {',
         '      "can_cover_next_obligation": boolean|null,',
@@ -1339,6 +1528,9 @@ async function generateSnapshotChatResponse({
         'DERIVED_SEMANTICS_JSON:',
         JSON.stringify(derivedSemantics || {}, null, 2),
         '',
+        'OWNER_CASH_JSON:',
+        JSON.stringify(ownerCashContext || {}, null, 2),
+        '',
         'SCENARIO_CALC_JSON:',
         JSON.stringify(scenarioCalculator || {}, null, 2),
         '',
@@ -1358,6 +1550,7 @@ async function generateSnapshotChatResponse({
         '- Корректная формулировка ликвидности: DERIVED_SEMANTICS_JSON.liquidityPath',
         '- Для оплаты/кассового разрыва: ACCOUNT_CONTEXT_JSON.liquidityView (open-only)',
         '- Для прибыли/оборота/эффективности: ACCOUNT_CONTEXT_JSON.performanceView (total)',
+        '- Для личных трат/жили-были: OWNER_CASH_JSON.hidden.period + SCENARIO_CALC_JSON (Owner Cash View, hidden-first)',
         '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
@@ -1500,6 +1693,7 @@ async function generateSnapshotChatResponse({
             deterministicFacts,
             advisoryFacts,
             derivedSemantics,
+            ownerCashContext,
             accountViewContext,
             accountContext,
             snapshotSlice,
