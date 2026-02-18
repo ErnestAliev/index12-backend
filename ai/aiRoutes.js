@@ -1740,6 +1740,17 @@ module.exports = function createAiRouter(deps) {
             warnings: []
           };
         })();
+        const discriminatorLog = {
+          applied: Boolean(qualityGate?.applied),
+          passed: qualityGate?.passed === true,
+          attempts: Number(qualityGate?.attempts || 0),
+          errors: Array.isArray(qualityGate?.errors) ? qualityGate.errors : [],
+          warnings: Array.isArray(qualityGate?.warnings) ? qualityGate.warnings : [],
+          mode: responseMode,
+          llmErrorCode: llmErrorCode || null,
+          llmErrorText: llmErrorText || null,
+          llmQualityGateRaw: qualityGateFromLlm || null
+        };
 
         const llmInputSnapshot = await _dumpLlmInputSnapshot({
           generatedAt: new Date().toISOString(),
@@ -1763,6 +1774,7 @@ module.exports = function createAiRouter(deps) {
                 : 0
             }
           },
+          discriminatorLog,
           tooltipSnapshot: snapshot
         });
 
@@ -1774,6 +1786,7 @@ module.exports = function createAiRouter(deps) {
             responseMode,
             deterministicFacts,
             qualityGate,
+            discriminatorLog,
             llm: llmResult?.debug || null
           }
         });
@@ -1782,11 +1795,13 @@ module.exports = function createAiRouter(deps) {
         return res.json({
           text: responseText,
           qualityGate,
+          discriminatorLog,
           ...(debugEnabled ? {
             debug: {
               timelineDate,
               deterministicFacts,
               qualityGate,
+              discriminatorLog,
               llm: llmResult?.debug || null,
               responseMode,
               historyLength: chatHistory.messages.length,
