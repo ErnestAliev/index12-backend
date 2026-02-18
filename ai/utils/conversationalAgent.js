@@ -94,6 +94,47 @@ const detectQuestionProfile = (question) => {
     return 'standard';
 };
 
+const detectAccountContextMode = (question) => {
+    const q = normalizeQuestion(question);
+    if (!q) return { mode: 'performance', reason: 'default_no_question' };
+
+    const liquidityTokens = [
+        'хватит ли',
+        'могу ли оплат',
+        'оплат',
+        'кассовый разрыв',
+        'платеж',
+        'налог',
+        'зарплат',
+        'долг',
+        'ликвидност',
+        'платежеспособ'
+    ];
+    const performanceTokens = [
+        'сколько заработ',
+        'оборот',
+        'маржин',
+        'рентабель',
+        'эффективност',
+        'прибыл',
+        'выручк',
+        'динамик',
+        'результат',
+        'как дела'
+    ];
+
+    const liquidityScore = liquidityTokens.reduce((sum, token) => (q.includes(token) ? sum + 1 : sum), 0);
+    const performanceScore = performanceTokens.reduce((sum, token) => (q.includes(token) ? sum + 1 : sum), 0);
+
+    if (liquidityScore > performanceScore && liquidityScore > 0) {
+        return { mode: 'liquidity', reason: 'liquidity_tokens' };
+    }
+    if (performanceScore > 0) {
+        return { mode: 'performance', reason: 'performance_tokens' };
+    }
+    return { mode: 'performance', reason: 'default_performance' };
+};
+
 const buildSnapshotAdvisoryFacts = ({ snapshot, deterministicFacts, snapshotMeta }) => {
     const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
     if (!days.length) {
@@ -762,6 +803,7 @@ async function generateSnapshotChatResponse({
         .filter((msg) => msg.content);
 
     const questionProfile = detectQuestionProfile(question);
+    const accountContext = detectAccountContextMode(question);
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
         deterministicFacts,
@@ -841,6 +883,49 @@ async function generateSnapshotChatResponse({
             }
         };
     })();
+    const accountViewContext = (() => {
+        const openNow = toNum(deterministicFacts?.fact?.balances?.open);
+        const totalNow = toNum(deterministicFacts?.fact?.balances?.total);
+        const openEnd = toNum(deterministicFacts?.plan?.toEndBalances?.open ?? deterministicFacts?.endBalances?.open);
+        const totalEnd = toNum(deterministicFacts?.plan?.toEndBalances?.total ?? deterministicFacts?.endBalances?.total);
+        const nextObligationAmount = toNum(deterministicFacts?.plan?.nextObligation?.amount);
+        const nextObligationDate = String(deterministicFacts?.plan?.nextObligation?.dateLabel || '');
+
+        const openAfterNextObligation = openNow - nextObligationAmount;
+        const totalAfterNextObligation = totalNow - nextObligationAmount;
+        const canCoverByOpen = nextObligationAmount <= 0 ? true : openNow >= nextObligationAmount;
+        const canCoverByTotal = nextObligationAmount <= 0 ? true : totalNow >= nextObligationAmount;
+
+        return {
+            resolvedMode: accountContext.mode,
+            reason: accountContext.reason,
+            liquidityView: {
+                sourceRule: 'open_only',
+                openNow,
+                openNowFmt: formatT(openNow),
+                openEnd,
+                openEndFmt: formatT(openEnd),
+                nextObligationAmount,
+                nextObligationAmountFmt: formatT(nextObligationAmount),
+                nextObligationDate: nextObligationDate || null,
+                openAfterNextObligation,
+                openAfterNextObligationFmt: formatSignedT(openAfterNextObligation),
+                canCoverByOpen
+            },
+            performanceView: {
+                sourceRule: 'open_plus_hidden',
+                totalNow,
+                totalNowFmt: formatT(totalNow),
+                totalEnd,
+                totalEndFmt: formatT(totalEnd),
+                nextObligationAmount,
+                nextObligationAmountFmt: formatT(nextObligationAmount),
+                totalAfterNextObligation,
+                totalAfterNextObligationFmt: formatSignedT(totalAfterNextObligation),
+                canCoverByTotal
+            }
+        };
+    })();
     const snapshotSlice = (() => {
         const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
         const sorted = [...days].sort((a, b) => String(a?.dateKey || '').localeCompare(String(b?.dateKey || '')));
@@ -909,6 +994,12 @@ async function generateSnapshotChatResponse({
     const systemPrompt = [
         'Ты CFO-советник INDEX12 в стиле Ильи Балахнина: data-driven, жестко по сути, без воды.',
         'Отвечай разговорно, но строго по цифрам и причинно-следственным связям.',
+        'ВАЖНО: ЛОГИКА СЧЕТОВ (OPEN vs HIDDEN).',
+        'Перед ответом классифицируй вопрос: "Платежеспособность" или "Результативность".',
+        'Сценарий "Платежеспособность" (Liquidity): для оплаты, долгов, налогов, кассового разрыва используй ТОЛЬКО open.',
+        'В Liquidity hidden не использовать для решения "хватит ли денег на оплату".',
+        'Пример правила: если open < обязательство, это риск кассового разрыва даже при большом hidden.',
+        'Сценарий "Результативность" (Performance): для прибыли, маржи, оборота используй total (open + hidden).',
         'Формат ответа: 5-7 строк, короткие фразы, без лишних абзацев.',
         'Не используй markdown: без **жирного**, без нумерации 1), без длинных списков.',
         'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_SLICE_JSON.',
@@ -932,6 +1023,7 @@ async function generateSnapshotChatResponse({
         'Если hasCashGap = false и остаток после списания положительный, пиши: "сжатие ликвидности", а не "разрыв".',
         'Текущие балансы бери из FACTS_JSON.fact.balances и ADVISORY_FACTS_JSON.balancePointers.currentDay.',
         'Будущие/конечные балансы бери из FACTS_JSON.plan.toEndBalances и ADVISORY_FACTS_JSON.balancePointers.endDay.',
+        'Режим вопроса бери из ACCOUNT_CONTEXT_JSON.resolvedMode и источников ACCOUNT_CONTEXT_JSON.liquidityView/performanceView.',
         'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
         'Если вопрос простой про один показатель, ответ должен быть коротким:',
         '- 1-я строка: прямой ответ с числом.',
@@ -946,6 +1038,7 @@ async function generateSnapshotChatResponse({
     const userContent = [
         `Вопрос пользователя: ${String(question || '').trim()}`,
         `QUESTION_PROFILE: ${questionProfile}`,
+        `ACCOUNT_CONTEXT_MODE: ${accountContext.mode}`,
         `TODAY_KEY: ${String(snapshotMeta?.timelineDate || '')}`,
         '',
         'FACTS_JSON:',
@@ -957,6 +1050,9 @@ async function generateSnapshotChatResponse({
         'DERIVED_SEMANTICS_JSON:',
         JSON.stringify(derivedSemantics || {}, null, 2),
         '',
+        'ACCOUNT_CONTEXT_JSON:',
+        JSON.stringify(accountViewContext || {}, null, 2),
+        '',
         'КАРТА ПОЛЕЙ ДЛЯ ОТВЕТА:',
         '- Факт итоги: FACTS_JSON.fact.totals',
         '- План итоги до конца периода: FACTS_JSON.plan.totals',
@@ -966,6 +1062,8 @@ async function generateSnapshotChatResponse({
         '- Проверка кассового разрыва на ближайшее списание: ADVISORY_FACTS_JSON.nextExpenseLiquidity',
         '- Корректная формулировка прибыли/убытка месяца: DERIVED_SEMANTICS_JSON.monthForecastNet и DERIVED_SEMANTICS_JSON.monthIsProfitable',
         '- Корректная формулировка ликвидности: DERIVED_SEMANTICS_JSON.liquidityPath',
+        '- Для оплаты/кассового разрыва: ACCOUNT_CONTEXT_JSON.liquidityView (open-only)',
+        '- Для прибыли/оборота/эффективности: ACCOUNT_CONTEXT_JSON.performanceView (total)',
         '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
@@ -1002,6 +1100,8 @@ async function generateSnapshotChatResponse({
             deterministicFacts,
             advisoryFacts,
             derivedSemantics,
+            accountViewContext,
+            accountContext,
             snapshotSlice,
             questionProfile,
             snapshotMeta,
