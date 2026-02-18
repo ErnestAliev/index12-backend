@@ -98,6 +98,37 @@ const detectAccountContextMode = (question) => {
     const q = normalizeQuestion(question);
     if (!q) return { mode: 'performance', reason: 'default_no_question' };
 
+    const includesAny = (tokens) => tokens.some((token) => q.includes(token));
+
+    const hardLiquidityTokens = [
+        'на открытых счетах',
+        'открытые счета',
+        'операцион',
+        'кассовый разрыв',
+        'платежеспособ',
+        'оплат',
+        'заплат',
+        'погас',
+        'долг',
+        'налог',
+        'зарплат',
+        'обязательств',
+        'платеж'
+    ];
+    const canPayTokens = ['могу ли', 'можно ли', 'хватит ли'];
+
+    if (q.includes('как дела')) {
+        return { mode: 'performance', reason: 'status_question' };
+    }
+
+    if (includesAny(hardLiquidityTokens)) {
+        return { mode: 'liquidity', reason: 'hard_liquidity_tokens' };
+    }
+
+    if (includesAny(canPayTokens) && includesAny(['расход', 'оплат', 'платеж', 'долг', 'налог', 'зарплат', 'обязатель'])) {
+        return { mode: 'liquidity', reason: 'can_pay_with_expense_context' };
+    }
+
     const liquidityTokens = [
         'хватит ли',
         'могу ли оплат',
@@ -814,6 +845,19 @@ async function generateSnapshotChatResponse({
         const planRemainderNet = toNum(deterministicFacts?.plan?.totals?.net);
         const monthForecastNet = factNet + planRemainderNet;
 
+        const currentBalanceOpen = toNum(
+            deterministicFacts?.fact?.balances?.open
+            ?? advisoryFacts?.balancePointers?.currentDay?.open
+            ?? 0
+        );
+        const endBalanceOpen = toNum(
+            deterministicFacts?.plan?.toEndBalances?.open
+            ?? deterministicFacts?.endBalances?.open
+            ?? advisoryFacts?.balancePointers?.endDay?.open
+            ?? 0
+        );
+        const openBalanceDeltaToEnd = endBalanceOpen - currentBalanceOpen;
+
         const currentBalanceTotal = toNum(
             deterministicFacts?.fact?.balances?.total
             ?? advisoryFacts?.balancePointers?.currentDay?.total
@@ -831,14 +875,14 @@ async function generateSnapshotChatResponse({
         const eventPostOpen = toNum(eventLiquidity?.postExpenseOpen);
         const hasCashGapOnEventDay = Boolean(eventLiquidity?.hasCashGap);
         const compressionByEventDay = eventLiquidity
-            ? (eventPostOpen < currentBalanceTotal)
+            ? (eventPostOpen < currentBalanceOpen)
             : false;
-        const recoveryByMonthEndAbs = endBalanceTotal - eventPostOpen;
+        const recoveryByMonthEndAbs = endBalanceOpen - eventPostOpen;
         const hasRecoveryByMonthEnd = eventLiquidity
             ? (recoveryByMonthEndAbs > 0)
             : false;
         const compressionPersistsToMonthEnd = eventLiquidity
-            ? (endBalanceTotal <= eventPostOpen)
+            ? (endBalanceOpen <= eventPostOpen)
             : false;
         const liquidityConclusionCode = (() => {
             if (!eventLiquidity) return 'no_upcoming_expense_event';
@@ -856,6 +900,12 @@ async function generateSnapshotChatResponse({
             monthForecastNet,
             monthForecastNetFmt: formatSignedT(monthForecastNet),
             monthIsProfitable: monthForecastNet >= 0,
+            currentBalanceOpen,
+            currentBalanceOpenFmt: formatT(currentBalanceOpen),
+            endBalanceOpen,
+            endBalanceOpenFmt: formatT(endBalanceOpen),
+            openBalanceDeltaToEnd,
+            openBalanceDeltaToEndFmt: formatSignedT(openBalanceDeltaToEnd),
             currentBalanceTotal,
             currentBalanceTotalFmt: formatT(currentBalanceTotal),
             endBalanceTotal,
@@ -871,8 +921,8 @@ async function generateSnapshotChatResponse({
                 openBeforeEventFmt: eventLiquidity?.availableBeforeExpenseFmt || formatT(eventLiquidity?.availableBeforeExpense || 0),
                 openAfterEvent: eventPostOpen,
                 openAfterEventFmt: eventLiquidity?.postExpenseOpenFmt || formatT(eventPostOpen),
-                openAtMonthEnd: endBalanceTotal,
-                openAtMonthEndFmt: formatT(endBalanceTotal),
+                openAtMonthEnd: endBalanceOpen,
+                openAtMonthEndFmt: formatT(endBalanceOpen),
                 recoveryByMonthEndAbs,
                 recoveryByMonthEndAbsFmt: formatSignedT(recoveryByMonthEndAbs),
                 hasCashGapOnEventDay,
@@ -885,8 +935,10 @@ async function generateSnapshotChatResponse({
     })();
     const accountViewContext = (() => {
         const openNow = toNum(deterministicFacts?.fact?.balances?.open);
+        const hiddenNow = toNum(deterministicFacts?.fact?.balances?.hidden);
         const totalNow = toNum(deterministicFacts?.fact?.balances?.total);
         const openEnd = toNum(deterministicFacts?.plan?.toEndBalances?.open ?? deterministicFacts?.endBalances?.open);
+        const hiddenEnd = toNum(deterministicFacts?.plan?.toEndBalances?.hidden ?? deterministicFacts?.endBalances?.hidden);
         const totalEnd = toNum(deterministicFacts?.plan?.toEndBalances?.total ?? deterministicFacts?.endBalances?.total);
         const nextObligationAmount = toNum(deterministicFacts?.plan?.nextObligation?.amount);
         const nextObligationDate = String(deterministicFacts?.plan?.nextObligation?.dateLabel || '');
@@ -910,12 +962,21 @@ async function generateSnapshotChatResponse({
                 nextObligationDate: nextObligationDate || null,
                 openAfterNextObligation,
                 openAfterNextObligationFmt: formatSignedT(openAfterNextObligation),
-                canCoverByOpen
+                canCoverByOpen,
+                hiddenExcludedFromLiquidity: true
             },
             performanceView: {
                 sourceRule: 'open_plus_hidden',
+                openNow,
+                openNowFmt: formatT(openNow),
+                hiddenNow,
+                hiddenNowFmt: formatT(hiddenNow),
                 totalNow,
                 totalNowFmt: formatT(totalNow),
+                openEnd,
+                openEndFmt: formatT(openEnd),
+                hiddenEnd,
+                hiddenEndFmt: formatT(hiddenEnd),
                 totalEnd,
                 totalEndFmt: formatT(totalEnd),
                 nextObligationAmount,
@@ -999,6 +1060,7 @@ async function generateSnapshotChatResponse({
         'Сценарий "Платежеспособность" (Liquidity): для оплаты, долгов, налогов, кассового разрыва используй ТОЛЬКО open.',
         'В Liquidity hidden не использовать для решения "хватит ли денег на оплату".',
         'Пример правила: если open < обязательство, это риск кассового разрыва даже при большом hidden.',
+        'Если ACCOUNT_CONTEXT_MODE = liquidity, запрещено использовать ACCOUNT_CONTEXT_JSON.performanceView как аргумент "денег хватает".',
         'Сценарий "Результативность" (Performance): для прибыли, маржи, оборота используй total (open + hidden).',
         'Формат ответа: 5-7 строк, короткие фразы, без лишних абзацев.',
         'Не используй markdown: без **жирного**, без нумерации 1), без длинных списков.',
