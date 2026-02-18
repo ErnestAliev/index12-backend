@@ -63,6 +63,31 @@ const normalizeCfoOutput = (raw) => {
 
 const normalizeQuestion = (value) => String(value || '').toLowerCase().replace(/ё/g, 'е').trim();
 
+const getQuestionFlags = (question) => {
+    const q = normalizeQuestion(question);
+    const asksInvestmentRelated = /(инвест|инвести|влож|ремонт)/i.test(q);
+    const asksSingleAmount = /(^|\s)(сколько|какой|какая|какие)\b/i.test(q);
+    const hasConditionalConstraint = /(при условии|если|забираем|берем|на жизнь|жили|останется|остается)/i.test(q);
+    const asksHowCalculated = /(как\s+ты\s+это\s+рассч|как\s+рассчит|как\s+посчит|откуда\s+цифр|обосну|поясни|как\s+понял)/i.test(q);
+    const asksStrategyDistribution = /(стратег|портф|риски?|сценар|распред|консерват|агрессив|хедж|диверсиф)/i.test(q);
+
+    const isDirectInvestmentAmount = asksInvestmentRelated
+        && asksSingleAmount
+        && !asksHowCalculated
+        && !asksStrategyDistribution;
+    const isDirectConditionalAmount = isDirectInvestmentAmount && hasConditionalConstraint;
+
+    return {
+        asksInvestmentRelated,
+        asksSingleAmount,
+        hasConditionalConstraint,
+        asksHowCalculated,
+        asksStrategyDistribution,
+        isDirectInvestmentAmount,
+        isDirectConditionalAmount
+    };
+};
+
 const parseRequestedAmount = (question) => {
     const text = normalizeQuestion(question);
 
@@ -310,11 +335,12 @@ const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContex
     };
 };
 
-const buildOwnerScenarioFallbackText = ({ scenarioCalculator, accountViewContext }) => {
+const buildOwnerScenarioFallbackText = ({ scenarioCalculator, accountViewContext, question }) => {
     const scenario = scenarioCalculator && typeof scenarioCalculator === 'object'
         ? scenarioCalculator
         : null;
     if (!scenario?.enabled || !scenario?.hasLifeSpendConstraint) return null;
+    const flags = getQuestionFlags(question);
 
     const lifeSpend = toNum(scenario?.lifeSpend);
     const freeCapital = Math.max(0, toNum(scenario?.freeCapital));
@@ -328,11 +354,21 @@ const buildOwnerScenarioFallbackText = ({ scenarioCalculator, accountViewContext
     const openAfterNextObligation = toNum(accountViewContext?.liquidityView?.openAfterNextObligation);
     const canCoverByOpen = Boolean(accountViewContext?.liquidityView?.canCoverByOpen);
 
+    if (flags.isDirectConditionalAmount && !flags.asksHowCalculated && !flags.asksStrategyDistribution) {
+        return `При условии расходов на жизнь ${formatT(lifeSpend)}, у вас на руках для инвестиций остается ${formatT(freeCapital)}.`;
+    }
+
     const lines = [];
-    lines.push(`При условии "жили-были" ${formatT(lifeSpend)}: на инвестиции ${formatT(freeCapital)}.`);
-    lines.push(`Owner Cash View: скрытый net-flow за период ${formatSignedT(ownerCashNetHidden)}.`);
-    lines.push(`Сценарии: 10% ${formatT(conservative10)}, 20% ${formatT(moderate20)}, 50% ${formatT(aggressive50)}.`);
-    lines.push('Личные траты считаются из скрытых счетов; трансфер hidden -> open не требуется.');
+    lines.push(`При условии расходов на жизнь ${formatT(lifeSpend)}, на инвестиции остается ${formatT(freeCapital)}.`);
+
+    if (flags.asksHowCalculated) {
+        lines.push(`Расчет: скрытый чистый поток за период ${formatSignedT(ownerCashNetHidden)} минус личные расходы ${formatT(lifeSpend)}.`);
+        lines.push('Личные траты учитываются из скрытых счетов; дополнительный перевод на open не требуется.');
+    }
+
+    if (flags.asksStrategyDistribution) {
+        lines.push(`Ориентиры распределения: 10% ${formatT(conservative10)}, 20% ${formatT(moderate20)}, 50% ${formatT(aggressive50)}.`);
+    }
 
     if (nextObligationAmount > 0 && nextObligationDate) {
         lines.push(
@@ -384,9 +420,10 @@ const detectQuestionProfile = (question) => {
     return 'standard';
 };
 
-const detectResponseIntent = (question) => {
+const detectResponseIntent = (question, precomputedFlags = null) => {
     const q = normalizeQuestion(question);
     if (!q) return { intent: 'status', reason: 'empty_default_status' };
+    const flags = precomputedFlags || getQuestionFlags(question);
 
     const includesAny = (tokens) => tokens.some((token) => q.includes(token));
     const startsWithAny = (tokens) => tokens.some((token) => q.startsWith(token));
@@ -457,6 +494,12 @@ const detectResponseIntent = (question) => {
         'прогноз'
     ];
 
+    if (flags.isDirectConditionalAmount || flags.isDirectInvestmentAmount) {
+        return {
+            intent: 'fact',
+            reason: flags.isDirectConditionalAmount ? 'direct_conditional_amount' : 'direct_invest_amount'
+        };
+    }
     if (includesAny(statusTokens)) return { intent: 'status', reason: 'status_tokens' };
     if (includesAny(advisoryTokens)) return { intent: 'advisory', reason: 'advisory_tokens' };
     if (startsWithAny(factLeadTokens) || (includesAny(factMetricTokens) && q.length <= 120)) {
@@ -1205,8 +1248,9 @@ async function generateSnapshotChatResponse({
         }))
         .filter((msg) => msg.content);
 
+    const questionFlags = getQuestionFlags(question);
     const questionProfile = detectQuestionProfile(question);
-    const responseIntent = detectResponseIntent(question);
+    const responseIntent = detectResponseIntent(question, questionFlags);
     const accountContext = detectAccountContextMode(question);
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
@@ -1474,12 +1518,15 @@ async function generateSnapshotChatResponse({
         'Будущие/конечные балансы бери из FACTS_JSON.plan.toEndBalances и ADVISORY_FACTS_JSON.balancePointers.endDay.',
         'Режим вопроса бери из ACCOUNT_CONTEXT_JSON.resolvedMode и источников ACCOUNT_CONTEXT_JSON.liquidityView/performanceView.',
         'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
+        'Запрещенные термины в answer_text: "Owner Cash View", "net-flow", "sourceRule", "SCENARIO_CALC_JSON".',
         'ФОРМАТ ОТВЕТА ВЫБИРАЙ ПО RESPONSE_INTENT (из user prompt):',
         'INTENT=FACT: короткий ответ по сути, без длинных блоков.',
+        'Если QUESTION_FLAGS_JSON.isDirectConditionalAmount=true, ответ должен быть ОДНИМ предложением с итоговой суммой.',
+        'Для isDirectConditionalAmount=true запрещено показывать формулы, шаги расчета, внутренние контуры и сценарии.',
+        'Пояснения к расчету давай только если QUESTION_FLAGS_JSON.asksHowCalculated=true.',
         'Шаблон FACT:',
-        'Ответ: [точная цифра/факт].',
-        'Контекст: [1 короткая строка: дата/горизонт/что включено].',
-        'Вывод: [1 короткая прикладная фраза].',
+        'Ответ: [точная цифра/факт, 1 строка].',
+        'Контекст и вывод добавляй только если пользователь прямо запросил детализацию.',
         'Для FACT не задавай уточняющие вопросы, если ответ уже есть в данных.',
         'INTENT=STATUS: используй структурный формат сводки.',
         'Шаблон STATUS:',
@@ -1517,7 +1564,8 @@ async function generateSnapshotChatResponse({
         '- Формула инвестиционного ядра: freeCapital = ownerCashNetHidden - lifeSpend.',
         '- Если freeCapital < 0, использовать 0 и явно написать, что свободного капитала из прибыли нет.',
         '- Не игнорируй ввод "на жизнь/жили-были/забираем X".',
-        '- Для инвестиционных вопросов дай число freeCapital и 3 сценария: 10%, 20%, 50% от freeCapital.',
+        '- Для обычного вопроса "сколько можем инвестировать" дай только итоговую сумму freeCapital.',
+        '- Сценарии 10%/20%/50% показывай ТОЛЬКО если QUESTION_FLAGS_JSON.asksStrategyDistribution=true.',
         '- Запрещено советовать трансфер hidden -> open для личных трат пользователя.',
         '- Трансфер допустим только при критическом кассовом разрыве бизнеса по обязательствам (liquidity mode + criticalOpenCashGap=true).',
         '- Если SCENARIO_CALC_JSON.hasLifeSpendConstraint=true, обязательно заполняй audit.figures.life_spend и audit.figures.free_capital.',
@@ -1551,6 +1599,8 @@ async function generateSnapshotChatResponse({
         `RESPONSE_INTENT_REASON: ${responseIntent.reason}`,
         `ACCOUNT_CONTEXT_MODE: ${accountContext.mode}`,
         `TODAY_KEY: ${String(snapshotMeta?.timelineDate || '')}`,
+        'QUESTION_FLAGS_JSON:',
+        JSON.stringify(questionFlags || {}, null, 2),
         '',
         'FACTS_JSON:',
         JSON.stringify(deterministicFacts || {}, null, 2),
@@ -1608,7 +1658,8 @@ async function generateSnapshotChatResponse({
         const buildScenarioFallbackResult = async ({ reason, audit = null }) => {
             const fallbackTextRaw = buildOwnerScenarioFallbackText({
                 scenarioCalculator,
-                accountViewContext
+                accountViewContext,
+                question
             });
             if (!fallbackTextRaw) return null;
 
