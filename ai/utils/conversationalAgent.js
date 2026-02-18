@@ -83,7 +83,16 @@ const detectQuestionProfile = (question) => {
         'совет',
         'анализ',
         'прогноз',
-        'колебания'
+        'колебания',
+        'в общем',
+        'общем и целом',
+        'максимально',
+        'распиши',
+        'подробно',
+        'развернуто',
+        'детально',
+        'сводка',
+        'отчет'
     ];
 
     const simpleScore = simpleTokens.reduce((sum, token) => (q.includes(token) ? sum + 1 : sum), 0);
@@ -92,6 +101,88 @@ const detectQuestionProfile = (question) => {
     if (deepScore > 0) return 'deep_analysis';
     if (simpleScore > 0 && q.length <= 90) return 'simple_fact';
     return 'standard';
+};
+
+const detectResponseIntent = (question) => {
+    const q = normalizeQuestion(question);
+    if (!q) return { intent: 'status', reason: 'empty_default_status' };
+
+    const includesAny = (tokens) => tokens.some((token) => q.includes(token));
+    const startsWithAny = (tokens) => tokens.some((token) => q.startsWith(token));
+
+    const statusTokens = [
+        'как дела',
+        'в общем',
+        'в целом',
+        'общем и целом',
+        'сводка',
+        'отчет',
+        'дай отчет',
+        'максимально',
+        'распиши',
+        'детально',
+        'развернуто',
+        'подробно',
+        'картина'
+    ];
+
+    const advisoryTokens = [
+        'инвест',
+        'инвести',
+        'ремонт',
+        'риски',
+        'риск',
+        'хедж',
+        'хеджир',
+        'стратег',
+        'планирован',
+        'что делать',
+        'как лучше',
+        'оптимиз',
+        'управлен',
+        'сценар',
+        'безболезн',
+        'что может пойти не так',
+        'почему'
+    ];
+
+    const factLeadTokens = [
+        'сколько',
+        'какой',
+        'какая',
+        'какие',
+        'покажи',
+        'что было',
+        'что будет',
+        'когда',
+        'на сколько',
+        'где'
+    ];
+
+    const factMetricTokens = [
+        'доход',
+        'расход',
+        'прибыл',
+        'маржа',
+        'баланс',
+        'остаток',
+        'оборот',
+        'налог',
+        'ликвидност',
+        'открытых счетах',
+        'скрытых счетах',
+        'конец месяца',
+        'конец февраля',
+        'прогноз'
+    ];
+
+    if (includesAny(statusTokens)) return { intent: 'status', reason: 'status_tokens' };
+    if (includesAny(advisoryTokens)) return { intent: 'advisory', reason: 'advisory_tokens' };
+    if (startsWithAny(factLeadTokens) || (includesAny(factMetricTokens) && q.length <= 120)) {
+        return { intent: 'fact', reason: 'fact_tokens' };
+    }
+
+    return { intent: 'advisory', reason: 'default_advisory' };
 };
 
 const detectAccountContextMode = (question) => {
@@ -834,6 +925,7 @@ async function generateSnapshotChatResponse({
         .filter((msg) => msg.content);
 
     const questionProfile = detectQuestionProfile(question);
+    const responseIntent = detectResponseIntent(question);
     const accountContext = detectAccountContextMode(question);
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
@@ -1062,8 +1154,7 @@ async function generateSnapshotChatResponse({
         'Пример правила: если open < обязательство, это риск кассового разрыва даже при большом hidden.',
         'Если ACCOUNT_CONTEXT_MODE = liquidity, запрещено использовать ACCOUNT_CONTEXT_JSON.performanceView как аргумент "денег хватает".',
         'Сценарий "Результативность" (Performance): для прибыли, маржи, оборота используй total (open + hidden).',
-        'Формат ответа: 5-7 строк, короткие фразы, без лишних абзацев.',
-        'Не используй markdown: без **жирного**, без нумерации 1), без длинных списков.',
+        'Не используй markdown: без **жирного** и без таблиц.',
         'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_SLICE_JSON.',
         'Запрещено придумывать суммы, даты, операции, категории.',
         'КРИТИЧНО ПО ДАТАМ: today = SNAPSHOT_META.timelineDate.',
@@ -1091,19 +1182,50 @@ async function generateSnapshotChatResponse({
         'Будущие/конечные балансы бери из FACTS_JSON.plan.toEndBalances и ADVISORY_FACTS_JSON.balancePointers.endDay.',
         'Режим вопроса бери из ACCOUNT_CONTEXT_JSON.resolvedMode и источников ACCOUNT_CONTEXT_JSON.liquidityView/performanceView.',
         'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
-        'Если вопрос простой про один показатель, ответ должен быть коротким:',
-        '- 1-я строка: прямой ответ с числом.',
-        '- 2-я строка (опционально): краткий контекст.',
-        'Если вопрос "как дела?" или вопрос про анализ/совет/почему/когда лучше:',
-        '- сначала вывод в 1 строке;',
-        '- потом 4-6 строк с фактами и выводами;',
-        '- обязательно, если есть данные: пик расхода (дата, сумма, категория) и оценка ликвидности ближайшего списания;',
-        'Не используй общие фразы вроде "в целом все хорошо" без конкретных чисел.'
+        'ФОРМАТ ОТВЕТА ВЫБИРАЙ ПО RESPONSE_INTENT (из user prompt):',
+        'INTENT=FACT: короткий ответ по сути, без длинных блоков.',
+        'Шаблон FACT:',
+        'Ответ: [точная цифра/факт].',
+        'Контекст: [1 короткая строка: дата/горизонт/что включено].',
+        'Вывод: [1 короткая прикладная фраза].',
+        'Для FACT не задавай уточняющие вопросы, если ответ уже есть в данных.',
+        'INTENT=STATUS: используй структурный формат сводки.',
+        'Шаблон STATUS:',
+        'Финансовая сводка на [дата today]',
+        'Главный итог',
+        '[1-2 строки с ключевым выводом и цифрой результата]',
+        'Ликвидность (Операционные деньги)',
+        '- Открытый баланс (текущий): [число]',
+        '- Предстоящий расход: [дата, сумма, категория] (если нет — "Нет плановых списаний")',
+        '- Прогноз остатка после выплаты: [число]',
+        '- Вердикт: [кассовый разрыв / разрыва нет / временная просадка с восстановлением]',
+        'Эффективность бизнеса (P&L)',
+        '- Доходы (факт): [число]',
+        '- Расходы (факт): [число]',
+        '- Чистая прибыль (текущая): [число]',
+        '- Общий капитал: [число] (из них резервы: [число])',
+        'Ключевые события',
+        '- Пик расходов (факт): [дата, сумма, категория]',
+        '- План до конца месяца: доходы [число], расходы [число], нетто [число]',
+        '- Аномалии: [по категориям или "не обнаружены"]',
+        'INTENT=ADVISORY: дай CFO-консультацию, а не список всех цифр.',
+        'Шаблон ADVISORY:',
+        'Диагноз',
+        '[что реально происходит на языке управления финансами]',
+        'Что это значит для решения',
+        '[риски/возможности и их эффект]',
+        'Что сделать сейчас (1-3 шага)',
+        '[конкретные действия]',
+        'Что уточнить (максимум 2 вопроса, только если реально не хватает данных).',
+        'Если данных хватает — блок "Что уточнить" не добавляй.',
+        'Для STATUS запрещен сплошной абзац. Для FACT запрещена длинная простыня.'
     ].join(' ');
 
     const userContent = [
         `Вопрос пользователя: ${String(question || '').trim()}`,
         `QUESTION_PROFILE: ${questionProfile}`,
+        `RESPONSE_INTENT: ${responseIntent.intent}`,
+        `RESPONSE_INTENT_REASON: ${responseIntent.reason}`,
         `ACCOUNT_CONTEXT_MODE: ${accountContext.mode}`,
         `TODAY_KEY: ${String(snapshotMeta?.timelineDate || '')}`,
         '',
@@ -1139,7 +1261,7 @@ async function generateSnapshotChatResponse({
         'SNAPSHOT_SLICE_JSON:',
         JSON.stringify(snapshotSlice || {}, null, 2),
         '',
-        'Дай содержательный CFO-ответ по вопросу пользователя.'
+        'Сформируй ответ по шаблону для RESPONSE_INTENT.'
     ].join('\n');
 
     try {
@@ -1172,6 +1294,7 @@ async function generateSnapshotChatResponse({
             accountContext,
             snapshotSlice,
             questionProfile,
+            responseIntent,
             snapshotMeta,
             snapshot
         });
