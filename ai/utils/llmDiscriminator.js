@@ -73,6 +73,9 @@ function auditStructuredCfoResponse({
   if (!answerText) {
     errors.push('answer_text_empty');
   }
+  if (/(owner\s*cash\s*view|net-?flow|sourceRule|SCENARIO_CALC_JSON)/i.test(answerText)) {
+    errors.push('style_violation:internal_technical_terms_exposed');
+  }
 
   const expected = {
     mode: String(accountContext?.mode || ''),
