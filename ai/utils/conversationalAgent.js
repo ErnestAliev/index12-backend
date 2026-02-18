@@ -63,6 +63,74 @@ const normalizeCfoOutput = (raw) => {
 
 const normalizeQuestion = (value) => String(value || '').toLowerCase().replace(/ё/g, 'е').trim();
 
+const parseRequestedAmount = (question) => {
+    const text = normalizeQuestion(question);
+
+    const unitMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(млн|миллион(?:а|ов)?|m|тыс|тысяч[аи]?|k)(?=\s|$|[?!.,;:])/i);
+    if (unitMatch) {
+        const raw = Number(String(unitMatch[1]).replace(',', '.'));
+        if (!Number.isFinite(raw)) return null;
+        const unit = String(unitMatch[2]).toLowerCase();
+        const multiplier = /млн|миллион|m/i.test(unit) ? 1_000_000 : 1_000;
+        return Math.round(raw * multiplier);
+    }
+
+    const plainMatches = text.match(/\b(\d[\d\s]{3,})\b/g);
+    if (plainMatches?.length) {
+        for (const token of plainMatches) {
+            const normalized = String(token).replace(/\s+/g, '');
+            const n = Number(normalized);
+            if (Number.isFinite(n) && n >= 1000) return Math.round(n);
+        }
+    }
+
+    return null;
+};
+
+const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContext }) => {
+    const q = normalizeQuestion(question);
+    const hasInvestIntent = /(инвест|инвести|влож|ремонт)/i.test(q);
+    const hasLifeSpendPhrase = /(жили|на\s+жизн|личн\w*\s+расход|забираем|выводим|берем\s+себе|на\s+себя)/i.test(q);
+    const spendAmount = parseRequestedAmount(question);
+    const lifeSpend = hasLifeSpendPhrase && Number.isFinite(Number(spendAmount)) ? Number(spendAmount) : null;
+
+    const monthProfit = Number(derivedSemantics?.monthForecastNet || 0);
+    const freeCapitalRaw = lifeSpend == null ? null : (monthProfit - lifeSpend);
+    const freeCapital = freeCapitalRaw == null ? null : Math.max(0, freeCapitalRaw);
+
+    const conservative10 = freeCapital == null ? null : Math.round(freeCapital * 0.10);
+    const moderate20 = freeCapital == null ? null : Math.round(freeCapital * 0.20);
+    const aggressive50 = freeCapital == null ? null : Math.round(freeCapital * 0.50);
+
+    const openAfterObligation = Number(accountViewContext?.liquidityView?.openAfterNextObligation || 0);
+    const openNow = Number(accountViewContext?.liquidityView?.openNow || 0);
+    const nextObligationAmount = Number(accountViewContext?.liquidityView?.nextObligationAmount || 0);
+
+    const needsHiddenTransferForLifeSpend = lifeSpend == null ? null : (openAfterObligation < lifeSpend);
+    const minHiddenTransferForLifeSpend = lifeSpend == null ? null : Math.max(0, lifeSpend - openAfterObligation);
+
+    return {
+        enabled: hasInvestIntent,
+        hasLifeSpendConstraint: lifeSpend != null,
+        lifeSpend,
+        monthProfit,
+        freeCapital,
+        freeCapitalRaw,
+        scenarios: {
+            conservative10,
+            moderate20,
+            aggressive50
+        },
+        liquidityContext: {
+            openNow,
+            nextObligationAmount,
+            openAfterObligation,
+            needsHiddenTransferForLifeSpend,
+            minHiddenTransferForLifeSpend
+        }
+    };
+};
+
 const detectQuestionProfile = (question) => {
     const q = normalizeQuestion(question);
     const simpleTokens = [
@@ -1080,6 +1148,11 @@ async function generateSnapshotChatResponse({
             }
         };
     })();
+    const scenarioCalculator = buildScenarioCalculator({
+        question,
+        derivedSemantics,
+        accountViewContext
+    });
     const snapshotSlice = (() => {
         const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
         const sorted = [...days].sort((a, b) => String(a?.dateKey || '').localeCompare(String(b?.dateKey || '')));
@@ -1220,6 +1293,13 @@ async function generateSnapshotChatResponse({
         'Что уточнить (максимум 2 вопроса, только если реально не хватает данных).',
         'Если данных хватает — блок "Что уточнить" не добавляй.',
         'Для STATUS запрещен сплошной абзац. Для FACT запрещена длинная простыня.',
+        'SCENARIO CALCULATOR (обязательно для вопросов про инвестиции/ремонт/изъятие на жизнь):',
+        '- Если SCENARIO_CALC_JSON.hasLifeSpendConstraint=true, обязательно учитывай это как условие пользователя.',
+        '- Формула инвестиционного ядра: freeCapital = monthProfit - lifeSpend.',
+        '- Если freeCapital < 0, использовать 0 и явно написать, что свободного капитала из прибыли нет.',
+        '- Не игнорируй ввод "на жизнь/жили-были/забираем X".',
+        '- Для инвестиционных вопросов дай число freeCapital и 3 сценария: 10%, 20%, 50% от freeCapital.',
+        '- Отдельно укажи источник денег: если openAfterObligation < lifeSpend, нужен трансфер из hidden минимум на minHiddenTransferForLifeSpend.',
         'ФИНАЛЬНЫЙ ОТВЕТ ВЕРНИ СТРОГО В JSON (БЕЗ ТЕКСТА ВНЕ JSON):',
         '{',
         '  "answer_text": "готовый ответ для пользователя",',
@@ -1228,7 +1308,9 @@ async function generateSnapshotChatResponse({
         '    "figures": {',
         '      "open_now": number|null,',
         '      "next_obligation_amount": number|null,',
-        '      "open_after_next_obligation": number|null',
+        '      "open_after_next_obligation": number|null,',
+        '      "life_spend": number|null,',
+        '      "free_capital": number|null',
         '    },',
         '    "verdicts": {',
         '      "can_cover_next_obligation": boolean|null,',
@@ -1256,6 +1338,9 @@ async function generateSnapshotChatResponse({
         '',
         'DERIVED_SEMANTICS_JSON:',
         JSON.stringify(derivedSemantics || {}, null, 2),
+        '',
+        'SCENARIO_CALC_JSON:',
+        JSON.stringify(scenarioCalculator || {}, null, 2),
         '',
         'ACCOUNT_CONTEXT_JSON:',
         JSON.stringify(accountViewContext || {}, null, 2),
@@ -1362,7 +1447,8 @@ async function generateSnapshotChatResponse({
             accountContext,
             accountViewContext,
             advisoryFacts,
-            derivedSemantics
+            derivedSemantics,
+            scenarioCalculator
         });
 
         if (!audit.ok) {
@@ -1388,7 +1474,8 @@ async function generateSnapshotChatResponse({
                 accountContext,
                 accountViewContext,
                 advisoryFacts,
-                derivedSemantics
+                derivedSemantics,
+                scenarioCalculator
             });
         }
 
@@ -1418,6 +1505,7 @@ async function generateSnapshotChatResponse({
             snapshotSlice,
             questionProfile,
             responseIntent,
+            scenarioCalculator,
             snapshotMeta,
             snapshot,
             qualityGate: {

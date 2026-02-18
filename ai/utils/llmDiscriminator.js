@@ -59,7 +59,8 @@ function auditStructuredCfoResponse({
   accountContext,
   accountViewContext,
   advisoryFacts,
-  derivedSemantics
+  derivedSemantics,
+  scenarioCalculator = null
 }) {
   const errors = [];
   const warnings = [];
@@ -130,6 +131,31 @@ function auditStructuredCfoResponse({
     errors.push('term_rule_violation:month_loss_when_profitable');
   }
 
+  const scenario = (scenarioCalculator && typeof scenarioCalculator === 'object')
+    ? scenarioCalculator
+    : null;
+  const lifeSpend = toNum(scenario?.lifeSpend);
+  const freeCapital = toNum(scenario?.freeCapital);
+  const hasLifeSpendConstraint = Boolean(scenario?.hasLifeSpendConstraint);
+  const scenarioEnabled = Boolean(scenario?.enabled);
+
+  if (scenarioEnabled && hasLifeSpendConstraint) {
+    const scenarioMentioned = /(на жизнь|жили|жили-были|личн\w*\s+расход|услови)/i.test(answerText);
+    if (!scenarioMentioned) {
+      errors.push('scenario_rule_violation:life_spend_constraint_ignored_in_text');
+    }
+
+    const freeCapitalClaim = toNum(figures?.free_capital);
+    if (figures?.free_capital != null && figures?.free_capital !== '' && !almostEqual(freeCapitalClaim, freeCapital)) {
+      errors.push(`scenario_mismatch:free_capital:${freeCapitalClaim}!=${freeCapital}`);
+    }
+
+    const lifeSpendClaim = toNum(figures?.life_spend);
+    if (figures?.life_spend != null && figures?.life_spend !== '' && !almostEqual(lifeSpendClaim, lifeSpend)) {
+      errors.push(`scenario_mismatch:life_spend:${lifeSpendClaim}!=${lifeSpend}`);
+    }
+  }
+
   if (!audit || Object.keys(audit).length === 0) {
     warnings.push('audit_block_missing');
   }
@@ -158,7 +184,9 @@ function buildRepairInstruction({
     '    "figures": {',
     '      "open_now": number|null,',
     '      "next_obligation_amount": number|null,',
-    '      "open_after_next_obligation": number|null',
+    '      "open_after_next_obligation": number|null,',
+    '      "life_spend": number|null,',
+    '      "free_capital": number|null',
     '    },',
     '    "verdicts": {',
     '      "can_cover_next_obligation": boolean|null,',
@@ -189,4 +217,3 @@ module.exports = {
   auditStructuredCfoResponse,
   buildRepairInstruction
 };
-
