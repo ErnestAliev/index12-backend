@@ -493,7 +493,11 @@ const renderDayBlock = ({ day, onlyOpen = false, scope = null }) => {
   const dayLabel = String(day?.dateLabel || toRuDateLabel(day?.dateKey));
 
   const effectiveScope = normalizeScope(scope || (onlyOpen ? 'open' : 'all'));
-  const balances = filterBalancesByScope(day?.accountBalances, effectiveScope);
+  const openBalances = filterBalancesByScope(day?.accountBalances, 'open');
+  const hiddenBalances = filterBalancesByScope(day?.accountBalances, 'hidden');
+  const balances = effectiveScope === 'open'
+    ? openBalances
+    : (effectiveScope === 'hidden' ? hiddenBalances : [...openBalances, ...hiddenBalances]);
 
   const totalBalance = balances.reduce((sum, acc) => sum + toNum(acc?.balance), 0);
   const income = toNum(day?.totals?.income);
@@ -502,16 +506,33 @@ const renderDayBlock = ({ day, onlyOpen = false, scope = null }) => {
   const lines = [
     dayLabel,
     `Баланс общий: ${fmtT(totalBalance)}`,
-    '----------------',
-    'Остатки на счетах:'
+    '----------------'
   ];
 
-  if (!balances.length) {
-    lines.push('Нет счетов по выбранному режиму.');
-  } else {
-    balances.forEach((acc) => {
+  if (effectiveScope === 'all') {
+    lines.push('Остатки на открытых счетах:');
+    if (!openBalances.length) lines.push('Нет открытых счетов.');
+    else openBalances.forEach((acc) => {
       lines.push(`${String(acc?.name || 'Счет')} — ${fmtT(acc?.balance)}`);
     });
+
+    lines.push('----------------');
+    lines.push('Остатки на скрытых счетах:');
+    if (!hiddenBalances.length) lines.push('Нет скрытых счетов.');
+    else hiddenBalances.forEach((acc) => {
+      lines.push(`${String(acc?.name || 'Счет')} — ${fmtT(acc?.balance)}`);
+    });
+  } else {
+    lines.push(effectiveScope === 'open'
+      ? 'Остатки на открытых счетах:'
+      : 'Остатки на скрытых счетах:');
+    if (!balances.length) {
+      lines.push(`Нет ${effectiveScope === 'open' ? 'открытых' : 'скрытых'} счетов.`);
+    } else {
+      balances.forEach((acc) => {
+        lines.push(`${String(acc?.name || 'Счет')} — ${fmtT(acc?.balance)}`);
+      });
+    }
   }
 
   lines.push('----------------');
