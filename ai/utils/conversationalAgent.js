@@ -2,6 +2,7 @@
 // Conversational AI agent with memory and context-first financial analysis
 const fs = require('fs/promises');
 const path = require('path');
+const llmDiscriminator = require('./llmDiscriminator');
 
 async function dumpLlmInputSnapshot(payload) {
     try {
@@ -1218,7 +1219,25 @@ async function generateSnapshotChatResponse({
         '[конкретные действия]',
         'Что уточнить (максимум 2 вопроса, только если реально не хватает данных).',
         'Если данных хватает — блок "Что уточнить" не добавляй.',
-        'Для STATUS запрещен сплошной абзац. Для FACT запрещена длинная простыня.'
+        'Для STATUS запрещен сплошной абзац. Для FACT запрещена длинная простыня.',
+        'ФИНАЛЬНЫЙ ОТВЕТ ВЕРНИ СТРОГО В JSON (БЕЗ ТЕКСТА ВНЕ JSON):',
+        '{',
+        '  "answer_text": "готовый ответ для пользователя",',
+        '  "audit": {',
+        '    "mode": "liquidity|performance|mixed",',
+        '    "figures": {',
+        '      "open_now": number|null,',
+        '      "next_obligation_amount": number|null,',
+        '      "open_after_next_obligation": number|null',
+        '    },',
+        '    "verdicts": {',
+        '      "can_cover_next_obligation": boolean|null,',
+        '      "cash_gap": boolean|null,',
+        '      "month_profitable": boolean|null',
+        '    },',
+        '    "uses_hidden_for_liquidity": boolean',
+        '  }',
+        '}'
     ].join(' ');
 
     const userContent = [
@@ -1261,21 +1280,126 @@ async function generateSnapshotChatResponse({
         'SNAPSHOT_SLICE_JSON:',
         JSON.stringify(snapshotSlice || {}, null, 2),
         '',
-        'Сформируй ответ по шаблону для RESPONSE_INTENT.'
+        'Сформируй ответ по шаблону для RESPONSE_INTENT.',
+        'Верни только JSON по контракту из system prompt.'
     ].join('\n');
 
     try {
         const model = process.env.OPENAI_MODEL || 'gpt-4o';
-        const llmRequest = {
-            model,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                ...conversationMessages,
-                { role: 'user', content: userContent }
-            ],
-            temperature: 0.2,
-            max_tokens: 650
+        const baseMessages = [
+            { role: 'system', content: systemPrompt },
+            ...conversationMessages,
+            { role: 'user', content: userContent }
+        ];
+
+        const llmAttempts = [];
+        const callLlm = async (messages, stage) => {
+            const llmRequest = {
+                model,
+                messages,
+                temperature: 0.2,
+                max_tokens: 900
+            };
+
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${OPENAI_KEY}`
+                },
+                body: JSON.stringify(llmRequest)
+            });
+
+            if (!response.ok) {
+                let detail = '';
+                try {
+                    const payload = await response.json();
+                    detail = String(payload?.error?.message || payload?.error || '').trim();
+                } catch (_) {
+                    // ignore
+                }
+                throw new Error(`API Status ${response.status}${detail ? `: ${detail}` : ''}`);
+            }
+
+            const data = await response.json();
+            const text = String(data?.choices?.[0]?.message?.content || '').trim();
+            if (!text) throw new Error('Empty response');
+
+            llmAttempts.push({
+                stage,
+                model: data?.model || model,
+                usage: data?.usage || null,
+                raw: text
+            });
+
+            return { text, data, llmRequest };
         };
+
+        let lastCall = await callLlm(baseMessages, 'initial');
+        let parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
+        let structured = parsed.ok ? parsed.data : null;
+
+        if (!parsed.ok) {
+            const repairPrompt = llmDiscriminator.buildRepairInstruction({
+                parseError: parsed.error,
+                accountContextMode: accountContext?.mode || ''
+            });
+            lastCall = await callLlm([
+                ...baseMessages,
+                { role: 'assistant', content: lastCall.text },
+                { role: 'user', content: repairPrompt }
+            ], 'repair_parse');
+            parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
+            structured = parsed.ok ? parsed.data : null;
+        }
+
+        if (!parsed.ok || !structured) {
+            throw new Error(`QUALITY_GATE_PARSE_FAILED:${parsed?.error || 'invalid_json_contract'}`);
+        }
+
+        let audit = llmDiscriminator.auditStructuredCfoResponse({
+            structured,
+            accountContext,
+            accountViewContext,
+            advisoryFacts,
+            derivedSemantics
+        });
+
+        if (!audit.ok) {
+            const repairPrompt = llmDiscriminator.buildRepairInstruction({
+                auditErrors: audit.errors,
+                expected: audit.expected,
+                accountContextMode: accountContext?.mode || ''
+            });
+            lastCall = await callLlm([
+                ...baseMessages,
+                { role: 'assistant', content: JSON.stringify(structured, null, 2) },
+                { role: 'user', content: repairPrompt }
+            ], 'repair_audit');
+
+            parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
+            if (!parsed.ok || !parsed.data) {
+                throw new Error(`QUALITY_GATE_PARSE_FAILED_AFTER_REPAIR:${parsed?.error || 'invalid_json_contract'}`);
+            }
+            structured = parsed.data;
+
+            audit = llmDiscriminator.auditStructuredCfoResponse({
+                structured,
+                accountContext,
+                accountViewContext,
+                advisoryFacts,
+                derivedSemantics
+            });
+        }
+
+        if (!audit.ok) {
+            throw new Error(`QUALITY_GATE_FAILED:${audit.errors.join('|')}`);
+        }
+
+        const answerText = normalizeCfoOutput(structured?.answer_text || '');
+        if (!answerText) {
+            throw new Error('QUALITY_GATE_FAILED:answer_text_empty_after_validation');
+        }
 
         const snapshotInfo = await dumpLlmInputSnapshot({
             generatedAt: new Date().toISOString(),
@@ -1284,8 +1408,7 @@ async function generateSnapshotChatResponse({
             llmInput: {
                 systemPrompt,
                 userContent,
-                conversationMessagesUsed: conversationMessages,
-                request: llmRequest
+                conversationMessagesUsed: conversationMessages
             },
             deterministicFacts,
             advisoryFacts,
@@ -1296,53 +1419,44 @@ async function generateSnapshotChatResponse({
             questionProfile,
             responseIntent,
             snapshotMeta,
-            snapshot
-        });
-
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${OPENAI_KEY}`
-            },
-            body: JSON.stringify(llmRequest)
-        });
-
-        if (!response.ok) {
-            let detail = '';
-            try {
-                const payload = await response.json();
-                detail = String(payload?.error?.message || payload?.error || '').trim();
-            } catch (_) {
-                // ignore
+            snapshot,
+            qualityGate: {
+                attempts: llmAttempts.length,
+                attemptsData: llmAttempts,
+                audit
             }
-            throw new Error(`API Status ${response.status}${detail ? `: ${detail}` : ''}`);
-        }
-        const data = await response.json();
-        const text = String(data?.choices?.[0]?.message?.content || '').trim();
-        if (!text) throw new Error('Empty response');
+        });
 
         return {
             ok: true,
-            text: normalizeCfoOutput(text),
+            text: answerText,
             debug: {
-                model: data.model,
-                usage: data.usage,
-                llmInputSnapshot: snapshotInfo
+                model: lastCall?.data?.model || model,
+                usage: lastCall?.data?.usage || null,
+                llmInputSnapshot: snapshotInfo,
+                qualityGate: {
+                    attempts: llmAttempts.length,
+                    audit
+                }
             }
         };
     } catch (err) {
         console.error('[conversationalAgent][snapshotChat] Error:', err);
         const errorMessage = String(err?.message || 'unknown error');
         const isQuotaError = /(^|[\s:])429([\s:]|$)/i.test(errorMessage) || /quota|billing/i.test(errorMessage);
+        const isQualityGateError = /^QUALITY_GATE_/i.test(errorMessage);
         return {
             ok: false,
             text: isQuotaError
                 ? 'LLM временно недоступен: исчерпан лимит API (429).'
-                : `Ошибка генерации ответа CFO: ${errorMessage}`,
+                : (isQualityGateError
+                    ? `LLM ответ отклонен контролем качества: ${errorMessage}`
+                    : `Ошибка генерации ответа CFO: ${errorMessage}`),
             debug: {
                 error: errorMessage,
-                code: isQuotaError ? 'quota_exceeded' : 'llm_error'
+                code: isQuotaError
+                    ? 'quota_exceeded'
+                    : (isQualityGateError ? 'quality_gate_failed' : 'llm_error')
             }
         };
     }

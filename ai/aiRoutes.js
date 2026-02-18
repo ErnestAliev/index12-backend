@@ -1690,6 +1690,11 @@ module.exports = function createAiRouter(deps) {
           || /(^|[\s:])429([\s:]|$)/i.test(llmErrorText)
           || /quota|billing/i.test(llmErrorText)
         );
+        const isQualityGateError = !llmResult?.ok && (
+          llmErrorCode === 'quality_gate_failed'
+          || /^LLM ответ отклонен контролем качества/i.test(llmErrorText)
+          || /QUALITY_GATE_/i.test(llmErrorText)
+        );
 
         const fallbackDeterministicText = snapshotAnswerEngine.buildDeterministicInsightsBlock(deterministicFacts);
         const responseText = llmResult?.ok
@@ -1697,11 +1702,44 @@ module.exports = function createAiRouter(deps) {
           : (
               isQuotaError
                 ? `${fallbackDeterministicText}\n\nLLM временно недоступен (лимит API 429). Проверьте billing/квоту OpenAI.`
-                : (llmErrorText || 'Не удалось сформировать ответ. Проверьте данные snapshot.')
+                : (isQualityGateError
+                    ? `${fallbackDeterministicText}\n\nLLM ответ отклонен контролем качества. Показываю проверенный детерминированный срез.`
+                    : (llmErrorText || 'Не удалось сформировать ответ. Проверьте данные snapshot.'))
             );
         const responseMode = llmResult?.ok
           ? 'llm_snapshot_chat'
-          : (isQuotaError ? 'snapshot_fallback_quota' : 'llm_snapshot_chat_error');
+          : (isQuotaError
+              ? 'snapshot_fallback_quota'
+              : (isQualityGateError ? 'snapshot_fallback_quality_gate' : 'llm_snapshot_chat_error'));
+        const qualityGateFromLlm = llmResult?.debug?.qualityGate || null;
+        const qualityGate = (() => {
+          if (qualityGateFromLlm) {
+            const audit = qualityGateFromLlm?.audit || {};
+            return {
+              applied: true,
+              passed: Boolean(audit?.ok === true),
+              attempts: Number(qualityGateFromLlm?.attempts || 0),
+              errors: Array.isArray(audit?.errors) ? audit.errors : [],
+              warnings: Array.isArray(audit?.warnings) ? audit.warnings : []
+            };
+          }
+          if (isQualityGateError) {
+            return {
+              applied: true,
+              passed: false,
+              attempts: 0,
+              errors: [llmErrorText || 'quality_gate_failed'],
+              warnings: []
+            };
+          }
+          return {
+            applied: false,
+            passed: null,
+            attempts: 0,
+            errors: [],
+            warnings: []
+          };
+        })();
 
         const llmInputSnapshot = await _dumpLlmInputSnapshot({
           generatedAt: new Date().toISOString(),
@@ -1735,6 +1773,7 @@ module.exports = function createAiRouter(deps) {
           metadata: {
             responseMode,
             deterministicFacts,
+            qualityGate,
             llm: llmResult?.debug || null
           }
         });
@@ -1742,10 +1781,12 @@ module.exports = function createAiRouter(deps) {
 
         return res.json({
           text: responseText,
+          qualityGate,
           ...(debugEnabled ? {
             debug: {
               timelineDate,
               deterministicFacts,
+              qualityGate,
               llm: llmResult?.debug || null,
               responseMode,
               historyLength: chatHistory.messages.length,
