@@ -310,6 +310,39 @@ const buildScenarioCalculator = ({ question, derivedSemantics, accountViewContex
     };
 };
 
+const buildOwnerScenarioFallbackText = ({ scenarioCalculator, accountViewContext }) => {
+    const scenario = scenarioCalculator && typeof scenarioCalculator === 'object'
+        ? scenarioCalculator
+        : null;
+    if (!scenario?.enabled || !scenario?.hasLifeSpendConstraint) return null;
+
+    const lifeSpend = toNum(scenario?.lifeSpend);
+    const freeCapital = Math.max(0, toNum(scenario?.freeCapital));
+    const ownerCashNetHidden = toNum(scenario?.ownerCashNetHidden);
+    const conservative10 = Math.max(0, toNum(scenario?.scenarios?.conservative10));
+    const moderate20 = Math.max(0, toNum(scenario?.scenarios?.moderate20));
+    const aggressive50 = Math.max(0, toNum(scenario?.scenarios?.aggressive50));
+
+    const nextObligationAmount = toNum(accountViewContext?.liquidityView?.nextObligationAmount);
+    const nextObligationDate = String(accountViewContext?.liquidityView?.nextObligationDate || '').trim();
+    const openAfterNextObligation = toNum(accountViewContext?.liquidityView?.openAfterNextObligation);
+    const canCoverByOpen = Boolean(accountViewContext?.liquidityView?.canCoverByOpen);
+
+    const lines = [];
+    lines.push(`При условии "жили-были" ${formatT(lifeSpend)}: на инвестиции ${formatT(freeCapital)}.`);
+    lines.push(`Owner Cash View: скрытый net-flow за период ${formatSignedT(ownerCashNetHidden)}.`);
+    lines.push(`Сценарии: 10% ${formatT(conservative10)}, 20% ${formatT(moderate20)}, 50% ${formatT(aggressive50)}.`);
+    lines.push('Личные траты считаются из скрытых счетов; трансфер hidden -> open не требуется.');
+
+    if (nextObligationAmount > 0 && nextObligationDate) {
+        lines.push(
+            `Операционка: ${nextObligationDate} обязательство ${formatT(nextObligationAmount)}, после оплаты на open ${formatSignedT(openAfterNextObligation)} (${canCoverByOpen ? 'без кассового разрыва' : 'риск кассового разрыва'}).`
+        );
+    }
+
+    return lines.join('\n');
+};
+
 const detectQuestionProfile = (question) => {
     const q = normalizeQuestion(question);
     const simpleTokens = [
@@ -1571,6 +1604,72 @@ async function generateSnapshotChatResponse({
         ];
 
         const llmAttempts = [];
+        let lastCall = null;
+        const buildScenarioFallbackResult = async ({ reason, audit = null }) => {
+            const fallbackTextRaw = buildOwnerScenarioFallbackText({
+                scenarioCalculator,
+                accountViewContext
+            });
+            if (!fallbackTextRaw) return null;
+
+            const fallbackAudit = audit && typeof audit === 'object'
+                ? audit
+                : {
+                    ok: false,
+                    errors: [String(reason || 'quality_gate_failed')],
+                    warnings: []
+                };
+
+            const answerText = normalizeCfoOutput(fallbackTextRaw);
+            if (!answerText) return null;
+
+            const snapshotInfo = await dumpLlmInputSnapshot({
+                generatedAt: new Date().toISOString(),
+                mode: 'snapshot_chat_scenario_fallback',
+                question,
+                fallbackReason: String(reason || 'quality_gate_failed'),
+                llmInput: {
+                    systemPrompt,
+                    userContent,
+                    conversationMessagesUsed: conversationMessages
+                },
+                deterministicFacts,
+                advisoryFacts,
+                derivedSemantics,
+                ownerCashContext,
+                accountViewContext,
+                accountContext,
+                snapshotSlice,
+                questionProfile,
+                responseIntent,
+                scenarioCalculator,
+                snapshotMeta,
+                snapshot,
+                qualityGate: {
+                    attempts: llmAttempts.length,
+                    attemptsData: llmAttempts,
+                    audit: fallbackAudit,
+                    deterministicFallback: true
+                }
+            });
+
+            return {
+                ok: true,
+                text: answerText,
+                debug: {
+                    model: lastCall?.data?.model || model,
+                    usage: lastCall?.data?.usage || null,
+                    llmInputSnapshot: snapshotInfo,
+                    qualityGate: {
+                        attempts: llmAttempts.length,
+                        audit: fallbackAudit,
+                        deterministicFallback: true,
+                        fallbackReason: String(reason || 'quality_gate_failed')
+                    }
+                }
+            };
+        };
+
         const callLlm = async (messages, stage) => {
             const llmRequest = {
                 model,
@@ -1613,7 +1712,7 @@ async function generateSnapshotChatResponse({
             return { text, data, llmRequest };
         };
 
-        let lastCall = await callLlm(baseMessages, 'initial');
+        lastCall = await callLlm(baseMessages, 'initial');
         let parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
         let structured = parsed.ok ? parsed.data : null;
 
@@ -1632,6 +1731,10 @@ async function generateSnapshotChatResponse({
         }
 
         if (!parsed.ok || !structured) {
+            const fallback = await buildScenarioFallbackResult({
+                reason: `QUALITY_GATE_PARSE_FAILED:${parsed?.error || 'invalid_json_contract'}`
+            });
+            if (fallback) return fallback;
             throw new Error(`QUALITY_GATE_PARSE_FAILED:${parsed?.error || 'invalid_json_contract'}`);
         }
 
@@ -1658,6 +1761,11 @@ async function generateSnapshotChatResponse({
 
             parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
             if (!parsed.ok || !parsed.data) {
+                const fallback = await buildScenarioFallbackResult({
+                    reason: `QUALITY_GATE_PARSE_FAILED_AFTER_REPAIR:${parsed?.error || 'invalid_json_contract'}`,
+                    audit
+                });
+                if (fallback) return fallback;
                 throw new Error(`QUALITY_GATE_PARSE_FAILED_AFTER_REPAIR:${parsed?.error || 'invalid_json_contract'}`);
             }
             structured = parsed.data;
@@ -1673,11 +1781,21 @@ async function generateSnapshotChatResponse({
         }
 
         if (!audit.ok) {
+            const fallback = await buildScenarioFallbackResult({
+                reason: `QUALITY_GATE_FAILED:${audit.errors.join('|')}`,
+                audit
+            });
+            if (fallback) return fallback;
             throw new Error(`QUALITY_GATE_FAILED:${audit.errors.join('|')}`);
         }
 
         const answerText = normalizeCfoOutput(structured?.answer_text || '');
         if (!answerText) {
+            const fallback = await buildScenarioFallbackResult({
+                reason: 'QUALITY_GATE_FAILED:answer_text_empty_after_validation',
+                audit
+            });
+            if (fallback) return fallback;
             throw new Error('QUALITY_GATE_FAILED:answer_text_empty_after_validation');
         }
 
