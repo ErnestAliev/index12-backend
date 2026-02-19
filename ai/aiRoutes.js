@@ -36,6 +36,7 @@ module.exports = function createAiRouter(deps) {
   const quickJournalAdapter = createQuickJournalAdapter({ Event });
 
   const conversationalAgent = require('./utils/conversationalAgent');
+  const cfoKnowledgeBase = require('./utils/cfoKnowledgeBase');
   const snapshotAnswerEngine = require('./utils/snapshotAnswerEngine');
   const snapshotIntentParser = require('./utils/snapshotIntentParser');
 
@@ -55,6 +56,28 @@ module.exports = function createAiRouter(deps) {
     } catch (error) {
       console.error('[AI Snapshot] dump error:', error);
       return null;
+    }
+  };
+
+  const _listSearchIndexes = async (collection, indexName = '') => {
+    if (!collection) return [];
+
+    if (typeof collection.listSearchIndexes === 'function') {
+      try {
+        const rows = await collection.listSearchIndexes(indexName || undefined).toArray();
+        return Array.isArray(rows) ? rows : [];
+      } catch (_) {
+        // fallback below
+      }
+    }
+
+    try {
+      const rows = await collection.aggregate([{ $listSearchIndexes: {} }]).toArray();
+      const list = Array.isArray(rows) ? rows : [];
+      if (!indexName) return list;
+      return list.filter((r) => String(r?.name || '') === String(indexName));
+    } catch (_) {
+      return [];
     }
   };
 
@@ -1386,6 +1409,128 @@ module.exports = function createAiRouter(deps) {
 
   router.get('/ping', (req, res) => {
     res.json({ ok: true, mode: 'hybrid', version: AIROUTES_VERSION });
+  });
+
+  router.get('/rag/health', isAuthenticated, async (req, res) => {
+    try {
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      const dbUrl = String(process.env.DB_URL || '');
+      const atlas = dbUrl.startsWith('mongodb+srv://');
+      const openAiKeyPresent = Boolean(process.env.OPENAI_KEY || process.env.OPENAI_API_KEY);
+      const embeddingModel = String(process.env.OPENAI_EMBED_MODEL || 'text-embedding-3-small');
+      const collectionName = String(process.env.RAG_KB_COLLECTION || 'ai_cfo_knowledge');
+      const vectorIndex = String(process.env.RAG_KB_VECTOR_INDEX || 'vector_index');
+
+      const readyState = Number(mongoose?.connection?.readyState || 0);
+      const connected = readyState === 1;
+      const dbName = connected
+        ? String(mongoose?.connection?.db?.databaseName || mongoose?.connection?.name || '')
+        : null;
+
+      let docsCount = null;
+      let sampleDocIds = [];
+      let vectorIndexes = [];
+      let vectorIndexExists = false;
+      let diagnosticsError = null;
+
+      if (connected && mongoose?.connection?.db) {
+        try {
+          const col = mongoose.connection.db.collection(collectionName);
+          docsCount = await col.countDocuments({});
+          const sample = await col.find(
+            {},
+            { projection: { _id: 0, id: 1, title: 1 } }
+          ).limit(5).toArray();
+          sampleDocIds = (Array.isArray(sample) ? sample : [])
+            .map((row) => String(row?.id || row?.title || '').trim())
+            .filter(Boolean);
+
+          vectorIndexes = await _listSearchIndexes(col, vectorIndex);
+          vectorIndexExists = Array.isArray(vectorIndexes) && vectorIndexes.length > 0;
+        } catch (error) {
+          diagnosticsError = String(error?.message || error);
+        }
+      }
+
+      const probeEnabled = String(req.query?.probe || '').toLowerCase() === 'true';
+      let probe = null;
+
+      if (probeEnabled) {
+        try {
+          const probeResult = await cfoKnowledgeBase.retrieveCfoContext({
+            question: 'проверка rag ликвидность налоги',
+            responseIntent: { intent: 'advisory' },
+            accountContext: { mode: 'liquidity' },
+            advisoryFacts: {
+              nextExpenseLiquidity: {
+                hasCashGap: false,
+                expense: 0,
+                postExpenseOpenFmt: '0 т'
+              }
+            },
+            derivedSemantics: { monthForecastNet: 0, monthForecastNetFmt: '0 т' },
+            scenarioCalculator: { enabled: false, hasLifeSpendConstraint: false },
+            limit: 3
+          });
+
+          probe = {
+            ok: true,
+            source: String(probeResult?.source || ''),
+            atlas: probeResult?.atlas || null,
+            itemCount: Array.isArray(probeResult?.items) ? probeResult.items.length : 0
+          };
+        } catch (error) {
+          probe = {
+            ok: false,
+            error: String(error?.message || error)
+          };
+        }
+      }
+
+      const ok = atlas
+        && connected
+        && openAiKeyPresent
+        && vectorIndexExists
+        && (Number(docsCount || 0) > 0);
+
+      return res.json({
+        ok,
+        status: ok ? 'ready' : 'degraded',
+        atlas: {
+          detected: atlas,
+          dbUrlKind: atlas ? 'mongodb+srv' : 'mongodb/other'
+        },
+        mongodb: {
+          connected,
+          readyState,
+          dbName
+        },
+        rag: {
+          collection: collectionName,
+          docsCount,
+          sampleDocIds,
+          vectorIndex,
+          vectorIndexExists,
+          vectorIndexCount: Array.isArray(vectorIndexes) ? vectorIndexes.length : 0
+        },
+        openai: {
+          keyPresent: openAiKeyPresent,
+          embeddingModel
+        },
+        diagnosticsError,
+        probe
+      });
+    } catch (error) {
+      console.error('[AI RAG Health] Error:', error);
+      return res.status(500).json({
+        ok: false,
+        status: 'error',
+        error: String(error?.message || error)
+      });
+    }
   });
 
   const _extractTimelineDate = (raw) => {
