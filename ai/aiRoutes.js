@@ -183,6 +183,76 @@ module.exports = function createAiRouter(deps) {
     return Number.isFinite(n) ? n : 0;
   };
 
+  const _normalizeHistoricalContext = (input) => {
+    if (!input || typeof input !== 'object') return null;
+    const periodsRaw = Array.isArray(input?.periods) ? input.periods : [];
+    if (!periodsRaw.length) return null;
+
+    const isDayKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
+    const periods = periodsRaw
+      .slice(0, 24)
+      .map((row) => {
+        const period = String(row?.period || '').trim();
+        const relation = String(row?.relation || '').trim();
+        const offsetMonths = Number(row?.offsetMonths);
+        const startDateKey = String(row?.range?.startDateKey || row?.startDateKey || '').trim();
+        const endDateKey = String(row?.range?.endDateKey || row?.endDateKey || '').trim();
+
+        return {
+          period,
+          relation: relation || null,
+          offsetMonths: Number.isFinite(offsetMonths) ? Math.round(offsetMonths) : null,
+          range: {
+            startDateKey: isDayKey(startDateKey) ? startDateKey : '',
+            endDateKey: isDayKey(endDateKey) ? endDateKey : ''
+          },
+          totals: {
+            income: _toNum(row?.totals?.income),
+            operational_expense: _toNum(row?.totals?.operational_expense),
+            net: _toNum(row?.totals?.net)
+          },
+          topCategories: (Array.isArray(row?.topCategories) ? row.topCategories : [])
+            .slice(0, 10)
+            .map((cat) => ({
+              category: String(cat?.category || 'Без категории'),
+              amount: _toNum(cat?.amount),
+              sharePct: _toNum(cat?.sharePct)
+            })),
+          ownerDraw: {
+            amount: _toNum(row?.ownerDraw?.amount),
+            byCategory: (Array.isArray(row?.ownerDraw?.byCategory) ? row.ownerDraw.byCategory : [])
+              .slice(0, 10)
+              .map((cat) => ({
+                category: String(cat?.category || 'Вывод средств'),
+                amount: _toNum(cat?.amount)
+              }))
+          },
+          endBalances: {
+            open: _toNum(row?.endBalances?.open),
+            hidden: _toNum(row?.endBalances?.hidden),
+            total: _toNum(row?.endBalances?.total)
+          }
+        };
+      })
+      .filter((row) => row.period || (row?.range?.startDateKey && row?.range?.endDateKey));
+
+    if (!periods.length) return null;
+
+    return {
+      meta: {
+        source: String(input?.meta?.source || 'background_analytics_buffer'),
+        generatedAt: String(input?.meta?.generatedAt || ''),
+        centerPeriod: String(input?.meta?.centerPeriod || ''),
+        expectedPeriods: _toNum(input?.meta?.expectedPeriods),
+        availablePeriods: _toNum(input?.meta?.availablePeriods),
+        isWarm: input?.meta?.isWarm === true,
+        isStale: input?.meta?.isStale === true,
+        lastBuildReason: String(input?.meta?.lastBuildReason || '')
+      },
+      periods
+    };
+  };
+
   const _fmtDDMMYY = (date) => {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '?';
     const dd = String(date.getDate()).padStart(2, '0');
@@ -2212,6 +2282,10 @@ module.exports = function createAiRouter(deps) {
           snapshot,
           timelineDateKey: timelineDate,
         });
+        const historicalContext = _normalizeHistoricalContext(req?.body?.historicalContext);
+        if (historicalContext) {
+          deterministicFacts.historicalContext = historicalContext;
+        }
         const periodAnalytics = isComparisonMode
           ? null
           : snapshotAnswerEngine.computePeriodAnalytics({
@@ -2476,6 +2550,11 @@ module.exports = function createAiRouter(deps) {
           requestMeta: {
             asOf,
             periodFilter: req?.body?.periodFilter || null,
+            historicalContextSummary: {
+              hasHistoricalContext: Boolean(historicalContext),
+              periodsCount: Array.isArray(historicalContext?.periods) ? historicalContext.periods.length : 0,
+              source: String(historicalContext?.meta?.source || '')
+            },
             tableContextSummary: {
               hasTableContext: !!req?.body?.tableContext,
               rowCount: Array.isArray(req?.body?.tableContext?.rows)

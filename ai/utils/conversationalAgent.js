@@ -1311,6 +1311,9 @@ async function generateSnapshotChatResponse({
     const hasComparisonData = comparisonData.length >= 2;
     const historyRows = Array.isArray(deterministicFacts?.history) ? deterministicFacts.history : [];
     const hasHistory = historyRows.length > 0;
+    const historicalContext = deterministicFacts?.historicalContext || null;
+    const historicalContextPeriods = Array.isArray(historicalContext?.periods) ? historicalContext.periods : [];
+    const hasHistoricalContext = historicalContextPeriods.length > 0;
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
         deterministicFacts,
@@ -1618,6 +1621,12 @@ async function generateSnapshotChatResponse({
             periods_count: historyRows.length,
             latest_period: String(historyRows[historyRows.length - 1]?.period || ''),
             latest_net: toNum(historyRows[historyRows.length - 1]?.net)
+        },
+        historical_context: {
+            has_historical_context: hasHistoricalContext,
+            periods_count: historicalContextPeriods.length,
+            center_period: String(historicalContext?.meta?.centerPeriod || ''),
+            source: String(historicalContext?.meta?.source || '')
         }
     };
 
@@ -1641,6 +1650,11 @@ async function generateSnapshotChatResponse({
         'Если HISTORY_JSON содержит 2+ периодов, перед рекомендациями ОБЯЗАТЕЛЬНО оцени динамику income/expense/net между последними периодами.',
         'Выводи направление тренда: рост / снижение / стабильно.',
         'Используй только HISTORY_JSON; не придумывай исторические суммы.',
+        '',
+        '# BACKGROUND BUFFER CONTEXT',
+        'Если HISTORICAL_CONTEXT_JSON.periods содержит 2+ периодов, используй их как основной мультипериодный контекст (прошлые/будущие месяцы).',
+        'Для сравнения периодов и рекомендаций бери суммы только из HISTORICAL_CONTEXT_JSON.periods[].totals.',
+        'Не смешивай historicalContext с PERIOD_ANALYTICS_JSON в одной сумме; сравнивай период к периоду.',
         '',
         '# COVERAGE & FORECAST ALGORITHM (КРИТИЧЕСКИ ВАЖНО)',
         'Если пользователь запрашивает прогноз на будущий месяц или спрашивает "хватит ли средств", действуй строго по алгоритму:',
@@ -1681,6 +1695,9 @@ async function generateSnapshotChatResponse({
         '',
         'HISTORY_JSON:',
         JSON.stringify(historyRows || [], null, 2),
+        '',
+        'HISTORICAL_CONTEXT_JSON:',
+        JSON.stringify(historicalContext || null, null, 2),
         '',
         'CONTEXTUAL_ADVICE_JSON:',
         JSON.stringify(ragContext || {}, null, 2),

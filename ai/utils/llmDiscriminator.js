@@ -85,6 +85,9 @@ const buildExpected = ({
   const periodAnalytics = deterministicFacts?.periodAnalytics || null;
   const comparisonData = Array.isArray(deterministicFacts?.comparisonData) ? deterministicFacts.comparisonData : [];
   const historyData = Array.isArray(deterministicFacts?.history) ? deterministicFacts.history : [];
+  const historicalContextData = Array.isArray(deterministicFacts?.historicalContext?.periods)
+    ? deterministicFacts.historicalContext.periods
+    : [];
   const hasPeriodAnalyticsTotals = toNum(periodAnalytics?.totals?.income) > 0
     || toNum(periodAnalytics?.totals?.expense) > 0
     || toNum(periodAnalytics?.totals?.net) !== 0;
@@ -116,7 +119,9 @@ const buildExpected = ({
     comparison_mode: comparisonData.length >= 2,
     comparison_periods_count: comparisonData.length,
     history_mode: historyData.length >= 2,
-    history_periods_count: historyData.length
+    history_periods_count: historyData.length,
+    historical_context_mode: historicalContextData.length >= 2,
+    historical_context_periods_count: historicalContextData.length
   };
 
   const anomalyNumbers = [];
@@ -150,6 +155,8 @@ const buildExpected = ({
   const comparisonDeltaNumbers = [];
   const historyTotalsNumbers = [];
   const historyDeltaNumbers = [];
+  const historicalContextTotalsNumbers = [];
+  const historicalContextDeltaNumbers = [];
   const comparisonMetrics = ['income', 'expense', 'net'];
 
   comparisonData.forEach((period) => {
@@ -184,6 +191,38 @@ const buildExpected = ({
         const right = toNum(historyData?.[j]?.[metric] ?? historyData?.[j]?.totals?.[metric]);
         const delta = right - left;
         historyDeltaNumbers.push(delta, -delta, Math.abs(delta));
+      });
+    }
+  }
+
+  historicalContextData.forEach((period) => {
+    historicalContextTotalsNumbers.push(
+      toNum(period?.totals?.income),
+      toNum(period?.totals?.expense),
+      toNum(period?.totals?.operational_expense),
+      toNum(period?.totals?.net),
+      toNum(period?.ownerDraw?.amount),
+      toNum(period?.endBalances?.open),
+      toNum(period?.endBalances?.hidden),
+      toNum(period?.endBalances?.total)
+    );
+
+    (Array.isArray(period?.topCategories) ? period.topCategories : []).forEach((cat) => {
+      historicalContextTotalsNumbers.push(toNum(cat?.amount));
+    });
+  });
+
+  for (let i = 0; i < historicalContextData.length; i += 1) {
+    for (let j = i + 1; j < historicalContextData.length; j += 1) {
+      comparisonMetrics.forEach((metric) => {
+        const left = metric === 'expense'
+          ? toNum(historicalContextData?.[i]?.totals?.expense ?? historicalContextData?.[i]?.totals?.operational_expense)
+          : toNum(historicalContextData?.[i]?.totals?.[metric]);
+        const right = metric === 'expense'
+          ? toNum(historicalContextData?.[j]?.totals?.expense ?? historicalContextData?.[j]?.totals?.operational_expense)
+          : toNum(historicalContextData?.[j]?.totals?.[metric]);
+        const delta = right - left;
+        historicalContextDeltaNumbers.push(delta, -delta, Math.abs(delta));
       });
     }
   }
@@ -230,6 +269,8 @@ const buildExpected = ({
     ...comparisonDeltaNumbers,
     ...historyTotalsNumbers,
     ...historyDeltaNumbers,
+    ...historicalContextTotalsNumbers,
+    ...historicalContextDeltaNumbers,
     ...anomalyNumbers,
     0
   ]);
