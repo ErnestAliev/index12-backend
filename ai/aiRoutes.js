@@ -717,6 +717,35 @@ module.exports = function createAiRouter(deps) {
     return periods;
   };
 
+  const _buildSurroundingMonthPeriods = ({
+    baseYear,
+    baseMonth,
+    pastMonths = 3,
+    futureMonths = 3
+  }) => {
+    const y = Number(baseYear);
+    const m = Number(baseMonth);
+    const past = Math.max(0, Math.min(12, Number(pastMonths || 3)));
+    const future = Math.max(0, Math.min(12, Number(futureMonths || 3)));
+
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return [];
+
+    const rows = [];
+    for (let offset = -past; offset <= future; offset += 1) {
+      const d = new Date(y, m - 1 + offset, 1, 12, 0, 0, 0);
+      const periodYear = d.getFullYear();
+      const periodMonth = d.getMonth() + 1;
+      rows.push({
+        period: `${periodYear}-${_pad2(periodMonth)}`,
+        relation: offset < 0 ? 'past' : (offset > 0 ? 'future' : 'current'),
+        offsetMonths: offset,
+        startDateKey: _startOfMonthDayKey(periodYear, periodMonth),
+        endDateKey: _endOfMonthDayKey(periodYear, periodMonth)
+      });
+    }
+    return rows;
+  };
+
   const _buildHistoryFromJournal = async ({
     userId,
     baseYear,
@@ -763,6 +792,150 @@ module.exports = function createAiRouter(deps) {
         net: _toNum(facts?.totals?.net)
       };
     });
+  };
+
+  const _buildHistoricalContextFromJournal = async ({
+    userId,
+    baseYear,
+    baseMonth,
+    pastMonths = 3,
+    futureMonths = 3,
+    asOf,
+    baseSnapshot
+  }) => {
+    const periods = _buildSurroundingMonthPeriods({
+      baseYear,
+      baseMonth,
+      pastMonths,
+      futureMonths
+    });
+
+    const centerPeriod = `${Number(baseYear)}-${_pad2(baseMonth)}`;
+    const toEmptyRow = (period) => ({
+      period: String(period?.period || ''),
+      relation: String(period?.relation || ''),
+      offsetMonths: Number(period?.offsetMonths || 0),
+      range: {
+        startDateKey: String(period?.startDateKey || ''),
+        endDateKey: String(period?.endDateKey || '')
+      },
+      totals: {
+        income: 0,
+        operational_expense: 0,
+        net: 0
+      },
+      topCategories: [],
+      ownerDraw: { amount: 0, byCategory: [] },
+      endBalances: { open: 0, hidden: 0, total: 0 }
+    });
+
+    if (!periods.length) {
+      return {
+        meta: {
+          source: 'backend_journal_fallback',
+          generatedAt: new Date().toISOString(),
+          centerPeriod,
+          expectedPeriods: 0,
+          availablePeriods: 0,
+          isWarm: false,
+          isStale: true,
+          lastBuildReason: 'invalid_base_month'
+        },
+        periods: []
+      };
+    }
+
+    const globalStart = String(periods[0]?.startDateKey || '');
+    const globalEnd = String(periods[periods.length - 1]?.endDateKey || '');
+    if (!_isDayKey(globalStart) || !_isDayKey(globalEnd) || globalStart > globalEnd) {
+      return {
+        meta: {
+          source: 'backend_journal_fallback',
+          generatedAt: new Date().toISOString(),
+          centerPeriod,
+          expectedPeriods: periods.length,
+          availablePeriods: 0,
+          isWarm: false,
+          isStale: true,
+          lastBuildReason: 'invalid_global_range'
+        },
+        periods: periods.map(toEmptyRow)
+      };
+    }
+
+    const journalSnapshot = await _buildSnapshotFromJournalRange({
+      userId: String(userId || ''),
+      startDateKey: globalStart,
+      endDateKey: globalEnd,
+      asOf: asOf || null,
+      baseSnapshot
+    });
+
+    const rows = periods.map((period) => {
+      if (!journalSnapshot) return toEmptyRow(period);
+
+      const periodSnapshot = _buildSnapshotForRange({
+        snapshot: journalSnapshot,
+        startDateKey: period.startDateKey,
+        endDateKey: period.endDateKey
+      });
+      const facts = snapshotAnswerEngine.computeDeterministicFacts({
+        snapshot: periodSnapshot,
+        timelineDateKey: period.endDateKey
+      });
+
+      const topCategories = (Array.isArray(facts?.topExpenseCategories) ? facts.topExpenseCategories : [])
+        .slice(0, 5)
+        .map((row) => ({
+          category: String(row?.category || 'Без категории'),
+          amount: _toNum(row?.amount),
+          sharePct: _toNum(row?.sharePct)
+        }));
+
+      return {
+        period: String(period?.period || ''),
+        relation: String(period?.relation || ''),
+        offsetMonths: Number(period?.offsetMonths || 0),
+        range: {
+          startDateKey: String(period?.startDateKey || ''),
+          endDateKey: String(period?.endDateKey || '')
+        },
+        totals: {
+          income: _toNum(facts?.totals?.income),
+          operational_expense: _toNum(facts?.totals?.expense),
+          net: _toNum(facts?.totals?.net)
+        },
+        topCategories,
+        ownerDraw: {
+          amount: _toNum(facts?.ownerDraw?.amount),
+          byCategory: (Array.isArray(facts?.ownerDraw?.byCategory) ? facts.ownerDraw.byCategory : [])
+            .slice(0, 10)
+            .map((row) => ({
+              category: String(row?.category || 'Вывод средств'),
+              amount: _toNum(row?.amount)
+            }))
+        },
+        endBalances: {
+          open: _toNum(facts?.endBalances?.open),
+          hidden: _toNum(facts?.endBalances?.hidden),
+          total: _toNum(facts?.endBalances?.total)
+        }
+      };
+    });
+
+    return {
+      meta: {
+        source: journalSnapshot ? 'backend_journal_fallback' : 'backend_journal_fallback_empty',
+        generatedAt: new Date().toISOString(),
+        centerPeriod,
+        expectedPeriods: periods.length,
+        availablePeriods: rows.length,
+        isWarm: Boolean(journalSnapshot) && rows.length === periods.length,
+        isStale: !journalSnapshot,
+        lastBuildReason: 'backend_snapshot_chat_fallback'
+      },
+      periods: rows
+    };
   };
 
   const _normalizeStatus = (statusCode, statusLabel) => {
@@ -2282,10 +2455,7 @@ module.exports = function createAiRouter(deps) {
           snapshot,
           timelineDateKey: timelineDate,
         });
-        const historicalContext = _normalizeHistoricalContext(req?.body?.historicalContext);
-        if (historicalContext) {
-          deterministicFacts.historicalContext = historicalContext;
-        }
+        let historicalContext = _normalizeHistoricalContext(req?.body?.historicalContext);
         const periodAnalytics = isComparisonMode
           ? null
           : snapshotAnswerEngine.computePeriodAnalytics({
@@ -2313,12 +2483,12 @@ module.exports = function createAiRouter(deps) {
             generatedCount: Array.isArray(comparisonData) ? comparisonData.length : 0
           };
         }
+        const historyBase = _resolveHistoryBaseMonth({
+          periodAnalytics,
+          snapshot: periodAnalyticsSnapshot || snapshot,
+          timelineDateKey: timelineDate
+        });
         try {
-          const historyBase = _resolveHistoryBaseMonth({
-            periodAnalytics,
-            snapshot: periodAnalyticsSnapshot || snapshot,
-            timelineDateKey: timelineDate
-          });
           const historyPeriods = _buildPreviousMonthPeriods({
             baseYear: historyBase.year,
             baseMonth: historyBase.month,
@@ -2368,14 +2538,9 @@ module.exports = function createAiRouter(deps) {
             generatedCount: mergedHistory.length
           };
         } catch (historyError) {
-          const fallbackHistoryBase = _resolveHistoryBaseMonth({
-            periodAnalytics,
-            snapshot: periodAnalyticsSnapshot || snapshot,
-            timelineDateKey: timelineDate
-          });
           deterministicFacts.history = _buildPreviousMonthPeriods({
-            baseYear: fallbackHistoryBase.year,
-            baseMonth: fallbackHistoryBase.month,
+            baseYear: historyBase.year,
+            baseMonth: historyBase.month,
             monthsBack: 2
           }).map((row) => ({
             period: String(row?.period || ''),
@@ -2384,13 +2549,46 @@ module.exports = function createAiRouter(deps) {
             net: 0
           }));
           deterministicFacts.historyMeta = {
-            basePeriod: `${fallbackHistoryBase.year}-${_pad2(fallbackHistoryBase.month)}`,
+            basePeriod: `${historyBase.year}-${_pad2(historyBase.month)}`,
             monthsBack: 2,
             generatedCount: Array.isArray(deterministicFacts.history) ? deterministicFacts.history.length : 0,
             error: String(historyError?.message || historyError || 'history_generation_failed')
           };
           console.warn('[AI Snapshot] History generation failed:', historyError?.message || historyError);
         }
+
+        if (!historicalContext) {
+          try {
+            historicalContext = await _buildHistoricalContextFromJournal({
+              userId: String(effectiveUserId || userId || ''),
+              baseYear: historyBase.year,
+              baseMonth: historyBase.month,
+              pastMonths: 3,
+              futureMonths: 3,
+              asOf: timelineDate,
+              baseSnapshot: validatedSnapshot
+            });
+          } catch (historicalContextError) {
+            console.warn('[AI Snapshot] Historical context fallback failed:', historicalContextError?.message || historicalContextError);
+          }
+        }
+
+        if (!historicalContext || !Array.isArray(historicalContext?.periods)) {
+          historicalContext = {
+            meta: {
+              source: 'missing',
+              generatedAt: new Date().toISOString(),
+              centerPeriod: `${historyBase.year}-${_pad2(historyBase.month)}`,
+              expectedPeriods: 0,
+              availablePeriods: 0,
+              isWarm: false,
+              isStale: true,
+              lastBuildReason: 'no_context_available'
+            },
+            periods: []
+          };
+        }
+        deterministicFacts.historicalContext = historicalContext;
 
         if (parsedIntent?.type === 'CATEGORY_FACT_BY_CATEGORY') {
           const deterministic = snapshotAnswerEngine.answerFromSnapshot({
