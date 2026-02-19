@@ -493,6 +493,17 @@ const categoryMatches = (left, right) => {
   return l === r || l.includes(r) || r.includes(l);
 };
 
+const NON_OPERATIONAL_CATEGORIES = ['Вывод средств', 'Перевод'];
+const NON_OPERATIONAL_CATEGORY_KEYS = NON_OPERATIONAL_CATEGORIES
+  .map((name) => normalizeCategoryKey(name))
+  .filter(Boolean);
+
+const isNonOperationalCategory = (value) => {
+  const key = normalizeCategoryKey(value);
+  if (!key) return false;
+  return NON_OPERATIONAL_CATEGORY_KEYS.some((baseKey) => key === baseKey || key.includes(baseKey) || baseKey.includes(key));
+};
+
 const computeTotalsFromLists = (lists) => {
   const incomeList = normalizeList(lists?.income);
   const expenseList = normalizeList(lists?.expense);
@@ -519,6 +530,116 @@ const computeTotalsFromLists = (lists) => {
   return {
     income,
     expense: expenseBase + withdrawalExpense + transferOutExpense
+  };
+};
+
+const computeOperationalTotalsFromLists = (lists) => {
+  const incomeList = normalizeList(lists?.income);
+  const expenseList = normalizeList(lists?.expense);
+  const withdrawalList = normalizeList(lists?.withdrawal);
+  const transferList = normalizeList(lists?.transfer);
+
+  let income = 0;
+  let expense = 0;
+  const ownerDrawByCategoryMap = new Map();
+
+  const pushOwnerDraw = (categoryName, amountValue) => {
+    const amount = Math.abs(toNum(amountValue));
+    if (amount <= 0) return;
+    const category = String(categoryName || 'Вывод средств');
+    ownerDrawByCategoryMap.set(category, toNum(ownerDrawByCategoryMap.get(category)) + amount);
+  };
+
+  const pushExpense = (categoryName, amountValue) => {
+    const amount = Math.abs(toNum(amountValue));
+    if (amount <= 0) return;
+    const category = String(categoryName || 'Без категории');
+    if (isNonOperationalCategory(category)) {
+      pushOwnerDraw(category, amount);
+      return;
+    }
+    expense += amount;
+  };
+
+  incomeList.forEach((item) => {
+    income += Math.abs(toNum(item?.amount));
+  });
+
+  expenseList.forEach((item) => {
+    pushExpense(item?.catName || 'Без категории', item?.amount);
+  });
+
+  withdrawalList.forEach((item) => {
+    pushExpense(item?.catName || 'Вывод средств', item?.amount);
+  });
+
+  // Out-of-system transfers are treated as cash outflow in UI totals.
+  transferList.forEach((item) => {
+    if (!item?.isOutOfSystemTransfer) return;
+    pushExpense(item?.catName || 'Перевод', item?.amount);
+  });
+
+  const ownerDrawByCategory = Array.from(ownerDrawByCategoryMap.entries())
+    .map(([category, amount]) => ({
+      category,
+      amount: toNum(amount)
+    }))
+    .sort((a, b) => toNum(b?.amount) - toNum(a?.amount));
+
+  const ownerDraw = ownerDrawByCategory.reduce((sum, row) => sum + toNum(row?.amount), 0);
+
+  return {
+    income,
+    expense,
+    net: income - expense,
+    ownerDraw,
+    ownerDrawByCategory
+  };
+};
+
+const computeOperationalTotalsForDays = (days) => {
+  const ownerDrawByCategoryMap = new Map();
+  const totals = normalizeList(days).reduce((acc, day) => {
+    const lists = day?.lists || {};
+    const hasAnyListItems = (
+      normalizeList(lists?.income).length
+      + normalizeList(lists?.expense).length
+      + normalizeList(lists?.withdrawal).length
+      + normalizeList(lists?.transfer).length
+    ) > 0;
+
+    if (!hasAnyListItems) {
+      acc.income += toNum(day?.totals?.income);
+      acc.expense += toNum(day?.totals?.expense);
+      return acc;
+    }
+
+    const dayTotals = computeOperationalTotalsFromLists(lists);
+    acc.income += toNum(dayTotals?.income);
+    acc.expense += toNum(dayTotals?.expense);
+    acc.ownerDraw += toNum(dayTotals?.ownerDraw);
+
+    normalizeList(dayTotals?.ownerDrawByCategory).forEach((row) => {
+      const category = String(row?.category || 'Вывод средств');
+      ownerDrawByCategoryMap.set(category, toNum(ownerDrawByCategoryMap.get(category)) + toNum(row?.amount));
+    });
+
+    return acc;
+  }, { income: 0, expense: 0, ownerDraw: 0 });
+
+  const ownerDrawByCategory = Array.from(ownerDrawByCategoryMap.entries())
+    .map(([category, amount]) => ({
+      category,
+      amount: toNum(amount)
+    }))
+    .sort((a, b) => toNum(b?.amount) - toNum(a?.amount));
+
+  return {
+    income: totals.income,
+    expense: totals.expense,
+    net: totals.income - totals.expense,
+    ownerDraw: totals.ownerDraw,
+    ownerDrawByCategory
   };
 };
 
@@ -1180,12 +1301,14 @@ const accumulateCategoryFlows = (snapshot) => {
 
     normalizeList(day?.lists?.expense).forEach((item) => {
       const key = String(item?.catName || 'Без категории');
+      if (isNonOperationalCategory(key)) return;
       if (!map.has(key)) map.set(key, { income: 0, expense: 0 });
       map.get(key).expense += Math.abs(toNum(item?.amount));
     });
 
     normalizeList(day?.lists?.withdrawal).forEach((item) => {
       const key = String(item?.catName || 'Вывод средств');
+      if (isNonOperationalCategory(key)) return;
       if (!map.has(key)) map.set(key, { income: 0, expense: 0 });
       map.get(key).expense += Math.abs(toNum(item?.amount));
     });
@@ -1208,6 +1331,7 @@ const buildExpenseCategoryAnalytics = ({
     const amount = Math.abs(toNum(amountValue));
     if (amount <= 0) return;
     const key = String(name || 'Без категории');
+    if (isNonOperationalCategory(key)) return;
     const prev = expenseByCategoryMap.get(key) || { category: key, amount: 0, operationsCount: 0 };
     prev.amount += amount;
     prev.operationsCount += 1;
@@ -1223,7 +1347,7 @@ const buildExpenseCategoryAnalytics = ({
     });
     normalizeList(day?.lists?.transfer).forEach((item) => {
       if (!item?.isOutOfSystemTransfer) return;
-      pushExpense('Перевод (вне системы)', item?.amount);
+      pushExpense(item?.catName || 'Перевод', item?.amount);
     });
   });
 
@@ -1373,6 +1497,7 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     startDateKey,
     endDateKey,
     totals: { income: 0, expense: 0, net: 0 },
+    ownerDraw: { amount: 0, byCategory: [] },
     largestExpenseCategory: null,
     topExpenseCategories: [],
     expenseByCategory: [],
@@ -1421,12 +1546,12 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     });
   }
 
-  const totals = periodDays.reduce((acc, day) => {
-    acc.income += toNum(day?.totals?.income);
-    acc.expense += toNum(day?.totals?.expense);
-    return acc;
-  }, { income: 0, expense: 0 });
-  totals.net = totals.income - totals.expense;
+  const periodTotals = computeOperationalTotalsForDays(periodDays);
+  const totals = {
+    income: toNum(periodTotals?.income),
+    expense: toNum(periodTotals?.expense),
+    net: toNum(periodTotals?.net)
+  };
   const expenseCategoryAnalytics = buildExpenseCategoryAnalytics({
     days: periodDays,
     totalExpense: totals.expense,
@@ -1447,6 +1572,10 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     startDateKey: clampedRange.startDateKey,
     endDateKey: clampedRange.endDateKey,
     totals,
+    ownerDraw: {
+      amount: toNum(periodTotals?.ownerDraw),
+      byCategory: normalizeList(periodTotals?.ownerDrawByCategory)
+    },
     largestExpenseCategory: expenseCategoryAnalytics.largestExpenseCategory,
     topExpenseCategories: expenseCategoryAnalytics.topExpenseCategories,
     expenseByCategory: expenseCategoryAnalytics.expenseByCategory,
@@ -1477,6 +1606,7 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
         dayCount: 0
       },
       totals: { income: 0, expense: 0, net: 0 },
+      ownerDraw: { amount: 0, byCategory: [] },
       endBalances: { open: 0, hidden: 0, total: 0 },
       anomalies: [],
       upcomingCount: 0,
@@ -1491,11 +1621,13 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
       fact: {
         dayCount: 0,
         totals: { income: 0, expense: 0, net: 0 },
+        ownerDraw: { amount: 0, byCategory: [] },
         balances: { open: 0, hidden: 0, total: 0 }
       },
       plan: {
         dayCount: 0,
         totals: { income: 0, expense: 0, net: 0 },
+        ownerDraw: { amount: 0, byCategory: [] },
         toEndBalances: { open: 0, hidden: 0, total: 0 },
         nextObligation: null
       },
@@ -1512,15 +1644,10 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     };
   }
 
-  const sumTotals = (rows) => {
-    const income = rows.reduce((sum, day) => sum + toNum(day?.totals?.income), 0);
-    const expense = rows.reduce((sum, day) => sum + toNum(day?.totals?.expense), 0);
-    return { income, expense, net: income - expense };
-  };
-
-  const totalIncome = snapshot.days.reduce((sum, day) => sum + toNum(day?.totals?.income), 0);
-  const totalExpense = snapshot.days.reduce((sum, day) => sum + toNum(day?.totals?.expense), 0);
-  const totalNet = totalIncome - totalExpense;
+  const allTotals = computeOperationalTotalsForDays(snapshot.days);
+  const totalIncome = toNum(allTotals?.income);
+  const totalExpense = toNum(allTotals?.expense);
+  const totalNet = toNum(allTotals?.net);
 
   const lastDay = snapshot.days[snapshot.days.length - 1] || null;
   const endOpen = normalizeList(lastDay?.accountBalances)
@@ -1558,8 +1685,18 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     ? snapshot.days.filter((day) => String(day?.dateKey || '') > asOfKey)
     : snapshot.days;
 
-  const factTotals = sumTotals(factDays);
-  const planTotals = sumTotals(planDays);
+  const factTotalsRaw = computeOperationalTotalsForDays(factDays);
+  const factTotals = {
+    income: toNum(factTotalsRaw?.income),
+    expense: toNum(factTotalsRaw?.expense),
+    net: toNum(factTotalsRaw?.net)
+  };
+  const planTotalsRaw = computeOperationalTotalsForDays(planDays);
+  const planTotals = {
+    income: toNum(planTotalsRaw?.income),
+    expense: toNum(planTotalsRaw?.expense),
+    net: toNum(planTotalsRaw?.net)
+  };
 
   const asOfOpen = normalizeList(asOfDay?.accountBalances)
     .filter((acc) => acc?.isOpen === true)
@@ -1616,6 +1753,10 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
       expense: totalExpense,
       net: totalNet
     },
+    ownerDraw: {
+      amount: toNum(allTotals?.ownerDraw),
+      byCategory: normalizeList(allTotals?.ownerDrawByCategory)
+    },
     endBalances: {
       open: endOpen,
       hidden: endHidden,
@@ -1637,6 +1778,10 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     fact: {
       dayCount: factDays.length,
       totals: factTotals,
+      ownerDraw: {
+        amount: toNum(factTotalsRaw?.ownerDraw),
+        byCategory: normalizeList(factTotalsRaw?.ownerDrawByCategory)
+      },
       balances: {
         open: asOfOpen,
         hidden: asOfHidden,
@@ -1646,6 +1791,10 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     plan: {
       dayCount: planDays.length,
       totals: planTotals,
+      ownerDraw: {
+        amount: toNum(planTotalsRaw?.ownerDraw),
+        byCategory: normalizeList(planTotalsRaw?.ownerDrawByCategory)
+      },
       toEndBalances: {
         open: endOpen,
         hidden: endHidden,
@@ -1668,14 +1817,24 @@ const buildDeterministicInsightsBlock = (facts) => {
     `- Баланс на конец диапазона: ${fmtT(facts.endBalances.total)} (открытые ${fmtT(facts.endBalances.open)}, скрытые ${fmtT(facts.endBalances.hidden)})`
   ];
 
+  if (toNum(facts?.ownerDraw?.amount) > 0) {
+    lines.push(`- Вывод средств / переводы (вне операционной прибыли): ${fmtT(facts.ownerDraw.amount)}`);
+  }
+
   if (facts?.timeline?.asOfDateLabel) {
     lines.push(`- Сегодня (asOf): ${facts.timeline.asOfDateLabel}`);
   }
   if (facts?.fact?.totals) {
     lines.push(`- Факт до today: доход +${fmtT(facts.fact.totals.income)}, расход -${fmtT(facts.fact.totals.expense)}, нетто ${fmtSignedT(facts.fact.totals.net)}`);
+    if (toNum(facts?.fact?.ownerDraw?.amount) > 0) {
+      lines.push(`- Факт до today (вывод средств): ${fmtT(facts.fact.ownerDraw.amount)}`);
+    }
   }
   if (facts?.plan?.totals) {
     lines.push(`- План после today: доход +${fmtT(facts.plan.totals.income)}, расход -${fmtT(facts.plan.totals.expense)}, нетто ${fmtSignedT(facts.plan.totals.net)}`);
+    if (toNum(facts?.plan?.ownerDraw?.amount) > 0) {
+      lines.push(`- План после today (вывод средств): ${fmtT(facts.plan.ownerDraw.amount)}`);
+    }
   }
 
   if (facts.nextObligation) {
