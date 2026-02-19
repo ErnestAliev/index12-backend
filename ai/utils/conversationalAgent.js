@@ -1536,7 +1536,9 @@ async function generateSnapshotChatResponse({
             period_label: String(effectivePeriodAnalytics?.label || ''),
             income: toNum(effectivePeriodAnalytics?.totals?.income),
             expense: toNum(effectivePeriodAnalytics?.totals?.expense),
-            net: toNum(effectivePeriodAnalytics?.totals?.net)
+            net: toNum(effectivePeriodAnalytics?.totals?.net),
+            top_expense_category: String(effectivePeriodAnalytics?.largestExpenseCategory?.category || ''),
+            top_expense_amount: toNum(effectivePeriodAnalytics?.largestExpenseCategory?.amount)
         }
     };
 
@@ -1549,7 +1551,9 @@ async function generateSnapshotChatResponse({
         'Денежные суммы пиши в формате "1 554 388 т".',
         'Для итогов по периоду используй ТОЛЬКО PERIOD_ANALYTICS_JSON.totals.',
         'Массив PERIOD_ANALYTICS_JSON.topOperations используй ТОЛЬКО для контекста: контрагенты, категории, счета.',
+        'Для ответа о крупнейших статьях расходов используй ТОЛЬКО PERIOD_ANALYTICS_JSON.topExpenseCategories/ largestExpenseCategory.',
         'Никогда не суммируй PERIOD_ANALYTICS_JSON.topOperations или FACTS_JSON.operations самостоятельно.',
+        'Никогда не делай самостоятельную агрегацию по категориям из массива операций.',
         'Разделяй факт и план: FACT = даты <= TODAY_KEY, PLAN = даты > TODAY_KEY.',
         'Ликвидность и платежеспособность оценивай только по open.',
         'Прибыльность и эффективность оценивай по total (open + hidden).',

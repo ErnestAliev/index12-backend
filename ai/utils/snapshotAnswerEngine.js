@@ -326,9 +326,36 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
     };
   }
 
+  const asksWeek = /недел/i.test(norm);
+  const explicitMonth = resolveMonthFromQuestion(norm);
+  const hasExplicitMonth = Number.isFinite(Number(explicitMonth));
+  const asksMonthScope = (
+    (
+      hasExplicitMonth
+      && /(\bза\b|\bв\b|\bпо\b|месяц|итог)/i.test(norm)
+    )
+    || /итог[аи]?\s+месяц/i.test(norm)
+    || /итоги\s+за\s+месяц/i.test(norm)
+    || /за\s+месяц/i.test(norm)
+    || /весь\s+месяц/i.test(norm)
+    || /по\s+месяц/i.test(norm)
+    || /текущ(ий|его)\s+месяц/i.test(norm)
+    || /эт(от|ого)\s+месяц/i.test(norm)
+  );
+  if (!asksWeek && (explicitMonth || asksMonthScope)) {
+    const month = explicitMonth || baseMonth;
+    const yearMatch = norm.match(/\b(20\d{2})\b/);
+    const year = yearMatch ? Number(yearMatch[1]) : baseYear;
+    return {
+      startDateKey: startOfMonthDateKey(year, month),
+      endDateKey: endOfMonthDateKey(year, month),
+      source: 'month_scope_query'
+    };
+  }
+
   const asksEndOfMonth = /(конец\s+месяц|к\s+концу\s+месяц|на\s+конец\s+месяц|конец\s+[а-я]+|остатк[аи]\s+на\s+конец|на\s+конец)/i.test(norm);
   if (asksEndOfMonth) {
-    const month = resolveMonthFromQuestion(norm) || baseMonth;
+    const month = explicitMonth || baseMonth;
     const yearMatch = norm.match(/\b(20\d{2})\b/);
     const year = yearMatch ? Number(yearMatch[1]) : baseYear;
     return {
@@ -339,9 +366,8 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
   }
 
   const weekOrder = resolveWeekOrderFromQuestion(norm);
-  const asksWeek = /недел/i.test(norm);
   if (asksWeek && Number.isFinite(Number(weekOrder))) {
-    const month = resolveMonthFromQuestion(norm) || baseMonth;
+    const month = explicitMonth || baseMonth;
     const yearMatch = norm.match(/\b(20\d{2})\b/);
     const year = yearMatch ? Number(yearMatch[1]) : baseYear;
     const weekRange = resolveNthWeekRangeInMonth({
@@ -1105,6 +1131,7 @@ const accumulateCategoryFlows = (snapshot) => {
 
 const LEDGER_OPERATIONS_LIMIT = 120;
 const PERIOD_TOP_OPERATIONS_LIMIT = 10;
+const PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT = 5;
 
 const buildLedgerOperations = ({
   snapshot,
@@ -1245,6 +1272,47 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
   }, { income: 0, expense: 0 });
   totals.net = totals.income - totals.expense;
 
+  const expenseByCategoryMap = new Map();
+  const pushExpense = (name, amountValue) => {
+    const amount = Math.abs(toNum(amountValue));
+    if (amount <= 0) return;
+    const key = String(name || 'Без категории');
+    const prev = expenseByCategoryMap.get(key) || { category: key, amount: 0, operationsCount: 0 };
+    prev.amount += amount;
+    prev.operationsCount += 1;
+    expenseByCategoryMap.set(key, prev);
+  };
+
+  periodDays.forEach((day) => {
+    normalizeList(day?.lists?.expense).forEach((item) => {
+      pushExpense(item?.catName || 'Без категории', item?.amount);
+    });
+    normalizeList(day?.lists?.withdrawal).forEach((item) => {
+      pushExpense(item?.catName || 'Вывод средств', item?.amount);
+    });
+    normalizeList(day?.lists?.transfer).forEach((item) => {
+      if (!item?.isOutOfSystemTransfer) return;
+      pushExpense('Перевод (вне системы)', item?.amount);
+    });
+  });
+
+  const expenseByCategory = Array.from(expenseByCategoryMap.values())
+    .map((row) => ({
+      category: row.category,
+      amount: toNum(row.amount),
+      operationsCount: Number(row.operationsCount || 0),
+      sharePct: totals.expense > 0 ? Math.round((toNum(row.amount) / totals.expense) * 10000) / 100 : 0
+    }))
+    .sort((a, b) => {
+      const diff = toNum(b?.amount) - toNum(a?.amount);
+      if (diff !== 0) return diff;
+      return String(a?.category || '').localeCompare(String(b?.category || ''), 'ru');
+    });
+
+  const topExpenseCategories = expenseByCategory
+    .slice(0, Math.max(3, Math.min(10, Number(PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT || 5))));
+  const largestExpenseCategory = topExpenseCategories[0] || null;
+
   const topLimitSafe = Math.max(5, Math.min(10, Number(topLimit || PERIOD_TOP_OPERATIONS_LIMIT)));
   const top = buildLedgerOperations({
     snapshot,
@@ -1260,6 +1328,9 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     startDateKey: clampedRange.startDateKey,
     endDateKey: clampedRange.endDateKey,
     totals,
+    largestExpenseCategory,
+    topExpenseCategories,
+    expenseByCategory,
     topOperations: top.operations,
     operationsMeta: {
       totalCount: top.operationsMeta.totalCount,

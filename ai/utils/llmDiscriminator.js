@@ -107,6 +107,9 @@ const buildExpected = ({
   const periodTopOperationAmounts = (Array.isArray(periodAnalytics?.topOperations) ? periodAnalytics.topOperations : [])
     .map((op) => toNum(op?.amount))
     .filter((n) => n > 0);
+  const periodTopExpenseCategoryAmounts = (Array.isArray(periodAnalytics?.topExpenseCategories) ? periodAnalytics.topExpenseCategories : [])
+    .map((row) => toNum(row?.amount))
+    .filter((n) => n > 0);
 
   const allowedNumbers = uniqueRounded([
     expected.open_now,
@@ -139,6 +142,7 @@ const buildExpected = ({
     toNum(periodAnalytics?.totals?.expense),
     toNum(periodAnalytics?.totals?.net),
     ...periodTopOperationAmounts,
+    ...periodTopExpenseCategoryAmounts,
     ...anomalyNumbers,
     0
   ]);
