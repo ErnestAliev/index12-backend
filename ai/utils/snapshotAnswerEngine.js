@@ -896,6 +896,92 @@ const accumulateCategoryFlows = (snapshot) => {
   return map;
 };
 
+const LEDGER_OPERATIONS_LIMIT = 120;
+
+const buildLedgerOperations = ({ snapshot, limit = LEDGER_OPERATIONS_LIMIT }) => {
+  const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+  const rows = [];
+
+  const pushRow = (row) => {
+    if (!row) return;
+    const date = String(row.date || '');
+    if (!DATE_KEY_RE.test(date)) return;
+
+    rows.push({
+      date,
+      type: String(row.type || 'Операция'),
+      amount: Math.abs(toNum(row.amount)),
+      counterparty: String(row.counterparty || 'Без контрагента'),
+      category: String(row.category || 'Без категории'),
+      account: String(row.account || 'Без счета')
+    });
+  };
+
+  days.forEach((day) => {
+    const date = String(day?.dateKey || '');
+    if (!DATE_KEY_RE.test(date)) return;
+
+    normalizeList(day?.lists?.income).forEach((item) => {
+      pushRow({
+        date,
+        type: 'Доход',
+        amount: item?.amount,
+        counterparty: item?.contName || 'Без контрагента',
+        category: item?.catName || 'Без категории',
+        account: item?.accName || 'Без счета'
+      });
+    });
+
+    normalizeList(day?.lists?.expense).forEach((item) => {
+      pushRow({
+        date,
+        type: 'Расход',
+        amount: item?.amount,
+        counterparty: item?.contName || 'Без контрагента',
+        category: item?.catName || 'Без категории',
+        account: item?.accName || 'Без счета'
+      });
+    });
+
+    normalizeList(day?.lists?.withdrawal).forEach((item) => {
+      pushRow({
+        date,
+        type: 'Расход',
+        amount: item?.amount,
+        counterparty: item?.contName || 'Без контрагента',
+        category: item?.catName || 'Вывод средств',
+        account: item?.accName || 'Без счета'
+      });
+    });
+
+    normalizeList(day?.lists?.transfer).forEach((item) => {
+      const fromAcc = String(item?.fromAccName || 'Без счета');
+      const toAcc = String(item?.toAccName || 'Без счета');
+      pushRow({
+        date,
+        type: 'Перевод',
+        amount: item?.amount,
+        counterparty: 'Без контрагента',
+        category: 'Перевод',
+        account: `${fromAcc} -> ${toAcc}`
+      });
+    });
+  });
+
+  const safeLimit = Math.max(50, Number(limit || LEDGER_OPERATIONS_LIMIT));
+  const operations = rows.slice(0, safeLimit);
+
+  return {
+    operations,
+    operationsMeta: {
+      totalCount: rows.length,
+      includedCount: operations.length,
+      truncated: rows.length > operations.length,
+      limit: safeLimit
+    }
+  };
+};
+
 const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
   const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
   if (!days.length) {
@@ -929,6 +1015,13 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
         totals: { income: 0, expense: 0, net: 0 },
         toEndBalances: { open: 0, hidden: 0, total: 0 },
         nextObligation: null
+      },
+      operations: [],
+      operationsMeta: {
+        totalCount: 0,
+        includedCount: 0,
+        truncated: false,
+        limit: Math.max(50, Number(LEDGER_OPERATIONS_LIMIT || 120))
       }
     };
   }
@@ -1017,6 +1110,7 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     .filter((x) => x.expense > 0)
     .sort((a, b) => Number(b.expense || 0) - Number(a.expense || 0))
     .slice(0, 3);
+  const ledger = buildLedgerOperations({ snapshot });
 
   return {
     range: {
@@ -1064,7 +1158,9 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
         total: endOpen + endHidden
       },
       nextObligation
-    }
+    },
+    operations: ledger.operations,
+    operationsMeta: ledger.operationsMeta
   };
 };
 

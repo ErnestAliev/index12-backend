@@ -71,6 +71,7 @@ const getQuestionFlags = (question) => {
     const hasConditionalConstraint = /(при условии|если|забираем|берем|на жизнь|жили|останется|остается)/i.test(q);
     const asksHowCalculated = /(как\s+ты\s+это\s+рассч|как\s+рассчит|как\s+посчит|откуда\s+цифр|обосну|поясни|как\s+понял)/i.test(q);
     const asksStrategyDistribution = /(стратег|портф|риски?|сценар|распред|консерват|агрессив|хедж|диверсиф)/i.test(q);
+    const asksPeriodAnalytics = /(первая|вторая|третья|четвертая|первую|вторую|третью|четвертую)\s+недел|за\s+недел|за\s+период|с\s+\d{4}-\d{2}-\d{2}\s+по\s+\d{4}-\d{2}-\d{2}|с\s+\d{1,2}[./]\d{1,2}\s+по\s+\d{1,2}[./]\d{1,2}|с\s+\d{1,2}\s+[а-я]+\s+по\s+\d{1,2}\s+[а-я]+/i.test(q);
 
     const isDirectInvestmentAmount = asksInvestmentRelated
         && asksSingleAmount
@@ -84,6 +85,7 @@ const getQuestionFlags = (question) => {
         hasConditionalConstraint,
         asksHowCalculated,
         asksStrategyDistribution,
+        asksPeriodAnalytics,
         isDirectInvestmentAmount,
         isDirectConditionalAmount
     };
@@ -1536,6 +1538,8 @@ async function generateSnapshotChatResponse({
         'Если нужного числа нет в этих блоках — скажи, что не хватает данных.',
         'Не придумывай новые суммы, даты, операции, категории.',
         'Денежные суммы пиши в формате "1 554 388 т".',
+        'Если пользователь просит аналитику по подпериоду (например, "первая неделя"), а totals относятся ко всему месяцу, игнорируй totals для подпериода.',
+        'Для подпериода фильтруй FACTS_JSON.operations по датам запроса, пересчитывай итоги сам и показывай ключевых контрагентов и статьи расходов этого подпериода.',
         'Разделяй факт и план: FACT = даты <= TODAY_KEY, PLAN = даты > TODAY_KEY.',
         'Ликвидность и платежеспособность оценивай только по open.',
         'Прибыльность и эффективность оценивай по total (open + hidden).',

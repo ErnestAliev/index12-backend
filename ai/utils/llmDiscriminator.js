@@ -60,9 +60,14 @@ const buildExpected = ({
   responseIntent,
   questionFlags
 }) => {
+  const hasLedgerOperations = Array.isArray(deterministicFacts?.operations) && deterministicFacts.operations.length > 0;
+  const isPeriodAnalyticsQuestion = Boolean(questionFlags?.asksPeriodAnalytics);
+  const periodAnalyticsMode = hasLedgerOperations && isPeriodAnalyticsQuestion;
+
   const expected = {
     mode: String(accountContext?.mode || ''),
     responseIntent: String(responseIntent?.intent || ''),
+    period_analytics_mode: periodAnalyticsMode,
     open_now: toNum(accountViewContext?.liquidityView?.openNow),
     open_end: toNum(accountViewContext?.liquidityView?.openEnd),
     next_obligation_amount: toNum(accountViewContext?.liquidityView?.nextObligationAmount),
@@ -219,11 +224,13 @@ function auditCfoTextResponse({
     }
   });
 
-  observedMoney.forEach((item) => {
-    if (!containsAllowed(item.value, allowedNumbers)) {
-      errors.push(`number_mismatch:unexpected_money_value:${Math.round(item.value)}`);
-    }
-  });
+  if (!expected.period_analytics_mode) {
+    observedMoney.forEach((item) => {
+      if (!containsAllowed(item.value, allowedNumbers)) {
+        errors.push(`number_mismatch:unexpected_money_value:${Math.round(item.value)}`);
+      }
+    });
+  }
 
   if (observedMoney.length === 0 && expected.responseIntent !== 'advisory') {
     warnings.push('no_money_numbers_detected');
