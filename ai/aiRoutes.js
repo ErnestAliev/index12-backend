@@ -7,7 +7,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs/promises');
 
-const AIROUTES_VERSION = 'hybrid-v2.2-hctx-normalize';
+const AIROUTES_VERSION = 'hybrid-v2.3-hctx-hardening';
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -2700,6 +2700,7 @@ module.exports = function createAiRouter(deps) {
             source,
             timelineDate,
             parsedIntent,
+            historicalContext,
             deterministicFacts,
             periodAnalytics,
             deterministicResult: {
@@ -2843,6 +2844,7 @@ module.exports = function createAiRouter(deps) {
           question: q,
           source,
           timelineDate,
+          historicalContext,
           deterministicFacts,
           periodAnalytics,
           llm: llmResult ? {
