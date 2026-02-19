@@ -84,6 +84,7 @@ const buildExpected = ({
   const hasLedgerOperations = Array.isArray(deterministicFacts?.operations) && deterministicFacts.operations.length > 0;
   const periodAnalytics = deterministicFacts?.periodAnalytics || null;
   const comparisonData = Array.isArray(deterministicFacts?.comparisonData) ? deterministicFacts.comparisonData : [];
+  const historyData = Array.isArray(deterministicFacts?.history) ? deterministicFacts.history : [];
   const hasPeriodAnalyticsTotals = toNum(periodAnalytics?.totals?.income) > 0
     || toNum(periodAnalytics?.totals?.expense) > 0
     || toNum(periodAnalytics?.totals?.net) !== 0;
@@ -113,7 +114,9 @@ const buildExpected = ({
     asks_direct_conditional_amount: Boolean(questionFlags?.isDirectConditionalAmount),
     asks_single_amount: Boolean(questionFlags?.asksSingleAmount),
     comparison_mode: comparisonData.length >= 2,
-    comparison_periods_count: comparisonData.length
+    comparison_periods_count: comparisonData.length,
+    history_mode: historyData.length >= 2,
+    history_periods_count: historyData.length
   };
 
   const anomalyNumbers = [];
@@ -145,6 +148,8 @@ const buildExpected = ({
   ], 2, 3);
   const comparisonTotalsNumbers = [];
   const comparisonDeltaNumbers = [];
+  const historyTotalsNumbers = [];
+  const historyDeltaNumbers = [];
   const comparisonMetrics = ['income', 'expense', 'net'];
 
   comparisonData.forEach((period) => {
@@ -161,6 +166,24 @@ const buildExpected = ({
         const right = toNum(comparisonData?.[j]?.totals?.[metric]);
         const delta = right - left;
         comparisonDeltaNumbers.push(delta, -delta, Math.abs(delta));
+      });
+    }
+  }
+
+  historyData.forEach((period) => {
+    comparisonMetrics.forEach((metric) => {
+      historyTotalsNumbers.push(toNum(period?.[metric]));
+      historyTotalsNumbers.push(toNum(period?.totals?.[metric]));
+    });
+  });
+
+  for (let i = 0; i < historyData.length; i += 1) {
+    for (let j = i + 1; j < historyData.length; j += 1) {
+      comparisonMetrics.forEach((metric) => {
+        const left = toNum(historyData?.[i]?.[metric] ?? historyData?.[i]?.totals?.[metric]);
+        const right = toNum(historyData?.[j]?.[metric] ?? historyData?.[j]?.totals?.[metric]);
+        const delta = right - left;
+        historyDeltaNumbers.push(delta, -delta, Math.abs(delta));
       });
     }
   }
@@ -205,6 +228,8 @@ const buildExpected = ({
     ...topExpenseCategoryCombinationSums,
     ...comparisonTotalsNumbers,
     ...comparisonDeltaNumbers,
+    ...historyTotalsNumbers,
+    ...historyDeltaNumbers,
     ...anomalyNumbers,
     0
   ]);

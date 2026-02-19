@@ -1787,6 +1787,8 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
         truncated: false,
         limit: Math.max(50, Number(LEDGER_OPERATIONS_LIMIT || 120))
       },
+      history: [],
+      historyMeta: null,
       comparisonData: [],
       comparisonMeta: null,
       largestExpenseCategory: null,
@@ -1955,6 +1957,8 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     },
     operations: ledger.operations,
     operationsMeta: ledger.operationsMeta,
+    history: [],
+    historyMeta: null,
     comparisonData: [],
     comparisonMeta: null
   };
@@ -1992,6 +1996,16 @@ const buildDeterministicInsightsBlock = (facts) => {
 
   if (facts.nextObligation) {
     lines.push(`- Ближайшее обязательство: ${facts.nextObligation.dateLabel} — ${fmtT(facts.nextObligation.amount)}`);
+  }
+
+  if (Array.isArray(facts?.history) && facts.history.length) {
+    const trendLine = facts.history
+      .slice(-3)
+      .map((row) => `${String(row?.period || '?')}: ${fmtSignedT(toNum(row?.net))}`)
+      .join('; ');
+    if (trendLine) {
+      lines.push(`- Исторический тренд (нетто): ${trendLine}`);
+    }
   }
 
   if (Array.isArray(facts.anomalies) && facts.anomalies.length) {

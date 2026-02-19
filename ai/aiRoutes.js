@@ -597,6 +597,96 @@ module.exports = function createAiRouter(deps) {
     });
   };
 
+  const _dayKeyToDate = (dayKey) => {
+    const m = String(dayKey || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const _resolveHistoryBaseMonth = ({ periodAnalytics, snapshot, timelineDateKey }) => {
+    const keyCandidates = [
+      String(periodAnalytics?.endDateKey || ''),
+      String(snapshot?.range?.endDateKey || ''),
+      String(snapshot?.range?.startDateKey || ''),
+      String(timelineDateKey || '')
+    ];
+    for (const key of keyCandidates) {
+      if (!_isDayKey(key)) continue;
+      const dt = _dayKeyToDate(key);
+      if (!dt) continue;
+      return {
+        year: dt.getFullYear(),
+        month: dt.getMonth() + 1
+      };
+    }
+    const now = new Date();
+    return {
+      year: now.getFullYear(),
+      month: now.getMonth() + 1
+    };
+  };
+
+  const _buildHistoryFromJournal = async ({
+    userId,
+    baseYear,
+    baseMonth,
+    monthsBack = 2,
+    asOf,
+    baseSnapshot
+  }) => {
+    const y = Number(baseYear);
+    const m = Number(baseMonth);
+    const depth = Math.max(1, Math.min(12, Number(monthsBack || 2)));
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return [];
+
+    const periods = [];
+    for (let step = depth; step >= 1; step -= 1) {
+      const d = new Date(y, m - 1 - step, 1, 12, 0, 0, 0);
+      const year = d.getFullYear();
+      const month = d.getMonth() + 1;
+      periods.push({
+        period: `${year}-${_pad2(month)}`,
+        startDateKey: _startOfMonthDayKey(year, month),
+        endDateKey: _endOfMonthDayKey(year, month)
+      });
+    }
+
+    if (!periods.length) return [];
+
+    const globalStart = String(periods[0]?.startDateKey || '');
+    const globalEnd = String(periods[periods.length - 1]?.endDateKey || '');
+    if (!_isDayKey(globalStart) || !_isDayKey(globalEnd) || globalStart > globalEnd) return [];
+
+    const journalSnapshot = await _buildSnapshotFromJournalRange({
+      userId: String(userId || ''),
+      startDateKey: globalStart,
+      endDateKey: globalEnd,
+      asOf: asOf || null,
+      baseSnapshot
+    });
+    if (!journalSnapshot) return [];
+
+    return periods.map((period) => {
+      const periodSnapshot = _buildSnapshotForRange({
+        snapshot: journalSnapshot,
+        startDateKey: period.startDateKey,
+        endDateKey: period.endDateKey
+      });
+      const facts = snapshotAnswerEngine.computeDeterministicFacts({
+        snapshot: periodSnapshot,
+        timelineDateKey: period.endDateKey
+      });
+
+      return {
+        period: period.period,
+        income: _toNum(facts?.totals?.income),
+        expense: _toNum(facts?.totals?.expense),
+        net: _toNum(facts?.totals?.net)
+      };
+    });
+  };
+
   const _normalizeStatus = (statusCode, statusLabel) => {
     const sc = String(statusCode || '').trim().toLowerCase();
     if (sc === 'plan') return 'plan';
@@ -2140,6 +2230,36 @@ module.exports = function createAiRouter(deps) {
             requestedPeriods: Array.isArray(comparisonQuery?.periods) ? comparisonQuery.periods : [],
             generatedCount: Array.isArray(comparisonData) ? comparisonData.length : 0
           };
+        }
+        try {
+          const historyBase = _resolveHistoryBaseMonth({
+            periodAnalytics,
+            snapshot: periodAnalyticsSnapshot || snapshot,
+            timelineDateKey: timelineDate
+          });
+          const history = await _buildHistoryFromJournal({
+            userId: String(effectiveUserId || userId || ''),
+            baseYear: historyBase.year,
+            baseMonth: historyBase.month,
+            monthsBack: 2,
+            asOf: timelineDate,
+            baseSnapshot: validatedSnapshot
+          });
+          deterministicFacts.history = Array.isArray(history) ? history : [];
+          deterministicFacts.historyMeta = {
+            basePeriod: `${historyBase.year}-${_pad2(historyBase.month)}`,
+            monthsBack: 2,
+            generatedCount: Array.isArray(history) ? history.length : 0
+          };
+        } catch (historyError) {
+          deterministicFacts.history = [];
+          deterministicFacts.historyMeta = {
+            basePeriod: null,
+            monthsBack: 2,
+            generatedCount: 0,
+            error: String(historyError?.message || historyError || 'history_generation_failed')
+          };
+          console.warn('[AI Snapshot] History generation failed:', historyError?.message || historyError);
         }
 
         if (parsedIntent?.type === 'CATEGORY_FACT_BY_CATEGORY') {

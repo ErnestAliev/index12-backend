@@ -1309,6 +1309,8 @@ async function generateSnapshotChatResponse({
     const effectivePeriodAnalytics = periodAnalytics || deterministicFacts?.periodAnalytics || null;
     const comparisonData = Array.isArray(deterministicFacts?.comparisonData) ? deterministicFacts.comparisonData : [];
     const hasComparisonData = comparisonData.length >= 2;
+    const historyRows = Array.isArray(deterministicFacts?.history) ? deterministicFacts.history : [];
+    const hasHistory = historyRows.length > 0;
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
         deterministicFacts,
@@ -1610,6 +1612,12 @@ async function generateSnapshotChatResponse({
             has_comparison_data: hasComparisonData,
             periods_count: comparisonData.length,
             period_labels: comparisonData.map((row) => String(row?.label || '')).filter(Boolean)
+        },
+        history: {
+            has_history: hasHistory,
+            periods_count: historyRows.length,
+            latest_period: String(historyRows[historyRows.length - 1]?.period || ''),
+            latest_net: toNum(historyRows[historyRows.length - 1]?.net)
         }
     };
 
@@ -1628,6 +1636,11 @@ async function generateSnapshotChatResponse({
         '3) Рассчитай дельту в процентах: Δ% = (Δ / A) * 100, если A != 0.',
         '4) Если A = 0, процент не считай; напиши "н/д".',
         '5) Не выдумывай дополнительные суммы вне comparisonData.',
+        '',
+        '# TREND ANALYSIS (HISTORY)',
+        'Если HISTORY_JSON содержит 2+ периодов, перед рекомендациями ОБЯЗАТЕЛЬНО оцени динамику income/expense/net между последними периодами.',
+        'Выводи направление тренда: рост / снижение / стабильно.',
+        'Используй только HISTORY_JSON; не придумывай исторические суммы.',
         '',
         '# COVERAGE & FORECAST ALGORITHM (КРИТИЧЕСКИ ВАЖНО)',
         'Если пользователь запрашивает прогноз на будущий месяц или спрашивает "хватит ли средств", действуй строго по алгоритму:',
@@ -1665,6 +1678,9 @@ async function generateSnapshotChatResponse({
         '',
         'COMPARISON_DATA_JSON:',
         JSON.stringify(comparisonData || [], null, 2),
+        '',
+        'HISTORY_JSON:',
+        JSON.stringify(historyRows || [], null, 2),
         '',
         'CONTEXTUAL_ADVICE_JSON:',
         JSON.stringify(ragContext || {}, null, 2),
