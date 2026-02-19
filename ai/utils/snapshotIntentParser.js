@@ -16,6 +16,8 @@ const MONTHS_RU = [
   { key: 12, re: /декабр/i }
 ];
 
+const MONTHS_RU_YEAR_RE_FRAGMENT = 'январ[а-я]*|феврал[а-я]*|март[а-я]*|апрел[а-я]*|ма[йя][а-я]*|июн[а-я]*|июл[а-я]*|август[а-я]*|сентябр[а-я]*|октябр[а-я]*|ноябр[а-я]*|декабр[а-я]*';
+
 const toIsoDateKey = (date) => {
   if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '';
   const y = date.getFullYear();
@@ -102,11 +104,32 @@ const parseMonthWord = (text) => {
   return null;
 };
 
+const parseShortOrFullYear = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  if (raw.length === 2) return n >= 70 ? (1900 + n) : (2000 + n);
+  if (raw.length === 4) return n;
+  return null;
+};
+
 const parseExplicitYear = (text) => {
-  const m = String(text || '').match(/\b((?:19|20)\d{2})\b/);
-  if (!m) return null;
-  const year = Number(m[1]);
-  return Number.isFinite(year) ? year : null;
+  const src = String(text || '');
+  const monthYearRe = new RegExp(`(?:${MONTHS_RU_YEAR_RE_FRAGMENT})\\s*(\\d{2}|(?:19|20)\\d{2})\\b`, 'i');
+  const monthYearMatch = src.match(monthYearRe);
+  if (monthYearMatch?.[1]) {
+    const yearFromMonth = parseShortOrFullYear(monthYearMatch[1]);
+    if (Number.isFinite(yearFromMonth)) return yearFromMonth;
+  }
+
+  const fullYearMatch = src.match(/\b((?:19|20)\d{2})\b/);
+  if (fullYearMatch?.[1]) {
+    const fullYear = Number(fullYearMatch[1]);
+    if (Number.isFinite(fullYear)) return fullYear;
+  }
+
+  return null;
 };
 
 const resolveRelativeMonthYear = ({ month, timelineDateKey, normText }) => {

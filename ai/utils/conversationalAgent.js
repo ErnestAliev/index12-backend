@@ -30,6 +30,20 @@ const toNum = (value) => {
 };
 
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MONTHS_RU_FULL = [
+    'январь',
+    'февраль',
+    'март',
+    'апрель',
+    'май',
+    'июнь',
+    'июль',
+    'август',
+    'сентябрь',
+    'октябрь',
+    'ноябрь',
+    'декабрь'
+];
 
 const formatT = (value) => {
     const n = Math.round(Math.abs(toNum(value)));
@@ -45,6 +59,39 @@ const formatSignedT = (value) => {
         .replace(/\u00A0/g, ' ');
     const sign = n > 0 ? '+' : (n < 0 ? '-' : '');
     return `${sign}${formatted} т`;
+};
+
+const periodMonthYearLabel = (periodAnalytics) => {
+    const startDateKey = String(periodAnalytics?.startDateKey || '');
+    const endDateKey = String(periodAnalytics?.endDateKey || '');
+    const startMatch = startDateKey.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const endMatch = endDateKey.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+    if (startMatch && endMatch) {
+        const startYear = Number(startMatch[1]);
+        const startMonth = Number(startMatch[2]);
+        const endYear = Number(endMatch[1]);
+        const endMonth = Number(endMatch[2]);
+        if (Number.isFinite(startYear) && Number.isFinite(startMonth) && startMonth >= 1 && startMonth <= 12
+            && startYear === endYear && startMonth === endMonth) {
+            return `${MONTHS_RU_FULL[startMonth - 1]} ${startYear}`;
+        }
+    }
+
+    const fallbackLabel = String(periodAnalytics?.label || '').trim();
+    if (fallbackLabel) return fallbackLabel;
+    if (startDateKey && endDateKey) return `${startDateKey} - ${endDateKey}`;
+    return 'выбранный период';
+};
+
+const shouldReturnPeriodNoDataAnswer = (periodAnalytics) => {
+    if (!periodAnalytics || typeof periodAnalytics !== 'object') return false;
+    const income = toNum(periodAnalytics?.totals?.income);
+    const expense = toNum(periodAnalytics?.totals?.expense);
+    const net = toNum(periodAnalytics?.totals?.net);
+    const topOps = Array.isArray(periodAnalytics?.topOperations) ? periodAnalytics.topOperations : [];
+    const metaNoData = Boolean(periodAnalytics?.operationsMeta?.noData);
+    return metaNoData || (income === 0 && expense === 0 && net === 0 && topOps.length === 0);
 };
 
 const normalizeCfoOutput = (raw) => {
@@ -1485,6 +1532,20 @@ async function generateSnapshotChatResponse({
         };
     })();
 
+    if (shouldReturnPeriodNoDataAnswer(effectivePeriodAnalytics)) {
+        const noDataLabel = periodMonthYearLabel(effectivePeriodAnalytics);
+        const noDataText = `За ${noDataLabel} данных в системе не обнаружено (ни фактических, ни запланированных).`;
+        return {
+            ok: true,
+            text: noDataText,
+            debug: {
+                deterministicNoDataPeriod: true,
+                periodLabel: noDataLabel,
+                periodAnalytics: effectivePeriodAnalytics
+            }
+        };
+    }
+
     const ragContext = await cfoKnowledgeBase.retrieveCfoContext({
         question,
         responseIntent,
@@ -1561,6 +1622,7 @@ async function generateSnapshotChatResponse({
         '# FORMATTING',
         '- Итоги периода -> PERIOD_ANALYTICS_JSON.totals.',
         '- Крупнейшие расходы -> PERIOD_ANALYTICS_JSON.topExpenseCategories.',
+        '- Если PERIOD_ANALYTICS_JSON.totals = {income:0, expense:0, net:0} и topOperations пустой, ответь строго: "За [Месяц Year] данных в системе не обнаружено (ни фактических, ни запланированных)".',
         '- Денежные суммы пиши в формате "1 554 388 т".',
         '- ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: В любом ответе про ликвидность или проверку покрытия всегда явно прописывай в тексте цифру доступного остатка (open_after_next_obligation).',
         '- Ликвидность оценивается по open балансам, прибыльность — по total.',

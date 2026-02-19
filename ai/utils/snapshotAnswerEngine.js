@@ -34,6 +34,8 @@ const MONTHS_RU_PARSE = [
   { month: 12, re: /декабр/i }
 ];
 
+const MONTHS_RU_YEAR_RE_FRAGMENT = 'январ[а-я]*|феврал[а-я]*|март[а-я]*|апрел[а-я]*|ма[йя][а-я]*|июн[а-я]*|июл[а-я]*|август[а-я]*|сентябр[а-я]*|октябр[а-я]*|ноябр[а-я]*|декабр[а-я]*';
+
 const toNum = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -227,11 +229,32 @@ const resolveMonthFromQuestion = (normText) => {
   return null;
 };
 
+const parseShortOrFullYear = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  if (raw.length === 2) return n >= 70 ? (1900 + n) : (2000 + n);
+  if (raw.length === 4) return n;
+  return null;
+};
+
 const parseExplicitYearFromQuestion = (normText) => {
-  const m = String(normText || '').match(/\b((?:19|20)\d{2})\b/);
-  if (!m) return null;
-  const year = Number(m[1]);
-  return Number.isFinite(year) ? year : null;
+  const text = String(normText || '');
+  const monthYearRe = new RegExp(`(?:${MONTHS_RU_YEAR_RE_FRAGMENT})\\s*(\\d{2}|(?:19|20)\\d{2})\\b`, 'i');
+  const monthYearMatch = text.match(monthYearRe);
+  if (monthYearMatch?.[1]) {
+    const yearFromMonth = parseShortOrFullYear(monthYearMatch[1]);
+    if (Number.isFinite(yearFromMonth)) return yearFromMonth;
+  }
+
+  const fullYearMatch = text.match(/\b((?:19|20)\d{2})\b/);
+  if (fullYearMatch?.[1]) {
+    const fullYear = Number(fullYearMatch[1]);
+    if (Number.isFinite(fullYear)) return fullYear;
+  }
+
+  return null;
 };
 
 const resolveMonthYearFromQuestion = ({ normText, month, baseDate }) => {
@@ -1344,13 +1367,44 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     snapshot
   });
   if (!resolvedPeriod) return null;
+  const topLimitSafe = Math.max(5, Math.min(10, Number(topLimit || PERIOD_TOP_OPERATIONS_LIMIT)));
+  const buildEmptyPeriodAnalytics = ({ startDateKey, endDateKey, reason, wasClampedToSnapshot = false }) => ({
+    label: `${toRuDateShort(startDateKey)} - ${toRuDateShort(endDateKey)}`,
+    startDateKey,
+    endDateKey,
+    totals: { income: 0, expense: 0, net: 0 },
+    largestExpenseCategory: null,
+    topExpenseCategories: [],
+    expenseByCategory: [],
+    topOperations: [],
+    operationsMeta: {
+      totalCount: 0,
+      topIncludedCount: 0,
+      topLimit: topLimitSafe,
+      source: resolvedPeriod.source,
+      requestedRange: {
+        startDateKey: resolvedPeriod.startDateKey,
+        endDateKey: resolvedPeriod.endDateKey
+      },
+      wasClampedToSnapshot: Boolean(wasClampedToSnapshot),
+      noData: true,
+      noDataReason: String(reason || 'empty_period')
+    }
+  });
 
   const clampedRange = clampDateKeyRangeToSnapshot({
     snapshot,
     startDateKey: resolvedPeriod.startDateKey,
     endDateKey: resolvedPeriod.endDateKey
   });
-  if (!clampedRange) return null;
+  if (!clampedRange) {
+    return buildEmptyPeriodAnalytics({
+      startDateKey: resolvedPeriod.startDateKey,
+      endDateKey: resolvedPeriod.endDateKey,
+      reason: 'requested_range_outside_snapshot',
+      wasClampedToSnapshot: true
+    });
+  }
 
   const periodDays = normalizeList(snapshot?.days).filter((day) => {
     const date = String(day?.dateKey || '');
@@ -1358,7 +1412,14 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
       && date >= clampedRange.startDateKey
       && date <= clampedRange.endDateKey;
   });
-  if (!periodDays.length) return null;
+  if (!periodDays.length) {
+    return buildEmptyPeriodAnalytics({
+      startDateKey: clampedRange.startDateKey,
+      endDateKey: clampedRange.endDateKey,
+      reason: 'no_days_after_clamp',
+      wasClampedToSnapshot: clampedRange.wasClamped
+    });
+  }
 
   const totals = periodDays.reduce((acc, day) => {
     acc.income += toNum(day?.totals?.income);
@@ -1372,7 +1433,6 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     topLimit: PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT
   });
 
-  const topLimitSafe = Math.max(5, Math.min(10, Number(topLimit || PERIOD_TOP_OPERATIONS_LIMIT)));
   const top = buildLedgerOperations({
     snapshot,
     startDateKey: clampedRange.startDateKey,
