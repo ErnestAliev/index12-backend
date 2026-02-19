@@ -136,9 +136,22 @@ const buildExpected = ({
   };
   pushAnomalyNumbers(deterministicFacts?.anomalies);
   pushAnomalyNumbers(advisoryFacts?.anomalies);
-  const periodTopOperationAmounts = (Array.isArray(periodAnalytics?.topOperations) ? periodAnalytics.topOperations : [])
-    .map((op) => toNum(op?.amount))
-    .filter((n) => n > 0);
+  const collectOperationNumbers = (rows) => {
+    const out = [];
+    (Array.isArray(rows) ? rows : []).forEach((op) => {
+      out.push(
+        toNum(op?.amount),
+        toNum(op?.netAmount),
+        toNum(op?.offsetAmount)
+      );
+      (Array.isArray(op?.offsets) ? op.offsets : []).forEach((offset) => {
+        out.push(toNum(offset?.amount));
+      });
+    });
+    return out.filter((n) => Number.isFinite(n) && n > 0);
+  };
+  const periodTopOperationAmounts = collectOperationNumbers(periodAnalytics?.topOperations);
+  const deterministicOperationAmounts = collectOperationNumbers(deterministicFacts?.operations);
   const periodTopExpenseCategoryAmounts = (Array.isArray(periodAnalytics?.topExpenseCategories) ? periodAnalytics.topExpenseCategories : [])
     .map((row) => toNum(row?.amount))
     .filter((n) => n > 0);
@@ -262,6 +275,7 @@ const buildExpected = ({
     toNum(deterministicFacts?.fact?.ownerDraw?.amount),
     toNum(deterministicFacts?.plan?.ownerDraw?.amount),
     ...periodTopOperationAmounts,
+    ...deterministicOperationAmounts,
     ...periodTopExpenseCategoryAmounts,
     ...deterministicTopExpenseCategoryAmounts,
     ...topExpenseCategoryCombinationSums,

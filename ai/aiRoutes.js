@@ -7,7 +7,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs/promises');
 
-const AIROUTES_VERSION = 'hybrid-v2.3-hctx-hardening';
+const AIROUTES_VERSION = 'hybrid-v2.4-offset-links';
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -552,7 +552,31 @@ module.exports = function createAiRouter(deps) {
       });
     });
 
-    (Array.isArray(operations) ? operations : []).forEach((op) => {
+    const sourceOps = Array.isArray(operations) ? operations : [];
+    const offsetMetaByIncomeId = new Map();
+    sourceOps.forEach((op) => {
+      const parentId = String(op?.offsetIncomeId || op?.linkedParentId || '').trim();
+      if (!parentId) return;
+
+      const kind = _normalizeKind(op?.type || op?.kind || '');
+      if (kind !== 'expense') return;
+
+      const amountAbs = Math.abs(_toNum(op?.amount));
+      if (amountAbs <= 0) return;
+
+      const categoryName = String(op?.categoryName || '').trim() || 'Без категории';
+      const note = `Взаимозачет: ${categoryName}`;
+      const prev = offsetMetaByIncomeId.get(parentId) || { total: 0, offsets: [] };
+      prev.total += amountAbs;
+      prev.offsets.push({
+        id: String(op?._id || op?.id || ''),
+        amount: amountAbs,
+        note
+      });
+      offsetMetaByIncomeId.set(parentId, prev);
+    });
+
+    sourceOps.forEach((op) => {
       const dayKey = String(op?.dateIso || '').slice(0, 10);
       if (!_isDayKey(dayKey) || dayKey < startDateKey || dayKey > endDateKey) return;
       const day = dayMap.get(dayKey);
@@ -562,14 +586,33 @@ module.exports = function createAiRouter(deps) {
       const amountAbs = Math.abs(_toNum(op?.amount));
       if (!kind || amountAbs <= 0) return;
 
+      const opId = String(op?._id || op?.id || '');
       const accountName = String(op?.accountName || 'Без счета');
       const counterparty = String(op?.contractorName || op?.individualName || 'Без контрагента');
       const projectName = String(op?.projectName || 'Без проекта');
       const categoryName = String(op?.categoryName || '').trim();
+      const parentIncomeId = String(op?.offsetIncomeId || op?.linkedParentId || '').trim();
 
       if (kind === 'income') {
+        const linkedOffset = opId ? (offsetMetaByIncomeId.get(opId) || null) : null;
+        const linkedOffsetTotal = Math.abs(_toNum(linkedOffset?.total));
+        const nominalAmount = amountAbs;
+        const netAmount = Math.max(0, nominalAmount - linkedOffsetTotal);
+
         day.lists.income.push({
+          id: opId || null,
+          name: `${categoryName || 'Без категории'} ${counterparty === 'Без контрагента' ? '' : counterparty}`.trim(),
           amount: amountAbs,
+          nominalAmount,
+          netAmount,
+          offsetAmount: linkedOffsetTotal,
+          offsets: Array.isArray(linkedOffset?.offsets)
+            ? linkedOffset.offsets.map((row) => ({
+                id: String(row?.id || ''),
+                amount: Math.abs(_toNum(row?.amount)),
+                note: String(row?.note || 'Взаимозачет')
+              }))
+            : [],
           accName: accountName,
           contName: counterparty,
           projName: projectName,
@@ -581,6 +624,10 @@ module.exports = function createAiRouter(deps) {
 
       if (kind === 'expense') {
         day.lists.expense.push({
+          id: opId || null,
+          linkedParentId: parentIncomeId || null,
+          offsetIncomeId: parentIncomeId || null,
+          isOffsetExpense: Boolean(parentIncomeId),
           amount: -amountAbs,
           accName: accountName,
           contName: counterparty,
@@ -605,6 +652,7 @@ module.exports = function createAiRouter(deps) {
       })();
 
       day.lists.transfer.push({
+        id: opId || null,
         amount: amountAbs,
         fromAccName,
         toAccName,

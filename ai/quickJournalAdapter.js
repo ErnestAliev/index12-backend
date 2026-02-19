@@ -99,7 +99,7 @@ function _normalizeStatusLabel(op, todayStartTs) {
 function _shouldIncludeInOperationsEditor(op) {
   if (!op) return false;
   if (op.isSplitParent) return false;
-  if (op.excludeFromTotals && !op.offsetIncomeId) return false;
+  if (op.excludeFromTotals && !op.offsetIncomeId && !op.linkedParentId) return false;
   return true;
 }
 
@@ -317,6 +317,7 @@ function _normalizeOperation(op, todayStartTs, startTs, endTs) {
   const projectId = _pickId(op?.projectId);
   const contractorId = _pickId(op?.contractorId);
   const counterpartyIndividualId = _pickId(op?.counterpartyIndividualId);
+  const offsetIncomeId = _pickId(op?.offsetIncomeId || op?.linkedParentId);
 
   return {
     _id: _pickId(op?._id || op?.id),
@@ -345,6 +346,10 @@ function _normalizeOperation(op, todayStartTs, startTs, endTs) {
     contractorId,
     categoryId,
     categoryName: _pickName(op?.categoryId),
+    offsetIncomeId,
+    linkedParentId: offsetIncomeId,
+    excludeFromTotals: op?.excludeFromTotals === true,
+    isOffsetExpense: kind === 'expense' && !!offsetIncomeId,
     companyId: _pickId(op?.companyId),
     fromCompanyId: _pickId(op?.fromCompanyId),
     toCompanyId: _pickId(op?.toCompanyId),

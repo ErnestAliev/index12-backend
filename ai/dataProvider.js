@@ -662,8 +662,8 @@ module.exports = function createDataProvider(deps) {
 
         for (const op of operations) {
             // Управленческие родители и исключенные из итогов не должны попадать в расчеты AI,
-            // НО взаимозачетные расходы (offsetIncomeId) нужно учитывать как расходы.
-            if (op.excludeFromTotals && !op.offsetIncomeId) continue;
+            // НО взаимозачетные расходы (offsetIncomeId/linkedParentId) нужно учитывать как расходы.
+            if (op.excludeFromTotals && !op.offsetIncomeId && !op.linkedParentId) continue;
             if (op.isSplitParent) continue;
 
             // Skip inter-company transfers if requested

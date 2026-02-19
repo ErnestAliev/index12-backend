@@ -1685,6 +1685,7 @@ async function generateSnapshotChatResponse({
         '# FORMATTING',
         '- Итоги периода -> PERIOD_ANALYTICS_JSON.totals.',
         '- Крупнейшие расходы -> PERIOD_ANALYTICS_JSON.topExpenseCategories.',
+        '- Если в FACTS_JSON.operations / PERIOD_ANALYTICS_JSON.topOperations у дохода есть offsets[] или netAmount < amount, трактуй это как взаимозачет: озвучивай номинал дохода, фактическое поступление (netAmount) и сумму зачета отдельно; не называй такие зачеты «обычными денежными расходами».',
         '- Если PERIOD_ANALYTICS_JSON.totals = {income:0, expense:0, net:0} и topOperations пустой, ответь строго: "За [Месяц Year] данных в системе не обнаружено (ни фактических, ни запланированных)".',
         '- Денежные суммы пиши в формате "1 554 388 т".',
         '- ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: В любом ответе про ликвидность или проверку покрытия всегда явно прописывай в тексте цифру доступного остатка (open_after_next_obligation).',

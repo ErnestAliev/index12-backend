@@ -1529,12 +1529,33 @@ const buildLedgerOperations = ({
     const date = String(row.date || '');
     if (!DATE_KEY_RE.test(date)) return;
 
+    const type = String(row.type || 'Операция');
+    const amount = Math.abs(toNum(row.amount));
+    const category = String(row.category || 'Без категории');
+    const counterparty = String(row.counterparty || 'Без контрагента');
+    const name = String(
+      row.name
+      || `${category}${counterparty !== 'Без контрагента' ? ` ${counterparty}` : ''}`
+    ).trim() || category;
+
     rows.push({
+      id: String(row.id || ''),
+      name,
       date,
-      type: String(row.type || 'Операция'),
-      amount: Math.abs(toNum(row.amount)),
-      counterparty: String(row.counterparty || 'Без контрагента'),
-      category: String(row.category || 'Без категории'),
+      type,
+      amount,
+      netAmount: type === 'Доход' ? Math.abs(toNum(row.netAmount || amount)) : null,
+      offsetAmount: type === 'Доход' ? Math.abs(toNum(row.offsetAmount || 0)) : null,
+      offsets: type === 'Доход' && Array.isArray(row.offsets)
+        ? row.offsets.map((offset) => ({
+            amount: Math.abs(toNum(offset?.amount)),
+            note: String(offset?.note || 'Взаимозачет')
+          }))
+        : [],
+      linkedParentId: String(row.linkedParentId || ''),
+      isOffsetExpense: Boolean(row.isOffsetExpense),
+      counterparty,
+      category,
       account: String(row.account || 'Без счета')
     });
   };
@@ -1547,9 +1568,14 @@ const buildLedgerOperations = ({
 
     normalizeList(day?.lists?.income).forEach((item) => {
       pushRow({
+        id: item?.id || '',
+        name: item?.name || '',
         date,
         type: 'Доход',
         amount: item?.amount,
+        netAmount: item?.netAmount,
+        offsetAmount: item?.offsetAmount,
+        offsets: item?.offsets,
         counterparty: item?.contName || 'Без контрагента',
         category: item?.catName || 'Без категории',
         account: item?.accName || 'Без счета'
@@ -1558,9 +1584,12 @@ const buildLedgerOperations = ({
 
     normalizeList(day?.lists?.expense).forEach((item) => {
       pushRow({
+        id: item?.id || '',
         date,
         type: 'Расход',
         amount: item?.amount,
+        linkedParentId: item?.linkedParentId || item?.offsetIncomeId || '',
+        isOffsetExpense: Boolean(item?.isOffsetExpense || item?.linkedParentId || item?.offsetIncomeId),
         counterparty: item?.contName || 'Без контрагента',
         category: item?.catName || 'Без категории',
         account: item?.accName || 'Без счета'
@@ -1569,9 +1598,12 @@ const buildLedgerOperations = ({
 
     normalizeList(day?.lists?.withdrawal).forEach((item) => {
       pushRow({
+        id: item?.id || '',
         date,
         type: 'Расход',
         amount: item?.amount,
+        linkedParentId: item?.linkedParentId || item?.offsetIncomeId || '',
+        isOffsetExpense: Boolean(item?.isOffsetExpense || item?.linkedParentId || item?.offsetIncomeId),
         counterparty: item?.contName || 'Без контрагента',
         category: item?.catName || 'Вывод средств',
         account: item?.accName || 'Без счета'
@@ -1582,6 +1614,7 @@ const buildLedgerOperations = ({
       const fromAcc = String(item?.fromAccName || 'Без счета');
       const toAcc = String(item?.toAccName || 'Без счета');
       pushRow({
+        id: item?.id || '',
         date,
         type: 'Перевод',
         amount: item?.amount,
@@ -1590,6 +1623,42 @@ const buildLedgerOperations = ({
         account: `${fromAcc} -> ${toAcc}`
       });
     });
+  });
+
+  const offsetsByParentId = new Map();
+  rows.forEach((row) => {
+    if (String(row?.type || '') !== 'Расход') return;
+    const parentId = String(row?.linkedParentId || '').trim();
+    if (!parentId) return;
+
+    const amount = Math.abs(toNum(row?.amount));
+    if (amount <= 0) return;
+
+    const note = `Взаимозачет: ${String(row?.category || 'Без категории')}`;
+    const prev = offsetsByParentId.get(parentId) || [];
+    prev.push({
+      amount,
+      note
+    });
+    offsetsByParentId.set(parentId, prev);
+  });
+
+  rows.forEach((row) => {
+    if (String(row?.type || '') !== 'Доход') return;
+
+    const incomeId = String(row?.id || '').trim();
+    const linkedOffsets = incomeId ? (offsetsByParentId.get(incomeId) || []) : [];
+    const offsetAmount = linkedOffsets.reduce((sum, item) => sum + Math.abs(toNum(item?.amount)), 0);
+    const nominalAmount = Math.abs(toNum(row?.amount));
+    const derivedNetAmount = Math.max(0, nominalAmount - offsetAmount);
+
+    row.offsets = linkedOffsets.length ? linkedOffsets : normalizeList(row?.offsets);
+    row.offsetAmount = linkedOffsets.length
+      ? offsetAmount
+      : Math.abs(toNum(row?.offsetAmount));
+    row.netAmount = linkedOffsets.length
+      ? derivedNetAmount
+      : Math.abs(toNum(row?.netAmount || row?.amount));
   });
 
   if (sortByAmountDesc) {
