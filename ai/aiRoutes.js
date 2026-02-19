@@ -267,6 +267,78 @@ module.exports = function createAiRouter(deps) {
     return `${d.getFullYear()}-${_pad2(d.getMonth() + 1)}-${_pad2(d.getDate())}`;
   };
 
+  const _isDayKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
+
+  const _startOfMonthDayKey = (year, month) => {
+    const y = Number(year);
+    const m = Number(month);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return '';
+    return _toDayKey(new Date(y, m - 1, 1, 12, 0, 0, 0));
+  };
+
+  const _endOfMonthDayKey = (year, month) => {
+    const y = Number(year);
+    const m = Number(month);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) return '';
+    return _toDayKey(new Date(y, m, 0, 12, 0, 0, 0));
+  };
+
+  const _resolveEffectiveSnapshotRange = ({ snapshot, parsedIntent, periodProbe }) => {
+    const snapshotStart = String(snapshot?.range?.startDateKey || '');
+    const snapshotEnd = String(snapshot?.range?.endDateKey || '');
+
+    const requestedStart = String(periodProbe?.operationsMeta?.requestedRange?.startDateKey || '');
+    const requestedEnd = String(periodProbe?.operationsMeta?.requestedRange?.endDateKey || '');
+    if (_isDayKey(requestedStart) && _isDayKey(requestedEnd) && requestedStart <= requestedEnd) {
+      return { startDateKey: requestedStart, endDateKey: requestedEnd, source: 'period_probe_requested_range' };
+    }
+
+    const targetYear = Number(parsedIntent?.targetMonth?.year);
+    const targetMonth = Number(parsedIntent?.targetMonth?.month);
+    if (Number.isFinite(targetYear) && Number.isFinite(targetMonth)) {
+      const startDateKey = _startOfMonthDayKey(targetYear, targetMonth);
+      const endDateKey = _endOfMonthDayKey(targetYear, targetMonth);
+      if (_isDayKey(startDateKey) && _isDayKey(endDateKey) && startDateKey <= endDateKey) {
+        return { startDateKey, endDateKey, source: 'intent_target_month' };
+      }
+    }
+
+    if (_isDayKey(snapshotStart) && _isDayKey(snapshotEnd) && snapshotStart <= snapshotEnd) {
+      return { startDateKey: snapshotStart, endDateKey: snapshotEnd, source: 'snapshot_range' };
+    }
+
+    return { startDateKey: '', endDateKey: '', source: 'empty_range' };
+  };
+
+  const _buildSnapshotForRange = ({ snapshot, startDateKey, endDateKey }) => {
+    const safeStart = String(startDateKey || '');
+    const safeEnd = String(endDateKey || '');
+    const daysRaw = Array.isArray(snapshot?.days) ? snapshot.days : [];
+
+    const days = (_isDayKey(safeStart) && _isDayKey(safeEnd) && safeStart <= safeEnd)
+      ? daysRaw.filter((day) => {
+          const dayKey = String(day?.dateKey || '');
+          return _isDayKey(dayKey) && dayKey >= safeStart && dayKey <= safeEnd;
+        })
+      : [...daysRaw];
+
+    const rangeStart = (_isDayKey(safeStart) && _isDayKey(safeEnd) && safeStart <= safeEnd)
+      ? safeStart
+      : String(snapshot?.range?.startDateKey || '');
+    const rangeEnd = (_isDayKey(safeStart) && _isDayKey(safeEnd) && safeStart <= safeEnd)
+      ? safeEnd
+      : String(snapshot?.range?.endDateKey || '');
+
+    return {
+      ...snapshot,
+      range: {
+        startDateKey: rangeStart,
+        endDateKey: rangeEnd
+      },
+      days
+    };
+  };
+
   const _parseRowDayKey = (row) => {
     const rawDate = String(row?.date || '').trim();
     const iso = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -1717,7 +1789,7 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
-        const snapshot = validation.snapshot;
+        const validatedSnapshot = validation.snapshot;
         const asOf = req.body?.asOf || null;
         const timelineDateRaw = String(req?.body?.timelineDate || '').trim();
         const timelineDate = (() => {
@@ -1727,6 +1799,30 @@ module.exports = function createAiRouter(deps) {
           if (fromAsOf) return fromAsOf[1];
           return new Date().toISOString().slice(0, 10);
         })();
+
+        const parsedIntent = snapshotIntentParser.parseSnapshotIntent({
+          question: q,
+          timelineDateKey: timelineDate,
+          snapshot: validatedSnapshot
+        });
+
+        const periodProbe = snapshotAnswerEngine.computePeriodAnalytics({
+          snapshot: validatedSnapshot,
+          question: q,
+          timelineDateKey: timelineDate
+        });
+
+        const effectiveRange = _resolveEffectiveSnapshotRange({
+          snapshot: validatedSnapshot,
+          parsedIntent,
+          periodProbe
+        });
+
+        const snapshot = _buildSnapshotForRange({
+          snapshot: validatedSnapshot,
+          startDateKey: effectiveRange.startDateKey,
+          endDateKey: effectiveRange.endDateKey
+        });
 
         let chatHistory = await ChatHistory.findOne({
           userId: userIdStr,
@@ -1760,12 +1856,6 @@ module.exports = function createAiRouter(deps) {
         if (periodAnalytics) {
           deterministicFacts.periodAnalytics = periodAnalytics;
         }
-
-        const parsedIntent = snapshotIntentParser.parseSnapshotIntent({
-          question: q,
-          timelineDateKey: timelineDate,
-          snapshot
-        });
 
         if (parsedIntent?.type === 'CATEGORY_FACT_BY_CATEGORY') {
           const deterministic = snapshotAnswerEngine.answerFromSnapshot({
