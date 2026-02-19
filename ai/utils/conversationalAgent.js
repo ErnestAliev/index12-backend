@@ -13,7 +13,24 @@ async function dumpLlmInputSnapshot(payload) {
         const archivePath = path.join(dir, `llm-input-${stamp}.json`);
 
         await fs.mkdir(dir, { recursive: true });
-        const body = JSON.stringify(payload, null, 2);
+        const payloadObj = payload && typeof payload === 'object' ? payload : {};
+        const detFacts = payloadObj?.deterministicFacts && typeof payloadObj.deterministicFacts === 'object'
+            ? payloadObj.deterministicFacts
+            : null;
+        const resolvedHistoricalContext = payloadObj?.historicalContext
+            || detFacts?.historicalContext
+            || null;
+        const normalized = {
+            ...payloadObj,
+            historicalContext: resolvedHistoricalContext,
+            deterministicFacts: detFacts
+                ? {
+                    ...detFacts,
+                    historicalContext: detFacts?.historicalContext || resolvedHistoricalContext || null
+                }
+                : payloadObj?.deterministicFacts
+        };
+        const body = JSON.stringify(normalized, null, 2);
         await fs.writeFile(latestPath, body, 'utf8');
         await fs.writeFile(archivePath, body, 'utf8');
 

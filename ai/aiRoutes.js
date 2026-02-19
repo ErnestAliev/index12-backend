@@ -7,7 +7,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs/promises');
 
-const AIROUTES_VERSION = 'hybrid-v2.1';
+const AIROUTES_VERSION = 'hybrid-v2.2-hctx-normalize';
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -43,13 +43,35 @@ module.exports = function createAiRouter(deps) {
   const router = express.Router();
   const LLM_SNAPSHOT_DIR = path.resolve(__dirname, 'debug');
 
+  const _normalizeLlmInputSnapshot = (payload) => {
+    const payloadObj = payload && typeof payload === 'object' ? payload : {};
+    const detFacts = payloadObj?.deterministicFacts && typeof payloadObj.deterministicFacts === 'object'
+      ? payloadObj.deterministicFacts
+      : null;
+    const resolvedHistoricalContext = payloadObj?.historicalContext
+      || detFacts?.historicalContext
+      || null;
+
+    return {
+      ...payloadObj,
+      historicalContext: resolvedHistoricalContext,
+      deterministicFacts: detFacts
+        ? {
+            ...detFacts,
+            historicalContext: detFacts?.historicalContext || resolvedHistoricalContext || null
+          }
+        : payloadObj?.deterministicFacts
+    };
+  };
+
   const _dumpLlmInputSnapshot = async (payload) => {
     try {
       await fs.mkdir(LLM_SNAPSHOT_DIR, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-');
       const latestPath = path.join(LLM_SNAPSHOT_DIR, 'llm-input-latest.json');
       const archivePath = path.join(LLM_SNAPSHOT_DIR, `llm-input-${stamp}.json`);
-      const body = JSON.stringify(payload, null, 2);
+      const normalized = _normalizeLlmInputSnapshot(payload);
+      const body = JSON.stringify(normalized, null, 2);
       await fs.writeFile(latestPath, body, 'utf8');
       await fs.writeFile(archivePath, body, 'utf8');
       return { latestPath, archivePath };
@@ -2271,6 +2293,25 @@ module.exports = function createAiRouter(deps) {
         await fs.access(filePath);
       } catch (_) {
         return res.status(404).json({ error: 'Снапшот не найден. Сначала выполните запрос к агенту.' });
+      }
+
+      let normalizedBody = null;
+      try {
+        const raw = await fs.readFile(filePath, 'utf8');
+        const parsed = JSON.parse(raw);
+        const normalized = _normalizeLlmInputSnapshot(parsed);
+        normalizedBody = JSON.stringify(normalized, null, 2);
+        if (normalizedBody !== raw) {
+          await fs.writeFile(filePath, normalizedBody, 'utf8');
+        }
+      } catch (normalizeError) {
+        console.warn('[AI Snapshot] latest snapshot normalize failed:', normalizeError?.message || normalizeError);
+      }
+
+      if (normalizedBody) {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename=\"llm-input-latest.json\"');
+        return res.status(200).send(normalizedBody);
       }
 
       return res.download(filePath, 'llm-input-latest.json');
