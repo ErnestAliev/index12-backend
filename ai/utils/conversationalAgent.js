@@ -3,6 +3,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 const llmDiscriminator = require('./llmDiscriminator');
+const cfoKnowledgeBase = require('./cfoKnowledgeBase');
 
 async function dumpLlmInputSnapshot(payload) {
     try {
@@ -1480,127 +1481,87 @@ async function generateSnapshotChatResponse({
         };
     })();
 
+    const ragContext = await cfoKnowledgeBase.retrieveCfoContext({
+        question,
+        responseIntent,
+        accountContext,
+        advisoryFacts,
+        derivedSemantics,
+        scenarioCalculator,
+        limit: 5
+    });
+
+    const precomputedNumbers = {
+        today_key: String(snapshotMeta?.timelineDate || advisoryFacts?.timeline?.todayKey || ''),
+        intent: responseIntent.intent,
+        account_mode: accountContext.mode,
+        balances: {
+            open_now: toNum(accountViewContext?.liquidityView?.openNow),
+            hidden_now: toNum(accountViewContext?.performanceView?.hiddenNow),
+            total_now: toNum(accountViewContext?.performanceView?.totalNow),
+            open_end: toNum(accountViewContext?.liquidityView?.openEnd),
+            hidden_end: toNum(accountViewContext?.performanceView?.hiddenEnd),
+            total_end: toNum(accountViewContext?.performanceView?.totalEnd)
+        },
+        pnl: {
+            fact_income: toNum(advisoryFacts?.splitTotals?.fact?.income),
+            fact_expense: toNum(advisoryFacts?.splitTotals?.fact?.expense),
+            fact_net: toNum(advisoryFacts?.splitTotals?.fact?.net),
+            plan_income: toNum(advisoryFacts?.splitTotals?.plan?.income),
+            plan_expense: toNum(advisoryFacts?.splitTotals?.plan?.expense),
+            plan_net: toNum(advisoryFacts?.splitTotals?.plan?.net),
+            month_forecast_net: toNum(derivedSemantics?.monthForecastNet)
+        },
+        liquidity: {
+            next_obligation_amount: toNum(accountViewContext?.liquidityView?.nextObligationAmount),
+            next_obligation_date: String(accountViewContext?.liquidityView?.nextObligationDate || ''),
+            open_after_next_obligation: toNum(accountViewContext?.liquidityView?.openAfterNextObligation),
+            can_cover_by_open: Boolean(accountViewContext?.liquidityView?.canCoverByOpen),
+            next_expense_available_before: toNum(advisoryFacts?.nextExpenseLiquidity?.availableBeforeExpense),
+            next_expense_post_open: toNum(advisoryFacts?.nextExpenseLiquidity?.postExpenseOpen)
+        },
+        scenario: {
+            enabled: Boolean(scenarioCalculator?.enabled),
+            has_life_spend_constraint: Boolean(scenarioCalculator?.hasLifeSpendConstraint),
+            life_spend: toNum(scenarioCalculator?.lifeSpend),
+            owner_cash_hidden_net: toNum(scenarioCalculator?.ownerCashNetHidden),
+            free_capital: toNum(scenarioCalculator?.freeCapital)
+        }
+    };
+
     const systemPrompt = [
-        'Ты CFO-советник INDEX12 в стиле Ильи Балахнина: data-driven, жестко по сути, без воды.',
-        'Отвечай разговорно, но строго по цифрам и причинно-следственным связям.',
-        'ВАЖНО: ЛОГИКА СЧЕТОВ (OPEN vs HIDDEN).',
-        'Перед ответом классифицируй вопрос: "Платежеспособность" или "Результативность".',
-        'Сценарий "Платежеспособность" (Liquidity): для оплаты, долгов, налогов, кассового разрыва используй ТОЛЬКО open.',
-        'В Liquidity hidden не использовать для решения "хватит ли денег на оплату".',
-        'Пример правила: если open < обязательство, это риск кассового разрыва даже при большом hidden.',
-        'Если ACCOUNT_CONTEXT_MODE = liquidity, запрещено использовать ACCOUNT_CONTEXT_JSON.performanceView как аргумент "денег хватает".',
-        'Сценарий "Результативность" (Performance): для прибыли, маржи, оборота используй total (open + hidden).',
-        'Не используй markdown: без **жирного** и без таблиц.',
-        'Числа бери только из FACTS_JSON, ADVISORY_FACTS_JSON и SNAPSHOT_SLICE_JSON.',
-        'Запрещено придумывать суммы, даты, операции, категории.',
-        'КРИТИЧНО ПО ДАТАМ: today = SNAPSHOT_META.timelineDate.',
-        'ФАКТ = операции/показатели на датах <= today.',
-        'ПЛАН = операции/показатели на датах > today.',
-        'ПЛАН здесь означает запланированные будущие операции, а не целевой KPI.',
-        'Запрещено описывать ПЛАН как уже случившийся ФАКТ.',
-        'Если упоминаешь будущую дату, явно маркируй это как "план".',
-        'КРИТИЧНО ПО ТЕРМИНАМ:',
-        '- FACTS_JSON.plan.totals.net — это плановый результат остатка периода, а НЕ "убыток месяца".',
-        '- Финрезультат месяца = FACTS_JSON.fact.totals.net + FACTS_JSON.plan.totals.net (см. DERIVED_SEMANTICS_JSON.monthForecastNet).',
-        '- Термин "месяц убыточный" разрешен только если monthForecastNet < 0.',
-        '- Если monthForecastNet >= 0, пиши "месяц прибыльный", даже если plan.totals.net отрицательный.',
-        '- Положительный баланс на конец периода не называть убытком.',
-        '- "Сжатие ликвидности" оценивай ТОЛЬКО по траектории DERIVED_SEMANTICS_JSON.liquidityPath: остаток после дня списания -> остаток на конец месяца.',
-        '- Запрещено делать вывод о сжатии ликвидности только по разнице плановых доходов и расходов.',
-        '- Если на дне списания нет дефицита и к концу месяца есть восстановление, формулировка: "временная просадка ликвидности, к концу месяца восстановление".',
-        'Термин "кассовый разрыв" используй ТОЛЬКО если ADVISORY_FACTS_JSON.nextExpenseLiquidity.hasCashGap = true.',
-        'Если hasCashGap = false и остаток после списания положительный, пиши: "сжатие ликвидности", а не "разрыв".',
-        'Для вопроса "хватит ли на оплату в дату X":',
-        '- Доступно на дату оплаты = ADVISORY_FACTS_JSON.nextExpenseLiquidity.availableBeforeExpense.',
-        '- Остаток сразу после оплаты = ADVISORY_FACTS_JSON.nextExpenseLiquidity.postExpenseOpen.',
-        '- ЗАПРЕЩЕНО подставлять FACTS_JSON.plan.toEndBalances.open как остаток на дату оплаты.',
-        'Текущие балансы бери из FACTS_JSON.fact.balances и ADVISORY_FACTS_JSON.balancePointers.currentDay.',
-        'Будущие/конечные балансы бери из FACTS_JSON.plan.toEndBalances и ADVISORY_FACTS_JSON.balancePointers.endDay.',
-        'Режим вопроса бери из ACCOUNT_CONTEXT_JSON.resolvedMode и источников ACCOUNT_CONTEXT_JSON.liquidityView/performanceView.',
-        'Формат денег строго: "1 554 388 т" (пробелы в разрядах, суффикс "т").',
-        'Запрещенные термины в answer_text: "Owner Cash View", "net-flow", "sourceRule", "SCENARIO_CALC_JSON".',
-        'ФОРМАТ ОТВЕТА ВЫБИРАЙ ПО RESPONSE_INTENT (из user prompt):',
-        'INTENT=FACT: короткий ответ по сути, без длинных блоков.',
-        'Если QUESTION_FLAGS_JSON.isDirectConditionalAmount=true, ответ должен быть ОДНИМ предложением с итоговой суммой.',
-        'Для isDirectConditionalAmount=true запрещено показывать формулы, шаги расчета, внутренние контуры и сценарии.',
-        'Пояснения к расчету давай только если QUESTION_FLAGS_JSON.asksHowCalculated=true.',
-        'Шаблон FACT:',
-        'Ответ: [точная цифра/факт, 1 строка].',
-        'Контекст и вывод добавляй только если пользователь прямо запросил детализацию.',
-        'Для FACT не задавай уточняющие вопросы, если ответ уже есть в данных.',
-        'INTENT=STATUS: используй структурный формат сводки.',
-        'Шаблон STATUS:',
-        'Финансовая сводка на [дата today]',
-        'Главный итог',
-        '[1-2 строки с ключевым выводом и цифрой результата]',
-        'Ликвидность (Операционные деньги)',
-        '- Открытый баланс (текущий): [число]',
-        '- Предстоящий расход: [дата, сумма, категория] (если нет — "Нет плановых списаний")',
-        '- Прогноз остатка после выплаты: [число]',
-        '- Вердикт: [кассовый разрыв / разрыва нет / временная просадка с восстановлением]',
-        'Эффективность бизнеса (P&L)',
-        '- Доходы (факт): [число]',
-        '- Расходы (факт): [число]',
-        '- Чистая прибыль (текущая): [число]',
-        '- Общий капитал: [число] (из них резервы: [число])',
-        'Ключевые события',
-        '- Пик расходов (факт): [дата, сумма, категория]',
-        '- План до конца месяца: доходы [число], расходы [число], нетто [число]',
-        '- Аномалии: [по категориям или "не обнаружены"]',
-        'INTENT=ADVISORY: дай CFO-консультацию, а не список всех цифр.',
-        'Шаблон ADVISORY:',
-        'Диагноз',
-        '[что реально происходит на языке управления финансами]',
-        'Что это значит для решения',
-        '[риски/возможности и их эффект]',
-        'Что сделать сейчас (1-3 шага)',
-        '[конкретные действия]',
-        'Что уточнить (максимум 2 вопроса, только если реально не хватает данных).',
-        'Если данных хватает — блок "Что уточнить" не добавляй.',
-        'Для STATUS запрещен сплошной абзац. Для FACT запрещена длинная простыня.',
-        'SCENARIO CALCULATOR (обязательно для вопросов про инвестиции/ремонт/изъятие на жизнь):',
-        '- Если SCENARIO_CALC_JSON.hasLifeSpendConstraint=true, обязательно учитывай это как условие пользователя.',
-        '- Режим Owner Cash View: для "жили-были/на жизнь" источник по умолчанию = hidden.',
-        '- Формула инвестиционного ядра: freeCapital = ownerCashNetHidden - lifeSpend.',
-        '- Если freeCapital < 0, использовать 0 и явно написать, что свободного капитала из прибыли нет.',
-        '- Не игнорируй ввод "на жизнь/жили-были/забираем X".',
-        '- Для обычного вопроса "сколько можем инвестировать" дай только итоговую сумму freeCapital.',
-        '- Сценарии 10%/20%/50% показывай ТОЛЬКО если QUESTION_FLAGS_JSON.asksStrategyDistribution=true.',
-        '- Запрещено советовать трансфер hidden -> open для личных трат пользователя.',
-        '- Трансфер допустим только при критическом кассовом разрыве бизнеса по обязательствам (liquidity mode + criticalOpenCashGap=true).',
-        '- Если SCENARIO_CALC_JSON.hasLifeSpendConstraint=true, обязательно заполняй audit.figures.life_spend и audit.figures.free_capital.',
-        'ФИНАЛЬНЫЙ ОТВЕТ ВЕРНИ СТРОГО В JSON (БЕЗ ТЕКСТА ВНЕ JSON):',
-        '{',
-        '  "answer_text": "готовый ответ для пользователя",',
-        '  "audit": {',
-        '    "mode": "liquidity|performance|mixed",',
-        '    "figures": {',
-        '      "open_now": number|null,',
-        '      "next_obligation_amount": number|null,',
-        '      "open_after_next_obligation": number|null,',
-        '      "life_spend": number|null,',
-        '      "free_capital": number|null,',
-        '      "owner_cash_hidden_net": number|null',
-        '    },',
-        '    "verdicts": {',
-        '      "can_cover_next_obligation": boolean|null,',
-        '      "cash_gap": boolean|null,',
-        '      "month_profitable": boolean|null',
-        '    },',
-        '    "uses_hidden_for_liquidity": boolean',
-        '  }',
-        '}'
+        'Ты CFO-советник INDEX12 в стиле Ильи Балахнина: жестко по сути, без воды.',
+        'Твоя роль: интерпретировать готовые расчеты, а не считать формулы.',
+        'Числа берешь только из PRECALC_NUMBERS_JSON / FACTS_JSON / ADVISORY_FACTS_JSON.',
+        'Если нужного числа нет в этих блоках — скажи, что не хватает данных.',
+        'Не придумывай новые суммы, даты, операции, категории.',
+        'Денежные суммы пиши в формате "1 554 388 т".',
+        'Разделяй факт и план: FACT = даты <= TODAY_KEY, PLAN = даты > TODAY_KEY.',
+        'Ликвидность и платежеспособность оценивай только по open.',
+        'Прибыльность и эффективность оценивай по total (open + hidden).',
+        'Используй CONTEXTUAL_ADVICE_JSON как базу бизнес-рекомендаций.',
+        'Не выводи технические служебные термины и внутренние названия переменных.',
+        'Если вопрос короткий и точечный — ответ 1-2 предложения, первая строка сразу с числом.',
+        'Если вопрос общий (как дела/в целом) — структурируй ответ блоками: Главный итог, Ликвидность, Риски/фокус.',
+        'Если в вопросе есть условие (например, "при условии ... 12 млн"), сначала дай итоговую сумму одним предложением.',
+        'Пояснение и сценарии давай только если пользователь прямо запросил детали/стратегии.'
     ].join(' ');
 
     const userContent = [
         `Вопрос пользователя: ${String(question || '').trim()}`,
         `QUESTION_PROFILE: ${questionProfile}`,
         `RESPONSE_INTENT: ${responseIntent.intent}`,
-        `RESPONSE_INTENT_REASON: ${responseIntent.reason}`,
         `ACCOUNT_CONTEXT_MODE: ${accountContext.mode}`,
         `TODAY_KEY: ${String(snapshotMeta?.timelineDate || '')}`,
+        '',
         'QUESTION_FLAGS_JSON:',
         JSON.stringify(questionFlags || {}, null, 2),
+        '',
+        'PRECALC_NUMBERS_JSON:',
+        JSON.stringify(precomputedNumbers || {}, null, 2),
+        '',
+        'CONTEXTUAL_ADVICE_JSON:',
+        JSON.stringify(ragContext || {}, null, 2),
         '',
         'FACTS_JSON:',
         JSON.stringify(deterministicFacts || {}, null, 2),
@@ -1617,32 +1578,11 @@ async function generateSnapshotChatResponse({
         'SCENARIO_CALC_JSON:',
         JSON.stringify(scenarioCalculator || {}, null, 2),
         '',
-        'ACCOUNT_CONTEXT_JSON:',
-        JSON.stringify(accountViewContext || {}, null, 2),
-        '',
-        'КАРТА ПОЛЕЙ ДЛЯ ОТВЕТА:',
-        '- Факт итоги: FACTS_JSON.fact.totals',
-        '- План итоги до конца периода: FACTS_JSON.plan.totals',
-        '- Текущий баланс (на today): FACTS_JSON.fact.balances или ADVISORY_FACTS_JSON.balancePointers.currentDay',
-        '- Баланс на конец периода: FACTS_JSON.plan.toEndBalances или ADVISORY_FACTS_JSON.balancePointers.endDay',
-        '- Ближайшее плановое списание: FACTS_JSON.plan.nextObligation или ADVISORY_FACTS_JSON.nextExpenseAfterTimeline',
-        '- Проверка кассового разрыва на ближайшее списание: ADVISORY_FACTS_JSON.nextExpenseLiquidity',
-        '- Доступно на дату оплаты: ADVISORY_FACTS_JSON.nextExpenseLiquidity.availableBeforeExpense',
-        '- Остаток сразу после оплаты: ADVISORY_FACTS_JSON.nextExpenseLiquidity.postExpenseOpen',
-        '- Корректная формулировка прибыли/убытка месяца: DERIVED_SEMANTICS_JSON.monthForecastNet и DERIVED_SEMANTICS_JSON.monthIsProfitable',
-        '- Корректная формулировка ликвидности: DERIVED_SEMANTICS_JSON.liquidityPath',
-        '- Для оплаты/кассового разрыва: ACCOUNT_CONTEXT_JSON.liquidityView (open-only)',
-        '- Для прибыли/оборота/эффективности: ACCOUNT_CONTEXT_JSON.performanceView (total)',
-        '- Для личных трат/жили-были: OWNER_CASH_JSON.hidden.period + SCENARIO_CALC_JSON (Owner Cash View, hidden-first)',
-        '',
         'SNAPSHOT_META:',
         JSON.stringify(snapshotMeta || {}, null, 2),
         '',
         'SNAPSHOT_SLICE_JSON:',
-        JSON.stringify(snapshotSlice || {}, null, 2),
-        '',
-        'Сформируй ответ по шаблону для RESPONSE_INTENT.',
-        'Верни только JSON по контракту из system prompt.'
+        JSON.stringify(snapshotSlice || {}, null, 2)
     ].join('\n');
 
     try {
@@ -1726,7 +1666,7 @@ async function generateSnapshotChatResponse({
                 model,
                 messages,
                 temperature: 0.2,
-                max_tokens: 900
+                max_tokens: 700
             };
 
             const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -1764,70 +1704,42 @@ async function generateSnapshotChatResponse({
         };
 
         lastCall = await callLlm(baseMessages, 'initial');
-        let parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
-        let structured = parsed.ok ? parsed.data : null;
+        let answerText = normalizeCfoOutput(lastCall.text);
 
-        if (!parsed.ok) {
-            const repairPrompt = llmDiscriminator.buildRepairInstruction({
-                parseError: parsed.error,
-                accountContextMode: accountContext?.mode || ''
-            });
-            lastCall = await callLlm([
-                ...baseMessages,
-                { role: 'assistant', content: lastCall.text },
-                { role: 'user', content: repairPrompt }
-            ], 'repair_parse');
-            parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
-            structured = parsed.ok ? parsed.data : null;
-        }
-
-        if (!parsed.ok || !structured) {
-            const fallback = await buildScenarioFallbackResult({
-                reason: `QUALITY_GATE_PARSE_FAILED:${parsed?.error || 'invalid_json_contract'}`
-            });
-            if (fallback) return fallback;
-            throw new Error(`QUALITY_GATE_PARSE_FAILED:${parsed?.error || 'invalid_json_contract'}`);
-        }
-
-        let audit = llmDiscriminator.auditStructuredCfoResponse({
-            structured,
+        let audit = llmDiscriminator.auditCfoTextResponse({
+            answerText,
             accountContext,
             accountViewContext,
             advisoryFacts,
             derivedSemantics,
-            scenarioCalculator
+            scenarioCalculator,
+            responseIntent,
+            questionFlags
         });
 
         if (!audit.ok) {
             const repairPrompt = llmDiscriminator.buildRepairInstruction({
                 auditErrors: audit.errors,
                 expected: audit.expected,
-                accountContextMode: accountContext?.mode || ''
+                accountContextMode: accountContext?.mode || '',
+                responseIntent: responseIntent?.intent || ''
             });
             lastCall = await callLlm([
                 ...baseMessages,
-                { role: 'assistant', content: JSON.stringify(structured, null, 2) },
+                { role: 'assistant', content: lastCall.text },
                 { role: 'user', content: repairPrompt }
-            ], 'repair_audit');
+            ], 'repair_math');
+            answerText = normalizeCfoOutput(lastCall.text);
 
-            parsed = llmDiscriminator.parseStructuredLlmOutput(lastCall.text);
-            if (!parsed.ok || !parsed.data) {
-                const fallback = await buildScenarioFallbackResult({
-                    reason: `QUALITY_GATE_PARSE_FAILED_AFTER_REPAIR:${parsed?.error || 'invalid_json_contract'}`,
-                    audit
-                });
-                if (fallback) return fallback;
-                throw new Error(`QUALITY_GATE_PARSE_FAILED_AFTER_REPAIR:${parsed?.error || 'invalid_json_contract'}`);
-            }
-            structured = parsed.data;
-
-            audit = llmDiscriminator.auditStructuredCfoResponse({
-                structured,
+            audit = llmDiscriminator.auditCfoTextResponse({
+                answerText,
                 accountContext,
                 accountViewContext,
                 advisoryFacts,
                 derivedSemantics,
-                scenarioCalculator
+                scenarioCalculator,
+                responseIntent,
+                questionFlags
             });
         }
 
@@ -1840,7 +1752,6 @@ async function generateSnapshotChatResponse({
             throw new Error(`QUALITY_GATE_FAILED:${audit.errors.join('|')}`);
         }
 
-        const answerText = normalizeCfoOutput(structured?.answer_text || '');
         if (!answerText) {
             const fallback = await buildScenarioFallbackResult({
                 reason: 'QUALITY_GATE_FAILED:answer_text_empty_after_validation',
@@ -1865,6 +1776,8 @@ async function generateSnapshotChatResponse({
             ownerCashContext,
             accountViewContext,
             accountContext,
+            ragContext,
+            precomputedNumbers,
             snapshotSlice,
             questionProfile,
             responseIntent,
