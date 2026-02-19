@@ -61,8 +61,12 @@ const buildExpected = ({
   questionFlags
 }) => {
   const hasLedgerOperations = Array.isArray(deterministicFacts?.operations) && deterministicFacts.operations.length > 0;
+  const periodAnalytics = deterministicFacts?.periodAnalytics || null;
+  const hasPeriodAnalyticsTotals = toNum(periodAnalytics?.totals?.income) > 0
+    || toNum(periodAnalytics?.totals?.expense) > 0
+    || toNum(periodAnalytics?.totals?.net) !== 0;
   const isPeriodAnalyticsQuestion = Boolean(questionFlags?.asksPeriodAnalytics);
-  const periodAnalyticsMode = hasLedgerOperations && isPeriodAnalyticsQuestion;
+  const periodAnalyticsMode = (hasLedgerOperations || hasPeriodAnalyticsTotals) && isPeriodAnalyticsQuestion;
 
   const expected = {
     mode: String(accountContext?.mode || ''),
@@ -100,6 +104,9 @@ const buildExpected = ({
   };
   pushAnomalyNumbers(deterministicFacts?.anomalies);
   pushAnomalyNumbers(advisoryFacts?.anomalies);
+  const periodTopOperationAmounts = (Array.isArray(periodAnalytics?.topOperations) ? periodAnalytics.topOperations : [])
+    .map((op) => toNum(op?.amount))
+    .filter((n) => n > 0);
 
   const allowedNumbers = uniqueRounded([
     expected.open_now,
@@ -128,6 +135,10 @@ const buildExpected = ({
     toNum(advisoryFacts?.endBalances?.open),
     toNum(advisoryFacts?.endBalances?.hidden),
     toNum(advisoryFacts?.endBalances?.total),
+    toNum(periodAnalytics?.totals?.income),
+    toNum(periodAnalytics?.totals?.expense),
+    toNum(periodAnalytics?.totals?.net),
+    ...periodTopOperationAmounts,
     ...anomalyNumbers,
     0
   ]);
@@ -147,6 +158,17 @@ const buildExpected = ({
     && expected.responseIntent !== 'status'
   ) {
     required.push({ name: 'next_obligation_or_open_after', value: [expected.next_obligation_amount, expected.open_after_next_obligation] });
+  }
+
+  if (expected.period_analytics_mode && hasPeriodAnalyticsTotals) {
+    required.push({
+      name: 'period_totals_any',
+      value: [
+        toNum(periodAnalytics?.totals?.income),
+        toNum(periodAnalytics?.totals?.expense),
+        toNum(periodAnalytics?.totals?.net)
+      ].filter((n) => Number.isFinite(n))
+    });
   }
 
   return { expected, allowedNumbers, required };
@@ -224,13 +246,11 @@ function auditCfoTextResponse({
     }
   });
 
-  if (!expected.period_analytics_mode) {
-    observedMoney.forEach((item) => {
-      if (!containsAllowed(item.value, allowedNumbers)) {
-        errors.push(`number_mismatch:unexpected_money_value:${Math.round(item.value)}`);
-      }
-    });
-  }
+  observedMoney.forEach((item) => {
+    if (!containsAllowed(item.value, allowedNumbers)) {
+      errors.push(`number_mismatch:unexpected_money_value:${Math.round(item.value)}`);
+    }
+  });
 
   if (observedMoney.length === 0 && expected.responseIntent !== 'advisory') {
     warnings.push('no_money_numbers_detected');

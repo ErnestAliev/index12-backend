@@ -1752,6 +1752,14 @@ module.exports = function createAiRouter(deps) {
           snapshot,
           timelineDateKey: timelineDate,
         });
+        const periodAnalytics = snapshotAnswerEngine.computePeriodAnalytics({
+          snapshot,
+          question: q,
+          timelineDateKey: timelineDate
+        });
+        if (periodAnalytics) {
+          deterministicFacts.periodAnalytics = periodAnalytics;
+        }
 
         const parsedIntent = snapshotIntentParser.parseSnapshotIntent({
           question: q,
@@ -1779,6 +1787,7 @@ module.exports = function createAiRouter(deps) {
             timelineDate,
             parsedIntent,
             deterministicFacts,
+            periodAnalytics,
             deterministicResult: {
               ok: deterministic?.ok === true,
               text: deterministic?.text || '',
@@ -1795,6 +1804,7 @@ module.exports = function createAiRouter(deps) {
               responseMode,
               intent: parsedIntent,
               deterministicFacts,
+              periodAnalytics,
               deterministicMeta: deterministic?.meta || null
             }
           });
@@ -1808,6 +1818,7 @@ module.exports = function createAiRouter(deps) {
                 responseMode,
                 parsedIntent,
                 deterministicFacts,
+                periodAnalytics,
                 deterministicMeta: deterministic?.meta || null,
                 historyLength: chatHistory.messages.length,
                 llmInputSnapshot
@@ -1821,6 +1832,7 @@ module.exports = function createAiRouter(deps) {
           history: chatHistory.messages.slice(0, -1),
           snapshot,
           deterministicFacts,
+          periodAnalytics,
           snapshotMeta: {
             range: snapshot.range,
             visibilityMode: snapshot.visibilityMode,
@@ -1904,6 +1916,7 @@ module.exports = function createAiRouter(deps) {
           source,
           timelineDate,
           deterministicFacts,
+          periodAnalytics,
           llm: llmResult ? {
             ok: llmResult.ok,
             text: llmResult.text,
@@ -1930,6 +1943,7 @@ module.exports = function createAiRouter(deps) {
           metadata: {
             responseMode,
             deterministicFacts,
+            periodAnalytics,
             qualityGate,
             discriminatorLog,
             llm: llmResult?.debug || null
@@ -1945,6 +1959,7 @@ module.exports = function createAiRouter(deps) {
             debug: {
               timelineDate,
               deterministicFacts,
+              periodAnalytics,
               qualityGate,
               discriminatorLog,
               llm: llmResult?.debug || null,

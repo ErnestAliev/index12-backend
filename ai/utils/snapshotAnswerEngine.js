@@ -19,6 +19,20 @@ const MONTHS_RU_SHORT = [
 ];
 
 const WEEKDAYS_RU_SHORT = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+const MONTHS_RU_PARSE = [
+  { month: 1, re: /январ/i },
+  { month: 2, re: /феврал/i },
+  { month: 3, re: /март/i },
+  { month: 4, re: /апрел/i },
+  { month: 5, re: /ма[йя]/i },
+  { month: 6, re: /июн/i },
+  { month: 7, re: /июл/i },
+  { month: 8, re: /август/i },
+  { month: 9, re: /сентябр/i },
+  { month: 10, re: /октябр/i },
+  { month: 11, re: /ноябр/i },
+  { month: 12, re: /декабр/i }
+];
 
 const toNum = (value) => {
   const n = Number(value);
@@ -146,6 +160,187 @@ const dateKeyFromDate = (date) => {
   const m = String(date.getMonth() + 1).padStart(2, '0');
   const d = String(date.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+};
+
+const normalizeQuestionForNlp = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/ё/g, 'е')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const addDaysToDateKey = (dateKey, deltaDays) => {
+  const date = dateFromKey(dateKey);
+  if (!date) return '';
+  date.setDate(date.getDate() + Number(deltaDays || 0));
+  return dateKeyFromDate(date);
+};
+
+const parseDmyToDateKey = ({ day, month, year, fallbackYear }) => {
+  const d = Number(day);
+  const m = Number(month);
+  const yRaw = Number(year);
+  const y = Number.isFinite(yRaw)
+    ? (String(year).length === 2 ? (yRaw >= 70 ? 1900 + yRaw : 2000 + yRaw) : yRaw)
+    : Number(fallbackYear);
+  if (!Number.isFinite(d) || !Number.isFinite(m) || !Number.isFinite(y)) return '';
+  if (d < 1 || d > 31 || m < 1 || m > 12) return '';
+
+  const dt = new Date(y, m - 1, d, 12, 0, 0, 0);
+  if (Number.isNaN(dt.getTime())) return '';
+  if (dt.getFullYear() !== y || dt.getMonth() !== (m - 1) || dt.getDate() !== d) return '';
+  return dateKeyFromDate(dt);
+};
+
+const resolveTimelineDateKeySafe = ({ timelineDateKey, snapshot }) => {
+  if (DATE_KEY_RE.test(String(timelineDateKey || ''))) return String(timelineDateKey);
+  const endKey = String(snapshot?.range?.endDateKey || '');
+  if (DATE_KEY_RE.test(endKey)) return endKey;
+  const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+  const lastDayKey = String(days[days.length - 1]?.dateKey || '');
+  if (DATE_KEY_RE.test(lastDayKey)) return lastDayKey;
+  return '';
+};
+
+const clampDateKeyRangeToSnapshot = ({ snapshot, startDateKey, endDateKey }) => {
+  if (!DATE_KEY_RE.test(String(startDateKey || '')) || !DATE_KEY_RE.test(String(endDateKey || ''))) return null;
+
+  const snapStart = String(snapshot?.range?.startDateKey || '');
+  const snapEnd = String(snapshot?.range?.endDateKey || '');
+  if (!DATE_KEY_RE.test(snapStart) || !DATE_KEY_RE.test(snapEnd)) return null;
+
+  const clampedStart = startDateKey < snapStart ? snapStart : startDateKey;
+  const clampedEnd = endDateKey > snapEnd ? snapEnd : endDateKey;
+  if (clampedStart > clampedEnd) return null;
+
+  return {
+    startDateKey: clampedStart,
+    endDateKey: clampedEnd,
+    wasClamped: clampedStart !== startDateKey || clampedEnd !== endDateKey
+  };
+};
+
+const resolveMonthFromQuestion = (normText) => {
+  const text = String(normText || '');
+  for (const item of MONTHS_RU_PARSE) {
+    if (item.re.test(text)) return Number(item.month);
+  }
+  return null;
+};
+
+const resolveWeekOrderFromQuestion = (normText) => {
+  const text = String(normText || '');
+  if (/(первая|первую|1-?я|1-я)/i.test(text)) return 1;
+  if (/(вторая|вторую|2-?я|2-я)/i.test(text)) return 2;
+  if (/(третья|третью|3-?я|3-я)/i.test(text)) return 3;
+  if (/(четвертая|четвертую|4-?я|4-я)/i.test(text)) return 4;
+  if (/(пятая|пятую|5-?я|5-я)/i.test(text)) return 5;
+  return null;
+};
+
+const resolveNthWeekRangeInMonth = ({ year, month, weekOrder }) => {
+  const y = Number(year);
+  const m = Number(month);
+  const n = Number(weekOrder);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(n) || n < 1) return null;
+
+  const monthStart = new Date(y, m - 1, 1, 12, 0, 0, 0);
+  const monthEnd = new Date(y, m, 0, 12, 0, 0, 0);
+  if (Number.isNaN(monthStart.getTime()) || Number.isNaN(monthEnd.getTime())) return null;
+
+  const firstMonday = new Date(monthStart);
+  const dayOfWeek = firstMonday.getDay(); // 0 sunday ... 6 saturday
+  const shiftToMonday = dayOfWeek === 0 ? 1 : (dayOfWeek === 1 ? 0 : (8 - dayOfWeek));
+  firstMonday.setDate(firstMonday.getDate() + shiftToMonday);
+
+  const start = new Date(firstMonday);
+  start.setDate(start.getDate() + ((n - 1) * 7));
+  if (start.getTime() > monthEnd.getTime()) return null;
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 6);
+
+  return {
+    startDateKey: dateKeyFromDate(start),
+    endDateKey: dateKeyFromDate(end),
+    source: `nth_week_${n}_month`
+  };
+};
+
+const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
+  const norm = normalizeQuestionForNlp(question);
+  if (!norm) return null;
+
+  const baseKey = resolveTimelineDateKeySafe({ timelineDateKey, snapshot });
+  const baseDate = dateFromKey(baseKey) || new Date();
+  const baseYear = baseDate.getFullYear();
+  const baseMonth = baseDate.getMonth() + 1;
+
+  const isoRangeMatch = norm.match(/с\s*(20\d{2}-\d{2}-\d{2})\s*по\s*(20\d{2}-\d{2}-\d{2})/i);
+  if (isoRangeMatch) {
+    const startDateKey = String(isoRangeMatch[1]);
+    const endDateKey = String(isoRangeMatch[2]);
+    if (DATE_KEY_RE.test(startDateKey) && DATE_KEY_RE.test(endDateKey) && startDateKey <= endDateKey) {
+      return { startDateKey, endDateKey, source: 'explicit_iso_range' };
+    }
+  }
+
+  const dmyRangeMatch = norm.match(/с\s*(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\s*по\s*(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?/i);
+  if (dmyRangeMatch) {
+    const leftYear = dmyRangeMatch[3] || baseYear;
+    const rightYear = dmyRangeMatch[6] || leftYear;
+    const startDateKey = parseDmyToDateKey({
+      day: dmyRangeMatch[1],
+      month: dmyRangeMatch[2],
+      year: leftYear,
+      fallbackYear: baseYear
+    });
+    const endDateKey = parseDmyToDateKey({
+      day: dmyRangeMatch[4],
+      month: dmyRangeMatch[5],
+      year: rightYear,
+      fallbackYear: baseYear
+    });
+    if (DATE_KEY_RE.test(startDateKey) && DATE_KEY_RE.test(endDateKey) && startDateKey <= endDateKey) {
+      return { startDateKey, endDateKey, source: 'explicit_dmy_range' };
+    }
+  }
+
+  if (/позавчера/i.test(norm)) {
+    const key = addDaysToDateKey(baseKey, -2);
+    if (DATE_KEY_RE.test(key)) return { startDateKey: key, endDateKey: key, source: 'day_before_yesterday' };
+  }
+
+  if (/вчера/i.test(norm)) {
+    const key = addDaysToDateKey(baseKey, -1);
+    if (DATE_KEY_RE.test(key)) return { startDateKey: key, endDateKey: key, source: 'yesterday' };
+  }
+
+  if (/прошл(ый|ого)\s+месяц/i.test(norm)) {
+    const prevMonthDate = new Date(baseYear, baseMonth - 2, 1, 12, 0, 0, 0);
+    const y = prevMonthDate.getFullYear();
+    const m = prevMonthDate.getMonth() + 1;
+    return {
+      startDateKey: startOfMonthDateKey(y, m),
+      endDateKey: endOfMonthDateKey(y, m),
+      source: 'previous_month'
+    };
+  }
+
+  const weekOrder = resolveWeekOrderFromQuestion(norm);
+  const asksWeek = /недел/i.test(norm);
+  if (asksWeek && Number.isFinite(Number(weekOrder))) {
+    const month = resolveMonthFromQuestion(norm) || baseMonth;
+    const yearMatch = norm.match(/\b(20\d{2})\b/);
+    const year = yearMatch ? Number(yearMatch[1]) : baseYear;
+    const weekRange = resolveNthWeekRangeInMonth({
+      year,
+      month,
+      weekOrder
+    });
+    if (weekRange) return weekRange;
+  }
+
+  return null;
 };
 
 const toRuDateLabel = (dateKey) => {
@@ -897,10 +1092,20 @@ const accumulateCategoryFlows = (snapshot) => {
 };
 
 const LEDGER_OPERATIONS_LIMIT = 120;
+const PERIOD_TOP_OPERATIONS_LIMIT = 10;
 
-const buildLedgerOperations = ({ snapshot, limit = LEDGER_OPERATIONS_LIMIT }) => {
+const buildLedgerOperations = ({
+  snapshot,
+  limit = LEDGER_OPERATIONS_LIMIT,
+  startDateKey = null,
+  endDateKey = null,
+  sortByAmountDesc = false,
+  enforceMinLimit = true
+}) => {
   const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
   const rows = [];
+  const hasStartFilter = DATE_KEY_RE.test(String(startDateKey || ''));
+  const hasEndFilter = DATE_KEY_RE.test(String(endDateKey || ''));
 
   const pushRow = (row) => {
     if (!row) return;
@@ -920,6 +1125,8 @@ const buildLedgerOperations = ({ snapshot, limit = LEDGER_OPERATIONS_LIMIT }) =>
   days.forEach((day) => {
     const date = String(day?.dateKey || '');
     if (!DATE_KEY_RE.test(date)) return;
+    if (hasStartFilter && date < startDateKey) return;
+    if (hasEndFilter && date > endDateKey) return;
 
     normalizeList(day?.lists?.income).forEach((item) => {
       pushRow({
@@ -968,7 +1175,21 @@ const buildLedgerOperations = ({ snapshot, limit = LEDGER_OPERATIONS_LIMIT }) =>
     });
   });
 
-  const safeLimit = Math.max(50, Number(limit || LEDGER_OPERATIONS_LIMIT));
+  if (sortByAmountDesc) {
+    rows.sort((a, b) => {
+      const diff = toNum(b?.amount) - toNum(a?.amount);
+      if (diff !== 0) return diff;
+      return String(a?.date || '').localeCompare(String(b?.date || ''));
+    });
+  }
+
+  const numericLimit = Number(limit);
+  const fallbackLimit = enforceMinLimit
+    ? Math.max(50, Number(LEDGER_OPERATIONS_LIMIT || 120))
+    : rows.length;
+  const safeLimit = Number.isFinite(numericLimit) && numericLimit > 0
+    ? (enforceMinLimit ? Math.max(50, numericLimit) : Math.max(1, numericLimit))
+    : fallbackLimit;
   const operations = rows.slice(0, safeLimit);
 
   return {
@@ -978,6 +1199,66 @@ const buildLedgerOperations = ({ snapshot, limit = LEDGER_OPERATIONS_LIMIT }) =>
       includedCount: operations.length,
       truncated: rows.length > operations.length,
       limit: safeLimit
+    }
+  };
+};
+
+const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit = PERIOD_TOP_OPERATIONS_LIMIT }) => {
+  const resolvedPeriod = resolvePeriodFromQuestion({
+    question,
+    timelineDateKey,
+    snapshot
+  });
+  if (!resolvedPeriod) return null;
+
+  const clampedRange = clampDateKeyRangeToSnapshot({
+    snapshot,
+    startDateKey: resolvedPeriod.startDateKey,
+    endDateKey: resolvedPeriod.endDateKey
+  });
+  if (!clampedRange) return null;
+
+  const periodDays = normalizeList(snapshot?.days).filter((day) => {
+    const date = String(day?.dateKey || '');
+    return DATE_KEY_RE.test(date)
+      && date >= clampedRange.startDateKey
+      && date <= clampedRange.endDateKey;
+  });
+  if (!periodDays.length) return null;
+
+  const totals = periodDays.reduce((acc, day) => {
+    acc.income += toNum(day?.totals?.income);
+    acc.expense += toNum(day?.totals?.expense);
+    return acc;
+  }, { income: 0, expense: 0 });
+  totals.net = totals.income - totals.expense;
+
+  const topLimitSafe = Math.max(5, Math.min(10, Number(topLimit || PERIOD_TOP_OPERATIONS_LIMIT)));
+  const top = buildLedgerOperations({
+    snapshot,
+    startDateKey: clampedRange.startDateKey,
+    endDateKey: clampedRange.endDateKey,
+    limit: topLimitSafe,
+    sortByAmountDesc: true,
+    enforceMinLimit: false
+  });
+
+  return {
+    label: `${toRuDateShort(clampedRange.startDateKey)} - ${toRuDateShort(clampedRange.endDateKey)}`,
+    startDateKey: clampedRange.startDateKey,
+    endDateKey: clampedRange.endDateKey,
+    totals,
+    topOperations: top.operations,
+    operationsMeta: {
+      totalCount: top.operationsMeta.totalCount,
+      topIncludedCount: top.operations.length,
+      topLimit: topLimitSafe,
+      source: resolvedPeriod.source,
+      requestedRange: {
+        startDateKey: resolvedPeriod.startDateKey,
+        endDateKey: resolvedPeriod.endDateKey
+      },
+      wasClampedToSnapshot: clampedRange.wasClamped
     }
   };
 };
@@ -1327,6 +1608,7 @@ module.exports = {
   validateTooltipSnapshot,
   answerFromSnapshot,
   computeDeterministicFacts,
+  computePeriodAnalytics,
   buildDeterministicInsightsBlock,
   toRuDateLabel,
   fmtT,

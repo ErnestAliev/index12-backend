@@ -1232,6 +1232,7 @@ async function generateSnapshotChatResponse({
     history = [],
     snapshot,
     deterministicFacts = null,
+    periodAnalytics = null,
     snapshotMeta = null
 }) {
     const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -1255,6 +1256,7 @@ async function generateSnapshotChatResponse({
     const questionProfile = detectQuestionProfile(question);
     const responseIntent = detectResponseIntent(question, questionFlags);
     const accountContext = detectAccountContextMode(question);
+    const effectivePeriodAnalytics = periodAnalytics || deterministicFacts?.periodAnalytics || null;
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
         deterministicFacts,
@@ -1528,6 +1530,13 @@ async function generateSnapshotChatResponse({
             life_spend: toNum(scenarioCalculator?.lifeSpend),
             owner_cash_hidden_net: toNum(scenarioCalculator?.ownerCashNetHidden),
             free_capital: toNum(scenarioCalculator?.freeCapital)
+        },
+        period_analytics: {
+            has_period_analytics: Boolean(effectivePeriodAnalytics),
+            period_label: String(effectivePeriodAnalytics?.label || ''),
+            income: toNum(effectivePeriodAnalytics?.totals?.income),
+            expense: toNum(effectivePeriodAnalytics?.totals?.expense),
+            net: toNum(effectivePeriodAnalytics?.totals?.net)
         }
     };
 
@@ -1538,8 +1547,9 @@ async function generateSnapshotChatResponse({
         'Если нужного числа нет в этих блоках — скажи, что не хватает данных.',
         'Не придумывай новые суммы, даты, операции, категории.',
         'Денежные суммы пиши в формате "1 554 388 т".',
-        'Если пользователь просит аналитику по подпериоду (например, "первая неделя"), а totals относятся ко всему месяцу, игнорируй totals для подпериода.',
-        'Для подпериода фильтруй FACTS_JSON.operations по датам запроса, пересчитывай итоги сам и показывай ключевых контрагентов и статьи расходов этого подпериода.',
+        'Для итогов по периоду используй ТОЛЬКО PERIOD_ANALYTICS_JSON.totals.',
+        'Массив PERIOD_ANALYTICS_JSON.topOperations используй ТОЛЬКО для контекста: контрагенты, категории, счета.',
+        'Никогда не суммируй PERIOD_ANALYTICS_JSON.topOperations или FACTS_JSON.operations самостоятельно.',
         'Разделяй факт и план: FACT = даты <= TODAY_KEY, PLAN = даты > TODAY_KEY.',
         'Ликвидность и платежеспособность оценивай только по open.',
         'Прибыльность и эффективность оценивай по total (open + hidden).',
@@ -1563,6 +1573,9 @@ async function generateSnapshotChatResponse({
         '',
         'PRECALC_NUMBERS_JSON:',
         JSON.stringify(precomputedNumbers || {}, null, 2),
+        '',
+        'PERIOD_ANALYTICS_JSON:',
+        JSON.stringify(effectivePeriodAnalytics || null, null, 2),
         '',
         'CONTEXTUAL_ADVICE_JSON:',
         JSON.stringify(ragContext || {}, null, 2),
@@ -1629,6 +1642,7 @@ async function generateSnapshotChatResponse({
                     conversationMessagesUsed: conversationMessages
                 },
                 deterministicFacts,
+                periodAnalytics: effectivePeriodAnalytics,
                 advisoryFacts,
                 derivedSemantics,
                 ownerCashContext,
@@ -1777,6 +1791,7 @@ async function generateSnapshotChatResponse({
                 conversationMessagesUsed: conversationMessages
             },
             deterministicFacts,
+            periodAnalytics: effectivePeriodAnalytics,
             advisoryFacts,
             derivedSemantics,
             ownerCashContext,
