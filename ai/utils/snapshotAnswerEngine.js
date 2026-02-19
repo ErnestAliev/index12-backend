@@ -576,7 +576,12 @@ const computeOperationalTotalsFromLists = (lists) => {
   // Out-of-system transfers are treated as cash outflow in UI totals.
   transferList.forEach((item) => {
     if (!item?.isOutOfSystemTransfer) return;
-    pushExpense(item?.catName || 'Перевод', item?.amount);
+    const rawCategory = String(item?.catName || '').trim();
+    const normalized = normalizeCategoryKey(rawCategory);
+    const transferCategory = normalized === normalizeCategoryKey('перевод')
+      ? 'Вывод средств'
+      : (rawCategory || 'Вывод средств');
+    pushExpense(transferCategory, item?.amount);
   });
 
   const ownerDrawByCategory = Array.from(ownerDrawByCategoryMap.entries())
@@ -1484,7 +1489,13 @@ const buildLedgerOperations = ({
   };
 };
 
-const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit = PERIOD_TOP_OPERATIONS_LIMIT }) => {
+const computePeriodAnalytics = ({
+  snapshot,
+  question,
+  timelineDateKey,
+  topLimit = PERIOD_TOP_OPERATIONS_LIMIT,
+  disableSnapshotClamp = false
+}) => {
   const resolvedPeriod = resolvePeriodFromQuestion({
     question,
     timelineDateKey,
@@ -1517,32 +1528,39 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     }
   });
 
-  const clampedRange = clampDateKeyRangeToSnapshot({
-    snapshot,
-    startDateKey: resolvedPeriod.startDateKey,
-    endDateKey: resolvedPeriod.endDateKey
-  });
-  if (!clampedRange) {
+  const shouldClampToSnapshot = disableSnapshotClamp !== true;
+  const effectiveRange = shouldClampToSnapshot
+    ? clampDateKeyRangeToSnapshot({
+      snapshot,
+      startDateKey: resolvedPeriod.startDateKey,
+      endDateKey: resolvedPeriod.endDateKey
+    })
+    : {
+      startDateKey: resolvedPeriod.startDateKey,
+      endDateKey: resolvedPeriod.endDateKey,
+      wasClamped: false
+    };
+  if (!effectiveRange) {
     return buildEmptyPeriodAnalytics({
       startDateKey: resolvedPeriod.startDateKey,
       endDateKey: resolvedPeriod.endDateKey,
-      reason: 'requested_range_outside_snapshot',
-      wasClampedToSnapshot: true
+      reason: shouldClampToSnapshot ? 'requested_range_outside_snapshot' : 'requested_range_invalid',
+      wasClampedToSnapshot: shouldClampToSnapshot
     });
   }
 
   const periodDays = normalizeList(snapshot?.days).filter((day) => {
     const date = String(day?.dateKey || '');
     return DATE_KEY_RE.test(date)
-      && date >= clampedRange.startDateKey
-      && date <= clampedRange.endDateKey;
+      && date >= effectiveRange.startDateKey
+      && date <= effectiveRange.endDateKey;
   });
   if (!periodDays.length) {
     return buildEmptyPeriodAnalytics({
-      startDateKey: clampedRange.startDateKey,
-      endDateKey: clampedRange.endDateKey,
-      reason: 'no_days_after_clamp',
-      wasClampedToSnapshot: clampedRange.wasClamped
+      startDateKey: effectiveRange.startDateKey,
+      endDateKey: effectiveRange.endDateKey,
+      reason: shouldClampToSnapshot ? 'no_days_after_clamp' : 'no_days_in_requested_range',
+      wasClampedToSnapshot: Boolean(effectiveRange.wasClamped)
     });
   }
 
@@ -1560,17 +1578,17 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
 
   const top = buildLedgerOperations({
     snapshot,
-    startDateKey: clampedRange.startDateKey,
-    endDateKey: clampedRange.endDateKey,
+    startDateKey: effectiveRange.startDateKey,
+    endDateKey: effectiveRange.endDateKey,
     limit: topLimitSafe,
     sortByAmountDesc: true,
     enforceMinLimit: false
   });
 
   return {
-    label: `${toRuDateShort(clampedRange.startDateKey)} - ${toRuDateShort(clampedRange.endDateKey)}`,
-    startDateKey: clampedRange.startDateKey,
-    endDateKey: clampedRange.endDateKey,
+    label: `${toRuDateShort(effectiveRange.startDateKey)} - ${toRuDateShort(effectiveRange.endDateKey)}`,
+    startDateKey: effectiveRange.startDateKey,
+    endDateKey: effectiveRange.endDateKey,
     totals,
     ownerDraw: {
       amount: toNum(periodTotals?.ownerDraw),
@@ -1589,7 +1607,7 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
         startDateKey: resolvedPeriod.startDateKey,
         endDateKey: resolvedPeriod.endDateKey
       },
-      wasClampedToSnapshot: clampedRange.wasClamped
+      wasClampedToSnapshot: Boolean(effectiveRange.wasClamped)
     }
   };
 };

@@ -339,6 +339,43 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _shouldUseNlpRangeOutsideUi = ({ validatedSnapshot, periodProbe, effectiveRange }) => {
+    const requestedStart = String(effectiveRange?.startDateKey || '');
+    const requestedEnd = String(effectiveRange?.endDateKey || '');
+    if (!_isDayKey(requestedStart) || !_isDayKey(requestedEnd) || requestedStart > requestedEnd) return false;
+
+    const source = String(periodProbe?.operationsMeta?.source || '');
+    if (!source || source === 'snapshot_range' || source === 'empty_range') return false;
+
+    const snapStart = String(validatedSnapshot?.range?.startDateKey || '');
+    const snapEnd = String(validatedSnapshot?.range?.endDateKey || '');
+    const outsideSnapshot = _isDayKey(snapStart) && _isDayKey(snapEnd)
+      ? (requestedStart < snapStart || requestedEnd > snapEnd)
+      : true;
+
+    const noData = Boolean(periodProbe?.operationsMeta?.noData);
+    const noDataReason = String(periodProbe?.operationsMeta?.noDataReason || '');
+    const clampConflict = noData && (
+      noDataReason === 'requested_range_outside_snapshot'
+      || noDataReason === 'no_days_after_clamp'
+      || noDataReason === 'no_days_in_requested_range'
+    );
+
+    return outsideSnapshot || clampConflict;
+  };
+
+  const _forEachDayKey = (startDateKey, endDateKey, visitor) => {
+    if (!_isDayKey(startDateKey) || !_isDayKey(endDateKey) || startDateKey > endDateKey || typeof visitor !== 'function') {
+      return;
+    }
+    const current = new Date(`${startDateKey}T12:00:00`);
+    const end = new Date(`${endDateKey}T12:00:00`);
+    while (!Number.isNaN(current.getTime()) && current.getTime() <= end.getTime()) {
+      visitor(_toDayKey(current));
+      current.setDate(current.getDate() + 1);
+    }
+  };
+
   const _parseRowDayKey = (row) => {
     const rawDate = String(row?.date || '').trim();
     const iso = rawDate.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -372,6 +409,135 @@ module.exports = function createAiRouter(deps) {
 
     const t = _normalizeToken(row?.type || '');
     return t.includes('выводсредств') || t.includes('withdrawal');
+  };
+
+  const _buildSnapshotFromJournalOperations = ({ operations, startDateKey, endDateKey, baseSnapshot }) => {
+    if (!_isDayKey(startDateKey) || !_isDayKey(endDateKey) || startDateKey > endDateKey) return null;
+
+    const dayMap = new Map();
+    _forEachDayKey(startDateKey, endDateKey, (dayKey) => {
+      dayMap.set(dayKey, {
+        dateKey: dayKey,
+        dateLabel: snapshotAnswerEngine.toRuDateLabel(dayKey),
+        totalBalance: 0,
+        accountBalances: [],
+        totals: {
+          income: 0,
+          expense: 0
+        },
+        lists: {
+          income: [],
+          expense: [],
+          withdrawal: [],
+          transfer: []
+        }
+      });
+    });
+
+    (Array.isArray(operations) ? operations : []).forEach((op) => {
+      const dayKey = String(op?.dateIso || '').slice(0, 10);
+      if (!_isDayKey(dayKey) || dayKey < startDateKey || dayKey > endDateKey) return;
+      const day = dayMap.get(dayKey);
+      if (!day) return;
+
+      const kind = _normalizeKind(op?.type || op?.kind || '');
+      const amountAbs = Math.abs(_toNum(op?.amount));
+      if (!kind || amountAbs <= 0) return;
+
+      const accountName = String(op?.accountName || 'Без счета');
+      const counterparty = String(op?.contractorName || op?.individualName || 'Без контрагента');
+      const projectName = String(op?.projectName || 'Без проекта');
+      const categoryName = String(op?.categoryName || '').trim();
+
+      if (kind === 'income') {
+        day.lists.income.push({
+          amount: amountAbs,
+          accName: accountName,
+          contName: counterparty,
+          projName: projectName,
+          catName: categoryName || 'Без категории'
+        });
+        day.totals.income += amountAbs;
+        return;
+      }
+
+      if (kind === 'expense') {
+        day.lists.expense.push({
+          amount: -amountAbs,
+          accName: accountName,
+          contName: counterparty,
+          projName: projectName,
+          catName: categoryName || 'Без категории'
+        });
+        day.totals.expense += amountAbs;
+        return;
+      }
+
+      const isOwnerDrawTransfer = _isOutOfSystemTransferRow(op);
+      const fromAccName = String(op?.fromAccountName || op?.accountName || 'Без счета');
+      const toAccName = isOwnerDrawTransfer
+        ? String(op?.toAccountName || 'Вне системы')
+        : String(op?.toAccountName || 'Без счета');
+      const transferCategory = (() => {
+        if (isOwnerDrawTransfer) {
+          if (/вывод\s*средств/i.test(categoryName)) return categoryName;
+          return 'Вывод средств';
+        }
+        return categoryName || 'Перевод';
+      })();
+
+      day.lists.transfer.push({
+        amount: amountAbs,
+        fromAccName,
+        toAccName,
+        isOutOfSystemTransfer: isOwnerDrawTransfer,
+        catName: transferCategory
+      });
+
+      if (isOwnerDrawTransfer) {
+        day.totals.expense += amountAbs;
+      }
+    });
+
+    const days = Array.from(dayMap.values()).sort((a, b) => String(a?.dateKey || '').localeCompare(String(b?.dateKey || '')));
+
+    return {
+      schemaVersion: 1,
+      visibilityMode: String(baseSnapshot?.visibilityMode || 'all'),
+      range: {
+        startDateKey,
+        endDateKey
+      },
+      days
+    };
+  };
+
+  const _buildSnapshotFromJournalRange = async ({
+    userId,
+    startDateKey,
+    endDateKey,
+    asOf,
+    baseSnapshot
+  }) => {
+    if (!_isDayKey(startDateKey) || !_isDayKey(endDateKey) || startDateKey > endDateKey) return null;
+
+    const quickJournal = await quickJournalAdapter.buildFromJournal({
+      userId: String(userId || ''),
+      periodFilter: {
+        mode: 'custom',
+        customStart: `${startDateKey}T00:00:00`,
+        customEnd: `${endDateKey}T23:59:59.999`
+      },
+      asOf: asOf || null,
+      categoriesCatalog: []
+    });
+
+    return _buildSnapshotFromJournalOperations({
+      operations: quickJournal?.operations || [],
+      startDateKey,
+      endDateKey,
+      baseSnapshot
+    });
   };
 
   const _normalizeStatus = (statusCode, statusLabel) => {
@@ -1809,7 +1975,8 @@ module.exports = function createAiRouter(deps) {
         const periodProbe = snapshotAnswerEngine.computePeriodAnalytics({
           snapshot: validatedSnapshot,
           question: q,
-          timelineDateKey: timelineDate
+          timelineDateKey: timelineDate,
+          disableSnapshotClamp: true
         });
 
         const effectiveRange = _resolveEffectiveSnapshotRange({
@@ -1823,6 +1990,33 @@ module.exports = function createAiRouter(deps) {
           startDateKey: effectiveRange.startDateKey,
           endDateKey: effectiveRange.endDateKey
         });
+        let periodAnalyticsSnapshot = snapshot;
+
+        if (_shouldUseNlpRangeOutsideUi({ validatedSnapshot, periodProbe, effectiveRange })) {
+          let effectiveUserId = userId;
+          if (typeof getCompositeUserId === 'function') {
+            try {
+              effectiveUserId = await getCompositeUserId(req);
+            } catch (_) {
+              effectiveUserId = userId;
+            }
+          }
+
+          try {
+            const byJournalRangeSnapshot = await _buildSnapshotFromJournalRange({
+              userId: String(effectiveUserId || userId || ''),
+              startDateKey: effectiveRange.startDateKey,
+              endDateKey: effectiveRange.endDateKey,
+              asOf: timelineDate,
+              baseSnapshot: validatedSnapshot
+            });
+            if (byJournalRangeSnapshot) {
+              periodAnalyticsSnapshot = byJournalRangeSnapshot;
+            }
+          } catch (journalRangeError) {
+            console.warn('[AI Snapshot] NLP range journal fallback failed:', journalRangeError?.message || journalRangeError);
+          }
+        }
 
         let chatHistory = await ChatHistory.findOne({
           userId: userIdStr,
@@ -1849,9 +2043,10 @@ module.exports = function createAiRouter(deps) {
           timelineDateKey: timelineDate,
         });
         const periodAnalytics = snapshotAnswerEngine.computePeriodAnalytics({
-          snapshot,
+          snapshot: periodAnalyticsSnapshot,
           question: q,
-          timelineDateKey: timelineDate
+          timelineDateKey: timelineDate,
+          disableSnapshotClamp: true
         });
         if (periodAnalytics) {
           deterministicFacts.periodAnalytics = periodAnalytics;
