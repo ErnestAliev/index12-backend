@@ -253,6 +253,32 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
+  const _normalizeSnapshotChecksum = (value) => {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return raw.slice(0, 128);
+  };
+
+  const _parseBooleanFlag = (value) => {
+    if (value === true) return true;
+    if (value === false || value == null) return false;
+    const text = String(value).trim().toLowerCase();
+    return text === '1' || text === 'true' || text === 'yes';
+  };
+
+  const _extractLastSnapshotChecksum = (messages) => {
+    const rows = Array.isArray(messages) ? messages : [];
+    for (let idx = rows.length - 1; idx >= 0; idx -= 1) {
+      const meta = rows[idx]?.metadata || {};
+      const checksum = _normalizeSnapshotChecksum(
+        meta?.snapshotChecksum
+        || meta?.requestMeta?.snapshotChecksum
+      );
+      if (checksum) return checksum;
+    }
+    return '';
+  };
+
   const _fmtDDMMYY = (date) => {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '?';
     const dd = String(date.getDate()).padStart(2, '0');
@@ -2444,10 +2470,34 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
+        const snapshotChecksum = _normalizeSnapshotChecksum(req?.body?.snapshotChecksum);
+        const requestedDataChanged = _parseBooleanFlag(req?.body?.isDataChanged);
+        const lastSnapshotChecksum = _extractLastSnapshotChecksum(chatHistory?.messages);
+        const checksumChanged = Boolean(snapshotChecksum && lastSnapshotChecksum && snapshotChecksum !== lastSnapshotChecksum);
+        const checksumBaselineMissing = Boolean(
+          snapshotChecksum
+          && !lastSnapshotChecksum
+          && Array.isArray(chatHistory?.messages)
+          && chatHistory.messages.length > 0
+        );
+        const isDataChangedEffective = requestedDataChanged || checksumChanged || checksumBaselineMissing;
+        const historyResetApplied = isDataChangedEffective && Array.isArray(chatHistory.messages) && chatHistory.messages.length > 0;
+        if (historyResetApplied) {
+          chatHistory.messages = [];
+        }
+
         chatHistory.messages.push({
           role: 'user',
           content: q,
-          timestamp: new Date()
+          timestamp: new Date(),
+          metadata: {
+            snapshotChecksum: snapshotChecksum || null,
+            isDataChanged: isDataChangedEffective,
+            requestedDataChanged,
+            checksumChanged,
+            checksumBaselineMissing,
+            historyResetApplied
+          }
         });
         chatHistory.updatedAt = new Date();
 
@@ -2628,7 +2678,15 @@ module.exports = function createAiRouter(deps) {
               intent: parsedIntent,
               deterministicFacts,
               periodAnalytics,
-              deterministicMeta: deterministic?.meta || null
+              deterministicMeta: deterministic?.meta || null,
+              requestMeta: {
+                snapshotChecksum: snapshotChecksum || null,
+                isDataChanged: isDataChangedEffective,
+                requestedDataChanged,
+                checksumChanged,
+                checksumBaselineMissing,
+                historyResetApplied
+              }
             }
           });
           await chatHistory.save();
@@ -2643,6 +2701,12 @@ module.exports = function createAiRouter(deps) {
                 deterministicFacts,
                 periodAnalytics,
                 deterministicMeta: deterministic?.meta || null,
+                snapshotChecksum: snapshotChecksum || null,
+                isDataChanged: isDataChangedEffective,
+                requestedDataChanged,
+                checksumChanged,
+                checksumBaselineMissing,
+                historyResetApplied,
                 historyLength: chatHistory.messages.length,
                 llmInputSnapshot
               }
@@ -2652,7 +2716,7 @@ module.exports = function createAiRouter(deps) {
 
         const llmResult = await conversationalAgent.generateSnapshotChatResponse({
           question: q,
-          history: chatHistory.messages.slice(0, -1),
+          history: isDataChangedEffective ? [] : chatHistory.messages.slice(0, -1),
           snapshot,
           deterministicFacts,
           periodAnalytics,
@@ -2748,6 +2812,12 @@ module.exports = function createAiRouter(deps) {
           requestMeta: {
             asOf,
             periodFilter: req?.body?.periodFilter || null,
+            snapshotChecksum: snapshotChecksum || null,
+            isDataChanged: isDataChangedEffective,
+            requestedDataChanged,
+            checksumChanged,
+            checksumBaselineMissing,
+            historyResetApplied,
             historicalContextSummary: {
               hasHistoricalContext: Boolean(historicalContext),
               periodsCount: Array.isArray(historicalContext?.periods) ? historicalContext.periods.length : 0,
@@ -2774,7 +2844,15 @@ module.exports = function createAiRouter(deps) {
             periodAnalytics,
             qualityGate,
             discriminatorLog,
-            llm: llmResult?.debug || null
+            llm: llmResult?.debug || null,
+            requestMeta: {
+              snapshotChecksum: snapshotChecksum || null,
+              isDataChanged: isDataChangedEffective,
+              requestedDataChanged,
+              checksumChanged,
+              checksumBaselineMissing,
+              historyResetApplied
+            }
           }
         });
         await chatHistory.save();
@@ -2790,6 +2868,12 @@ module.exports = function createAiRouter(deps) {
               periodAnalytics,
               qualityGate,
               discriminatorLog,
+              snapshotChecksum: snapshotChecksum || null,
+              isDataChanged: isDataChangedEffective,
+              requestedDataChanged,
+              checksumChanged,
+              checksumBaselineMissing,
+              historyResetApplied,
               llm: llmResult?.debug || null,
               responseMode,
               historyLength: chatHistory.messages.length,

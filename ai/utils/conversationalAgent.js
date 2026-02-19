@@ -1637,6 +1637,7 @@ async function generateSnapshotChatResponse({
         '# CORE CONSTRAINTS',
         '1. STRICT DATA: Используй ТОЛЬКО числа из предоставленных JSON-блоков. Запрещено придумывать суммы.',
         '2. NO MATH HALLUCINATIONS: Запрещено суммировать весь массив операций. Бери готовые итоги из PERIOD_ANALYTICS_JSON.totals, topExpenseCategories и FACTS_JSON.comparisonData.',
+        '3. SNAPSHOT PRIORITY: Текущий JSON-snapshot имеет абсолютный приоритет над историей переписки. Если цифры изменились — забудь старые выводы и делай новые.',
         '',
         '# COMPARISON MODE',
         'Если FACTS_JSON.comparisonData содержит 2+ периодов:',
