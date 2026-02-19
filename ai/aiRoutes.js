@@ -627,14 +627,7 @@ module.exports = function createAiRouter(deps) {
     };
   };
 
-  const _buildHistoryFromJournal = async ({
-    userId,
-    baseYear,
-    baseMonth,
-    monthsBack = 2,
-    asOf,
-    baseSnapshot
-  }) => {
+  const _buildPreviousMonthPeriods = ({ baseYear, baseMonth, monthsBack = 2 }) => {
     const y = Number(baseYear);
     const m = Number(baseMonth);
     const depth = Math.max(1, Math.min(12, Number(monthsBack || 2)));
@@ -651,7 +644,22 @@ module.exports = function createAiRouter(deps) {
         endDateKey: _endOfMonthDayKey(year, month)
       });
     }
+    return periods;
+  };
 
+  const _buildHistoryFromJournal = async ({
+    userId,
+    baseYear,
+    baseMonth,
+    monthsBack = 2,
+    asOf,
+    baseSnapshot
+  }) => {
+    const periods = _buildPreviousMonthPeriods({
+      baseYear,
+      baseMonth,
+      monthsBack
+    });
     if (!periods.length) return [];
 
     const globalStart = String(periods[0]?.startDateKey || '');
@@ -2069,7 +2077,7 @@ module.exports = function createAiRouter(deps) {
       if (!q) return res.status(400).json({ error: 'Пустой запрос' });
 
       const source = String(req?.body?.source || 'chat');
-      const isQuickButton = source === 'quick_button';
+      const isQuickButton = source === 'quick_button' && Boolean(req?.body?.action);
 
       if (!isQuickButton) {
         const debugEnabled = req?.body?.debugAi === true;
@@ -2237,6 +2245,11 @@ module.exports = function createAiRouter(deps) {
             snapshot: periodAnalyticsSnapshot || snapshot,
             timelineDateKey: timelineDate
           });
+          const historyPeriods = _buildPreviousMonthPeriods({
+            baseYear: historyBase.year,
+            baseMonth: historyBase.month,
+            monthsBack: 2
+          });
           const history = await _buildHistoryFromJournal({
             userId: String(effectiveUserId || userId || ''),
             baseYear: historyBase.year,
@@ -2245,18 +2258,61 @@ module.exports = function createAiRouter(deps) {
             asOf: timelineDate,
             baseSnapshot: validatedSnapshot
           });
-          deterministicFacts.history = Array.isArray(history) ? history : [];
+          const fallbackHistory = historyPeriods.map((row) => ({
+            period: String(row?.period || ''),
+            income: 0,
+            expense: 0,
+            net: 0
+          }));
+          const mergedHistory = (() => {
+            const direct = Array.isArray(history) ? history : [];
+            if (!direct.length) return fallbackHistory;
+            const byPeriod = new Map();
+            direct.forEach((row) => {
+              byPeriod.set(String(row?.period || ''), {
+                period: String(row?.period || ''),
+                income: _toNum(row?.income),
+                expense: _toNum(row?.expense),
+                net: _toNum(row?.net)
+              });
+            });
+            return historyPeriods.map((row) => {
+              const key = String(row?.period || '');
+              return byPeriod.get(key) || {
+                period: key,
+                income: 0,
+                expense: 0,
+                net: 0
+              };
+            });
+          })();
+
+          deterministicFacts.history = mergedHistory;
           deterministicFacts.historyMeta = {
             basePeriod: `${historyBase.year}-${_pad2(historyBase.month)}`,
             monthsBack: 2,
-            generatedCount: Array.isArray(history) ? history.length : 0
+            generatedCount: mergedHistory.length
           };
         } catch (historyError) {
-          deterministicFacts.history = [];
+          const fallbackHistoryBase = _resolveHistoryBaseMonth({
+            periodAnalytics,
+            snapshot: periodAnalyticsSnapshot || snapshot,
+            timelineDateKey: timelineDate
+          });
+          deterministicFacts.history = _buildPreviousMonthPeriods({
+            baseYear: fallbackHistoryBase.year,
+            baseMonth: fallbackHistoryBase.month,
+            monthsBack: 2
+          }).map((row) => ({
+            period: String(row?.period || ''),
+            income: 0,
+            expense: 0,
+            net: 0
+          }));
           deterministicFacts.historyMeta = {
-            basePeriod: null,
+            basePeriod: `${fallbackHistoryBase.year}-${_pad2(fallbackHistoryBase.month)}`,
             monthsBack: 2,
-            generatedCount: 0,
+            generatedCount: Array.isArray(deterministicFacts.history) ? deterministicFacts.history.length : 0,
             error: String(historyError?.message || historyError || 'history_generation_failed')
           };
           console.warn('[AI Snapshot] History generation failed:', historyError?.message || historyError);
