@@ -50,6 +50,27 @@ const uniqueRounded = (numbers) => {
   return out;
 };
 
+const buildCombinationSums = (numbers, minItems = 2, maxItems = 3) => {
+  const values = uniqueRounded(numbers)
+    .map((n) => Math.round(toNum(n)))
+    .filter((n) => n > 0);
+  const out = [];
+  const total = values.length;
+  if (!total || maxItems < 2) return out;
+
+  const walk = (startIdx, picked, sum) => {
+    if (picked >= minItems && picked <= maxItems) out.push(sum);
+    if (picked >= maxItems) return;
+
+    for (let i = startIdx; i < total; i += 1) {
+      walk(i + 1, picked + 1, sum + values[i]);
+    }
+  };
+
+  walk(0, 0, 0);
+  return uniqueRounded(out);
+};
+
 const buildExpected = ({
   accountContext,
   accountViewContext,
@@ -110,6 +131,15 @@ const buildExpected = ({
   const periodTopExpenseCategoryAmounts = (Array.isArray(periodAnalytics?.topExpenseCategories) ? periodAnalytics.topExpenseCategories : [])
     .map((row) => toNum(row?.amount))
     .filter((n) => n > 0);
+  const deterministicTopExpenseCategoryAmounts = [];
+  (Array.isArray(deterministicFacts?.topExpenseCategories) ? deterministicFacts.topExpenseCategories : []).forEach((row) => {
+    const amount = toNum(row?.amount);
+    if (amount > 0) deterministicTopExpenseCategoryAmounts.push(amount);
+  });
+  const topExpenseCategoryCombinationSums = buildCombinationSums([
+    ...periodTopExpenseCategoryAmounts,
+    ...deterministicTopExpenseCategoryAmounts
+  ], 2, 3);
 
   const allowedNumbers = uniqueRounded([
     expected.open_now,
@@ -143,6 +173,8 @@ const buildExpected = ({
     toNum(periodAnalytics?.totals?.net),
     ...periodTopOperationAmounts,
     ...periodTopExpenseCategoryAmounts,
+    ...deterministicTopExpenseCategoryAmounts,
+    ...topExpenseCategoryCombinationSums,
     ...anomalyNumbers,
     0
   ]);

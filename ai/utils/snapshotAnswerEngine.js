@@ -1133,6 +1133,59 @@ const LEDGER_OPERATIONS_LIMIT = 120;
 const PERIOD_TOP_OPERATIONS_LIMIT = 10;
 const PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT = 5;
 
+const buildExpenseCategoryAnalytics = ({
+  days = [],
+  totalExpense = 0,
+  topLimit = PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT
+}) => {
+  const expenseByCategoryMap = new Map();
+  const pushExpense = (name, amountValue) => {
+    const amount = Math.abs(toNum(amountValue));
+    if (amount <= 0) return;
+    const key = String(name || 'Без категории');
+    const prev = expenseByCategoryMap.get(key) || { category: key, amount: 0, operationsCount: 0 };
+    prev.amount += amount;
+    prev.operationsCount += 1;
+    expenseByCategoryMap.set(key, prev);
+  };
+
+  normalizeList(days).forEach((day) => {
+    normalizeList(day?.lists?.expense).forEach((item) => {
+      pushExpense(item?.catName || 'Без категории', item?.amount);
+    });
+    normalizeList(day?.lists?.withdrawal).forEach((item) => {
+      pushExpense(item?.catName || 'Вывод средств', item?.amount);
+    });
+    normalizeList(day?.lists?.transfer).forEach((item) => {
+      if (!item?.isOutOfSystemTransfer) return;
+      pushExpense('Перевод (вне системы)', item?.amount);
+    });
+  });
+
+  const expenseByCategory = Array.from(expenseByCategoryMap.values())
+    .map((row) => ({
+      category: row.category,
+      amount: toNum(row.amount),
+      operationsCount: Number(row.operationsCount || 0),
+      sharePct: totalExpense > 0 ? Math.round((toNum(row.amount) / totalExpense) * 10000) / 100 : 0
+    }))
+    .sort((a, b) => {
+      const diff = toNum(b?.amount) - toNum(a?.amount);
+      if (diff !== 0) return diff;
+      return String(a?.category || '').localeCompare(String(b?.category || ''), 'ru');
+    });
+
+  const topExpenseCategories = expenseByCategory
+    .slice(0, Math.max(3, Math.min(10, Number(topLimit || PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT))));
+  const largestExpenseCategory = topExpenseCategories[0] || null;
+
+  return {
+    expenseByCategory,
+    topExpenseCategories,
+    largestExpenseCategory
+  };
+};
+
 const buildLedgerOperations = ({
   snapshot,
   limit = LEDGER_OPERATIONS_LIMIT,
@@ -1271,47 +1324,11 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     return acc;
   }, { income: 0, expense: 0 });
   totals.net = totals.income - totals.expense;
-
-  const expenseByCategoryMap = new Map();
-  const pushExpense = (name, amountValue) => {
-    const amount = Math.abs(toNum(amountValue));
-    if (amount <= 0) return;
-    const key = String(name || 'Без категории');
-    const prev = expenseByCategoryMap.get(key) || { category: key, amount: 0, operationsCount: 0 };
-    prev.amount += amount;
-    prev.operationsCount += 1;
-    expenseByCategoryMap.set(key, prev);
-  };
-
-  periodDays.forEach((day) => {
-    normalizeList(day?.lists?.expense).forEach((item) => {
-      pushExpense(item?.catName || 'Без категории', item?.amount);
-    });
-    normalizeList(day?.lists?.withdrawal).forEach((item) => {
-      pushExpense(item?.catName || 'Вывод средств', item?.amount);
-    });
-    normalizeList(day?.lists?.transfer).forEach((item) => {
-      if (!item?.isOutOfSystemTransfer) return;
-      pushExpense('Перевод (вне системы)', item?.amount);
-    });
+  const expenseCategoryAnalytics = buildExpenseCategoryAnalytics({
+    days: periodDays,
+    totalExpense: totals.expense,
+    topLimit: PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT
   });
-
-  const expenseByCategory = Array.from(expenseByCategoryMap.values())
-    .map((row) => ({
-      category: row.category,
-      amount: toNum(row.amount),
-      operationsCount: Number(row.operationsCount || 0),
-      sharePct: totals.expense > 0 ? Math.round((toNum(row.amount) / totals.expense) * 10000) / 100 : 0
-    }))
-    .sort((a, b) => {
-      const diff = toNum(b?.amount) - toNum(a?.amount);
-      if (diff !== 0) return diff;
-      return String(a?.category || '').localeCompare(String(b?.category || ''), 'ru');
-    });
-
-  const topExpenseCategories = expenseByCategory
-    .slice(0, Math.max(3, Math.min(10, Number(PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT || 5))));
-  const largestExpenseCategory = topExpenseCategories[0] || null;
 
   const topLimitSafe = Math.max(5, Math.min(10, Number(topLimit || PERIOD_TOP_OPERATIONS_LIMIT)));
   const top = buildLedgerOperations({
@@ -1328,9 +1345,9 @@ const computePeriodAnalytics = ({ snapshot, question, timelineDateKey, topLimit 
     startDateKey: clampedRange.startDateKey,
     endDateKey: clampedRange.endDateKey,
     totals,
-    largestExpenseCategory,
-    topExpenseCategories,
-    expenseByCategory,
+    largestExpenseCategory: expenseCategoryAnalytics.largestExpenseCategory,
+    topExpenseCategories: expenseCategoryAnalytics.topExpenseCategories,
+    expenseByCategory: expenseCategoryAnalytics.expenseByCategory,
     topOperations: top.operations,
     operationsMeta: {
       totalCount: top.operationsMeta.totalCount,
@@ -1386,7 +1403,10 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
         includedCount: 0,
         truncated: false,
         limit: Math.max(50, Number(LEDGER_OPERATIONS_LIMIT || 120))
-      }
+      },
+      largestExpenseCategory: null,
+      topExpenseCategories: [],
+      expenseByCategory: []
     };
   }
 
@@ -1474,6 +1494,11 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
     .filter((x) => x.expense > 0)
     .sort((a, b) => Number(b.expense || 0) - Number(a.expense || 0))
     .slice(0, 3);
+  const expenseCategoryAnalytics = buildExpenseCategoryAnalytics({
+    days: snapshot.days,
+    totalExpense,
+    topLimit: PERIOD_TOP_EXPENSE_CATEGORIES_LIMIT
+  });
   const ledger = buildLedgerOperations({ snapshot });
 
   return {
@@ -1495,6 +1520,9 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
       total: endOpen + endHidden
     },
     anomalies,
+    largestExpenseCategory: expenseCategoryAnalytics.largestExpenseCategory,
+    topExpenseCategories: expenseCategoryAnalytics.topExpenseCategories,
+    expenseByCategory: expenseCategoryAnalytics.expenseByCategory,
     upcomingCount: upcoming.length,
     nextObligation,
     topExpenseDays: expenseDaysTop,
