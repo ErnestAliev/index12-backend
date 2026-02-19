@@ -102,6 +102,36 @@ const parseMonthWord = (text) => {
   return null;
 };
 
+const parseExplicitYear = (text) => {
+  const m = String(text || '').match(/\b((?:19|20)\d{2})\b/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  return Number.isFinite(year) ? year : null;
+};
+
+const resolveRelativeMonthYear = ({ month, timelineDateKey, normText }) => {
+  const monthNum = Number(month);
+  if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return null;
+
+  const explicitYear = parseExplicitYear(normText);
+  if (Number.isFinite(explicitYear)) {
+    return {
+      year: explicitYear,
+      month: monthNum
+    };
+  }
+
+  const base = fromIsoDateKey(timelineDateKey) || new Date();
+  const baseYear = base.getFullYear();
+  const baseMonthIdx = base.getMonth(); // 0..11
+  const requestedMonthIdx = monthNum - 1; // 0..11
+
+  return {
+    year: requestedMonthIdx > baseMonthIdx ? (baseYear - 1) : baseYear,
+    month: monthNum
+  };
+};
+
 const parseDateKeyFromQuestion = ({ question, timelineDateKey, fallbackYear }) => {
   const text = String(question || '');
   const norm = normalizeText(text);
@@ -125,9 +155,19 @@ const parseDateKeyFromQuestion = ({ question, timelineDateKey, fallbackYear }) =
     const verbalMatch = norm.match(/\b([0-2]?\d|3[01])\s+[а-яa-z]+\s*(\d{4})?\b/i);
     if (verbalMatch) {
       const dd = String(Number(verbalMatch[1])).padStart(2, '0');
+      const resolvedMonthYear = resolveRelativeMonthYear({
+        month: monthKey,
+        timelineDateKey,
+        normText: norm
+      });
       const yyyy = verbalMatch[2]
         ? Number(verbalMatch[2])
-        : Number(String(timelineDateKey || '').slice(0, 4) || fallbackYear || new Date().getFullYear());
+        : Number(
+          resolvedMonthYear?.year
+          || String(timelineDateKey || '').slice(0, 4)
+          || fallbackYear
+          || new Date().getFullYear()
+        );
       const mm = String(monthKey).padStart(2, '0');
       return `${yyyy}-${mm}-${dd}`;
     }
@@ -159,10 +199,13 @@ const parseTargetMonth = ({ question, timelineDateKey }) => {
 
   const monthWord = parseMonthWord(norm);
   if (monthWord) {
-    const yearMatch = norm.match(/\b(20\d{2})\b/);
-    const timelineYear = Number(String(timelineDateKey || '').slice(0, 4) || new Date().getFullYear());
+    const resolvedMonthYear = resolveRelativeMonthYear({
+      month: monthWord,
+      timelineDateKey,
+      normText: norm
+    });
     return {
-      year: yearMatch ? Number(yearMatch[1]) : timelineYear,
+      year: Number(resolvedMonthYear?.year || String(timelineDateKey || '').slice(0, 4) || new Date().getFullYear()),
       month: monthWord
     };
   }

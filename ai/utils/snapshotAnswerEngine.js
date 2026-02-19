@@ -227,6 +227,38 @@ const resolveMonthFromQuestion = (normText) => {
   return null;
 };
 
+const parseExplicitYearFromQuestion = (normText) => {
+  const m = String(normText || '').match(/\b((?:19|20)\d{2})\b/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  return Number.isFinite(year) ? year : null;
+};
+
+const resolveMonthYearFromQuestion = ({ normText, month, baseDate }) => {
+  const monthNum = Number(month);
+  if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return null;
+
+  const explicitYear = parseExplicitYearFromQuestion(normText);
+  if (Number.isFinite(explicitYear)) {
+    return {
+      year: explicitYear,
+      month: monthNum
+    };
+  }
+
+  const base = (baseDate instanceof Date && !Number.isNaN(baseDate.getTime()))
+    ? baseDate
+    : new Date();
+  const baseYear = base.getFullYear();
+  const baseMonthIdx = base.getMonth(); // 0..11
+  const requestedMonthIdx = monthNum - 1; // 0..11
+
+  return {
+    year: requestedMonthIdx > baseMonthIdx ? (baseYear - 1) : baseYear,
+    month: monthNum
+  };
+};
+
 const resolveWeekOrderFromQuestion = (normText) => {
   const text = String(normText || '');
   if (/(первая|первую|1-?я|1-я)/i.test(text)) return 1;
@@ -329,6 +361,13 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
   const asksWeek = /недел/i.test(norm);
   const explicitMonth = resolveMonthFromQuestion(norm);
   const hasExplicitMonth = Number.isInteger(explicitMonth) && explicitMonth >= 1 && explicitMonth <= 12;
+  const resolvedMonthYear = hasExplicitMonth
+    ? resolveMonthYearFromQuestion({
+      normText: norm,
+      month: explicitMonth,
+      baseDate
+    })
+    : null;
   const asksMonthScope = (
     (
       hasExplicitMonth
@@ -344,8 +383,9 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
   );
   if (!asksWeek && (explicitMonth || asksMonthScope)) {
     const month = explicitMonth || baseMonth;
-    const yearMatch = norm.match(/\b(20\d{2})\b/);
-    const year = yearMatch ? Number(yearMatch[1]) : baseYear;
+    const year = explicitMonth
+      ? Number(resolvedMonthYear?.year || baseYear)
+      : baseYear;
     return {
       startDateKey: startOfMonthDateKey(year, month),
       endDateKey: endOfMonthDateKey(year, month),
@@ -356,8 +396,9 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
   const asksEndOfMonth = /(конец\s+месяц|к\s+концу\s+месяц|на\s+конец\s+месяц|конец\s+[а-я]+|остатк[аи]\s+на\s+конец|на\s+конец)/i.test(norm);
   if (asksEndOfMonth) {
     const month = explicitMonth || baseMonth;
-    const yearMatch = norm.match(/\b(20\d{2})\b/);
-    const year = yearMatch ? Number(yearMatch[1]) : baseYear;
+    const year = explicitMonth
+      ? Number(resolvedMonthYear?.year || baseYear)
+      : baseYear;
     return {
       startDateKey: startOfMonthDateKey(year, month),
       endDateKey: endOfMonthDateKey(year, month),
@@ -368,8 +409,9 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
   const weekOrder = resolveWeekOrderFromQuestion(norm);
   if (asksWeek && Number.isFinite(Number(weekOrder))) {
     const month = explicitMonth || baseMonth;
-    const yearMatch = norm.match(/\b(20\d{2})\b/);
-    const year = yearMatch ? Number(yearMatch[1]) : baseYear;
+    const year = explicitMonth
+      ? Number(resolvedMonthYear?.year || baseYear)
+      : baseYear;
     const weekRange = resolveNthWeekRangeInMonth({
       year,
       month,
