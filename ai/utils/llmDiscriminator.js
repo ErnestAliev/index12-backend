@@ -54,6 +54,7 @@ const buildExpected = ({
   accountContext,
   accountViewContext,
   advisoryFacts,
+  deterministicFacts,
   derivedSemantics,
   scenarioCalculator,
   responseIntent,
@@ -82,6 +83,19 @@ const buildExpected = ({
     asks_single_amount: Boolean(questionFlags?.asksSingleAmount)
   };
 
+  const anomalyNumbers = [];
+  const pushAnomalyNumbers = (rows) => {
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      anomalyNumbers.push(
+        toNum(row?.gap),
+        toNum(row?.income),
+        toNum(row?.expense)
+      );
+    });
+  };
+  pushAnomalyNumbers(deterministicFacts?.anomalies);
+  pushAnomalyNumbers(advisoryFacts?.anomalies);
+
   const allowedNumbers = uniqueRounded([
     expected.open_now,
     expected.open_end,
@@ -109,6 +123,7 @@ const buildExpected = ({
     toNum(advisoryFacts?.endBalances?.open),
     toNum(advisoryFacts?.endBalances?.hidden),
     toNum(advisoryFacts?.endBalances?.total),
+    ...anomalyNumbers,
     0
   ]);
 
@@ -159,6 +174,7 @@ function auditCfoTextResponse({
   accountContext,
   accountViewContext,
   advisoryFacts,
+  deterministicFacts,
   derivedSemantics,
   scenarioCalculator = null,
   responseIntent = null,
@@ -181,6 +197,7 @@ function auditCfoTextResponse({
     accountContext,
     accountViewContext,
     advisoryFacts,
+    deterministicFacts,
     derivedSemantics,
     scenarioCalculator,
     responseIntent,
