@@ -119,6 +119,8 @@ const getQuestionFlags = (question) => {
     const asksHowCalculated = /(как\s+ты\s+это\s+рассч|как\s+рассчит|как\s+посчит|откуда\s+цифр|обосну|поясни|как\s+понял)/i.test(q);
     const asksStrategyDistribution = /(стратег|портф|риски?|сценар|распред|консерват|агрессив|хедж|диверсиф)/i.test(q);
     const asksPeriodAnalytics = /(первая|вторая|третья|четвертая|первую|вторую|третью|четвертую)\s+недел|за\s+недел|за\s+период|с\s+\d{4}-\d{2}-\d{2}\s+по\s+\d{4}-\d{2}-\d{2}|с\s+\d{1,2}[./]\d{1,2}\s+по\s+\d{1,2}[./]\d{1,2}|с\s+\d{1,2}\s+[а-я]+\s+по\s+\d{1,2}\s+[а-я]+/i.test(q);
+    const monthMentions = (q.match(/(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)/gi) || []).length;
+    const asksComparison = /(сравн|сопостав|vs|versus|против|по\s+сравнению)/i.test(q) || monthMentions >= 2;
 
     const isDirectInvestmentAmount = asksInvestmentRelated
         && asksSingleAmount
@@ -133,6 +135,7 @@ const getQuestionFlags = (question) => {
         asksHowCalculated,
         asksStrategyDistribution,
         asksPeriodAnalytics,
+        asksComparison,
         isDirectInvestmentAmount,
         isDirectConditionalAmount
     };
@@ -1304,6 +1307,8 @@ async function generateSnapshotChatResponse({
     const responseIntent = detectResponseIntent(question, questionFlags);
     const accountContext = detectAccountContextMode(question);
     const effectivePeriodAnalytics = periodAnalytics || deterministicFacts?.periodAnalytics || null;
+    const comparisonData = Array.isArray(deterministicFacts?.comparisonData) ? deterministicFacts.comparisonData : [];
+    const hasComparisonData = comparisonData.length >= 2;
     const advisoryFacts = buildSnapshotAdvisoryFacts({
         snapshot,
         deterministicFacts,
@@ -1532,7 +1537,7 @@ async function generateSnapshotChatResponse({
         };
     })();
 
-    if (shouldReturnPeriodNoDataAnswer(effectivePeriodAnalytics)) {
+    if (!hasComparisonData && shouldReturnPeriodNoDataAnswer(effectivePeriodAnalytics)) {
         const noDataLabel = periodMonthYearLabel(effectivePeriodAnalytics);
         const noDataText = `За ${noDataLabel} данных в системе не обнаружено (ни фактических, ни запланированных).`;
         return {
@@ -1600,6 +1605,11 @@ async function generateSnapshotChatResponse({
             net: toNum(effectivePeriodAnalytics?.totals?.net),
             top_expense_category: String(effectivePeriodAnalytics?.largestExpenseCategory?.category || ''),
             top_expense_amount: toNum(effectivePeriodAnalytics?.largestExpenseCategory?.amount)
+        },
+        comparison: {
+            has_comparison_data: hasComparisonData,
+            periods_count: comparisonData.length,
+            period_labels: comparisonData.map((row) => String(row?.label || '')).filter(Boolean)
         }
     };
 
@@ -1609,7 +1619,15 @@ async function generateSnapshotChatResponse({
         '',
         '# CORE CONSTRAINTS',
         '1. STRICT DATA: Используй ТОЛЬКО числа из предоставленных JSON-блоков. Запрещено придумывать суммы.',
-        '2. NO MATH HALLUCINATIONS: Запрещено суммировать весь массив операций. Бери готовые итоги из PERIOD_ANALYTICS_JSON.totals и topExpenseCategories.',
+        '2. NO MATH HALLUCINATIONS: Запрещено суммировать весь массив операций. Бери готовые итоги из PERIOD_ANALYTICS_JSON.totals, topExpenseCategories и FACTS_JSON.comparisonData.',
+        '',
+        '# COMPARISON MODE',
+        'Если FACTS_JSON.comparisonData содержит 2+ периодов:',
+        '1) Используй totals каждого периода только из comparisonData.',
+        '2) Рассчитай дельту в деньгах: Δ = [период B] - [период A].',
+        '3) Рассчитай дельту в процентах: Δ% = (Δ / A) * 100, если A != 0.',
+        '4) Если A = 0, процент не считай; напиши "н/д".',
+        '5) Не выдумывай дополнительные суммы вне comparisonData.',
         '',
         '# COVERAGE & FORECAST ALGORITHM (КРИТИЧЕСКИ ВАЖНО)',
         'Если пользователь запрашивает прогноз на будущий месяц или спрашивает "хватит ли средств", действуй строго по алгоритму:',
@@ -1644,6 +1662,9 @@ async function generateSnapshotChatResponse({
         '',
         'PERIOD_ANALYTICS_JSON:',
         JSON.stringify(effectivePeriodAnalytics || null, null, 2),
+        '',
+        'COMPARISON_DATA_JSON:',
+        JSON.stringify(comparisonData || [], null, 2),
         '',
         'CONTEXTUAL_ADVICE_JSON:',
         JSON.stringify(ragContext || {}, null, 2),

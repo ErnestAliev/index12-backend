@@ -35,6 +35,8 @@ const MONTHS_RU_PARSE = [
 ];
 
 const MONTHS_RU_YEAR_RE_FRAGMENT = 'январ[а-я]*|феврал[а-я]*|март[а-я]*|апрел[а-я]*|ма[йя][а-я]*|июн[а-я]*|июл[а-я]*|август[а-я]*|сентябр[а-я]*|октябр[а-я]*|ноябр[а-я]*|декабр[а-я]*';
+const MONTH_WORD_WITH_OPTIONAL_YEAR_RE = new RegExp(`(${MONTHS_RU_YEAR_RE_FRAGMENT})(?:\\s*((?:19|20)\\d{2}|\\d{2}))?`, 'gi');
+const COMPARISON_KEYWORD_RE = /(сравн|сопостав|vs|versus|против|по\s+сравнению)/i;
 
 const toNum = (value) => {
   const n = Number(value);
@@ -223,6 +225,21 @@ const clampDateKeyRangeToSnapshot = ({ snapshot, startDateKey, endDateKey }) => 
 
 const resolveMonthFromQuestion = (normText) => {
   const text = String(normText || '');
+  let winner = null;
+  for (const item of MONTHS_RU_PARSE) {
+    const m = text.match(item.re);
+    if (!m) continue;
+    const idx = Number.isFinite(Number(m.index)) ? Number(m.index) : Number.MAX_SAFE_INTEGER;
+    if (!winner || idx < winner.idx) {
+      winner = { month: Number(item.month), idx };
+    }
+  }
+  return winner ? winner.month : null;
+};
+
+const resolveMonthFromToken = (value) => {
+  const text = String(value || '');
+  if (!text) return null;
   for (const item of MONTHS_RU_PARSE) {
     if (item.re.test(text)) return Number(item.month);
   }
@@ -279,6 +296,120 @@ const resolveMonthYearFromQuestion = ({ normText, month, baseDate }) => {
   return {
     year: requestedMonthIdx > baseMonthIdx ? (baseYear - 1) : baseYear,
     month: monthNum
+  };
+};
+
+const resolveRelativeMonthYear = ({ month, explicitYear = null, baseDate = null }) => {
+  const monthNum = Number(month);
+  if (!Number.isFinite(monthNum) || monthNum < 1 || monthNum > 12) return null;
+  if (typeof explicitYear === 'number' && Number.isFinite(explicitYear)) {
+    return {
+      year: explicitYear,
+      month: monthNum
+    };
+  }
+
+  const base = (baseDate instanceof Date && !Number.isNaN(baseDate.getTime()))
+    ? baseDate
+    : new Date();
+  const baseYear = base.getFullYear();
+  const baseMonthIdx = base.getMonth();
+  const requestedMonthIdx = monthNum - 1;
+  return {
+    year: requestedMonthIdx > baseMonthIdx ? (baseYear - 1) : baseYear,
+    month: monthNum
+  };
+};
+
+const extractMonthMentionsFromQuestion = (normText) => {
+  const text = String(normText || '');
+  if (!text) return [];
+
+  const rows = [];
+  MONTH_WORD_WITH_OPTIONAL_YEAR_RE.lastIndex = 0;
+  let match;
+  while ((match = MONTH_WORD_WITH_OPTIONAL_YEAR_RE.exec(text)) !== null) {
+    const token = String(match[1] || '').trim();
+    const month = resolveMonthFromToken(token);
+    if (!Number.isFinite(month)) continue;
+    const explicitYear = parseShortOrFullYear(match[2]);
+    rows.push({
+      month,
+      explicitYear: Number.isFinite(explicitYear) ? Number(explicitYear) : null,
+      index: Number(match.index || 0),
+      token
+    });
+  }
+  return rows;
+};
+
+const resolveComparisonQueryFromQuestion = ({ question, timelineDateKey, snapshot }) => {
+  const norm = normalizeQuestionForNlp(question);
+  if (!norm) return null;
+
+  const mentions = extractMonthMentionsFromQuestion(norm)
+    .sort((a, b) => Number(a?.index || 0) - Number(b?.index || 0));
+  const hasComparisonKeyword = COMPARISON_KEYWORD_RE.test(norm);
+  if (mentions.length < 2 && !hasComparisonKeyword) return null;
+
+  const baseKey = resolveTimelineDateKeySafe({ timelineDateKey, snapshot });
+  const baseDate = dateFromKey(baseKey) || new Date();
+  const baseMonth = baseDate.getMonth() + 1;
+  const baseYear = baseDate.getFullYear();
+
+  const periods = [];
+  const seen = new Set();
+
+  mentions.forEach((mention) => {
+    const monthNum = Number(mention?.month);
+    const explicitYear = (typeof mention?.explicitYear === 'number' && Number.isFinite(mention.explicitYear))
+      ? mention.explicitYear
+      : null;
+    const resolved = resolveRelativeMonthYear({
+      month: monthNum,
+      explicitYear,
+      baseDate
+    });
+    const year = Number(resolved?.year);
+    if (!Number.isFinite(year) || !Number.isFinite(monthNum)) return;
+
+    const key = `${year}-${String(monthNum).padStart(2, '0')}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    periods.push({
+      key,
+      year,
+      month: monthNum,
+      startDateKey: startOfMonthDateKey(year, monthNum),
+      endDateKey: endOfMonthDateKey(year, monthNum),
+      label: `${MONTHS_RU_SHORT[monthNum - 1]} ${year}`,
+      explicitYear
+    });
+  });
+
+  if (hasComparisonKeyword && periods.length === 1) {
+    const fallbackKey = `${baseYear}-${String(baseMonth).padStart(2, '0')}`;
+    if (!seen.has(fallbackKey)) {
+      periods.push({
+        key: fallbackKey,
+        year: baseYear,
+        month: baseMonth,
+        startDateKey: startOfMonthDateKey(baseYear, baseMonth),
+        endDateKey: endOfMonthDateKey(baseYear, baseMonth),
+        label: `${MONTHS_RU_SHORT[baseMonth - 1]} ${baseYear}`,
+        explicitYear: baseYear
+      });
+    }
+  }
+
+  if (periods.length < 2) return null;
+
+  return {
+    mode: 'comparison',
+    source: mentions.length >= 2 ? 'multi_month_mentions' : 'comparison_keyword_fallback',
+    compareKeyword: hasComparisonKeyword,
+    periods: periods.slice(0, 4)
   };
 };
 
@@ -1656,6 +1787,8 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
         truncated: false,
         limit: Math.max(50, Number(LEDGER_OPERATIONS_LIMIT || 120))
       },
+      comparisonData: [],
+      comparisonMeta: null,
       largestExpenseCategory: null,
       topExpenseCategories: [],
       expenseByCategory: []
@@ -1821,7 +1954,9 @@ const computeDeterministicFacts = ({ snapshot, timelineDateKey }) => {
       nextObligation
     },
     operations: ledger.operations,
-    operationsMeta: ledger.operationsMeta
+    operationsMeta: ledger.operationsMeta,
+    comparisonData: [],
+    comparisonMeta: null
   };
 };
 
@@ -1999,6 +2134,7 @@ module.exports = {
   answerFromSnapshot,
   computeDeterministicFacts,
   computePeriodAnalytics,
+  resolveComparisonQueryFromQuestion,
   buildDeterministicInsightsBlock,
   toRuDateLabel,
   fmtT,

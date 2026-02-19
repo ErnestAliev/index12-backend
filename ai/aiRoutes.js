@@ -540,6 +540,63 @@ module.exports = function createAiRouter(deps) {
     });
   };
 
+  const _buildComparisonDataFromJournal = async ({
+    userId,
+    periods,
+    asOf,
+    baseSnapshot
+  }) => {
+    const periodRows = Array.isArray(periods) ? periods.filter((p) => _isDayKey(p?.startDateKey) && _isDayKey(p?.endDateKey)) : [];
+    if (!periodRows.length) return [];
+
+    const sortedByStart = [...periodRows].sort((a, b) => String(a.startDateKey).localeCompare(String(b.startDateKey)));
+    const globalStart = String(sortedByStart[0]?.startDateKey || '');
+    const globalEnd = String(sortedByStart[sortedByStart.length - 1]?.endDateKey || '');
+    if (!_isDayKey(globalStart) || !_isDayKey(globalEnd) || globalStart > globalEnd) return [];
+
+    const journalSnapshot = await _buildSnapshotFromJournalRange({
+      userId,
+      startDateKey: globalStart,
+      endDateKey: globalEnd,
+      asOf,
+      baseSnapshot
+    });
+    if (!journalSnapshot) return [];
+
+    return periodRows.map((period, idx) => {
+      const periodSnapshot = _buildSnapshotForRange({
+        snapshot: journalSnapshot,
+        startDateKey: period.startDateKey,
+        endDateKey: period.endDateKey
+      });
+      const periodFacts = snapshotAnswerEngine.computeDeterministicFacts({
+        snapshot: periodSnapshot,
+        timelineDateKey: String(period?.endDateKey || asOf || '')
+      });
+      const opCount = Number(periodFacts?.operationsMeta?.totalCount || 0);
+
+      return {
+        index: idx + 1,
+        key: String(period?.key || `${period.startDateKey}:${period.endDateKey}`),
+        label: String(period?.label || `${period.startDateKey} - ${period.endDateKey}`),
+        startDateKey: String(period?.startDateKey || ''),
+        endDateKey: String(period?.endDateKey || ''),
+        totals: {
+          income: _toNum(periodFacts?.totals?.income),
+          expense: _toNum(periodFacts?.totals?.expense),
+          net: _toNum(periodFacts?.totals?.net)
+        },
+        ownerDraw: {
+          amount: _toNum(periodFacts?.ownerDraw?.amount)
+        },
+        operationsMeta: {
+          totalCount: opCount,
+          noData: opCount === 0
+        }
+      };
+    });
+  };
+
   const _normalizeStatus = (statusCode, statusLabel) => {
     const sc = String(statusCode || '').trim().toLowerCase();
     if (sc === 'plan') return 'plan';
@@ -1965,43 +2022,58 @@ module.exports = function createAiRouter(deps) {
           if (fromAsOf) return fromAsOf[1];
           return new Date().toISOString().slice(0, 10);
         })();
+        let effectiveUserId = userId;
+        if (typeof getCompositeUserId === 'function') {
+          try {
+            effectiveUserId = await getCompositeUserId(req);
+          } catch (_) {
+            effectiveUserId = userId;
+          }
+        }
 
         const parsedIntent = snapshotIntentParser.parseSnapshotIntent({
           question: q,
           timelineDateKey: timelineDate,
           snapshot: validatedSnapshot
         });
-
-        const periodProbe = snapshotAnswerEngine.computePeriodAnalytics({
-          snapshot: validatedSnapshot,
+        const comparisonQuery = snapshotAnswerEngine.resolveComparisonQueryFromQuestion({
           question: q,
           timelineDateKey: timelineDate,
-          disableSnapshotClamp: true
+          snapshot: validatedSnapshot
         });
+        const isComparisonMode = Array.isArray(comparisonQuery?.periods) && comparisonQuery.periods.length >= 2;
 
-        const effectiveRange = _resolveEffectiveSnapshotRange({
-          snapshot: validatedSnapshot,
-          parsedIntent,
-          periodProbe
-        });
+        const periodProbe = isComparisonMode
+          ? null
+          : snapshotAnswerEngine.computePeriodAnalytics({
+            snapshot: validatedSnapshot,
+            question: q,
+            timelineDateKey: timelineDate,
+            disableSnapshotClamp: true
+          });
 
-        const snapshot = _buildSnapshotForRange({
-          snapshot: validatedSnapshot,
-          startDateKey: effectiveRange.startDateKey,
-          endDateKey: effectiveRange.endDateKey
-        });
+        const effectiveRange = isComparisonMode
+          ? {
+            startDateKey: String(validatedSnapshot?.range?.startDateKey || ''),
+            endDateKey: String(validatedSnapshot?.range?.endDateKey || ''),
+            source: 'comparison_mode_keep_snapshot'
+          }
+          : _resolveEffectiveSnapshotRange({
+            snapshot: validatedSnapshot,
+            parsedIntent,
+            periodProbe
+          });
+
+        const snapshot = isComparisonMode
+          ? validatedSnapshot
+          : _buildSnapshotForRange({
+            snapshot: validatedSnapshot,
+            startDateKey: effectiveRange.startDateKey,
+            endDateKey: effectiveRange.endDateKey
+          });
         let periodAnalyticsSnapshot = snapshot;
 
-        if (_shouldUseNlpRangeOutsideUi({ validatedSnapshot, periodProbe, effectiveRange })) {
-          let effectiveUserId = userId;
-          if (typeof getCompositeUserId === 'function') {
-            try {
-              effectiveUserId = await getCompositeUserId(req);
-            } catch (_) {
-              effectiveUserId = userId;
-            }
-          }
-
+        if (!isComparisonMode && _shouldUseNlpRangeOutsideUi({ validatedSnapshot, periodProbe, effectiveRange })) {
           try {
             const byJournalRangeSnapshot = await _buildSnapshotFromJournalRange({
               userId: String(effectiveUserId || userId || ''),
@@ -2042,14 +2114,32 @@ module.exports = function createAiRouter(deps) {
           snapshot,
           timelineDateKey: timelineDate,
         });
-        const periodAnalytics = snapshotAnswerEngine.computePeriodAnalytics({
-          snapshot: periodAnalyticsSnapshot,
-          question: q,
-          timelineDateKey: timelineDate,
-          disableSnapshotClamp: true
-        });
+        const periodAnalytics = isComparisonMode
+          ? null
+          : snapshotAnswerEngine.computePeriodAnalytics({
+            snapshot: periodAnalyticsSnapshot,
+            question: q,
+            timelineDateKey: timelineDate,
+            disableSnapshotClamp: true
+          });
         if (periodAnalytics) {
           deterministicFacts.periodAnalytics = periodAnalytics;
+        }
+        if (isComparisonMode) {
+          const comparisonData = await _buildComparisonDataFromJournal({
+            userId: String(effectiveUserId || userId || ''),
+            periods: comparisonQuery?.periods || [],
+            asOf: timelineDate,
+            baseSnapshot: validatedSnapshot
+          });
+          deterministicFacts.comparisonData = comparisonData;
+          deterministicFacts.comparisonMeta = {
+            mode: 'comparison',
+            source: String(comparisonQuery?.source || 'comparison_query'),
+            compareKeyword: Boolean(comparisonQuery?.compareKeyword),
+            requestedPeriods: Array.isArray(comparisonQuery?.periods) ? comparisonQuery.periods : [],
+            generatedCount: Array.isArray(comparisonData) ? comparisonData.length : 0
+          };
         }
 
         if (parsedIntent?.type === 'CATEGORY_FACT_BY_CATEGORY') {

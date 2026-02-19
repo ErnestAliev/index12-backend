@@ -83,6 +83,7 @@ const buildExpected = ({
 }) => {
   const hasLedgerOperations = Array.isArray(deterministicFacts?.operations) && deterministicFacts.operations.length > 0;
   const periodAnalytics = deterministicFacts?.periodAnalytics || null;
+  const comparisonData = Array.isArray(deterministicFacts?.comparisonData) ? deterministicFacts.comparisonData : [];
   const hasPeriodAnalyticsTotals = toNum(periodAnalytics?.totals?.income) > 0
     || toNum(periodAnalytics?.totals?.expense) > 0
     || toNum(periodAnalytics?.totals?.net) !== 0;
@@ -110,7 +111,9 @@ const buildExpected = ({
     scenario_enabled: Boolean(scenarioCalculator?.enabled),
     has_life_spend_constraint: Boolean(scenarioCalculator?.hasLifeSpendConstraint),
     asks_direct_conditional_amount: Boolean(questionFlags?.isDirectConditionalAmount),
-    asks_single_amount: Boolean(questionFlags?.asksSingleAmount)
+    asks_single_amount: Boolean(questionFlags?.asksSingleAmount),
+    comparison_mode: comparisonData.length >= 2,
+    comparison_periods_count: comparisonData.length
   };
 
   const anomalyNumbers = [];
@@ -140,6 +143,27 @@ const buildExpected = ({
     ...periodTopExpenseCategoryAmounts,
     ...deterministicTopExpenseCategoryAmounts
   ], 2, 3);
+  const comparisonTotalsNumbers = [];
+  const comparisonDeltaNumbers = [];
+  const comparisonMetrics = ['income', 'expense', 'net'];
+
+  comparisonData.forEach((period) => {
+    comparisonMetrics.forEach((metric) => {
+      comparisonTotalsNumbers.push(toNum(period?.totals?.[metric]));
+    });
+    comparisonTotalsNumbers.push(toNum(period?.ownerDraw?.amount));
+  });
+
+  for (let i = 0; i < comparisonData.length; i += 1) {
+    for (let j = i + 1; j < comparisonData.length; j += 1) {
+      comparisonMetrics.forEach((metric) => {
+        const left = toNum(comparisonData?.[i]?.totals?.[metric]);
+        const right = toNum(comparisonData?.[j]?.totals?.[metric]);
+        const delta = right - left;
+        comparisonDeltaNumbers.push(delta, -delta, Math.abs(delta));
+      });
+    }
+  }
 
   const allowedNumbers = uniqueRounded([
     expected.open_now,
@@ -179,6 +203,8 @@ const buildExpected = ({
     ...periodTopExpenseCategoryAmounts,
     ...deterministicTopExpenseCategoryAmounts,
     ...topExpenseCategoryCombinationSums,
+    ...comparisonTotalsNumbers,
+    ...comparisonDeltaNumbers,
     ...anomalyNumbers,
     0
   ]);
@@ -195,6 +221,7 @@ const buildExpected = ({
   if (
     expected.mode === 'liquidity'
     && expected.next_obligation_amount > 0
+    && !Boolean(questionFlags?.asksComparison)
     && expected.responseIntent !== 'status'
   ) {
     required.push({ name: 'next_obligation_or_open_after', value: [expected.next_obligation_amount, expected.open_after_next_obligation] });
