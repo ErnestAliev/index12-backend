@@ -326,6 +326,18 @@ const resolvePeriodFromQuestion = ({ question, timelineDateKey, snapshot }) => {
     };
   }
 
+  const asksEndOfMonth = /(конец\s+месяц|к\s+концу\s+месяц|на\s+конец\s+месяц|конец\s+[а-я]+|остатк[аи]\s+на\s+конец|на\s+конец)/i.test(norm);
+  if (asksEndOfMonth) {
+    const month = resolveMonthFromQuestion(norm) || baseMonth;
+    const yearMatch = norm.match(/\b(20\d{2})\b/);
+    const year = yearMatch ? Number(yearMatch[1]) : baseYear;
+    return {
+      startDateKey: startOfMonthDateKey(year, month),
+      endDateKey: endOfMonthDateKey(year, month),
+      source: 'end_of_month_query'
+    };
+  }
+
   const weekOrder = resolveWeekOrderFromQuestion(norm);
   const asksWeek = /недел/i.test(norm);
   if (asksWeek && Number.isFinite(Number(weekOrder))) {
