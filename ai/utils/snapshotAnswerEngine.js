@@ -1596,6 +1596,13 @@ const buildLedgerOperations = ({
     const amount = Math.abs(toNum(row.amount));
     const category = String(row.category || 'Без категории');
     const counterparty = String(row.counterparty || 'Без контрагента');
+    const project = String(
+      row.project
+      || row.projName
+      || row?.project?.name
+      || row.projectName
+      || 'Без проекта'
+    );
     const name = String(
       row.name
       || `${category}${counterparty !== 'Без контрагента' ? ` ${counterparty}` : ''}`
@@ -1619,7 +1626,8 @@ const buildLedgerOperations = ({
       isOffsetExpense: Boolean(row.isOffsetExpense),
       counterparty,
       category,
-      account: String(row.account || 'Без счета')
+      account: String(row.account || 'Без счета'),
+      project
     });
   };
 
@@ -1641,7 +1649,8 @@ const buildLedgerOperations = ({
         offsets: item?.offsets,
         counterparty: item?.contName || 'Без контрагента',
         category: item?.catName || 'Без категории',
-        account: item?.accName || 'Без счета'
+        account: item?.accName || 'Без счета',
+        project: item?.projName || item?.project?.name || item?.projectName || ''
       });
     });
 
@@ -1655,7 +1664,8 @@ const buildLedgerOperations = ({
         isOffsetExpense: Boolean(item?.isOffsetExpense || item?.linkedParentId || item?.offsetIncomeId),
         counterparty: item?.contName || 'Без контрагента',
         category: item?.catName || 'Без категории',
-        account: item?.accName || 'Без счета'
+        account: item?.accName || 'Без счета',
+        project: item?.projName || item?.project?.name || item?.projectName || ''
       });
     });
 
@@ -1669,7 +1679,8 @@ const buildLedgerOperations = ({
         isOffsetExpense: Boolean(item?.isOffsetExpense || item?.linkedParentId || item?.offsetIncomeId),
         counterparty: item?.contName || 'Без контрагента',
         category: item?.catName || 'Вывод средств',
-        account: item?.accName || 'Без счета'
+        account: item?.accName || 'Без счета',
+        project: item?.projName || item?.project?.name || item?.projectName || ''
       });
     });
 
@@ -1683,7 +1694,8 @@ const buildLedgerOperations = ({
         amount: item?.amount,
         counterparty: 'Без контрагента',
         category: 'Перевод',
-        account: `${fromAcc} -> ${toAcc}`
+        account: `${fromAcc} -> ${toAcc}`,
+        project: item?.projName || item?.project?.name || item?.projectName || ''
       });
     });
   });

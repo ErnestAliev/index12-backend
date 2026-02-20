@@ -3,7 +3,6 @@
 
 const OpenAI = require('openai');
 const axios = require('axios');
-const vm = require('node:vm');
 const { create, all } = require('mathjs');
 const intentParser = require('../utils/intentParser');
 const cfoKnowledgeBase = require('../utils/cfoKnowledgeBase');
@@ -116,7 +115,7 @@ const normalizeOperations = (rows) => {
         counterparty: String(row?.counterparty || row?.counterpartyName || row?.contractorName || 'Без контрагента'),
         category: String(row?.category || row?.categoryName || row?.catName || 'Без категории'),
         account: String(row?.account || row?.accountName || row?.accName || row?.accountFromTo || 'Без счета'),
-        project: String(row?.project || row?.projectName || 'Без проекта'),
+        project: String(row?.project || row?.projName || row?.projectName || row?.project?.name || 'Без проекта'),
         status: String(row?.status || 'Исполнено')
       };
     })
@@ -147,7 +146,7 @@ const collectOperationsFromSnapshot = (snapshot) => {
           counterparty: String(mapped?.counterparty || mapped?.counterpartyName || 'Без контрагента'),
           category: String(mapped?.category || mapped?.catName || 'Без категории'),
           account: String(mapped?.account || mapped?.accName || 'Без счета'),
-          project: String(mapped?.project || 'Без проекта'),
+          project: String(mapped?.project || mapped?.projName || mapped?.projectName || mapped?.project?.name || 'Без проекта'),
           status: String(mapped?.status || 'Исполнено')
         });
       });
@@ -898,18 +897,20 @@ const resolveAnalyzerTransactions = (state, args = {}) => {
 const advancedDataAnalyzerTool = (state, args = {}) => {
   const transactions = resolveAnalyzerTransactions(state, args);
   const command = String(args?.command || args?.expression || args?.analysis || '').trim();
-  if (!command) {
+  const codeString = String(args?.codeString || '').trim();
+  if (!command && !codeString) {
     return {
       ok: false,
-      error: 'missing_command',
-      hint: 'Передайте command/expression для расчета.'
+      error: 'missing_command_or_codeString',
+      hint: 'Передайте command/expression или codeString для расчета.'
     };
   }
   if (!transactions.length) {
     return {
       ok: false,
       error: 'no_transactions_for_analysis',
-      command
+      command: command || null,
+      codeString: codeString || null
     };
   }
 
@@ -976,6 +977,8 @@ const advancedDataAnalyzerTool = (state, args = {}) => {
     incomeAmounts,
     expenseAmounts,
     offsetAmounts,
+    operations: transactions,
+    transactions,
     dailyTotals: dailyTotals.map((row) => row.value),
     transactionsCount: transactions.length,
     ...helperFns
@@ -995,34 +998,51 @@ const advancedDataAnalyzerTool = (state, args = {}) => {
   };
 
   try {
+    const runCodeInterpreter = (codeBody) => {
+      const jsCode = String(codeBody || '').trim();
+      if (!jsCode) {
+        throw new Error('empty_codeString');
+      }
+      if (/(?:process|require|module|global|import|export|child_process|fs)/i.test(jsCode)) {
+        throw new Error('unsafe_codeString');
+      }
+      const finalCode = /\breturn\b/.test(jsCode)
+        ? jsCode
+        : `return (${jsCode});`;
+      // Intentional code-interpreter mode for group-by and custom aggregations.
+      const fn = new Function(
+        'operations',
+        'math',
+        'helpers',
+        `"use strict";\n${finalCode}`
+      );
+      return fn(transactions, math, helperFns);
+    };
+
     let result;
-    if (command.startsWith('js:')) {
-      const jsExpr = command.slice(3).trim();
-      if (!jsExpr) {
-        return { ok: false, error: 'empty_js_expression' };
-      }
-      if (/(?:process|require|global|module|import|export|Function|eval|child_process|fs|while\s*\(|for\s*\()/i.test(jsExpr)) {
-        return { ok: false, error: 'unsafe_js_expression' };
-      }
-      const context = vm.createContext({
-        transactions,
-        amounts,
-        signedAmounts,
-        incomeAmounts,
-        expenseAmounts,
-        offsetAmounts,
-        dailyTotals,
-        Math
-      });
-      const script = new vm.Script(`(${jsExpr})`);
-      result = script.runInContext(context, { timeout: 1000 });
+    let executionMode = 'mathjs';
+    if (codeString) {
+      result = runCodeInterpreter(codeString);
+      executionMode = 'code_interpreter';
+    } else if (command.startsWith('js:')) {
+      result = runCodeInterpreter(command.slice(3).trim());
+      executionMode = 'code_interpreter';
     } else {
-      result = math.evaluate(command, scope);
+      const looksLikeJsAggregation = /(?:operations|transactions)\s*[\.\[]|=>|\.reduce\(|\.filter\(|\.map\(|\.sort\(|\.forEach\(|\{|\}/i
+        .test(command);
+      if (looksLikeJsAggregation) {
+        result = runCodeInterpreter(command);
+        executionMode = 'code_interpreter';
+      } else {
+        result = math.evaluate(command, scope);
+      }
     }
 
     return {
       ok: true,
-      command,
+      command: command || null,
+      codeString: codeString || null,
+      mode: executionMode,
       result: serializeResult(result),
       datasetMeta: {
         transactionsCount: transactions.length,
@@ -1033,7 +1053,8 @@ const advancedDataAnalyzerTool = (state, args = {}) => {
   } catch (error) {
     return {
       ok: false,
-      command,
+      command: command || null,
+      codeString: codeString || null,
       error: `advanced_analysis_failed:${String(error?.message || error)}`
     };
   }
@@ -1339,12 +1360,15 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'advanced_data_analyzer',
-      description: 'Выполняет продвинутые агрегации и вычисления по транзакциям (median, moving average, compound growth) через mathjs/JS.',
+      description: 'Code Interpreter для продвинутой аналитики: агрегации, Group By, фильтрация по проектам/контрагентам/счетам и математические расчеты через codeString (JS) или mathjs.',
       parameters: {
         type: 'object',
-        required: ['command'],
         properties: {
-          command: { type: 'string', description: 'mathjs выражение или JS-выражение с префиксом "js:"' },
+          codeString: {
+            type: 'string',
+            description: 'Тело JS-кода с обязательным return. Доступны переменные operations и math. Пример: return operations.filter(op => op.type === "Доход").reduce((acc, op) => { acc[op.project] = (acc[op.project] || 0) + op.amount; return acc; }, {});'
+          },
+          command: { type: 'string', description: 'mathjs выражение или JS-выражение (fallback).' },
           expression: { type: 'string' },
           analysis: { type: 'string' },
           transactions: {
@@ -1428,6 +1452,7 @@ const buildSystemPrompt = () => {
     '2) Широкие группы (налоги, коммуналка): делай широкий поиск по category через contains/filter в in-memory операциях.',
     '3) Уникальный сленг/аббревиатуры: сначала semantic_entity_matcher, затем get_transactions.',
     '4) Аналитические срезы (по проектам/по контрагентам/в разрезе счетов/разбивка): ЗАПРЕЩЕНО использовать get_snapshot_metrics для финального ответа. ОБЯЗАТЕЛЬНО используй get_transactions + advanced_data_analyzer (или JS-агрегацию) для группировки по нужному полю и расчета Доход - Расход по КАЖДОЙ группе.',
+    'Для advanced_data_analyzer при сложной агрегации передавай codeString: внутри доступны operations и math, код ОБЯЗАН завершаться return. Пример: return operations.filter(op => op.type === "Доход").reduce((acc, op) => { acc[op.project] = (acc[op.project]||0) + op.amount; return acc; }, {});',
     'НИКОГДА не говори пользователю фразы вида "я использую инструмент/калькулятор/tool".',
     'ВСЕГДА показывай расчетные шаги и формулы для прогнозов/балансов. Формат: "База [X] - Налоги [Y] - Взаимозачеты [Z] = Итог [N]".',
     'Если пользователь спрашивает "как ты это посчитал", используй цифры и контекст из предыдущих сообщений диалога и распиши шаги вычислений.',
