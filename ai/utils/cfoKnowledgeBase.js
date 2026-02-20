@@ -95,10 +95,19 @@ async function resolveSemanticAlias({ term, entityType = 'auto' }) {
       const learnedConfidence = Math.max(0, Math.min(100, Math.round(toNum(item?.confidence) || 0)));
       const hits = Math.max(1, Math.round(toNum(item?.hits) || 1));
       const score = (baseMatch * 0.75) + ((learnedConfidence / 100) * 0.2) + (Math.min(10, hits) * 0.005);
+      const canonicalNamesRaw = Array.isArray(item?.canonicalNames)
+        ? item.canonicalNames
+        : [item?.canonicalName];
+      const canonicalNames = Array.from(new Set(
+        canonicalNamesRaw
+          .map((name) => String(name || '').trim())
+          .filter(Boolean)
+      ));
       return {
         entityType: itemType === 'auto' ? 'category' : itemType,
         term: String(item?.term || item?.termOriginal || ''),
-        canonicalName: String(item?.canonicalName || ''),
+        canonicalName: canonicalNames[0] || '',
+        canonicalNames,
         confidence: Math.max(0, Math.min(100, Math.round(score * 100))),
         learnedConfidence,
         hits,
@@ -120,15 +129,24 @@ async function resolveSemanticAlias({ term, entityType = 'auto' }) {
 async function updateSemanticWeights({
   term,
   canonicalName,
+  canonicalNames = null,
   entityType = 'category',
   confidence = 95,
   note = ''
 }) {
   const termRaw = String(term || '').trim();
-  const canonicalRaw = String(canonicalName || '').trim();
+  const canonicalListRaw = Array.isArray(canonicalNames) && canonicalNames.length
+    ? canonicalNames
+    : [canonicalName];
+  const canonicalList = Array.from(new Set(
+    canonicalListRaw
+      .map((name) => String(name || '').trim())
+      .filter(Boolean)
+  ));
+  const canonicalRaw = canonicalList[0] || '';
   const typeNorm = normalizeEntityType(entityType);
   const termNorm = normalize(termRaw);
-  if (!termNorm || !canonicalRaw) {
+  if (!termNorm || !canonicalList.length) {
     return {
       ok: false,
       error: 'term_or_canonical_missing'
@@ -150,7 +168,9 @@ async function updateSemanticWeights({
       term: termRaw,
       termNorm,
       canonicalName: canonicalRaw,
+      canonicalNames: canonicalList,
       canonicalNorm: normalize(canonicalRaw),
+      canonicalNorms: canonicalList.map((name) => normalize(name)),
       confidence: safeConfidence,
       hits: Math.max(1, Math.round(toNum(prev?.hits) || 1) + 1),
       note: String(note || prev?.note || ''),
@@ -163,7 +183,9 @@ async function updateSemanticWeights({
       term: termRaw,
       termNorm,
       canonicalName: canonicalRaw,
+      canonicalNames: canonicalList,
       canonicalNorm: normalize(canonicalRaw),
+      canonicalNorms: canonicalList.map((name) => normalize(name)),
       confidence: safeConfidence,
       hits: 1,
       note: String(note || ''),

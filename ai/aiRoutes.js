@@ -2879,6 +2879,9 @@ module.exports = function createAiRouter(deps) {
             timelineDate
           }
         });
+        const uiPayload = llmResult?.uiPayload && typeof llmResult.uiPayload === 'object'
+          ? llmResult.uiPayload
+          : null;
 
         const llmErrorText = String(llmResult?.text || '').trim();
         const llmErrorCode = String(llmResult?.debug?.code || '').trim();
@@ -2935,7 +2938,8 @@ module.exports = function createAiRouter(deps) {
           llm: llmResult ? {
             ok: llmResult.ok,
             text: llmResult.text,
-            debug: llmResult.debug || null
+            debug: llmResult.debug || null,
+            uiPayload
           } : null,
           requestMeta: {
             asOf,
@@ -2979,6 +2983,7 @@ module.exports = function createAiRouter(deps) {
             qualityGate,
             discriminatorLog,
             llm: llmResult?.debug || null,
+            uiPayload,
             requestMeta: {
               snapshotChecksum: snapshotChecksum || null,
               isDataChanged: isDataChangedEffective,
@@ -2993,6 +2998,7 @@ module.exports = function createAiRouter(deps) {
 
         return res.json({
           text: responseText,
+          ui: uiPayload,
           qualityGate,
           discriminatorLog,
           ...(debugEnabled ? {
