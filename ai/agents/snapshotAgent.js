@@ -232,6 +232,7 @@ const buildEntityCatalog = (state) => {
     upsert('category', op?.category);
     upsert('counterparty', op?.counterparty);
     upsert('account', op?.account);
+    upsert('project', op?.project);
   });
 
   (Array.isArray(state?.deterministicFacts?.topExpenseCategories) ? state.deterministicFacts.topExpenseCategories : [])
@@ -265,11 +266,13 @@ const buildBusinessDictionary = (state) => {
   const categories = uniqueNames(entities.filter((x) => x.entityType === 'category').map((x) => x.name));
   const counterparties = uniqueNames(entities.filter((x) => x.entityType === 'counterparty').map((x) => x.name));
   const accounts = uniqueNames(entities.filter((x) => x.entityType === 'account').map((x) => x.name));
+  const projects = uniqueNames(entities.filter((x) => x.entityType === 'project').map((x) => x.name));
   return {
     categories,
     counterparties,
     accounts,
-    all: uniqueNames([...categories, ...counterparties, ...accounts])
+    projects,
+    all: uniqueNames([...categories, ...counterparties, ...accounts, ...projects])
   };
 };
 
@@ -284,13 +287,16 @@ const getBusinessDictionaryResponse = (state, args = {}) => {
   const itemsByType = {
     categories: dict.categories,
     counterparties: dict.counterparties,
-    accounts: dict.accounts
+    accounts: dict.accounts,
+    projects: dict.projects
   };
   const selectedTypeKeys = entityType === 'category'
     ? ['categories']
     : (entityType === 'counterparty'
       ? ['counterparties']
-      : (entityType === 'account' ? ['accounts'] : ['categories', 'counterparties', 'accounts']));
+      : (entityType === 'account'
+        ? ['accounts']
+        : (entityType === 'project' ? ['projects'] : ['categories', 'counterparties', 'accounts', 'projects'])));
 
   const matches = selectedTypeKeys.reduce((acc, key) => {
     const source = Array.isArray(itemsByType[key]) ? itemsByType[key] : [];
@@ -308,11 +314,13 @@ const getBusinessDictionaryResponse = (state, args = {}) => {
     counts: {
       categories: dict.categories.length,
       counterparties: dict.counterparties.length,
-      accounts: dict.accounts.length
+      accounts: dict.accounts.length,
+      projects: dict.projects.length
     },
     categories: dict.categories.slice(0, limit),
     counterparties: dict.counterparties.slice(0, limit),
     accounts: dict.accounts.slice(0, limit),
+    projects: dict.projects.slice(0, limit),
     matches
   };
 };
@@ -412,6 +420,7 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
   const entityTypeFilter = entityTypeArg === 'category'
     || entityTypeArg === 'counterparty'
     || entityTypeArg === 'account'
+    || entityTypeArg === 'project'
     ? entityTypeArg
     : 'auto';
   const CONFIDENCE_THRESHOLD = 85;
@@ -444,6 +453,32 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
       clarificationQuestion: `Я не вижу справочник сущностей в текущем срезе для "${termToSearch}". Уточните полное название.`,
       clarificationPrompt: `Я не вижу справочник сущностей в текущем срезе для "${termToSearch}". Уточните полное название.`
     };
+  }
+
+  const termNorm = normalizeText(termToSearch);
+  if (termNorm) {
+    const exact = catalog.find((row) => row.norm === termNorm);
+    if (exact) {
+      const exactMatch = {
+        entityType: exact.entityType,
+        canonicalName: exact.name,
+        confidence: 100,
+        source: 'exact_text',
+        reasons: ['exact_match']
+      };
+      return {
+        ok: true,
+        term: termToSearch,
+        entityTypeRequested: entityTypeFilter,
+        confidenceThreshold: CONFIDENCE_THRESHOLD,
+        topMatches: [exactMatch],
+        match: exactMatch,
+        action: 'auto_apply',
+        clarificationOptions: [],
+        clarificationQuestion: null,
+        clarificationPrompt: null
+      };
+    }
   }
 
   let intentCategoryHints = [];
@@ -579,7 +614,9 @@ const updateSemanticWeightsTool = async (state, args = {}, context = {}) => {
   const dict = buildBusinessDictionary(state);
   const allowedByType = entityType === 'counterparty'
     ? dict.counterparties
-    : (entityType === 'account' ? dict.accounts : dict.categories);
+    : (entityType === 'account'
+      ? dict.accounts
+      : (entityType === 'project' ? dict.projects : dict.categories));
   const allowedNormMap = new Map(allowedByType.map((name) => [normalizeText(name), name]));
 
   if (!term || !canonicalRequested.length) {
@@ -1203,11 +1240,11 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'get_business_dictionary',
-      description: 'Возвращает словарь бизнеса из текущего Snapshot: уникальные категории, контрагенты и счета.',
+      description: 'Возвращает словарь бизнеса из текущего Snapshot: уникальные категории, контрагенты, счета и проекты.',
       parameters: {
         type: 'object',
         properties: {
-          entityType: { type: 'string', description: 'all | category | counterparty | account' },
+          entityType: { type: 'string', description: 'all | category | counterparty | account | project' },
           contains: { type: 'string', description: 'Подстрока для фильтрации, например "налог"' },
           limit: { type: 'integer', description: 'Лимит элементов на массив' }
         }
@@ -1230,7 +1267,7 @@ const TOOL_DEFINITIONS = [
         type: 'object',
         properties: {
           term: { type: 'string', description: 'Слово или фраза пользователя, например "кпн"' },
-          entityType: { type: 'string', description: 'category | counterparty | account | auto' },
+          entityType: { type: 'string', description: 'category | counterparty | account | project | auto' },
           question: { type: 'string', description: 'Полный вопрос пользователя для дополнительного контекста' }
         }
       }
@@ -1252,7 +1289,7 @@ const TOOL_DEFINITIONS = [
             items: { type: 'string' },
             description: 'Массив точных канонических названий из get_business_dictionary.'
           },
-          entityType: { type: 'string', description: 'category | counterparty | account' },
+          entityType: { type: 'string', description: 'category | counterparty | account | project' },
           confidence: { type: 'integer', description: 'Уверенность в корректировке, 0..100' },
           note: { type: 'string', description: 'Короткое пояснение' }
         }
@@ -1268,7 +1305,7 @@ const TOOL_DEFINITIONS = [
         type: 'object',
         properties: {
           term: { type: 'string', description: 'Опционально: исходный термин для точного фильтра.' },
-          entityType: { type: 'string', description: 'auto | category | counterparty | account' },
+          entityType: { type: 'string', description: 'auto | category | counterparty | account | project' },
           limit: { type: 'integer', description: 'Лимит выдачи.' }
         }
       }
@@ -1284,7 +1321,7 @@ const TOOL_DEFINITIONS = [
         required: ['term'],
         properties: {
           term: { type: 'string', description: 'Термин алиаса для удаления.' },
-          entityType: { type: 'string', description: 'auto | category | counterparty | account' }
+          entityType: { type: 'string', description: 'auto | category | counterparty | account | project' }
         }
       }
     }
@@ -1534,7 +1571,7 @@ const parseClarificationFromAssistant = (text) => {
   if (!src) return null;
 
   const termMatch = src.match(/Что\s+вы\s+имеете\s+в\s+виду\s+под\s+["«]?([^"\n»]+)["»]?\?/i);
-  const entityTypeMatch = src.match(/\[entity:(category|counterparty|account|auto)\]/i);
+  const entityTypeMatch = src.match(/\[entity:(category|counterparty|account|project|auto)\]/i);
   const options = [];
   const re = /(?:^|\n)\s*(\d+)\.\s*(.+?)(?=\n|$)/g;
   let match = re.exec(src);
