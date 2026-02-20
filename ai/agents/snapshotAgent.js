@@ -27,6 +27,17 @@ const parseJsonSafe = (value, fallback = {}) => {
   }
 };
 
+const normalizeQuestionForRules = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/ё/g, 'е')
+  .trim();
+
+const asksHowCalculated = (question) => /(как\s+ты\s+(это\s+)?(рассчитал|посчитал)|как\s+это\s+посчитан|как\s+посчитал|покажи\s+расчет|распиши\s+расчет|откуда\s+цифр)/i
+  .test(normalizeQuestionForRules(question));
+
+const asksForecastOrBalanceImpact = (question) => /(прогноз|экстрапол|хватит\s+ли|как\s+это\s+отразитс[яь]\s+на\s+баланс|повлияет\s+на\s+баланс|баланс\s+после)/i
+  .test(normalizeQuestionForRules(question));
+
 const isDayKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
 const isMonthKey = (value) => /^\d{4}-\d{2}$/.test(String(value || ''));
 
@@ -369,6 +380,9 @@ const buildSystemPrompt = () => {
     'Ты ОБЯЗАН использовать инструмент get_snapshot_metrics для получения данных.',
     'Ты ОБЯЗАН использовать инструмент calculator перед любыми прогнозами будущих балансов и прибыли.',
     'Если видишь offsetNetting или isOffsetExpense, исключай эти суммы из прогнозов будущих расходов, потому что это не физические cash-траты.',
+    'НИКОГДА не говори пользователю фразы вида "я использую инструмент/калькулятор/tool".',
+    'ВСЕГДА показывай расчетные шаги и формулы для прогнозов/балансов. Формат: "База [X] - Налоги [Y] - Взаимозачеты [Z] = Итог [N]".',
+    'Если пользователь спрашивает "как ты это посчитал", используй цифры и контекст из предыдущих сообщений диалога и распиши шаги вычислений.',
     'Отвечай кратко, по делу, с конкретными цифрами и формулами.'
   ].join(' ');
 };
@@ -388,12 +402,27 @@ const buildContextPrimer = (state) => {
 
 const mapHistoryMessages = (history) => {
   return (Array.isArray(history) ? history : [])
-    .slice(-8)
     .map((msg) => ({
       role: msg?.role === 'assistant' ? 'assistant' : 'user',
       content: String(msg?.content || '').trim()
     }))
     .filter((m) => m.content);
+};
+
+const sanitizeFinalText = (value) => {
+  let out = String(value || '').trim();
+  if (!out) return out;
+
+  const replacements = [
+    [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?calculator\b/gi, 'расчет выполнен по формуле'],
+    [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?get_snapshot_metrics\b/gi, 'данные взяты из финансового среза'],
+    [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+tools?\b/gi, 'расчет выполнен по данным системы']
+  ];
+  replacements.forEach(([pattern, replacement]) => {
+    out = out.replace(pattern, replacement);
+  });
+  out = out.replace(/[ \t]{2,}/g, ' ').trim();
+  return out;
 };
 
 const run = async ({
@@ -425,6 +454,11 @@ const run = async ({
   const client = new OpenAI({ apiKey: OPENAI_KEY });
   const toolCallsLog = [];
   const model = DEFAULT_MODEL;
+  const questionText = String(question || '').trim();
+  const wantsCalculationBreakdown = asksHowCalculated(questionText);
+  const wantsForecastStyle = asksForecastOrBalanceImpact(questionText);
+  const historyMessages = mapHistoryMessages(history);
+  const lastAssistantMessage = [...historyMessages].reverse().find((m) => m.role === 'assistant') || null;
 
   const messages = [
     { role: 'system', content: buildSystemPrompt() },
@@ -432,8 +466,26 @@ const run = async ({
       role: 'system',
       content: `INDEX_JSON: ${JSON.stringify(buildContextPrimer(state))}`
     },
-    ...mapHistoryMessages(history),
-    { role: 'user', content: String(question || '').trim() }
+    ...(wantsCalculationBreakdown
+      ? [{
+          role: 'system',
+          content: [
+            'Пользователь просит объяснить расчет.',
+            'Ответ должен содержать пошаговую расшифровку с формулами и промежуточными числами.',
+            lastAssistantMessage?.content
+              ? `Опирайся на последний ответ ассистента в истории: "${lastAssistantMessage.content.slice(0, 1200)}"`
+              : 'Если в истории нет прошлой формулы, сначала восстанови ее через инструменты, затем распиши шаги.'
+          ].join(' ')
+        }]
+      : []),
+    ...(wantsForecastStyle
+      ? [{
+          role: 'system',
+          content: 'Для прогноза/влияния на баланс обязательны формулы со знаками +/− и итогом после "=".'
+        }]
+      : []),
+    ...historyMessages,
+    { role: 'user', content: questionText }
   ];
 
   const executeTool = (name, argsObj) => {
@@ -462,7 +514,7 @@ const run = async ({
 
       const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
       if (!toolCalls.length) {
-        const text = String(msg?.content || '').trim();
+        const text = sanitizeFinalText(msg?.content || '');
         if (!text) throw new Error('empty_model_text');
         return {
           ok: true,
@@ -471,7 +523,10 @@ const run = async ({
             model: completion?.model || model,
             usage: lastUsage,
             agentMode: 'tool_use',
-            toolCalls: toolCallsLog
+            toolCalls: toolCallsLog,
+            historyMessagesUsed: historyMessages.length,
+            wantsCalculationBreakdown,
+            wantsForecastStyle
           }
         };
       }
@@ -541,4 +596,3 @@ const run = async ({
 module.exports = {
   run
 };
-

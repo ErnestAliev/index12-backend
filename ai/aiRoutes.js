@@ -310,6 +310,23 @@ module.exports = function createAiRouter(deps) {
     return '';
   };
 
+  const _normalizeAgentHistory = (rows) => {
+    const src = Array.isArray(rows) ? rows : [];
+    const out = [];
+    src.forEach((row) => {
+      const roleRaw = String(row?.role || row?.sender || '').trim().toLowerCase();
+      const role = roleRaw === 'assistant' || roleRaw === 'ai' || roleRaw === 'bot'
+        ? 'assistant'
+        : 'user';
+      const content = String(row?.content ?? row?.text ?? row?.message ?? '').trim();
+      if (!content) return;
+      const prev = out[out.length - 1];
+      if (prev && prev.role === role && prev.content === content) return;
+      out.push({ role, content });
+    });
+    return out;
+  };
+
   const _fmtDDMMYY = (date) => {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '?';
     const dd = String(date.getDate()).padStart(2, '0');
@@ -2827,9 +2844,23 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
+        const frontendHistoryRaw = _normalizeAgentHistory(req?.body?.history);
+        const persistedHistoryRaw = _normalizeAgentHistory(
+          isDataChangedEffective ? [] : chatHistory.messages.slice(0, -1)
+        );
+        const historyForAgent = (() => {
+          const base = frontendHistoryRaw.length ? [...frontendHistoryRaw] : [...persistedHistoryRaw];
+          const last = base[base.length - 1];
+          if (last && last.role === 'user' && String(last.content || '').trim() === q) {
+            base.pop();
+          }
+          return base;
+        })();
+        const historySource = frontendHistoryRaw.length ? 'frontend_history' : 'server_chat_history';
+
         const llmResult = await snapshotAgent.run({
           question: q,
-          history: isDataChangedEffective ? [] : chatHistory.messages.slice(0, -1),
+          history: historyForAgent,
           currentContext: req?.body?.currentContext || null,
           snapshot,
           deterministicFacts,
@@ -2917,6 +2948,12 @@ module.exports = function createAiRouter(deps) {
               rowCount: Array.isArray(req?.body?.tableContext?.rows)
                 ? req.body.tableContext.rows.length
                 : 0
+            },
+            historySummary: {
+              source: historySource,
+              frontendCount: frontendHistoryRaw.length,
+              persistedCount: persistedHistoryRaw.length,
+              usedCount: historyForAgent.length
             }
           },
           discriminatorLog,
