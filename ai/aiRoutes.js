@@ -317,14 +317,14 @@ module.exports = function createAiRouter(deps) {
       const roleRaw = String(row?.role || row?.sender || '').trim().toLowerCase();
       const role = roleRaw === 'assistant' || roleRaw === 'ai' || roleRaw === 'bot'
         ? 'assistant'
-        : 'user';
+        : (roleRaw === 'system' ? 'system' : 'user');
       const content = String(row?.content ?? row?.text ?? row?.message ?? '').trim();
       if (!content) return;
       const prev = out[out.length - 1];
       if (prev && prev.role === role && prev.content === content) return;
       out.push({ role, content });
     });
-    return out;
+    return out.slice(-10);
   };
 
   const _fmtDDMMYY = (date) => {
@@ -2849,14 +2849,22 @@ module.exports = function createAiRouter(deps) {
           isDataChangedEffective ? [] : chatHistory.messages.slice(0, -1)
         );
         const historyForAgent = (() => {
-          const base = frontendHistoryRaw.length ? [...frontendHistoryRaw] : [...persistedHistoryRaw];
+          const merged = [...persistedHistoryRaw, ...frontendHistoryRaw];
+          const base = [];
+          merged.forEach((row) => {
+            const prev = base[base.length - 1];
+            if (prev && prev.role === row.role && prev.content === row.content) return;
+            base.push(row);
+          });
           const last = base[base.length - 1];
           if (last && last.role === 'user' && String(last.content || '').trim() === q) {
             base.pop();
           }
-          return base;
+          return base.slice(-10);
         })();
-        const historySource = frontendHistoryRaw.length ? 'frontend_history' : 'server_chat_history';
+        const historySource = frontendHistoryRaw.length
+          ? (persistedHistoryRaw.length ? 'merged_frontend_server_history' : 'frontend_history')
+          : 'server_chat_history';
 
         const llmResult = await snapshotAgent.run({
           question: q,

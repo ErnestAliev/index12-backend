@@ -1,6 +1,8 @@
 // ai/utils/cfoKnowledgeBase.js
 // RAG helper with Atlas Vector Search (primary) + local pattern fallback.
 const mongoose = require('mongoose');
+const fs = require('fs/promises');
+const path = require('path');
 
 const toNum = (value) => {
   const n = Number(value);
@@ -19,6 +21,172 @@ const tokenize = (value) => {
   if (!text) return [];
   return text.split(' ').filter(Boolean);
 };
+
+const SEMANTIC_WEIGHTS_PATH = path.resolve(__dirname, '..', 'debug', 'semantic-weights.json');
+let semanticWeightsCache = null;
+
+const normalizeEntityType = (value) => {
+  const src = String(value || '').toLowerCase().trim();
+  if (src === 'category' || src === 'категория') return 'category';
+  if (src === 'counterparty' || src === 'контрагент') return 'counterparty';
+  if (src === 'account' || src === 'счет' || src === 'счёт') return 'account';
+  if (src === 'project' || src === 'проект') return 'project';
+  return 'auto';
+};
+
+const buildSemanticId = (entityType, termNorm) => `${String(entityType || 'auto')}::${String(termNorm || '')}`;
+
+const loadSemanticWeights = async () => {
+  if (Array.isArray(semanticWeightsCache)) return semanticWeightsCache;
+
+  try {
+    const raw = await fs.readFile(SEMANTIC_WEIGHTS_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    semanticWeightsCache = Array.isArray(parsed?.items) ? parsed.items : [];
+  } catch (_) {
+    semanticWeightsCache = [];
+  }
+  return semanticWeightsCache;
+};
+
+const persistSemanticWeights = async () => {
+  if (!Array.isArray(semanticWeightsCache)) semanticWeightsCache = [];
+  const body = JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    items: semanticWeightsCache
+  }, null, 2);
+
+  await fs.mkdir(path.dirname(SEMANTIC_WEIGHTS_PATH), { recursive: true });
+  await fs.writeFile(SEMANTIC_WEIGHTS_PATH, body, 'utf8');
+};
+
+const matchSemanticCandidate = (termNorm, itemTermNorm) => {
+  const q = String(termNorm || '');
+  const x = String(itemTermNorm || '');
+  if (!q || !x) return 0;
+  if (q === x) return 1;
+  if (q.length >= 3 && x.includes(q)) return 0.92;
+  if (x.length >= 3 && q.includes(x)) return 0.88;
+  return 0;
+};
+
+async function resolveSemanticAlias({ term, entityType = 'auto' }) {
+  const qNorm = normalize(term);
+  if (!qNorm) {
+    return {
+      ok: false,
+      error: 'empty_term',
+      match: null,
+      candidates: []
+    };
+  }
+
+  const typeNorm = normalizeEntityType(entityType);
+  const store = await loadSemanticWeights();
+  const candidates = (Array.isArray(store) ? store : [])
+    .map((item) => {
+      const itemType = normalizeEntityType(item?.entityType || 'auto');
+      if (typeNorm !== 'auto' && itemType !== typeNorm) return null;
+
+      const baseMatch = matchSemanticCandidate(qNorm, normalize(item?.termNorm || item?.term || ''));
+      if (baseMatch <= 0) return null;
+
+      const learnedConfidence = Math.max(0, Math.min(100, Math.round(toNum(item?.confidence) || 0)));
+      const hits = Math.max(1, Math.round(toNum(item?.hits) || 1));
+      const score = (baseMatch * 0.75) + ((learnedConfidence / 100) * 0.2) + (Math.min(10, hits) * 0.005);
+      return {
+        entityType: itemType === 'auto' ? 'category' : itemType,
+        term: String(item?.term || item?.termOriginal || ''),
+        canonicalName: String(item?.canonicalName || ''),
+        confidence: Math.max(0, Math.min(100, Math.round(score * 100))),
+        learnedConfidence,
+        hits,
+        source: 'learned_semantic_weights'
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0))
+    .slice(0, 5);
+
+  return {
+    ok: candidates.length > 0,
+    error: candidates.length ? null : 'no_semantic_alias_match',
+    match: candidates[0] || null,
+    candidates
+  };
+}
+
+async function updateSemanticWeights({
+  term,
+  canonicalName,
+  entityType = 'category',
+  confidence = 95,
+  note = ''
+}) {
+  const termRaw = String(term || '').trim();
+  const canonicalRaw = String(canonicalName || '').trim();
+  const typeNorm = normalizeEntityType(entityType);
+  const termNorm = normalize(termRaw);
+  if (!termNorm || !canonicalRaw) {
+    return {
+      ok: false,
+      error: 'term_or_canonical_missing'
+    };
+  }
+
+  const store = await loadSemanticWeights();
+  const id = buildSemanticId(typeNorm, termNorm);
+  const nowIso = new Date().toISOString();
+  const safeConfidence = Math.max(0, Math.min(100, Math.round(toNum(confidence) || 95)));
+
+  const existingIdx = store.findIndex((row) => String(row?.id || '') === id);
+  if (existingIdx >= 0) {
+    const prev = store[existingIdx] || {};
+    store[existingIdx] = {
+      ...prev,
+      id,
+      entityType: typeNorm,
+      term: termRaw,
+      termNorm,
+      canonicalName: canonicalRaw,
+      canonicalNorm: normalize(canonicalRaw),
+      confidence: safeConfidence,
+      hits: Math.max(1, Math.round(toNum(prev?.hits) || 1) + 1),
+      note: String(note || prev?.note || ''),
+      updatedAt: nowIso
+    };
+  } else {
+    store.push({
+      id,
+      entityType: typeNorm,
+      term: termRaw,
+      termNorm,
+      canonicalName: canonicalRaw,
+      canonicalNorm: normalize(canonicalRaw),
+      confidence: safeConfidence,
+      hits: 1,
+      note: String(note || ''),
+      createdAt: nowIso,
+      updatedAt: nowIso
+    });
+  }
+
+  semanticWeightsCache = store;
+  try {
+    await persistSemanticWeights();
+  } catch (error) {
+    return {
+      ok: false,
+      error: `semantic_weights_persist_failed:${String(error?.message || error)}`
+    };
+  }
+
+  return {
+    ok: true,
+    updated: store.find((row) => String(row?.id || '') === id) || null
+  };
+}
 
 const isAtlasUri = () => {
   const uri = String(process.env.DB_URL || '');
@@ -371,5 +539,7 @@ async function retrieveCfoContext({
 
 module.exports = {
   retrieveCfoContext,
-  getDefaultKnowledgeEntries
+  getDefaultKnowledgeEntries,
+  resolveSemanticAlias,
+  updateSemanticWeights
 };
