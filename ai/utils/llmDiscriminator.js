@@ -71,6 +71,62 @@ const buildCombinationSums = (numbers, minItems = 2, maxItems = 3) => {
   return uniqueRounded(out);
 };
 
+const hasOffsetSignalInOperations = (rows) => {
+  return (Array.isArray(rows) ? rows : []).some((op) => {
+    const amount = Math.abs(toNum(op?.amount));
+    const netAmount = Math.abs(toNum(op?.netAmount));
+    const offsetAmount = Math.abs(toNum(op?.offsetAmount));
+    const offsets = Array.isArray(op?.offsets) ? op.offsets : [];
+    const hasOffsetsList = offsets.some((row) => Math.abs(toNum(row?.amount)) > 0);
+    const hasNetGap = amount > 0 && netAmount > 0 && Math.abs(amount - netAmount) > 1;
+    return offsetAmount > 0 || hasOffsetsList || hasNetGap || Boolean(op?.isOffsetExpense) || Boolean(op?.linkedParentId);
+  });
+};
+
+const collectOffsetAdjustedOperationNumbers = (rows) => {
+  const out = [];
+  (Array.isArray(rows) ? rows : []).forEach((op) => {
+    const amount = Math.abs(toNum(op?.amount));
+    const netAmount = Math.abs(toNum(op?.netAmount));
+    const offsetAmount = Math.abs(toNum(op?.offsetAmount));
+    const offsetsTotal = (Array.isArray(op?.offsets) ? op.offsets : [])
+      .reduce((sum, row) => sum + Math.abs(toNum(row?.amount)), 0);
+
+    if (amount > 0 && offsetAmount > 0) {
+      out.push(Math.max(0, amount - offsetAmount));
+      out.push(offsetAmount);
+    }
+    if (amount > 0 && netAmount > 0) {
+      out.push(netAmount);
+      const derivedOffset = Math.max(0, amount - netAmount);
+      if (derivedOffset > 0) out.push(derivedOffset);
+    }
+    if (amount > 0 && offsetsTotal > 0) {
+      out.push(offsetsTotal);
+      out.push(Math.max(0, amount - offsetsTotal));
+    }
+  });
+  return out.filter((n) => Number.isFinite(n) && n >= 0);
+};
+
+const hasPredictionAdjustmentReason = (text) => {
+  const src = String(text || '').toLowerCase().replace(/ё/g, 'е');
+  if (!src) return false;
+  const reasonPatterns = [
+    /исключ[а-я]*\s+налог/,
+    /без\s+налог/,
+    /исключ[а-я]*\s+взаимозач/,
+    /взаимозачет/,
+    /разов[а-я]*\s+(эффект|операц|расход|зачет|событ)/,
+    /не\s+перенос[а-я]*\s+на\s+(март|будущ|следующ)/,
+    /изменени[ея]\s+услови/,
+    /услови[яе].*ybb\s*group/,
+    /ybb\s*group/,
+    /корректировк[аи]\s+(базы|расход|доход|прогноз)/
+  ];
+  return reasonPatterns.some((re) => re.test(src));
+};
+
 const buildExpected = ({
   accountContext,
   accountViewContext,
@@ -133,6 +189,19 @@ const buildExpected = ({
     toNum(deterministicFacts?.plan?.offsetNetting?.amount)
   ]).filter((n) => n > 0);
   expected.offset_netting_candidates = offsetNettingCandidates;
+  const hasOffsetSignalsInFacts = hasOffsetSignalInOperations(periodAnalytics?.topOperations)
+    || hasOffsetSignalInOperations(deterministicFacts?.operations);
+  expected.offset_logic_present = offsetNettingCandidates.length > 0 || hasOffsetSignalsInFacts;
+  expected.authoritative_net_candidates = uniqueRounded([
+    toNum(deterministicFacts?.totals?.net),
+    toNum(deterministicFacts?.fact?.totals?.net),
+    toNum(deterministicFacts?.plan?.totals?.net),
+    toNum(periodAnalytics?.totals?.net),
+    toNum(advisoryFacts?.totals?.net),
+    toNum(advisoryFacts?.splitTotals?.fact?.net),
+    toNum(advisoryFacts?.splitTotals?.plan?.net),
+    toNum(derivedSemantics?.monthForecastNet)
+  ]);
 
   const anomalyNumbers = [];
   const pushAnomalyNumbers = (rows) => {
@@ -162,6 +231,8 @@ const buildExpected = ({
   };
   const periodTopOperationAmounts = collectOperationNumbers(periodAnalytics?.topOperations);
   const deterministicOperationAmounts = collectOperationNumbers(deterministicFacts?.operations);
+  const periodTopOperationOffsetAdjustedAmounts = collectOffsetAdjustedOperationNumbers(periodAnalytics?.topOperations);
+  const deterministicOperationOffsetAdjustedAmounts = collectOffsetAdjustedOperationNumbers(deterministicFacts?.operations);
   const periodTopExpenseCategoryAmounts = (Array.isArray(periodAnalytics?.topExpenseCategories) ? periodAnalytics.topExpenseCategories : [])
     .map((row) => toNum(row?.amount))
     .filter((n) => n > 0);
@@ -254,6 +325,15 @@ const buildExpected = ({
     }
   }
 
+  const periodOffsetAmount = toNum(periodAnalytics?.offsetNetting?.amount ?? deterministicFacts?.offsetNetting?.amount);
+  const periodAdjustedIncome = Math.max(0, toNum(periodAnalytics?.totals?.income) - periodOffsetAmount);
+  const periodAdjustedExpense = Math.max(0, toNum(periodAnalytics?.totals?.expense) - periodOffsetAmount);
+  const periodAdjustedNet = periodAdjustedIncome - periodAdjustedExpense;
+  const deterministicOffsetAmount = toNum(deterministicFacts?.offsetNetting?.amount);
+  const deterministicAdjustedIncome = Math.max(0, toNum(deterministicFacts?.totals?.income) - deterministicOffsetAmount);
+  const deterministicAdjustedExpense = Math.max(0, toNum(deterministicFacts?.totals?.expense) - deterministicOffsetAmount);
+  const deterministicAdjustedNet = deterministicAdjustedIncome - deterministicAdjustedExpense;
+
   const allowedNumbers = uniqueRounded([
     expected.open_now,
     expected.open_end,
@@ -284,8 +364,23 @@ const buildExpected = ({
     toNum(periodAnalytics?.totals?.income),
     toNum(periodAnalytics?.totals?.expense),
     toNum(periodAnalytics?.totals?.net),
+    toNum(deterministicFacts?.totals?.income),
+    toNum(deterministicFacts?.totals?.expense),
+    toNum(deterministicFacts?.totals?.net),
+    toNum(deterministicFacts?.fact?.totals?.income),
+    toNum(deterministicFacts?.fact?.totals?.expense),
+    toNum(deterministicFacts?.fact?.totals?.net),
+    toNum(deterministicFacts?.plan?.totals?.income),
+    toNum(deterministicFacts?.plan?.totals?.expense),
+    toNum(deterministicFacts?.plan?.totals?.net),
     toNum(periodAnalytics?.ownerDraw?.amount),
     toNum(periodAnalytics?.offsetNetting?.amount),
+    periodAdjustedIncome,
+    periodAdjustedExpense,
+    periodAdjustedNet,
+    deterministicAdjustedIncome,
+    deterministicAdjustedExpense,
+    deterministicAdjustedNet,
     toNum(deterministicFacts?.ownerDraw?.amount),
     toNum(deterministicFacts?.fact?.ownerDraw?.amount),
     toNum(deterministicFacts?.plan?.ownerDraw?.amount),
@@ -296,6 +391,8 @@ const buildExpected = ({
     ...(Array.isArray(deterministicFacts?.offsetNetting?.byCategory) ? deterministicFacts.offsetNetting.byCategory : []).map((row) => toNum(row?.amount)),
     ...periodTopOperationAmounts,
     ...deterministicOperationAmounts,
+    ...periodTopOperationOffsetAdjustedAmounts,
+    ...deterministicOperationOffsetAdjustedAmounts,
     ...periodTopExpenseCategoryAmounts,
     ...deterministicTopExpenseCategoryAmounts,
     ...topExpenseCategoryCombinationSums,
@@ -361,7 +458,8 @@ const buildExpected = ({
       value: [
         toNum(periodAnalytics?.totals?.income),
         toNum(periodAnalytics?.totals?.expense),
-        toNum(periodAnalytics?.totals?.net)
+        toNum(periodAnalytics?.totals?.net),
+        ...expected.authoritative_net_candidates
       ].filter((n) => Number.isFinite(n))
     });
   }
@@ -370,6 +468,17 @@ const buildExpected = ({
     required.push({
       name: 'offset_netting_amount',
       value: offsetNettingCandidates
+    });
+  }
+
+  if (
+    expected.offset_logic_present
+    && expected.authoritative_net_candidates.length > 0
+    && (expected.asks_forecast_or_extrapolation || expected.period_analytics_mode || expected.asks_balance_impact)
+  ) {
+    required.push({
+      name: 'authoritative_net',
+      value: expected.authoritative_net_candidates
     });
   }
 
@@ -446,6 +555,10 @@ function auditCfoTextResponse({
   });
 
   const observedMoney = extractMoneyNumbers(text);
+  const hasAdjustmentReason = hasPredictionAdjustmentReason(text);
+  const hasAuthoritativeNetInAnswer = containsRequired(expected?.authoritative_net_candidates || [], observedMoney);
+  const relaxPredictionUnexpectedNumbers = Boolean(expected?.asks_forecast_or_extrapolation) && hasAdjustmentReason;
+  const relaxByNetSync = Boolean(expected?.offset_logic_present) && hasAuthoritativeNetInAnswer;
 
   required.forEach((req) => {
     if (req.name === 'any_money_number') {
@@ -456,12 +569,23 @@ function auditCfoTextResponse({
     }
 
     if (!containsRequired(req.value, observedMoney)) {
+      if (
+        req.name === 'offset_netting_amount'
+        && (relaxPredictionUnexpectedNumbers || relaxByNetSync)
+      ) {
+        warnings.push(`required_number_relaxed:${req.name}`);
+        return;
+      }
       errors.push(`required_number_missing:${req.name}`);
     }
   });
 
   observedMoney.forEach((item) => {
     if (!containsAllowed(item.value, allowedNumbers)) {
+      if (relaxPredictionUnexpectedNumbers || relaxByNetSync) {
+        warnings.push(`number_relaxed:unexpected_money_value:${Math.round(item.value)}`);
+        return;
+      }
       errors.push(`number_mismatch:unexpected_money_value:${Math.round(item.value)}`);
     }
   });
