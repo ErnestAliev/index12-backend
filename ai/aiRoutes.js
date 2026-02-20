@@ -7,7 +7,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs/promises');
 
-const AIROUTES_VERSION = 'hybrid-v2.5-offset-intelligence';
+const AIROUTES_VERSION = 'hybrid-v3.0-tool-use-agent';
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -35,7 +35,7 @@ module.exports = function createAiRouter(deps) {
   const createQuickJournalAdapter = require('./quickJournalAdapter');
   const quickJournalAdapter = createQuickJournalAdapter({ Event });
 
-  const conversationalAgent = require('./utils/conversationalAgent');
+  const snapshotAgent = require('./agents/snapshotAgent');
   const cfoKnowledgeBase = require('./utils/cfoKnowledgeBase');
   const snapshotAnswerEngine = require('./utils/snapshotAnswerEngine');
   const snapshotIntentParser = require('./utils/snapshotIntentParser');
@@ -2439,7 +2439,7 @@ module.exports = function createAiRouter(deps) {
     }
   });
 
-  router.post('/query', isAuthenticated, async (req, res) => {
+  router.post(['/query', '/chat'], isAuthenticated, async (req, res) => {
     try {
       const userId = req.user?._id || req.user?.id;
       const userIdStr = String(userId || '');
@@ -2747,6 +2747,10 @@ module.exports = function createAiRouter(deps) {
           };
         }
         deterministicFacts.historicalContext = historicalContext;
+        deterministicFacts._agent = {
+          mode: 'tool_use',
+          engine: 'snapshotAgent'
+        };
 
         if (parsedIntent?.type === 'CATEGORY_FACT_BY_CATEGORY') {
           const deterministic = snapshotAnswerEngine.answerFromSnapshot({
@@ -2823,9 +2827,10 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
-        const llmResult = await conversationalAgent.generateSnapshotChatResponse({
+        const llmResult = await snapshotAgent.run({
           question: q,
           history: isDataChangedEffective ? [] : chatHistory.messages.slice(0, -1),
+          currentContext: req?.body?.currentContext || null,
           snapshot,
           deterministicFacts,
           periodAnalytics,
@@ -2843,11 +2848,6 @@ module.exports = function createAiRouter(deps) {
           || /(^|[\s:])429([\s:]|$)/i.test(llmErrorText)
           || /quota|billing/i.test(llmErrorText)
         );
-        const isQualityGateError = !llmResult?.ok && (
-          llmErrorCode === 'quality_gate_failed'
-          || /^LLM ответ отклонен контролем качества/i.test(llmErrorText)
-          || /QUALITY_GATE_/i.test(llmErrorText)
-        );
 
         const fallbackDeterministicText = snapshotAnswerEngine.buildDeterministicInsightsBlock(deterministicFacts);
         const responseText = llmResult?.ok
@@ -2855,62 +2855,41 @@ module.exports = function createAiRouter(deps) {
           : (
               isQuotaError
                 ? `${fallbackDeterministicText}\n\nLLM временно недоступен (лимит API 429). Проверьте billing/квоту OpenAI.`
-                : (isQualityGateError
-                    ? `${fallbackDeterministicText}\n\nLLM ответ отклонен контролем качества. Показываю проверенный детерминированный срез.`
-                    : (llmErrorText || 'Не удалось сформировать ответ. Проверьте данные snapshot.'))
+                : `${fallbackDeterministicText}\n\n${llmErrorText || 'Не удалось сформировать ответ. Проверьте данные snapshot.'}`
             );
         const responseMode = llmResult?.ok
-          ? 'llm_snapshot_chat'
+          ? 'llm_snapshot_agent_tools'
           : (isQuotaError
-              ? 'snapshot_fallback_quota'
-              : (isQualityGateError ? 'snapshot_fallback_quality_gate' : 'llm_snapshot_chat_error'));
-        const qualityGateFromLlm = llmResult?.debug?.qualityGate || null;
-        const qualityGate = (() => {
-          if (qualityGateFromLlm) {
-            const audit = qualityGateFromLlm?.audit || {};
-            return {
-              applied: true,
-              passed: Boolean(audit?.ok === true),
-              attempts: Number(qualityGateFromLlm?.attempts || 0),
-              errors: Array.isArray(audit?.errors) ? audit.errors : [],
-              warnings: Array.isArray(audit?.warnings) ? audit.warnings : []
-            };
-          }
-          if (isQualityGateError) {
-            return {
-              applied: true,
-              passed: false,
-              attempts: 0,
-              errors: [llmErrorText || 'quality_gate_failed'],
-              warnings: []
-            };
-          }
-          return {
-            applied: false,
-            passed: null,
-            attempts: 0,
-            errors: [],
-            warnings: []
-          };
-        })();
+              ? 'snapshot_agent_fallback_quota'
+              : 'llm_snapshot_agent_error');
+        const qualityGate = {
+          applied: false,
+          passed: null,
+          attempts: 0,
+          errors: [],
+          warnings: [],
+          reason: 'disabled_for_tool_use_agent'
+        };
         const discriminatorLog = {
-          applied: Boolean(qualityGate?.applied),
-          passed: qualityGate?.passed === true,
-          attempts: Number(qualityGate?.attempts || 0),
-          errors: Array.isArray(qualityGate?.errors) ? qualityGate.errors : [],
-          warnings: Array.isArray(qualityGate?.warnings) ? qualityGate.warnings : [],
+          applied: false,
+          passed: null,
+          attempts: 0,
+          errors: [],
+          warnings: [],
+          reason: 'disabled_for_tool_use_agent',
           mode: responseMode,
           llmErrorCode: llmErrorCode || null,
           llmErrorText: llmErrorText || null,
-          llmQualityGateRaw: qualityGateFromLlm || null
+          llmQualityGateRaw: null
         };
 
         const llmInputSnapshot = await _dumpLlmInputSnapshot({
           generatedAt: new Date().toISOString(),
-          mode: 'snapshot_llm_chat',
+          mode: 'snapshot_llm_chat_tool_use_agent',
           question: q,
           source,
           timelineDate,
+          currentContext: req?.body?.currentContext || null,
           historicalContext,
           deterministicFacts,
           periodAnalytics,

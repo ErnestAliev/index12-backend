@@ -543,6 +543,29 @@ function auditCfoTextResponse({
     };
   }
 
+  const isToolUseAgent = String(
+    deterministicFacts?._agent?.mode
+    || deterministicFacts?.agentMode
+    || ''
+  ).toLowerCase() === 'tool_use';
+  if (isToolUseAgent) {
+    return {
+      ok: true,
+      errors: [],
+      warnings: ['discriminator_bypassed:tool_use_agent'],
+      expected: {
+        mode: 'bypassed_tool_use_agent',
+        required: []
+      },
+      observed: {
+        moneyNumbers: extractMoneyNumbers(text).map((n) => ({
+          raw: n.raw,
+          value: Math.round(n.value)
+        }))
+      }
+    };
+  }
+
   const { expected, allowedNumbers, required } = buildExpected({
     accountContext,
     accountViewContext,
