@@ -1,8 +1,6 @@
 // ai/utils/cfoKnowledgeBase.js
 // RAG helper with Atlas Vector Search (primary) + local pattern fallback.
 const mongoose = require('mongoose');
-const fs = require('fs/promises');
-const path = require('path');
 
 const toNum = (value) => {
   const n = Number(value);
@@ -22,9 +20,6 @@ const tokenize = (value) => {
   return text.split(' ').filter(Boolean);
 };
 
-const SEMANTIC_WEIGHTS_PATH = path.resolve(__dirname, '..', 'debug', 'semantic-weights.json');
-let semanticWeightsCache = null;
-
 const normalizeEntityType = (value) => {
   const src = String(value || '').toLowerCase().trim();
   if (src === 'category' || src === 'категория') return 'category';
@@ -35,30 +30,32 @@ const normalizeEntityType = (value) => {
 };
 
 const buildSemanticId = (entityType, termNorm) => `${String(entityType || 'auto')}::${String(termNorm || '')}`;
+const getKnowledgeCollectionName = () => String(process.env.RAG_KB_COLLECTION || 'ai_cfo_knowledge');
+const normalizeUserId = (value) => String(value || '').trim();
 
-const loadSemanticWeights = async () => {
-  if (Array.isArray(semanticWeightsCache)) return semanticWeightsCache;
-
-  try {
-    const raw = await fs.readFile(SEMANTIC_WEIGHTS_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    semanticWeightsCache = Array.isArray(parsed?.items) ? parsed.items : [];
-  } catch (_) {
-    semanticWeightsCache = [];
+const getKnowledgeCollection = () => {
+  if (mongoose?.connection?.readyState !== 1 || !mongoose?.connection?.db) {
+    throw new Error('mongoose_not_connected');
   }
-  return semanticWeightsCache;
+  return mongoose.connection.db.collection(getKnowledgeCollectionName());
 };
 
-const persistSemanticWeights = async () => {
-  if (!Array.isArray(semanticWeightsCache)) semanticWeightsCache = [];
-  const body = JSON.stringify({
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    items: semanticWeightsCache
-  }, null, 2);
-
-  await fs.mkdir(path.dirname(SEMANTIC_WEIGHTS_PATH), { recursive: true });
-  await fs.writeFile(SEMANTIC_WEIGHTS_PATH, body, 'utf8');
+const buildSemanticUserQuery = (userId, { includeGlobalFallback = true } = {}) => {
+  const normalizedUserId = normalizeUserId(userId);
+  if (!normalizedUserId) {
+    return { $or: [{ userId: { $exists: false } }, { userId: null }, { userId: '' }] };
+  }
+  if (!includeGlobalFallback) {
+    return { userId: normalizedUserId };
+  }
+  return {
+    $or: [
+      { userId: normalizedUserId },
+      { userId: { $exists: false } },
+      { userId: null },
+      { userId: '' }
+    ]
+  };
 };
 
 const matchSemanticCandidate = (termNorm, itemTermNorm) => {
@@ -71,7 +68,7 @@ const matchSemanticCandidate = (termNorm, itemTermNorm) => {
   return 0;
 };
 
-async function resolveSemanticAlias({ term, entityType = 'auto' }) {
+async function resolveSemanticAlias({ term, entityType = 'auto', userId = '' }) {
   const qNorm = normalize(term);
   if (!qNorm) {
     return {
@@ -83,7 +80,27 @@ async function resolveSemanticAlias({ term, entityType = 'auto' }) {
   }
 
   const typeNorm = normalizeEntityType(entityType);
-  const store = await loadSemanticWeights();
+  let store = [];
+  try {
+    const col = getKnowledgeCollection();
+    const query = {
+      docType: 'semantic_alias',
+      ...buildSemanticUserQuery(userId)
+    };
+    if (typeNorm !== 'auto') query.entityType = typeNorm;
+    store = await col.find(query)
+      .sort({ updatedAt: -1, hits: -1 })
+      .limit(500)
+      .toArray();
+  } catch (error) {
+    return {
+      ok: false,
+      error: `semantic_alias_read_failed:${String(error?.message || error)}`,
+      match: null,
+      candidates: []
+    };
+  }
+
   const candidates = (Array.isArray(store) ? store : [])
     .map((item) => {
       const itemType = normalizeEntityType(item?.entityType || 'auto');
@@ -132,7 +149,8 @@ async function updateSemanticWeights({
   canonicalNames = null,
   entityType = 'category',
   confidence = 95,
-  note = ''
+  note = '',
+  userId = ''
 }) {
   const termRaw = String(term || '').trim();
   const canonicalListRaw = Array.isArray(canonicalNames) && canonicalNames.length
@@ -153,17 +171,25 @@ async function updateSemanticWeights({
     };
   }
 
-  const store = await loadSemanticWeights();
   const id = buildSemanticId(typeNorm, termNorm);
   const nowIso = new Date().toISOString();
   const safeConfidence = Math.max(0, Math.min(100, Math.round(toNum(confidence) || 95)));
+  const normalizedUserId = normalizeUserId(userId);
 
-  const existingIdx = store.findIndex((row) => String(row?.id || '') === id);
-  if (existingIdx >= 0) {
-    const prev = store[existingIdx] || {};
-    store[existingIdx] = {
-      ...prev,
+  let updatedDoc = null;
+  try {
+    const col = getKnowledgeCollection();
+    const filter = {
+      docType: 'semantic_alias',
       id,
+      userId: normalizedUserId
+    };
+    const existing = await col.findOne(filter);
+    const existingHits = Math.max(1, Math.round(toNum(existing?.hits) || 1));
+    const nextDoc = {
+      docType: 'semantic_alias',
+      id,
+      userId: normalizedUserId,
       entityType: typeNorm,
       term: termRaw,
       termNorm,
@@ -172,42 +198,126 @@ async function updateSemanticWeights({
       canonicalNorm: normalize(canonicalRaw),
       canonicalNorms: canonicalList.map((name) => normalize(name)),
       confidence: safeConfidence,
-      hits: Math.max(1, Math.round(toNum(prev?.hits) || 1) + 1),
-      note: String(note || prev?.note || ''),
+      hits: existing ? (existingHits + 1) : 1,
+      note: String(note || existing?.note || ''),
+      source: 'user_semantic_alias',
       updatedAt: nowIso
     };
-  } else {
-    store.push({
-      id,
-      entityType: typeNorm,
-      term: termRaw,
-      termNorm,
-      canonicalName: canonicalRaw,
-      canonicalNames: canonicalList,
-      canonicalNorm: normalize(canonicalRaw),
-      canonicalNorms: canonicalList.map((name) => normalize(name)),
-      confidence: safeConfidence,
-      hits: 1,
-      note: String(note || ''),
-      createdAt: nowIso,
-      updatedAt: nowIso
-    });
-  }
 
-  semanticWeightsCache = store;
-  try {
-    await persistSemanticWeights();
+    await col.updateOne(
+      filter,
+      {
+        $set: nextDoc,
+        $setOnInsert: { createdAt: nowIso }
+      },
+      { upsert: true }
+    );
+
+    updatedDoc = await col.findOne(filter);
   } catch (error) {
     return {
       ok: false,
-      error: `semantic_weights_persist_failed:${String(error?.message || error)}`
+      error: `semantic_alias_upsert_failed:${String(error?.message || error)}`
     };
   }
 
   return {
     ok: true,
-    updated: store.find((row) => String(row?.id || '') === id) || null
+    updated: updatedDoc || null
   };
+}
+
+async function getLearnedAliases({
+  userId = '',
+  term = '',
+  entityType = 'auto',
+  limit = 200
+}) {
+  const normalizedUserId = normalizeUserId(userId);
+  const typeNorm = normalizeEntityType(entityType);
+  const termNorm = normalize(term);
+  const safeLimit = Math.max(1, Math.min(500, Math.round(toNum(limit) || 200)));
+
+  try {
+    const col = getKnowledgeCollection();
+    const query = {
+      docType: 'semantic_alias',
+      ...buildSemanticUserQuery(normalizedUserId, { includeGlobalFallback: false })
+    };
+    if (typeNorm !== 'auto') query.entityType = typeNorm;
+    if (termNorm) query.termNorm = termNorm;
+
+    const rows = await col.find(query)
+      .sort({ updatedAt: -1, hits: -1 })
+      .limit(safeLimit)
+      .project({
+        _id: 0,
+        id: 1,
+        userId: 1,
+        term: 1,
+        termNorm: 1,
+        entityType: 1,
+        canonicalName: 1,
+        canonicalNames: 1,
+        confidence: 1,
+        hits: 1,
+        note: 1,
+        createdAt: 1,
+        updatedAt: 1
+      })
+      .toArray();
+
+    return {
+      ok: true,
+      count: Array.isArray(rows) ? rows.length : 0,
+      items: Array.isArray(rows) ? rows : []
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `semantic_alias_list_failed:${String(error?.message || error)}`,
+      count: 0,
+      items: []
+    };
+  }
+}
+
+async function deleteSemanticAlias({
+  userId = '',
+  term = '',
+  entityType = 'auto'
+}) {
+  const normalizedUserId = normalizeUserId(userId);
+  const termNorm = normalize(term);
+  const typeNorm = normalizeEntityType(entityType);
+  if (!termNorm) {
+    return {
+      ok: false,
+      error: 'term_missing',
+      deletedCount: 0
+    };
+  }
+
+  try {
+    const col = getKnowledgeCollection();
+    const query = {
+      docType: 'semantic_alias',
+      termNorm,
+      ...buildSemanticUserQuery(normalizedUserId, { includeGlobalFallback: false })
+    };
+    if (typeNorm !== 'auto') query.entityType = typeNorm;
+    const result = await col.deleteMany(query);
+    return {
+      ok: true,
+      deletedCount: Math.max(0, Math.round(toNum(result?.deletedCount)))
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `semantic_alias_delete_failed:${String(error?.message || error)}`,
+      deletedCount: 0
+    };
+  }
 }
 
 const isAtlasUri = () => {
@@ -563,5 +673,7 @@ module.exports = {
   retrieveCfoContext,
   getDefaultKnowledgeEntries,
   resolveSemanticAlias,
-  updateSemanticWeights
+  updateSemanticWeights,
+  getLearnedAliases,
+  deleteSemanticAlias
 };

@@ -60,8 +60,20 @@ const asksAnomalies = (question) => /(аномал|подозр|выброс|н�
   .test(normalizeQuestionForRules(question));
 const asksChart = (question) => /(график|диаграм|chart|барчарт|bar\s*chart|line\s*chart|динамик)/i
   .test(normalizeQuestionForRules(question));
+const asksBasicOperationLookup = (question) => /(доход|расход|перевод|баланс)/i
+  .test(normalizeQuestionForRules(question));
+const asksBroadCategoryLookup = (question) => /(налог|коммунал|комунал|коммуналка|комуналка)/i
+  .test(normalizeQuestionForRules(question));
+const detectBroadCategoryKeyword = (question) => {
+  const src = normalizeQuestionForRules(question);
+  if (!src) return '';
+  if (/налог/.test(src)) return 'налог';
+  if (/коммунал|комунал/.test(src)) return 'комунал';
+  return '';
+};
 const MONTH_FOLLOWUP_RE = /(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр|месяц|за\s+период|этот\s+период)/i;
 const SHORT_FOLLOWUP_RE = /^[\p{L}\p{N}\s.,!?-]{1,40}$/u;
+const DIGIT_CHOICE_RE = /^([1-9]\d?)$/;
 
 const isDayKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
 const isMonthKey = (value) => /^\d{4}-\d{2}$/.test(String(value || ''));
@@ -226,6 +238,8 @@ const buildEntityCatalog = (state) => {
 
   (Array.isArray(state?.deterministicFacts?.topExpenseCategories) ? state.deterministicFacts.topExpenseCategories : [])
     .forEach((row) => upsert('category', row?.category));
+  (Array.isArray(state?.deterministicFacts?.topCategories) ? state.deterministicFacts.topCategories : [])
+    .forEach((row) => upsert('category', row?.category));
   (Array.isArray(state?.deterministicFacts?.anomalies) ? state.deterministicFacts.anomalies : [])
     .forEach((row) => upsert('category', row?.name || row?.category));
 
@@ -378,7 +392,23 @@ const buildSemanticContextHints = async (term) => {
   return tokenHints;
 };
 
-const semanticEntityMatcher = async (state, args = {}) => {
+const buildSemanticClarificationQuestion = ({ term, entityTypeRequested, options }) => {
+  const safeTerm = String(term || '').trim();
+  const safeType = String(entityTypeRequested || 'category').trim().toLowerCase() || 'category';
+  const rows = Array.isArray(options) ? options : [];
+  if (!rows.length) {
+    return `Что вы имеете в виду под "${safeTerm}"? Уточните точное название и ответьте текстом.`;
+  }
+  const lines = [
+    `Что вы имеете в виду под "${safeTerm}"?`,
+    'Ответьте одной цифрой:',
+    ...rows.map((row, idx) => `${idx + 1}. ${String(row?.label || '')}`),
+    `[entity:${safeType}]`
+  ];
+  return lines.join('\n');
+};
+
+const semanticEntityMatcher = async (state, args = {}, context = {}) => {
   const term = String(args?.term || args?.query || '').trim();
   const question = String(args?.question || term || '').trim();
   const entityTypeArg = String(args?.entityType || 'auto').trim().toLowerCase();
@@ -395,7 +425,11 @@ const semanticEntityMatcher = async (state, args = {}) => {
       term: '',
       error: 'empty_term',
       action: 'needs_clarification',
-      clarificationQuestion: 'Уточните, какое слово или сущность нужно распознать.'
+      clarificationOptions: [
+        { index: 1, label: 'Создать новое', action: 'create_new' }
+      ],
+      clarificationQuestion: 'Уточните, какое слово или сущность нужно распознать.',
+      clarificationPrompt: 'Уточните, какое слово или сущность нужно распознать.'
     };
   }
 
@@ -407,7 +441,11 @@ const semanticEntityMatcher = async (state, args = {}) => {
       term: question,
       error: 'empty_catalog',
       action: 'needs_clarification',
-      clarificationQuestion: `Я не вижу справочник сущностей в текущем срезе для "${question}". Уточните полное название.`
+      clarificationOptions: [
+        { index: 1, label: 'Создать новое', action: 'create_new' }
+      ],
+      clarificationQuestion: `Я не вижу справочник сущностей в текущем срезе для "${question}". Уточните полное название.`,
+      clarificationPrompt: `Я не вижу справочник сущностей в текущем срезе для "${question}". Уточните полное название.`
     };
   }
 
@@ -431,7 +469,8 @@ const semanticEntityMatcher = async (state, args = {}) => {
   const semanticHints = await buildSemanticContextHints(question);
   const learned = await cfoKnowledgeBase.resolveSemanticAlias({
     term: question,
-    entityType: entityTypeFilter
+    entityType: entityTypeFilter,
+    userId: String(context?.userId || '')
   });
 
   const ranked = catalog.map((entity) => {
@@ -486,10 +525,35 @@ const semanticEntityMatcher = async (state, args = {}) => {
     };
   })
     .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0))
-    .slice(0, 5);
+    .slice(0, 3);
 
   const best = ranked[0] || null;
   const shouldAsk = !best || Number(best.confidence || 0) < CONFIDENCE_THRESHOLD;
+  const clarificationOptions = shouldAsk
+    ? [
+        ...ranked.slice(0, 3).map((row, idx) => ({
+          index: idx + 1,
+          label: String(row?.canonicalName || ''),
+          entityType: String(row?.entityType || entityTypeFilter || 'category'),
+          confidence: Number(row?.confidence || 0),
+          action: 'pick_existing'
+        })),
+        {
+          index: Math.min(4, ranked.slice(0, 3).length + 1),
+          label: 'Создать новое',
+          entityType: entityTypeFilter === 'auto' ? 'category' : entityTypeFilter,
+          confidence: 0,
+          action: 'create_new'
+        }
+      ]
+    : [];
+  const clarificationPrompt = shouldAsk
+    ? buildSemanticClarificationQuestion({
+        term: question,
+        entityTypeRequested: entityTypeFilter === 'auto' ? 'category' : entityTypeFilter,
+        options: clarificationOptions
+      })
+    : null;
 
   return {
     ok: Boolean(best),
@@ -499,13 +563,13 @@ const semanticEntityMatcher = async (state, args = {}) => {
     topMatches: ranked,
     match: best,
     action: shouldAsk ? 'needs_clarification' : 'auto_apply',
-    clarificationQuestion: shouldAsk
-      ? `Что вы имеете в виду под "${question}"? Уточните точное название категории/контрагента/счета.`
-      : null
+    clarificationOptions,
+    clarificationQuestion: clarificationPrompt,
+    clarificationPrompt
   };
 };
 
-const updateSemanticWeightsTool = async (state, args = {}) => {
+const updateSemanticWeightsTool = async (state, args = {}, context = {}) => {
   const term = String(args?.term || args?.rawTerm || '').trim();
   const entityType = String(args?.entityType || 'category').trim().toLowerCase();
   const confidence = Math.round(toNum(args?.confidence || 95));
@@ -559,7 +623,8 @@ const updateSemanticWeightsTool = async (state, args = {}) => {
     canonicalNames,
     entityType,
     confidence,
-    note
+    note,
+    userId: String(context?.userId || '')
   });
   if (!updated?.ok) {
     return {
@@ -573,7 +638,8 @@ const updateSemanticWeightsTool = async (state, args = {}) => {
 
   const resolved = await cfoKnowledgeBase.resolveSemanticAlias({
     term,
-    entityType
+    entityType,
+    userId: String(context?.userId || '')
   });
 
   return {
@@ -582,6 +648,29 @@ const updateSemanticWeightsTool = async (state, args = {}) => {
     updated: updated.updated || null,
     resolved: resolved?.match || null
   };
+};
+
+const getLearnedAliasesTool = async (args = {}, context = {}) => {
+  const limitRaw = Math.round(toNum(args?.limit));
+  const limit = limitRaw > 0 ? Math.min(limitRaw, 500) : 200;
+  const entityType = String(args?.entityType || 'auto').trim().toLowerCase() || 'auto';
+  const term = String(args?.term || '').trim();
+  return cfoKnowledgeBase.getLearnedAliases({
+    userId: String(context?.userId || ''),
+    term,
+    entityType,
+    limit
+  });
+};
+
+const deleteSemanticAliasTool = async (args = {}, context = {}) => {
+  const term = String(args?.term || '').trim();
+  const entityType = String(args?.entityType || 'auto').trim().toLowerCase() || 'auto';
+  return cfoKnowledgeBase.deleteSemanticAlias({
+    userId: String(context?.userId || ''),
+    term,
+    entityType
+  });
 };
 
 const aggregateOps = (rows) => {
@@ -1219,6 +1308,36 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'get_learned_aliases',
+      description: 'Возвращает сохраненные семантические алиасы пользователя из ai_cfo_knowledge.',
+      parameters: {
+        type: 'object',
+        properties: {
+          term: { type: 'string', description: 'Опционально: исходный термин для точного фильтра.' },
+          entityType: { type: 'string', description: 'auto | category | counterparty | account' },
+          limit: { type: 'integer', description: 'Лимит выдачи.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_semantic_alias',
+      description: 'Удаляет сохраненный семантический алиас пользователя из ai_cfo_knowledge.',
+      parameters: {
+        type: 'object',
+        required: ['term'],
+        properties: {
+          term: { type: 'string', description: 'Термин алиаса для удаления.' },
+          entityType: { type: 'string', description: 'auto | category | counterparty | account' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'advanced_data_analyzer',
       description: 'Выполняет продвинутые агрегации и вычисления по транзакциям (median, moving average, compound growth) через mathjs/JS.',
       parameters: {
@@ -1304,15 +1423,19 @@ const buildSystemPrompt = () => {
     'Ты ОБЯЗАН использовать инструмент get_snapshot_metrics для получения данных.',
     'Ты ОБЯЗАН использовать инструмент calculator перед любыми прогнозами будущих балансов и прибыли.',
     'Если видишь offsetNetting или isOffsetExpense, исключай эти суммы из прогнозов будущих расходов, потому что это не физические cash-траты.',
+    'Маршрутизация интента обязательна:',
+    '1) Базовые операции (доход/расход/перевод/баланс): semantic_entity_matcher НЕ использовать. Бери данные напрямую из get_transactions/get_snapshot_metrics.',
+    '2) Широкие группы (налоги, коммуналка): делай широкий поиск по category через contains/filter в in-memory операциях.',
+    '3) Уникальный сленг/аббревиатуры: сначала semantic_entity_matcher, затем get_transactions.',
     'НИКОГДА не говори пользователю фразы вида "я использую инструмент/калькулятор/tool".',
     'ВСЕГДА показывай расчетные шаги и формулы для прогнозов/балансов. Формат: "База [X] - Налоги [Y] - Взаимозачеты [Z] = Итог [N]".',
     'Если пользователь спрашивает "как ты это посчитал", используй цифры и контекст из предыдущих сообщений диалога и распиши шаги вычислений.',
     'Если пользователь спрашивает про конкретную категорию (например: Комуналка, Ремонт, Аренда), ты ОБЯЗАН сразу вызвать get_transactions для точного списка операций, а не ограничиваться totals.',
     'Если пользователь спрашивает про аномалии, ты ОБЯЗАН прочитать deterministicFacts.anomalies через get_snapshot_metrics и опираться только на этот массив.',
-    'Никогда не угадывай названия сущностей вслепую. Перед поиском транзакций прогони слова пользователя через semantic_entity_matcher.',
+    'Никогда не угадывай названия сущностей вслепую.',
     'Перед update_semantic_weights ты ОБЯЗАН вызвать get_business_dictionary и выбрать точные сущности только из словаря.',
     'Если пользователь говорит "все налоги"/"все категории со словом ...", сохрани canonicalNames как массив точных названий из словаря, а не текстовую фразу.',
-    'Если уверенность semantic_entity_matcher ниже порога — остановись и задай пользователю уточняющий вопрос "Что вы имеете в виду под [слово]?".',
+    'Если уверенность semantic_entity_matcher ниже порога — выдай нумерованный список вариантов (1,2,3) + "Создать новое", попроси ответить одной цифрой и останови ответ.',
     'Если пользователь поправил соответствие, немедленно вызови update_semantic_weights, чтобы обучить систему.',
     'Если пользователь просит график, вызови render_ui_widget и верни структуру uiCommand для рендера.',
     'Отвечай кратко, по делу, с конкретными цифрами и формулами.'
@@ -1374,6 +1497,16 @@ const detectCategoryMention = (question, state) => {
   return null;
 };
 
+const looksLikeSlangToken = (token) => {
+  const raw = String(token || '').trim().toLowerCase();
+  if (!raw || raw.length < 2 || raw.length > 16) return false;
+  if (/^\d+$/.test(raw)) return false;
+  if (/^[a-z0-9_-]{2,10}$/i.test(raw)) return true;
+  if (/^[а-яa-z]{2,6}$/i.test(raw)) return true;
+  if (/[0-9]/.test(raw) || raw.includes('-') || raw.includes('_')) return true;
+  return false;
+};
+
 const detectSemanticCandidateTerm = (question, state) => {
   const tokens = splitTextTokens(question);
   if (!tokens.length) return '';
@@ -1390,7 +1523,7 @@ const detectSemanticCandidateTerm = (question, state) => {
     if (/^\d+$/.test(token)) continue;
     if (SEMANTIC_STOPWORDS.has(token)) continue;
     if (knownTokens.has(token)) continue;
-    return token;
+    if (looksLikeSlangToken(token)) return token;
   }
   return '';
 };
@@ -1426,6 +1559,41 @@ const isShortFollowUp = (question) => {
   return MONTH_FOLLOWUP_RE.test(q);
 };
 
+const extractDigitChoice = (question) => {
+  const match = String(question || '').trim().match(DIGIT_CHOICE_RE);
+  return match ? Math.max(0, Number(match[1])) : 0;
+};
+
+const parseClarificationFromAssistant = (text) => {
+  const src = String(text || '').trim();
+  if (!src) return null;
+
+  const termMatch = src.match(/Что\s+вы\s+имеете\s+в\s+виду\s+под\s+["«]?([^"\n»]+)["»]?\?/i);
+  const entityTypeMatch = src.match(/\[entity:(category|counterparty|account|auto)\]/i);
+  const options = [];
+  const re = /(?:^|\n)\s*(\d+)\.\s*(.+?)(?=\n|$)/g;
+  let match = re.exec(src);
+  while (match) {
+    const index = Number(match[1]);
+    const label = String(match[2] || '').trim();
+    if (index > 0 && label) {
+      options.push({
+        index,
+        label,
+        action: /создать\s+нов/i.test(label) ? 'create_new' : 'pick_existing'
+      });
+    }
+    match = re.exec(src);
+  }
+
+  if (!termMatch || !options.length) return null;
+  return {
+    term: String(termMatch?.[1] || '').trim(),
+    entityType: String(entityTypeMatch?.[1] || 'category').trim().toLowerCase(),
+    options
+  };
+};
+
 const sanitizeFinalText = (value) => {
   let out = String(value || '').trim();
   if (!out) return out;
@@ -1436,6 +1604,8 @@ const sanitizeFinalText = (value) => {
     [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?get_business_dictionary\b/gi, 'использован словарь бизнес-сущностей'],
     [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?semantic_entity_matcher\b/gi, 'термин сопоставлен с финансовым справочником'],
     [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?update_semantic_weights\b/gi, 'словарь терминов пользователя обновлен'],
+    [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?get_learned_aliases\b/gi, 'получены сохраненные алиасы'],
+    [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?delete_semantic_alias\b/gi, 'алиас удален'],
     [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?advanced_data_analyzer\b/gi, 'выполнен аналитический расчет'],
     [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?get_kz_exchange_rates\b/gi, 'курс загружен из Нацбанка РК'],
     [/\bя\s+(?:использую|использовал|воспользовался|применил)\s+(?:инструмент\s+)?render_ui_widget\b/gi, 'подготовлен график'],
@@ -1455,7 +1625,8 @@ const run = async ({
   snapshot = null,
   deterministicFacts = null,
   periodAnalytics = null,
-  snapshotMeta = null
+  snapshotMeta = null,
+  userId = ''
 }) => {
   const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
   if (!OPENAI_KEY) {
@@ -1477,19 +1648,93 @@ const run = async ({
   const client = new OpenAI({ apiKey: OPENAI_KEY });
   const toolCallsLog = [];
   const model = DEFAULT_MODEL;
-  const questionText = String(question || '').trim();
+  let questionText = String(question || '').trim();
+  const toolUserContext = { userId: String(userId || '').trim() };
+
+  const historyMessages = mapHistoryMessages(history);
+  const lastAssistantMessage = [...historyMessages].reverse().find((m) => m.role === 'assistant') || null;
+  const lastUserMessage = [...historyMessages].reverse().find((m) => m.role === 'user') || null;
+
+  let semanticSelection = null;
+  const digitChoice = extractDigitChoice(questionText);
+  if (digitChoice > 0 && lastAssistantMessage?.content) {
+    const clarification = parseClarificationFromAssistant(lastAssistantMessage.content);
+    if (clarification) {
+      const selected = clarification.options.find((row) => Number(row?.index) === digitChoice) || null;
+      if (selected) {
+        if (String(selected?.action || '') === 'create_new') {
+          return {
+            ok: true,
+            text: `Уточните точное название для "${clarification.term}" текстом, и я сохраню новый алиас.`,
+            debug: {
+              model,
+              agentMode: 'tool_use',
+              clarificationRequired: true,
+              clarificationCreateNew: true,
+              semanticTerm: clarification.term
+            }
+          };
+        }
+
+        const updateFromChoice = await updateSemanticWeightsTool(state, {
+          term: clarification.term,
+          canonicalNames: [String(selected?.label || '')],
+          entityType: clarification.entityType || 'category',
+          confidence: 99,
+          note: 'user_digit_choice_confirmation'
+        }, toolUserContext);
+
+        if (!updateFromChoice?.ok) {
+          return {
+            ok: true,
+            text: `Не удалось сохранить алиас для "${clarification.term}". Уточните соответствие текстом.`,
+            debug: {
+              model,
+              agentMode: 'tool_use',
+              semanticUpdateError: String(updateFromChoice?.error || 'semantic_update_failed')
+            }
+          };
+        }
+
+        semanticSelection = {
+          term: clarification.term,
+          canonicalName: String(selected?.label || ''),
+          entityType: clarification.entityType || 'category'
+        };
+
+        const previousMeaningfulUserMessage = [...historyMessages]
+          .reverse()
+          .find((m) => m.role === 'user' && !extractDigitChoice(m.content));
+        if (previousMeaningfulUserMessage?.content) {
+          questionText = String(previousMeaningfulUserMessage.content || '').trim();
+        } else {
+          return {
+            ok: true,
+            text: `Принял: "${semanticSelection.term}" = "${semanticSelection.canonicalName}". Сохранено в словарь.`,
+            debug: {
+              model,
+              agentMode: 'tool_use',
+              semanticSelectionApplied: semanticSelection
+            }
+          };
+        }
+      }
+    }
+  }
+
   const wantsCalculationBreakdown = asksHowCalculated(questionText);
   const wantsForecastStyle = asksForecastOrBalanceImpact(questionText);
   const wantsAnomalies = asksAnomalies(questionText);
   const wantsChart = asksChart(questionText);
-  const historyMessages = mapHistoryMessages(history);
-  const lastAssistantMessage = [...historyMessages].reverse().find((m) => m.role === 'assistant') || null;
-  const lastUserMessage = [...historyMessages].reverse().find((m) => m.role === 'user') || null;
+  const basicOperationIntent = asksBasicOperationLookup(questionText);
+  const broadCategoryIntent = asksBroadCategoryLookup(questionText);
+  const broadCategoryKeyword = detectBroadCategoryKeyword(questionText);
   const categoryMention = detectCategoryMention(questionText, state);
   const semanticCorrection = detectSemanticCorrection(questionText);
-  const semanticCandidateTerm = semanticCorrection?.term
-    || categoryMention
-    || detectSemanticCandidateTerm(questionText, state);
+  const shouldUseSemanticMatcher = Boolean(semanticCorrection) || (!basicOperationIntent && !broadCategoryIntent);
+  const semanticCandidateTerm = shouldUseSemanticMatcher
+    ? (semanticCorrection?.term || detectSemanticCandidateTerm(questionText, state))
+    : (semanticCorrection?.term || '');
   const isLikelyFollowUp = isShortFollowUp(questionText) && Boolean(lastUserMessage);
 
   const messages = [
@@ -1498,6 +1743,12 @@ const run = async ({
       role: 'system',
       content: `INDEX_JSON: ${JSON.stringify(buildContextPrimer(state))}`
     },
+    ...(semanticSelection
+      ? [{
+          role: 'system',
+          content: `Пользователь выбрал алиас: "${semanticSelection.term}" => "${semanticSelection.canonicalName}" (${semanticSelection.entityType}). Считай это подтвержденным соответствием в текущем ответе.`
+        }]
+      : []),
     ...(wantsCalculationBreakdown
       ? [{
           role: 'system',
@@ -1522,13 +1773,25 @@ const run = async ({
           content: `Короткий follow-up пользователя "${questionText}" относится к предыдущему вопросу: "${String(lastUserMessage?.content || '').slice(0, 1000)}". Интерпретируй его как уточнение, а не новый независимый запрос.`
         }]
       : []),
+    ...(basicOperationIntent
+      ? [{
+          role: 'system',
+          content: 'Обнаружен базовый операционный запрос (доход/расход/перевод/баланс): semantic_entity_matcher не использовать, работай через get_transactions/get_snapshot_metrics.'
+        }]
+      : []),
+    ...(broadCategoryIntent
+      ? [{
+          role: 'system',
+          content: `Обнаружен широкий категорийный запрос (налоги/коммуналка): выполни широкий фильтр category через contains по токену "${broadCategoryKeyword || 'налог'}" и верни точные операции.`
+        }]
+      : []),
     ...(categoryMention
       ? [{
           role: 'system',
-          content: `Обнаружена категория "${categoryMention}". Сначала вызови semantic_entity_matcher, затем получи список операций через get_transactions перед финальным ответом.`
+          content: `Обнаружена категория "${categoryMention}". Сразу вызови get_transactions для точного списка операций и сумм по этой категории.`
         }]
       : []),
-    ...(semanticCandidateTerm
+    ...(semanticCandidateTerm && shouldUseSemanticMatcher
       ? [{
           role: 'system',
           content: `Перед поиском операций обработай термин "${semanticCandidateTerm}" через semantic_entity_matcher.`
@@ -1568,7 +1831,7 @@ const run = async ({
       runtimeToolState.businessDictionaryFetched = true;
       return getBusinessDictionaryResponse(state, argsObj);
     }
-    if (name === 'semantic_entity_matcher') return semanticEntityMatcher(state, argsObj);
+    if (name === 'semantic_entity_matcher') return semanticEntityMatcher(state, argsObj, toolUserContext);
     if (name === 'update_semantic_weights') {
       if (!runtimeToolState.businessDictionaryFetched) {
         return {
@@ -1577,8 +1840,10 @@ const run = async ({
           hint: 'Сначала вызови get_business_dictionary и передай canonicalNames из словаря.'
         };
       }
-      return updateSemanticWeightsTool(state, argsObj);
+      return updateSemanticWeightsTool(state, argsObj, toolUserContext);
     }
+    if (name === 'get_learned_aliases') return getLearnedAliasesTool(argsObj, toolUserContext);
+    if (name === 'delete_semantic_alias') return deleteSemanticAliasTool(argsObj, toolUserContext);
     if (name === 'advanced_data_analyzer') return advancedDataAnalyzerTool(state, argsObj);
     if (name === 'get_kz_exchange_rates') return getKzExchangeRatesTool();
     if (name === 'render_ui_widget') return renderUiWidgetTool(state, argsObj);
@@ -1594,8 +1859,14 @@ const run = async ({
         if (semanticCorrection) {
           return { type: 'function', function: { name: 'get_business_dictionary' } };
         }
-        if (semanticCandidateTerm) {
+        if (semanticCandidateTerm && shouldUseSemanticMatcher) {
           return { type: 'function', function: { name: 'semantic_entity_matcher' } };
+        }
+        if (categoryMention || broadCategoryIntent) {
+          return { type: 'function', function: { name: 'get_transactions' } };
+        }
+        if (basicOperationIntent) {
+          return { type: 'function', function: { name: 'get_snapshot_metrics' } };
         }
         if (wantsChart) {
           return { type: 'function', function: { name: 'render_ui_widget' } };
@@ -1636,7 +1907,11 @@ const run = async ({
             wantsForecastStyle,
             wantsAnomalies,
             wantsChart,
+            basicOperationIntent,
+            broadCategoryIntent,
+            broadCategoryKeyword,
             categoryMention,
+            semanticSelection,
             isLikelyFollowUp
           },
           uiPayload: runtimeToolState.uiPayload
@@ -1650,6 +1925,7 @@ const run = async ({
       });
 
       let clarificationQuestion = null;
+      let clarificationOptions = null;
       for (const toolCall of toolCalls) {
         const functionName = String(toolCall?.function?.name || '');
         const rawArgs = String(toolCall?.function?.arguments || '{}');
@@ -1661,9 +1937,13 @@ const run = async ({
           && String(toolResult?.action || '') === 'needs_clarification'
         ) {
           clarificationQuestion = String(
-            toolResult?.clarificationQuestion
+            toolResult?.clarificationPrompt
+            || toolResult?.clarificationQuestion
             || `Что вы имеете в виду под "${String(argsObj?.term || argsObj?.query || questionText)}"?`
           );
+          clarificationOptions = Array.isArray(toolResult?.clarificationOptions)
+            ? toolResult.clarificationOptions
+            : null;
         }
         if (functionName === 'render_ui_widget' && toolResult?.uiCommand) {
           runtimeToolState.uiPayload = {
@@ -1707,9 +1987,14 @@ const run = async ({
             wantsForecastStyle,
             wantsAnomalies,
             wantsChart,
+            basicOperationIntent,
+            broadCategoryIntent,
+            broadCategoryKeyword,
             categoryMention,
             semanticCandidateTerm,
             semanticCorrectionDetected: Boolean(semanticCorrection),
+            semanticSelection,
+            clarificationOptions,
             clarificationRequired: true,
             isLikelyFollowUp
           },

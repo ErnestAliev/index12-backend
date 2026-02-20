@@ -2365,6 +2365,109 @@ module.exports = function createAiRouter(deps) {
     }
   });
 
+  // GET /api/ai/dictionary - list learned semantic aliases for current user
+  router.get('/dictionary', isAuthenticated, async (req, res) => {
+    try {
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      const userId = req.user?._id || req.user?.id;
+      const userIdStr = String(userId || '');
+      if (!userIdStr) return res.status(401).json({ error: 'Пользователь не найден' });
+
+      let effectiveUserId = userId;
+      if (typeof getCompositeUserId === 'function') {
+        try {
+          effectiveUserId = await getCompositeUserId(req);
+        } catch (_) {
+          effectiveUserId = userId;
+        }
+      }
+
+      const term = String(req?.query?.term || '').trim();
+      const entityType = String(req?.query?.entityType || 'auto').trim().toLowerCase();
+      const limitRaw = Number(req?.query?.limit);
+      const limit = Number.isFinite(limitRaw)
+        ? Math.max(1, Math.min(500, Math.round(limitRaw)))
+        : 200;
+
+      const result = await cfoKnowledgeBase.getLearnedAliases({
+        userId: String(effectiveUserId || userId || ''),
+        term,
+        entityType,
+        limit
+      });
+
+      if (!result?.ok) {
+        return res.status(500).json({
+          ok: false,
+          error: String(result?.error || 'dictionary_read_failed')
+        });
+      }
+
+      return res.json({
+        ok: true,
+        count: Number(result?.count || 0),
+        items: Array.isArray(result?.items) ? result.items : []
+      });
+    } catch (error) {
+      console.error('[AI Dictionary] List error:', error);
+      return res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  });
+
+  // DELETE /api/ai/dictionary/:term - delete learned alias by term
+  router.delete('/dictionary/:term', isAuthenticated, async (req, res) => {
+    try {
+      if (!_isAiAllowed(req)) {
+        return res.status(402).json({ error: 'AI недоступен для вашего аккаунта' });
+      }
+
+      const userId = req.user?._id || req.user?.id;
+      const userIdStr = String(userId || '');
+      if (!userIdStr) return res.status(401).json({ error: 'Пользователь не найден' });
+
+      let effectiveUserId = userId;
+      if (typeof getCompositeUserId === 'function') {
+        try {
+          effectiveUserId = await getCompositeUserId(req);
+        } catch (_) {
+          effectiveUserId = userId;
+        }
+      }
+
+      const term = String(req?.params?.term || '').trim();
+      if (!term) {
+        return res.status(400).json({ ok: false, error: 'term_required' });
+      }
+      const entityType = String(req?.query?.entityType || 'auto').trim().toLowerCase();
+
+      const result = await cfoKnowledgeBase.deleteSemanticAlias({
+        userId: String(effectiveUserId || userId || ''),
+        term,
+        entityType
+      });
+      if (!result?.ok) {
+        return res.status(500).json({
+          ok: false,
+          error: String(result?.error || 'dictionary_delete_failed'),
+          deletedCount: Number(result?.deletedCount || 0)
+        });
+      }
+
+      return res.json({
+        ok: true,
+        deletedCount: Number(result?.deletedCount || 0),
+        term,
+        entityType
+      });
+    } catch (error) {
+      console.error('[AI Dictionary] Delete error:', error);
+      return res.status(500).json({ ok: false, error: String(error?.message || error) });
+    }
+  });
+
   // GET /api/ai/llm-input/latest - Download latest LLM input snapshot JSON
   router.get('/llm-input/latest', isAuthenticated, async (req, res) => {
     try {
@@ -2869,6 +2972,7 @@ module.exports = function createAiRouter(deps) {
         const llmResult = await snapshotAgent.run({
           question: q,
           history: historyForAgent,
+          userId: String(effectiveUserId || userId || ''),
           currentContext: req?.body?.currentContext || null,
           snapshot,
           deterministicFacts,
