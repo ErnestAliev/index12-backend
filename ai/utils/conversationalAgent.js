@@ -139,6 +139,7 @@ const getQuestionFlags = (question) => {
     const monthMentions = (q.match(/(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)/gi) || []).length;
     const asksComparison = /(сравн|сопостав|vs|versus|против|по\s+сравнению)/i.test(q) || monthMentions >= 2;
     const asksForecastOrExtrapolation = /(прогноз|экстрапол|на\s+март|на\s+апрел|на\s+май|на\s+июн|на\s+июл|на\s+август|на\s+сентябр|на\s+октябр|на\s+ноябр|на\s+декабр|следующ(ий|его)\s+месяц|будущ(ий|его)\s+месяц|хватит\s+ли|покро(ет|ем)|повторить)/i.test(q);
+    const asksBalanceImpact = /(как\s+это\s+отразитс[яь]\s+на\s+баланс|как\s+это\s+повлияет\s+на\s+баланс|влияни[ея]\s+на\s+баланс|отразитс[яь]\s+на\s+баланс|повлияет\s+на\s+баланс)/i.test(q);
 
     const isDirectInvestmentAmount = asksInvestmentRelated
         && asksSingleAmount
@@ -155,6 +156,7 @@ const getQuestionFlags = (question) => {
         asksPeriodAnalytics,
         asksComparison,
         asksForecastOrExtrapolation,
+        asksBalanceImpact,
         isDirectInvestmentAmount,
         isDirectConditionalAmount
     };
@@ -1602,7 +1604,8 @@ async function generateSnapshotChatResponse({
         const currentBalanceForForecast = hasNextObligation
             ? toNum(accountViewContext?.liquidityView?.openAfterNextObligation)
             : toNum(accountViewContext?.liquidityView?.openEnd);
-        const projectedBalance = currentBalanceForForecast + adjustedIncomeFromNetting - adjustedExpenseWithoutOffsets;
+        const projectedNet = adjustedIncomeFromNetting - adjustedExpenseWithoutOffsets;
+        const projectedBalance = currentBalanceForForecast + projectedNet;
 
         return {
             has_offset_netting: periodOffsetNetting > 0,
@@ -1611,10 +1614,13 @@ async function generateSnapshotChatResponse({
             nominal_expense: periodExpense,
             adjusted_income_from_netting: adjustedIncomeFromNetting,
             adjusted_expense_without_offsets: adjustedExpenseWithoutOffsets,
+            projected_net: projectedNet,
             current_balance_for_forecast: currentBalanceForForecast,
             projected_balance: projectedBalance,
             formula_template: '(Текущий баланс + Скорректированный доход - Скорректированный расход = Прогноз)',
-            formula_numbers: `${formatT(currentBalanceForForecast)} + ${formatT(adjustedIncomeFromNetting)} - ${formatT(adjustedExpenseWithoutOffsets)} = ${formatT(projectedBalance)}`
+            formula_numbers: `${formatT(currentBalanceForForecast)} + ${formatT(adjustedIncomeFromNetting)} - ${formatT(adjustedExpenseWithoutOffsets)} = ${formatT(projectedBalance)}`,
+            balance_impact_formula_template: '(Текущий остаток + Прогнозный Net = Баланс после прогноза)',
+            balance_impact_formula_numbers: `${formatT(currentBalanceForForecast)} + ${formatSignedT(projectedNet)} = ${formatT(projectedBalance)}`
         };
     })();
 
@@ -1682,6 +1688,7 @@ async function generateSnapshotChatResponse({
         },
         enforcement: {
             asks_forecast_or_extrapolation: Boolean(questionFlags?.asksForecastOrExtrapolation),
+            asks_balance_impact: Boolean(questionFlags?.asksBalanceImpact),
             has_numeric_context: Boolean(
                 hasHistoricalContext
                 || hasHistory
@@ -1739,14 +1746,21 @@ async function generateSnapshotChatResponse({
         'Шаг B. Для дохода использовать netAmount/чистый приток (PRECALC_NUMBERS_JSON.forecast.adjusted_income_from_netting), а не номинальный доход.',
         'Шаг C. Явно показать формулу отдельной строкой: "(Текущий баланс + Скорректированный доход - Скорректированный расход = Прогноз)".',
         'Шаг D. Подставить цифры из PRECALC_NUMBERS_JSON.forecast.formula_numbers.',
-        'Шаг E. Если offsetNetting.amount > 0, явно написать: взаимозачет учтен как разовый неденежный эффект и не экстраполирован как регулярный расход.',
+        'Шаг E. Если offsetNetting.amount > 0, явно написать фразу в 1-м лице: "Я убрал [сумма offsetNetting] из расходов будущего периода, так как это был разовый взаимозачет". Если в вопросе указан месяц (например, март) — подставь этот месяц в фразу.',
+        'Шаг F. Сформируй в ответе таблицу расчетов (минимум 4 строки): Текущий остаток, Скорректированный доход, Скорректированный расход, Прогнозный баланс.',
+        '',
+        '# BALANCE IMPACT TRIGGER (ОБЯЗАТЕЛЬНО)',
+        'Если вопрос содержит формулировку "как это отразится на балансе" (см. QUESTION_FLAGS_JSON.asksBalanceImpact=true):',
+        '1) Обязательно посчитай по формуле "(Текущий остаток + Прогнозный Net = Баланс после прогноза)".',
+        '2) Используй PRECALC_NUMBERS_JSON.forecast.balance_impact_formula_numbers.',
+        '3) Покажи эту формулу отдельной строкой и не заменяй ее общими словами.',
         '',
         '# FORMATTING',
         '- Итоги периода -> PERIOD_ANALYTICS_JSON.totals.',
         '- Крупнейшие расходы -> PERIOD_ANALYTICS_JSON.topExpenseCategories.',
         '- Если в FACTS_JSON.operations / PERIOD_ANALYTICS_JSON.topOperations у дохода есть offsets[] или netAmount < amount, трактуй это как взаимозачет: озвучивай номинал дохода, фактическое поступление (netAmount) и сумму зачета отдельно; не называй такие зачеты «обычными денежными расходами».',
         '- При экстраполяции на будущие месяцы НЕ переноси взаимозачет как регулярный расход; используй offsetNetting только как разовый комментарий к периоду/сделке.',
-        '- Если PRECALC_NUMBERS_JSON.forecast.enabled=true, ответ без формулы и без чисел недопустим.',
+        '- Если PRECALC_NUMBERS_JSON.forecast.enabled=true, ответ без таблицы расчетов, формулы и чисел недопустим.',
         '- Если PERIOD_ANALYTICS_JSON.totals = {income:0, expense:0, net:0} и topOperations пустой, ответь строго: "За [Месяц Year] данных в системе не обнаружено (ни фактических, ни запланированных)".',
         '- Денежные суммы пиши в формате "1 554 388 т".',
         '- ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: В любом ответе про ликвидность или проверку покрытия всегда явно прописывай в тексте цифру доступного остатка (open_after_next_obligation).',

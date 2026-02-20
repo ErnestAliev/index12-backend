@@ -122,7 +122,8 @@ const buildExpected = ({
     history_periods_count: historyData.length,
     historical_context_mode: historicalContextData.length >= 2,
     historical_context_periods_count: historicalContextData.length,
-    asks_forecast_or_extrapolation: Boolean(questionFlags?.asksForecastOrExtrapolation)
+    asks_forecast_or_extrapolation: Boolean(questionFlags?.asksForecastOrExtrapolation),
+    asks_balance_impact: Boolean(questionFlags?.asksBalanceImpact)
   };
 
   const offsetNettingCandidates = uniqueRounded([
@@ -327,6 +328,17 @@ const buildExpected = ({
     required.push({
       name: 'forecast_balance_anchor',
       value: [expected.open_after_next_obligation, expected.open_end]
+    });
+  }
+
+  if (expected.asks_balance_impact) {
+    required.push({
+      name: 'balance_impact_anchor',
+      value: [expected.open_after_next_obligation, expected.open_end]
+    });
+    required.push({
+      name: 'balance_impact_net',
+      value: [expected.month_forecast_net, expected.fact_net, expected.plan_remainder_net]
     });
   }
 
