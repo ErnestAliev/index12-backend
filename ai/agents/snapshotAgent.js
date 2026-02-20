@@ -81,10 +81,12 @@ const SEMANTIC_STOPWORDS = new Set([
   'не', 'нет', 'да', 'ну', 'вопрос', 'ответ', 'почему', 'сколько', 'покажи', 'расскажи',
   'подскажи', 'дай', 'итог', 'итоги', 'сумма', 'суммы', 'доход', 'доходы', 'расход',
   'расходы', 'прибыль', 'убыток', 'баланс', 'балансы', 'ликвидность', 'месяц', 'месяца',
+  'деньги', 'денег', 'траты', 'трат', 'средства', 'средств', 'выручка', 'оборот',
   'январь', 'января', 'февраль', 'февраля', 'март', 'марта', 'апрель', 'апреля', 'май',
   'мая', 'июнь', 'июня', 'июль', 'июля', 'август', 'августа', 'сентябрь', 'сентября',
   'октябрь', 'октября', 'ноябрь', 'ноября', 'декабрь', 'декабря'
 ]);
+const GENERIC_SEMANTIC_TERMS_RE = /(деньг|трат|средств|выручк|оборот|финанс|прибыл|убыт|кэш|cash|money|spend)/i;
 
 const normalizeOperationType = (value) => {
   const token = normalizeToken(value);
@@ -1412,7 +1414,72 @@ const TOOL_DEFINITIONS = [
   }
 ];
 
-const buildSystemPrompt = () => {
+const isPlaceholderEntityName = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return true;
+  const norm = normalizeText(raw);
+  if (!norm) return true;
+  return /^без\s+/.test(norm);
+};
+
+const collectUniqueOperationValues = (state, key) => {
+  const ops = Array.isArray(state?.operations) ? state.operations : [];
+  return uniqueNames(
+    ops
+      .map((row) => String(row?.[key] || '').trim())
+      .filter((value) => value && !isPlaceholderEntityName(value))
+  );
+};
+
+const buildSnapshotSchemaAwareness = (state) => {
+  const categories = collectUniqueOperationValues(state, 'category');
+  const projects = collectUniqueOperationValues(state, 'project');
+  const accounts = collectUniqueOperationValues(state, 'account');
+  const counterparties = collectUniqueOperationValues(state, 'counterparty');
+  const allNorm = Array.from(new Set(
+    [...categories, ...projects, ...accounts, ...counterparties]
+      .map((item) => normalizeText(item))
+      .filter(Boolean)
+  ));
+  return {
+    categories,
+    projects,
+    accounts,
+    counterparties,
+    allNorm
+  };
+};
+
+const formatSchemaValues = (items, limit = 60) => {
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) return 'нет данных';
+  const safeLimit = Math.max(1, Math.min(120, Math.round(toNum(limit) || 60)));
+  const visible = rows.slice(0, safeLimit);
+  const rest = rows.length - visible.length;
+  return rest > 0
+    ? `${visible.join(', ')} ... (+${rest})`
+    : visible.join(', ');
+};
+
+const isGenericSemanticWord = (term) => {
+  const norm = normalizeText(term);
+  if (!norm) return false;
+  return SEMANTIC_STOPWORDS.has(norm) || GENERIC_SEMANTIC_TERMS_RE.test(norm);
+};
+
+const termExistsInSnapshotSchema = (term, schemaAwareness) => {
+  const norm = normalizeText(term);
+  if (!norm) return false;
+  const source = Array.isArray(schemaAwareness?.allNorm) ? schemaAwareness.allNorm : [];
+  return source.some((entityNorm) => (
+    entityNorm === norm
+    || entityNorm.includes(norm)
+    || norm.includes(entityNorm)
+  ));
+};
+
+const buildSystemPrompt = (state, schemaAwareness = null) => {
+  const schema = schemaAwareness || buildSnapshotSchemaAwareness(state);
   return [
     'Ты — Финансовый директор сервиса Index12.',
     'Ты не угадываешь цифры из головы.',
@@ -1435,13 +1502,21 @@ const buildSystemPrompt = () => {
     'Никогда не угадывай названия сущностей вслепую.',
     'Перед update_semantic_weights ты ОБЯЗАН вызвать get_business_dictionary и выбрать точные сущности только из словаря.',
     'Если пользователь просит группу сущностей, сохрани canonicalNames как массив точных названий из словаря, а не текстовую фразу.',
+    'Schema Awareness (динамический контекст Snapshot):',
+    `- Доступные проекты: [${formatSchemaValues(schema.projects)}]`,
+    `- Доступные категории: [${formatSchemaValues(schema.categories)}]`,
+    `- Доступные счета: [${formatSchemaValues(schema.accounts)}]`,
+    `- Доступные контрагенты: [${formatSchemaValues(schema.counterparties)}]`,
+    'Если термин пользователя уже встречается в списках Snapshot выше — НЕ вызывай semantic_entity_matcher, фильтруй операции напрямую через get_transactions/advanced_data_analyzer.',
+    'semantic_entity_matcher разрешен ТОЛЬКО когда термин отсутствует в списках Snapshot, но это похоже на сленг/аббревиатуру сущности.',
+    'Если термин общеупотребимый (деньги, траты, средства, выручка и т.п.) — semantic_entity_matcher не использовать.',
     'Если уверенность semantic_entity_matcher ниже порога — выдай нумерованный список вариантов (1,2,3) + "Создать новое", попроси ответить одной цифрой и останови ответ.',
     'Если пользователь ответил одной цифрой, возьми из history свое предыдущее сообщение с нумерованным списком, сопоставь цифру с точным названием и вызови update_semantic_weights с названием, а не с цифрой.',
     'Если пользователь поправил соответствие, немедленно вызови update_semantic_weights, чтобы обучить систему.',
     'СТРОГОЕ ПРАВИЛО ФОРМАТИРОВАНИЯ ЧИСЕЛ: всегда выводи суммы с разделителем тысяч через пробел (допустим неразрывный пробел), никогда не используй запятые для тысяч. Правильно: "1 220 078 KZT". Неправильно: "1,220,078 KZT".',
     'Если пользователь просит график, вызови render_ui_widget и верни структуру uiCommand для рендера.',
     'Отвечай кратко, по делу, с конкретными финальными цифрами.'
-  ].join(' ');
+  ].join('\n');
 };
 
 const buildContextPrimer = (state) => {
@@ -1733,14 +1808,24 @@ const run = async ({
   const broadCategoryKeyword = detectBroadCategoryKeyword(questionText);
   const categoryMention = detectCategoryMention(questionText, state);
   const semanticCorrection = detectSemanticCorrection(questionText);
-  const shouldUseSemanticMatcher = Boolean(semanticCorrection) || (!basicOperationIntent && !broadCategoryIntent);
+  const schemaAwareness = buildSnapshotSchemaAwareness(state);
+  const rawSemanticCandidateTerm = semanticCorrection?.term || detectSemanticCandidateTerm(questionText, state);
+  const semanticCandidateExistsInSchema = termExistsInSnapshotSchema(rawSemanticCandidateTerm, schemaAwareness);
+  const semanticCandidateIsGeneric = isGenericSemanticWord(rawSemanticCandidateTerm);
+  const shouldUseSemanticMatcher = Boolean(semanticCorrection) || (
+    !basicOperationIntent
+    && !broadCategoryIntent
+    && Boolean(rawSemanticCandidateTerm)
+    && !semanticCandidateExistsInSchema
+    && !semanticCandidateIsGeneric
+  );
   const semanticCandidateTerm = shouldUseSemanticMatcher
-    ? (semanticCorrection?.term || detectSemanticCandidateTerm(questionText, state))
+    ? rawSemanticCandidateTerm
     : (semanticCorrection?.term || '');
   const isLikelyFollowUp = isShortFollowUp(questionText) && Boolean(lastUserMessage);
 
   const messages = [
-    { role: 'system', content: buildSystemPrompt() },
+    { role: 'system', content: buildSystemPrompt(state, schemaAwareness) },
     {
       role: 'system',
       content: `INDEX_JSON: ${JSON.stringify(buildContextPrimer(state))}`
@@ -1792,6 +1877,12 @@ const run = async ({
       ? [{
           role: 'system',
           content: `Обнаружена категория "${categoryMention}". Сразу вызови get_transactions для точного списка операций и сумм по этой категории.`
+        }]
+      : []),
+    ...(rawSemanticCandidateTerm && !shouldUseSemanticMatcher
+      ? [{
+          role: 'system',
+          content: `Термин "${rawSemanticCandidateTerm}" не требует semantic_entity_matcher (либо уже есть в Snapshot-схеме, либо общеупотребимый). Работай напрямую через get_transactions/advanced_data_analyzer.`
         }]
       : []),
     ...(semanticCandidateTerm && shouldUseSemanticMatcher
@@ -1924,6 +2015,9 @@ const run = async ({
             broadCategoryIntent,
             broadCategoryKeyword,
             categoryMention,
+            rawSemanticCandidateTerm,
+            semanticCandidateExistsInSchema,
+            semanticCandidateIsGeneric,
             semanticSelection,
             isLikelyFollowUp
           },
@@ -2008,6 +2102,9 @@ const run = async ({
             broadCategoryKeyword,
             categoryMention,
             semanticCandidateTerm,
+            rawSemanticCandidateTerm,
+            semanticCandidateExistsInSchema,
+            semanticCandidateIsGeneric,
             semanticCorrectionDetected: Boolean(semanticCorrection),
             semanticSelection,
             clarificationOptions,
