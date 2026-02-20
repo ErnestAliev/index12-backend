@@ -3,13 +3,12 @@
 
 const OpenAI = require('openai');
 const axios = require('axios');
-const { create, all } = require('mathjs');
+const vm = require('node:vm');
 const intentParser = require('../utils/intentParser');
 const cfoKnowledgeBase = require('../utils/cfoKnowledgeBase');
 
 const MAX_TOOL_STEPS = 8;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
-const math = create(all, {});
 
 const toNum = (value) => {
   const n = Number(value);
@@ -874,6 +873,46 @@ const movingAverage = (values, windowSize) => {
   return out;
 };
 
+const medianValue = (values) => {
+  const src = toPlainNumberArray(values).sort((a, b) => a - b);
+  if (!src.length) return 0;
+  const mid = Math.floor(src.length / 2);
+  if (src.length % 2 === 0) return (src[mid - 1] + src[mid]) / 2;
+  return src[mid];
+};
+
+const SANDBOX_MATH = Object.freeze({
+  abs: (x) => Math.abs(toNum(x)),
+  round: (x) => Math.round(toNum(x)),
+  floor: (x) => Math.floor(toNum(x)),
+  ceil: (x) => Math.ceil(toNum(x)),
+  min: (...xs) => {
+    const source = (xs.length === 1 && Array.isArray(xs[0])) ? xs[0] : xs;
+    const nums = toPlainNumberArray(source);
+    return nums.length ? Math.min(...nums) : 0;
+  },
+  max: (...xs) => {
+    const source = (xs.length === 1 && Array.isArray(xs[0])) ? xs[0] : xs;
+    const nums = toPlainNumberArray(source);
+    return nums.length ? Math.max(...nums) : 0;
+  },
+  pow: (a, b) => Math.pow(toNum(a), toNum(b)),
+  sqrt: (x) => Math.sqrt(Math.max(0, toNum(x))),
+  sum: (arr) => toPlainNumberArray(arr).reduce((sum, n) => sum + n, 0),
+  avg: (arr) => {
+    const src = toPlainNumberArray(arr);
+    return src.length ? (src.reduce((sum, n) => sum + n, 0) / src.length) : 0;
+  },
+  median: (arr) => medianValue(arr),
+  movingAvg: (arr, windowSize = 3) => movingAverage(arr, windowSize),
+  percentChange: (current, previous) => {
+    const cur = toNum(current);
+    const prev = toNum(previous);
+    if (!prev) return 0;
+    return ((cur - prev) / prev) * 100;
+  }
+});
+
 const resolveAnalyzerTransactions = (state, args = {}) => {
   if (Array.isArray(args?.transactions) && args.transactions.length > 0) {
     return normalizeOperations(args.transactions);
@@ -895,168 +934,56 @@ const resolveAnalyzerTransactions = (state, args = {}) => {
 };
 
 const advancedDataAnalyzerTool = (state, args = {}) => {
-  const transactions = resolveAnalyzerTransactions(state, args);
-  const command = String(args?.command || args?.expression || args?.analysis || '').trim();
-  const codeString = String(args?.codeString || '').trim();
-  if (!command && !codeString) {
-    return {
-      ok: false,
-      error: 'missing_command_or_codeString',
-      hint: 'Передайте command/expression или codeString для расчета.'
-    };
+  const operations = resolveAnalyzerTransactions(state, args);
+  const codeRaw = String(
+    args?.code
+    || args?.codeString
+    || args?.command
+    || args?.expression
+    || args?.analysis
+    || ''
+  ).trim();
+
+  if (!codeRaw) {
+    return 'EXECUTION_ERROR: code is required. Please provide JS code and call the tool again.';
   }
-  if (!transactions.length) {
-    return {
-      ok: false,
-      error: 'no_transactions_for_analysis',
-      command: command || null,
-      codeString: codeString || null
-    };
+  if (!operations.length) {
+    return 'EXECUTION_ERROR: no operations available for analysis. Please adjust filters and call the tool again.';
+  }
+  if (codeRaw.length > 24000) {
+    return 'EXECUTION_ERROR: code is too large. Please provide a shorter JS snippet and call the tool again.';
+  }
+  if (/(?:\bprocess\b|\brequire\b|\bmodule\b|\bglobal\b|\bglobalThis\b|\bimport\b|\bexport\b|\bchild_process\b|\bfs\b)/i.test(codeRaw)) {
+    return 'EXECUTION_ERROR: unsafe code token detected. Please remove forbidden globals and call the tool again.';
   }
 
-  const amounts = transactions.map((tx) => Math.abs(toNum(tx?.amount)));
-  const offsetAmounts = transactions.map((tx) => Math.abs(toNum(tx?.offsetAmount)));
-  const incomeAmounts = transactions
-    .filter((tx) => normalizeOperationType(tx?.type) === 'Доход')
-    .map((tx) => Math.abs(toNum(tx?.amount)));
-  const expenseAmounts = transactions
-    .filter((tx) => normalizeOperationType(tx?.type) === 'Расход')
-    .map((tx) => Math.abs(toNum(tx?.amount)));
-  const signedAmounts = transactions.map((tx) => {
-    const type = normalizeOperationType(tx?.type);
-    const amount = Math.abs(toNum(tx?.amount));
-    if (type === 'Расход') return -amount;
-    if (type === 'Доход') return amount;
-    return 0;
-  });
-  const byDateMap = transactions.reduce((acc, tx) => {
-    const key = String(tx?.date || '');
-    if (!key) return acc;
-    const type = normalizeOperationType(tx?.type);
-    const amount = Math.abs(toNum(tx?.amount));
-    const signed = type === 'Расход' ? -amount : (type === 'Доход' ? amount : 0);
-    acc.set(key, (acc.get(key) || 0) + signed);
-    return acc;
-  }, new Map());
-  const dailyTotals = Array.from(byDateMap.entries())
-    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
-    .map((entry) => ({ date: entry[0], value: entry[1] }));
-
-  const helperFns = {
-    sum: (arr) => toPlainNumberArray(arr).reduce((sum, n) => sum + n, 0),
-    avg: (arr) => {
-      const src = toPlainNumberArray(arr);
-      return src.length ? (src.reduce((sum, n) => sum + n, 0) / src.length) : 0;
-    },
-    median: (arr) => {
-      const src = toPlainNumberArray(arr);
-      return src.length ? Number(math.median(src)) : 0;
-    },
-    movingAvg: (arr, windowSize = 3) => movingAverage(arr, windowSize),
-    percentChange: (current, previous) => {
-      const cur = toNum(current);
-      const prev = toNum(previous);
-      if (!prev) return 0;
-      return ((cur - prev) / prev) * 100;
-    },
-    compound: (principal, ratePercent, periods, contribution = 0) => {
-      let total = toNum(principal);
-      const rate = toNum(ratePercent) / 100;
-      const n = Math.max(0, Math.round(toNum(periods)));
-      const add = toNum(contribution);
-      for (let i = 0; i < n; i += 1) {
-        total = (total + add) * (1 + rate);
-      }
-      return total;
-    }
-  };
-
-  const scope = {
-    amounts,
-    signedAmounts,
-    incomeAmounts,
-    expenseAmounts,
-    offsetAmounts,
-    operations: transactions,
-    transactions,
-    dailyTotals: dailyTotals.map((row) => row.value),
-    transactionsCount: transactions.length,
-    ...helperFns
-  };
-
-  const serializeResult = (value) => {
-    if (value && typeof value?.valueOf === 'function') {
-      const plain = value.valueOf();
-      if (plain !== value) return serializeResult(plain);
-    }
-    if (Array.isArray(value)) {
-      return value.map((row) => (typeof row === 'number' ? row : toNum(row)));
-    }
-    if (typeof value === 'number') return value;
-    if (value && typeof value === 'object') return value;
-    return toNum(value);
-  };
+  const code = /\breturn\b/.test(codeRaw)
+    ? codeRaw
+    : `return (${codeRaw});`;
 
   try {
-    const runCodeInterpreter = (codeBody) => {
-      const jsCode = String(codeBody || '').trim();
-      if (!jsCode) {
-        throw new Error('empty_codeString');
-      }
-      if (/(?:process|require|module|global|import|export|child_process|fs)/i.test(jsCode)) {
-        throw new Error('unsafe_codeString');
-      }
-      const finalCode = /\breturn\b/.test(jsCode)
-        ? jsCode
-        : `return (${jsCode});`;
-      // Intentional code-interpreter mode for group-by and custom aggregations.
-      const fn = new Function(
-        'operations',
-        'math',
-        'helpers',
-        `"use strict";\n${finalCode}`
-      );
-      return fn(transactions, math, helperFns);
+    const sandbox = {
+      operations,
+      result: null,
+      math: SANDBOX_MATH,
+      Math
     };
+    vm.createContext(sandbox);
+    vm.runInContext(`result = (() => { ${code} })();`, sandbox, { timeout: 3000 });
 
-    let result;
-    let executionMode = 'mathjs';
-    if (codeString) {
-      result = runCodeInterpreter(codeString);
-      executionMode = 'code_interpreter';
-    } else if (command.startsWith('js:')) {
-      result = runCodeInterpreter(command.slice(3).trim());
-      executionMode = 'code_interpreter';
-    } else {
-      const looksLikeJsAggregation = /(?:operations|transactions)\s*[\.\[]|=>|\.reduce\(|\.filter\(|\.map\(|\.sort\(|\.forEach\(|\{|\}/i
-        .test(command);
-      if (looksLikeJsAggregation) {
-        result = runCodeInterpreter(command);
-        executionMode = 'code_interpreter';
-      } else {
-        result = math.evaluate(command, scope);
-      }
+    let serialized;
+    try {
+      serialized = JSON.stringify(sandbox.result);
+    } catch (stringifyError) {
+      return `EXECUTION_ERROR: result_not_serializable:${String(stringifyError?.message || stringifyError)}. Please fix your JS code and call the tool again.`;
     }
-
-    return {
-      ok: true,
-      command: command || null,
-      codeString: codeString || null,
-      mode: executionMode,
-      result: serializeResult(result),
-      datasetMeta: {
-        transactionsCount: transactions.length,
-        incomeCount: incomeAmounts.length,
-        expenseCount: expenseAmounts.length
-      }
-    };
+    if (typeof serialized !== 'string') serialized = 'null';
+    if (serialized.length > 200000) {
+      return 'EXECUTION_ERROR: result_too_large. Please reduce output size and call the tool again.';
+    }
+    return serialized;
   } catch (error) {
-    return {
-      ok: false,
-      command: command || null,
-      codeString: codeString || null,
-      error: `advanced_analysis_failed:${String(error?.message || error)}`
-    };
+    return `EXECUTION_ERROR: ${String(error?.message || error)}. Please fix your JS code and call the tool again.`;
   }
 };
 
@@ -1360,15 +1287,17 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'advanced_data_analyzer',
-      description: 'Code Interpreter для продвинутой аналитики: агрегации, Group By, фильтрация по проектам/контрагентам/счетам и математические расчеты через codeString (JS) или mathjs.',
+      description: 'Sandboxed Code Interpreter для Group By, агрегаций, фильтраций и сложной математики по operations через JavaScript-код.',
       parameters: {
         type: 'object',
+        required: ['code'],
         properties: {
-          codeString: {
+          code: {
             type: 'string',
-            description: 'Тело JS-кода с обязательным return. Доступны переменные operations и math. Пример: return operations.filter(op => op.type === "Доход").reduce((acc, op) => { acc[op.project] = (acc[op.project] || 0) + op.amount; return acc; }, {});'
+            description: 'JS-код с обязательным return. Доступны переменные operations (массив объектов) и math. Пример: return operations.filter(o => o.type === "Доход").reduce((acc, o) => { const p = o.project || o.projName || "Без проекта"; acc[p] = (acc[p] || 0) + o.amount; return acc; }, {});'
           },
-          command: { type: 'string', description: 'mathjs выражение или JS-выражение (fallback).' },
+          codeString: { type: 'string', description: 'Legacy alias параметра code.' },
+          command: { type: 'string', description: 'Legacy alias параметра code.' },
           expression: { type: 'string' },
           analysis: { type: 'string' },
           transactions: {
@@ -1452,10 +1381,12 @@ const buildSystemPrompt = () => {
     '2) Широкие группы (налоги, коммуналка): делай широкий поиск по category через contains/filter в in-memory операциях.',
     '3) Уникальный сленг/аббревиатуры: сначала semantic_entity_matcher, затем get_transactions.',
     '4) Аналитические срезы (по проектам/по контрагентам/в разрезе счетов/разбивка): ЗАПРЕЩЕНО использовать get_snapshot_metrics для финального ответа. ОБЯЗАТЕЛЬНО используй get_transactions + advanced_data_analyzer (или JS-агрегацию) для группировки по нужному полю и расчета Доход - Расход по КАЖДОЙ группе.',
-    'Для advanced_data_analyzer при сложной агрегации передавай codeString: внутри доступны operations и math, код ОБЯЗАН завершаться return. Пример: return operations.filter(op => op.type === "Доход").reduce((acc, op) => { acc[op.project] = (acc[op.project]||0) + op.amount; return acc; }, {});',
+    'Для advanced_data_analyzer при сложной агрегации передавай параметр code: внутри доступны operations (массив) и math (помощники), код ОБЯЗАН завершаться return. Пример: return operations.filter(o => o.type==="Доход").reduce((acc,o)=>{ const p=o.project||o.projName||"Без проекта"; acc[p]=(acc[p]||0)+o.amount; return acc; }, {});',
+    'Если advanced_data_analyzer вернул строку с префиксом EXECUTION_ERROR, НЕ показывай эту ошибку пользователю: исправь JS-код и вызови инструмент повторно.',
     'НИКОГДА не говори пользователю фразы вида "я использую инструмент/калькулятор/tool".',
-    'ВСЕГДА показывай расчетные шаги и формулы для прогнозов/балансов. Формат: "База [X] - Налоги [Y] - Взаимозачеты [Z] = Итог [N]".',
-    'Если пользователь спрашивает "как ты это посчитал", используй цифры и контекст из предыдущих сообщений диалога и распиши шаги вычислений.',
+    'DISPLAY_MODES:',
+    'Режим СВОДКИ (по умолчанию): выводи только финальные цифры и короткие выводы. Запрещено показывать промежуточные формулы, логи кода и внутреннюю арифметику.',
+    'Режим PROVE_IT: если пользователь просит "покажи расчеты", "распиши", "докажи", "как ты это посчитал" — вызови advanced_data_analyzer заново и выведи структурированный отчет: 1) Доходы, 2) Расходы, 3) Итог.',
     'Если пользователь спрашивает про конкретную категорию (например: Комуналка, Ремонт, Аренда), ты ОБЯЗАН сразу вызвать get_transactions для точного списка операций, а не ограничиваться totals.',
     'Если пользователь спрашивает про аномалии, ты ОБЯЗАН прочитать deterministicFacts.anomalies через get_snapshot_metrics и опираться только на этот массив.',
     'Никогда не угадывай названия сущностей вслепую.',
@@ -1466,7 +1397,7 @@ const buildSystemPrompt = () => {
     'Если пользователь поправил соответствие, немедленно вызови update_semantic_weights, чтобы обучить систему.',
     'СТРОГОЕ ПРАВИЛО ФОРМАТИРОВАНИЯ ЧИСЕЛ: всегда выводи суммы с разделителем тысяч через пробел (допустим неразрывный пробел), никогда не используй запятые для тысяч. Правильно: "1 220 078 KZT". Неправильно: "1,220,078 KZT".',
     'Если пользователь просит график, вызови render_ui_widget и верни структуру uiCommand для рендера.',
-    'Отвечай кратко, по делу, с конкретными цифрами и формулами.'
+    'Отвечай кратко, по делу, с конкретными финальными цифрами.'
   ].join(' ');
 };
 
@@ -1781,18 +1712,19 @@ const run = async ({
       ? [{
           role: 'system',
           content: [
-            'Пользователь просит объяснить расчет.',
-            'Ответ должен содержать пошаговую расшифровку с формулами и промежуточными числами.',
+            'Режим PROVE_IT: пользователь просит доказательство расчета.',
+            'Обязательно вызови advanced_data_analyzer и верни структурированный отчет: 1) Доходы, 2) Расходы, 3) Итог.',
+            'Не показывай пользователю служебные ошибки вида EXECUTION_ERROR; при ошибке исправь код и вызови инструмент повторно.',
             lastAssistantMessage?.content
               ? `Опирайся на последний ответ ассистента в истории: "${lastAssistantMessage.content.slice(0, 1200)}"`
-              : 'Если в истории нет прошлой формулы, сначала восстанови ее через инструменты, затем распиши шаги.'
+              : 'Если в истории нет прошлого расчета, восстанови детали через инструменты.'
           ].join(' ')
         }]
       : []),
     ...(wantsForecastStyle
       ? [{
           role: 'system',
-          content: 'Для прогноза/влияния на баланс обязательны формулы со знаками +/− и итогом после "=".'
+          content: 'Запрос про прогноз/влияние на баланс: дай пользователю итоговые цифры без промежуточной арифметики (если он не просил режим PROVE_IT).'
         }]
       : []),
     ...(isLikelyFollowUp
@@ -1890,6 +1822,9 @@ const run = async ({
         if (semanticCandidateTerm && shouldUseSemanticMatcher) {
           return { type: 'function', function: { name: 'semantic_entity_matcher' } };
         }
+        if (wantsCalculationBreakdown) {
+          return { type: 'function', function: { name: 'advanced_data_analyzer' } };
+        }
         if (categoryMention || broadCategoryIntent) {
           return { type: 'function', function: { name: 'get_transactions' } };
         }
@@ -1922,6 +1857,13 @@ const run = async ({
       if (!toolCalls.length) {
         const text = sanitizeFinalText(msg?.content || '');
         if (!text) throw new Error('empty_model_text');
+        if (/EXECUTION_ERROR:/i.test(text) && step < (MAX_TOOL_STEPS - 1)) {
+          messages.push({
+            role: 'system',
+            content: 'Нельзя показывать пользователю EXECUTION_ERROR. Исправь код и снова вызови advanced_data_analyzer, затем верни только итоговый ответ.'
+          });
+          continue;
+        }
         return {
           ok: true,
           text,
@@ -1959,6 +1901,9 @@ const run = async ({
         const rawArgs = String(toolCall?.function?.arguments || '{}');
         const argsObj = parseJsonSafe(rawArgs, {});
         const toolResult = await executeTool(functionName, argsObj);
+        const toolContent = typeof toolResult === 'string'
+          ? toolResult
+          : JSON.stringify(toolResult);
 
         if (
           functionName === 'semantic_entity_matcher'
@@ -1989,7 +1934,7 @@ const run = async ({
           tool: functionName,
           args: argsObj,
           resultPreview: (() => {
-            const raw = JSON.stringify(toolResult);
+            const raw = String(toolContent || '');
             return raw.length > 400 ? `${raw.slice(0, 400)}...` : raw;
           })()
         });
@@ -1997,7 +1942,7 @@ const run = async ({
         messages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
-          content: JSON.stringify(toolResult)
+          content: toolContent
         });
       }
 
