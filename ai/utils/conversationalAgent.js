@@ -138,6 +138,7 @@ const getQuestionFlags = (question) => {
     const asksPeriodAnalytics = /(первая|вторая|третья|четвертая|первую|вторую|третью|четвертую)\s+недел|за\s+недел|за\s+период|с\s+\d{4}-\d{2}-\d{2}\s+по\s+\d{4}-\d{2}-\d{2}|с\s+\d{1,2}[./]\d{1,2}\s+по\s+\d{1,2}[./]\d{1,2}|с\s+\d{1,2}\s+[а-я]+\s+по\s+\d{1,2}\s+[а-я]+/i.test(q);
     const monthMentions = (q.match(/(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)/gi) || []).length;
     const asksComparison = /(сравн|сопостав|vs|versus|против|по\s+сравнению)/i.test(q) || monthMentions >= 2;
+    const asksForecastOrExtrapolation = /(прогноз|экстрапол|на\s+март|на\s+апрел|на\s+май|на\s+июн|на\s+июл|на\s+август|на\s+сентябр|на\s+октябр|на\s+ноябр|на\s+декабр|следующ(ий|его)\s+месяц|будущ(ий|его)\s+месяц|хватит\s+ли|покро(ет|ем)|повторить)/i.test(q);
 
     const isDirectInvestmentAmount = asksInvestmentRelated
         && asksSingleAmount
@@ -153,6 +154,7 @@ const getQuestionFlags = (question) => {
         asksStrategyDistribution,
         asksPeriodAnalytics,
         asksComparison,
+        asksForecastOrExtrapolation,
         isDirectInvestmentAmount,
         isDirectConditionalAmount
     };
@@ -1583,6 +1585,39 @@ async function generateSnapshotChatResponse({
         limit: 5
     });
 
+    const forecastMath = (() => {
+        const periodIncome = toNum(effectivePeriodAnalytics?.totals?.income);
+        const periodExpense = toNum(effectivePeriodAnalytics?.totals?.expense);
+        const periodOffsetNetting = toNum(
+            effectivePeriodAnalytics?.offsetNetting?.amount
+            ?? deterministicFacts?.offsetNetting?.amount
+            ?? deterministicFacts?.fact?.offsetNetting?.amount
+            ?? 0
+        );
+
+        const adjustedIncomeFromNetting = Math.max(0, periodIncome - periodOffsetNetting);
+        const adjustedExpenseWithoutOffsets = Math.max(0, periodExpense - periodOffsetNetting);
+
+        const hasNextObligation = toNum(accountViewContext?.liquidityView?.nextObligationAmount) > 0;
+        const currentBalanceForForecast = hasNextObligation
+            ? toNum(accountViewContext?.liquidityView?.openAfterNextObligation)
+            : toNum(accountViewContext?.liquidityView?.openEnd);
+        const projectedBalance = currentBalanceForForecast + adjustedIncomeFromNetting - adjustedExpenseWithoutOffsets;
+
+        return {
+            has_offset_netting: periodOffsetNetting > 0,
+            offset_expense_excluded: periodOffsetNetting,
+            nominal_income: periodIncome,
+            nominal_expense: periodExpense,
+            adjusted_income_from_netting: adjustedIncomeFromNetting,
+            adjusted_expense_without_offsets: adjustedExpenseWithoutOffsets,
+            current_balance_for_forecast: currentBalanceForForecast,
+            projected_balance: projectedBalance,
+            formula_template: '(Текущий баланс + Скорректированный доход - Скорректированный расход = Прогноз)',
+            formula_numbers: `${formatT(currentBalanceForForecast)} + ${formatT(adjustedIncomeFromNetting)} - ${formatT(adjustedExpenseWithoutOffsets)} = ${formatT(projectedBalance)}`
+        };
+    })();
+
     const precomputedNumbers = {
         today_key: String(snapshotMeta?.timelineDate || advisoryFacts?.timeline?.todayKey || ''),
         intent: responseIntent.intent,
@@ -1644,6 +1679,20 @@ async function generateSnapshotChatResponse({
             periods_count: historicalContextPeriods.length,
             center_period: String(historicalContext?.meta?.centerPeriod || ''),
             source: String(historicalContext?.meta?.source || '')
+        },
+        enforcement: {
+            asks_forecast_or_extrapolation: Boolean(questionFlags?.asksForecastOrExtrapolation),
+            has_numeric_context: Boolean(
+                hasHistoricalContext
+                || hasHistory
+                || hasComparisonData
+                || effectivePeriodAnalytics
+                || deterministicFacts?.totals
+            )
+        },
+        forecast: {
+            enabled: Boolean(questionFlags?.asksForecastOrExtrapolation),
+            ...forecastMath
         }
     };
 
@@ -1656,6 +1705,7 @@ async function generateSnapshotChatResponse({
         '2. NO MATH HALLUCINATIONS: Запрещено суммировать весь массив операций. Бери готовые итоги из PERIOD_ANALYTICS_JSON.totals, topExpenseCategories и FACTS_JSON.comparisonData.',
         '3. SNAPSHOT PRIORITY: Текущий JSON-snapshot имеет абсолютный приоритет над историей переписки. Если цифры изменились — забудь старые выводы и делай новые.',
         '4. OFFSET IS NON-CASH: Категория/флаг взаимозачета (offsets, linkedParentId, isOffsetExpense, offsetNetting) — это неденежный зачет обязательств, а не регулярный cash-расход.',
+        '5. NO WATER WITH DATA: Если в HISTORICAL_CONTEXT_JSON / FACTS_JSON / PERIOD_ANALYTICS_JSON есть числовые данные, запрещены общие фразы без конкретных сумм.',
         '',
         '# COMPARISON MODE',
         'Если FACTS_JSON.comparisonData содержит 2+ периодов:',
@@ -1683,11 +1733,20 @@ async function generateSnapshotChatResponse({
         'Шаг 4. Если итог < 0: Ты ОБЯЗАН заявить о прогнозируемом кассовом разрыве (дефиците) и строго по правилам CONTEXTUAL_ADVICE_JSON рекомендовать трансфер из закрытого контура.',
         'Запрещено делать вывод "денег хватит", если математически Остаток меньше Расходов.',
         '',
+        '# NETTING EXTRAPOLATION ENFORCEMENT (ОБЯЗАТЕЛЬНО)',
+        'Если пользователь просит экстраполяцию или прогноз, ты ОБЯЗАН:',
+        'Шаг A. Найти/учесть все операции с isOffsetExpense=true и исключить их из будущих расходов (используй PRECALC_NUMBERS_JSON.forecast.adjusted_expense_without_offsets).',
+        'Шаг B. Для дохода использовать netAmount/чистый приток (PRECALC_NUMBERS_JSON.forecast.adjusted_income_from_netting), а не номинальный доход.',
+        'Шаг C. Явно показать формулу отдельной строкой: "(Текущий баланс + Скорректированный доход - Скорректированный расход = Прогноз)".',
+        'Шаг D. Подставить цифры из PRECALC_NUMBERS_JSON.forecast.formula_numbers.',
+        'Шаг E. Если offsetNetting.amount > 0, явно написать: взаимозачет учтен как разовый неденежный эффект и не экстраполирован как регулярный расход.',
+        '',
         '# FORMATTING',
         '- Итоги периода -> PERIOD_ANALYTICS_JSON.totals.',
         '- Крупнейшие расходы -> PERIOD_ANALYTICS_JSON.topExpenseCategories.',
         '- Если в FACTS_JSON.operations / PERIOD_ANALYTICS_JSON.topOperations у дохода есть offsets[] или netAmount < amount, трактуй это как взаимозачет: озвучивай номинал дохода, фактическое поступление (netAmount) и сумму зачета отдельно; не называй такие зачеты «обычными денежными расходами».',
         '- При экстраполяции на будущие месяцы НЕ переноси взаимозачет как регулярный расход; используй offsetNetting только как разовый комментарий к периоду/сделке.',
+        '- Если PRECALC_NUMBERS_JSON.forecast.enabled=true, ответ без формулы и без чисел недопустим.',
         '- Если PERIOD_ANALYTICS_JSON.totals = {income:0, expense:0, net:0} и topOperations пустой, ответь строго: "За [Месяц Year] данных в системе не обнаружено (ни фактических, ни запланированных)".',
         '- Денежные суммы пиши в формате "1 554 388 т".',
         '- ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: В любом ответе про ликвидность или проверку покрытия всегда явно прописывай в тексте цифру доступного остатка (open_after_next_obligation).',

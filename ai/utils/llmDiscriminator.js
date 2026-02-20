@@ -121,8 +121,17 @@ const buildExpected = ({
     history_mode: historyData.length >= 2,
     history_periods_count: historyData.length,
     historical_context_mode: historicalContextData.length >= 2,
-    historical_context_periods_count: historicalContextData.length
+    historical_context_periods_count: historicalContextData.length,
+    asks_forecast_or_extrapolation: Boolean(questionFlags?.asksForecastOrExtrapolation)
   };
+
+  const offsetNettingCandidates = uniqueRounded([
+    toNum(periodAnalytics?.offsetNetting?.amount),
+    toNum(deterministicFacts?.offsetNetting?.amount),
+    toNum(deterministicFacts?.fact?.offsetNetting?.amount),
+    toNum(deterministicFacts?.plan?.offsetNetting?.amount)
+  ]).filter((n) => n > 0);
+  expected.offset_netting_candidates = offsetNettingCandidates;
 
   const anomalyNumbers = [];
   const pushAnomalyNumbers = (rows) => {
@@ -304,6 +313,23 @@ const buildExpected = ({
     required.push({ name: 'any_money_number', value: null });
   }
 
+  if (
+    expected.asks_forecast_or_extrapolation
+    && (
+      hasPeriodAnalyticsTotals
+      || hasLedgerOperations
+      || comparisonData.length > 0
+      || historyData.length > 0
+      || historicalContextData.length > 0
+    )
+  ) {
+    required.push({ name: 'any_money_number', value: null });
+    required.push({
+      name: 'forecast_balance_anchor',
+      value: [expected.open_after_next_obligation, expected.open_end]
+    });
+  }
+
   if (expected.scenario_enabled && expected.has_life_spend_constraint && expected.asks_direct_conditional_amount) {
     required.push({ name: 'scenario_free_capital', value: expected.scenario_free_capital });
   }
@@ -328,7 +354,26 @@ const buildExpected = ({
     });
   }
 
-  return { expected, allowedNumbers, required };
+  if (expected.asks_forecast_or_extrapolation && offsetNettingCandidates.length > 0) {
+    required.push({
+      name: 'offset_netting_amount',
+      value: offsetNettingCandidates
+    });
+  }
+
+  const requiredUnique = [];
+  const requiredSeen = new Set();
+  required.forEach((item) => {
+    const valueKey = Array.isArray(item?.value)
+      ? item.value.map((v) => Math.round(toNum(v))).join(',')
+      : (item?.value == null ? 'null' : String(Math.round(toNum(item.value))));
+    const key = `${String(item?.name || '')}:${valueKey}`;
+    if (requiredSeen.has(key)) return;
+    requiredSeen.add(key);
+    requiredUnique.push(item);
+  });
+
+  return { expected, allowedNumbers, required: requiredUnique };
 };
 
 const containsAllowed = (value, allowedNumbers) => {
