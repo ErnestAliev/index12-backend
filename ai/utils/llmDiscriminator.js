@@ -215,12 +215,16 @@ const buildExpected = ({
       toNum(period?.totals?.operational_expense),
       toNum(period?.totals?.net),
       toNum(period?.ownerDraw?.amount),
+      toNum(period?.offsetNetting?.amount),
       toNum(period?.endBalances?.open),
       toNum(period?.endBalances?.hidden),
       toNum(period?.endBalances?.total)
     );
 
     (Array.isArray(period?.topCategories) ? period.topCategories : []).forEach((cat) => {
+      historicalContextTotalsNumbers.push(toNum(cat?.amount));
+    });
+    (Array.isArray(period?.offsetNetting?.byCategory) ? period.offsetNetting.byCategory : []).forEach((cat) => {
       historicalContextTotalsNumbers.push(toNum(cat?.amount));
     });
   });
@@ -271,9 +275,15 @@ const buildExpected = ({
     toNum(periodAnalytics?.totals?.expense),
     toNum(periodAnalytics?.totals?.net),
     toNum(periodAnalytics?.ownerDraw?.amount),
+    toNum(periodAnalytics?.offsetNetting?.amount),
     toNum(deterministicFacts?.ownerDraw?.amount),
     toNum(deterministicFacts?.fact?.ownerDraw?.amount),
     toNum(deterministicFacts?.plan?.ownerDraw?.amount),
+    toNum(deterministicFacts?.offsetNetting?.amount),
+    toNum(deterministicFacts?.fact?.offsetNetting?.amount),
+    toNum(deterministicFacts?.plan?.offsetNetting?.amount),
+    ...(Array.isArray(periodAnalytics?.offsetNetting?.byCategory) ? periodAnalytics.offsetNetting.byCategory : []).map((row) => toNum(row?.amount)),
+    ...(Array.isArray(deterministicFacts?.offsetNetting?.byCategory) ? deterministicFacts.offsetNetting.byCategory : []).map((row) => toNum(row?.amount)),
     ...periodTopOperationAmounts,
     ...deterministicOperationAmounts,
     ...periodTopExpenseCategoryAmounts,

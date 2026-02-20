@@ -7,7 +7,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs/promises');
 
-const AIROUTES_VERSION = 'hybrid-v2.4-offset-links';
+const AIROUTES_VERSION = 'hybrid-v2.5-offset-intelligence';
 
 module.exports = function createAiRouter(deps) {
   const {
@@ -246,6 +246,15 @@ module.exports = function createAiRouter(deps) {
               .slice(0, 10)
               .map((cat) => ({
                 category: String(cat?.category || 'Вывод средств'),
+                amount: _toNum(cat?.amount)
+              }))
+          },
+          offsetNetting: {
+            amount: _toNum(row?.offsetNetting?.amount),
+            byCategory: (Array.isArray(row?.offsetNetting?.byCategory) ? row.offsetNetting.byCategory : [])
+              .slice(0, 10)
+              .map((cat) => ({
+                category: String(cat?.category || 'Взаимозачет'),
                 amount: _toNum(cat?.amount)
               }))
           },
@@ -922,6 +931,7 @@ module.exports = function createAiRouter(deps) {
       },
       topCategories: [],
       ownerDraw: { amount: 0, byCategory: [] },
+      offsetNetting: { amount: 0, byCategory: [] },
       endBalances: { open: 0, hidden: 0, total: 0 }
     });
 
@@ -1008,6 +1018,15 @@ module.exports = function createAiRouter(deps) {
             .slice(0, 10)
             .map((row) => ({
               category: String(row?.category || 'Вывод средств'),
+              amount: _toNum(row?.amount)
+            }))
+        },
+        offsetNetting: {
+          amount: _toNum(facts?.offsetNetting?.amount),
+          byCategory: (Array.isArray(facts?.offsetNetting?.byCategory) ? facts.offsetNetting.byCategory : [])
+            .slice(0, 10)
+            .map((row) => ({
+              category: String(row?.category || 'Взаимозачет'),
               amount: _toNum(row?.amount)
             }))
         },
