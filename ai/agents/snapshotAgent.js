@@ -407,8 +407,7 @@ const buildSemanticClarificationQuestion = ({ term, entityTypeRequested, options
 };
 
 const semanticEntityMatcher = async (state, args = {}, context = {}) => {
-  const term = String(args?.term || args?.query || '').trim();
-  const question = String(args?.question || term || '').trim();
+  const termToSearch = String(args?.term || args?.query || '').trim();
   const entityTypeArg = String(args?.entityType || 'auto').trim().toLowerCase();
   const entityTypeFilter = entityTypeArg === 'category'
     || entityTypeArg === 'counterparty'
@@ -417,7 +416,7 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
     : 'auto';
   const CONFIDENCE_THRESHOLD = 85;
 
-  if (!question) {
+  if (!termToSearch) {
     return {
       ok: false,
       term: '',
@@ -436,14 +435,14 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
   if (!catalog.length) {
     return {
       ok: false,
-      term: question,
+      term: termToSearch,
       error: 'empty_catalog',
       action: 'needs_clarification',
       clarificationOptions: [
         { index: 1, label: 'Создать новое', action: 'create_new' }
       ],
-      clarificationQuestion: `Я не вижу справочник сущностей в текущем срезе для "${question}". Уточните полное название.`,
-      clarificationPrompt: `Я не вижу справочник сущностей в текущем срезе для "${question}". Уточните полное название.`
+      clarificationQuestion: `Я не вижу справочник сущностей в текущем срезе для "${termToSearch}". Уточните полное название.`,
+      clarificationPrompt: `Я не вижу справочник сущностей в текущем срезе для "${termToSearch}". Уточните полное название.`
     };
   }
 
@@ -454,7 +453,7 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
       .filter((row) => row.entityType === 'category')
       .forEach((row) => { byCategory[row.name] = { total: {} }; });
     const parsed = await intentParser.parseIntent({
-      question,
+      question: termToSearch,
       availableContext: { byCategory, byProject: {} }
     });
     intentCategoryHints = Array.isArray(parsed?.intent?.filters?.categories)
@@ -464,15 +463,15 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
     intentCategoryHints = [];
   }
 
-  const semanticHints = await buildSemanticContextHints(question);
+  const semanticHints = await buildSemanticContextHints(termToSearch);
   const learned = await cfoKnowledgeBase.resolveSemanticAlias({
-    term: question,
+    term: termToSearch,
     entityType: entityTypeFilter,
     userId: String(context?.userId || '')
   });
 
   const ranked = catalog.map((entity) => {
-    const base = semanticBaseScore(question, entity.name);
+    const base = semanticBaseScore(termToSearch, entity.name);
     let score = base;
     const reasons = [];
 
@@ -547,7 +546,7 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
     : [];
   const clarificationPrompt = shouldAsk
     ? buildSemanticClarificationQuestion({
-        term: question,
+        term: termToSearch,
         entityTypeRequested: entityTypeFilter === 'auto' ? 'category' : entityTypeFilter,
         options: clarificationOptions
       })
@@ -555,7 +554,7 @@ const semanticEntityMatcher = async (state, args = {}, context = {}) => {
 
   return {
     ok: Boolean(best),
-    term: question,
+    term: termToSearch,
     entityTypeRequested: entityTypeFilter,
     confidenceThreshold: CONFIDENCE_THRESHOLD,
     topMatches: ranked,
