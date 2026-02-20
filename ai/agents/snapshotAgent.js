@@ -1219,7 +1219,14 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'semantic_entity_matcher',
-      description: 'Использует семантические веса и RAG-контекст для перевода сленга/аббревиатур пользователя в точные названия категорий, контрагентов или счетов.',
+      description: [
+        'Use this tool EXCLUSIVELY to resolve user slang into exact database keys for 4 specific entity types: Categories, Counterparties, Projects, or Accounts.',
+        'STRICT RULES:',
+        'ONLY pass suspected proper nouns, names, or custom short labels (1-3 words max).',
+        'NEVER pass full sentences or questions.',
+        'NEVER pass abstract financial metrics, math concepts, or generic business terms. For metrics, use advanced_data_analyzer.',
+        'If the user explicitly names a project, do not use this tool; filter by project name in advanced_data_analyzer.'
+      ].join(' '),
       parameters: {
         type: 'object',
         properties: {
@@ -1377,8 +1384,8 @@ const buildSystemPrompt = () => {
     'Ты ОБЯЗАН использовать инструмент calculator перед любыми прогнозами будущих балансов и прибыли.',
     'Если видишь offsetNetting или isOffsetExpense, исключай эти суммы из прогнозов будущих расходов, потому что это не физические cash-траты.',
     'Маршрутизация интента обязательна:',
-    '1) Базовые операции (доход/расход/перевод/баланс): semantic_entity_matcher НЕ использовать. Бери данные напрямую из get_transactions/get_snapshot_metrics.',
-    '2) Широкие группы (налоги, коммуналка): делай широкий поиск по category через contains/filter в in-memory операциях.',
+    '1) Базовые операции и метрики: semantic_entity_matcher НЕ использовать. Бери данные напрямую из get_transactions/get_snapshot_metrics/advanced_data_analyzer.',
+    '2) Широкие групповые запросы: выполняй фильтрацию и агрегацию по операциям через get_transactions + advanced_data_analyzer.',
     '3) Уникальный сленг/аббревиатуры: сначала semantic_entity_matcher, затем get_transactions.',
     '4) Аналитические срезы (по проектам/по контрагентам/в разрезе счетов/разбивка): ЗАПРЕЩЕНО использовать get_snapshot_metrics для финального ответа. ОБЯЗАТЕЛЬНО используй get_transactions + advanced_data_analyzer (или JS-агрегацию) для группировки по нужному полю и расчета Доход - Расход по КАЖДОЙ группе.',
     'Для advanced_data_analyzer при сложной агрегации передавай параметр code: внутри доступны operations (массив) и math (помощники), код ОБЯЗАН завершаться return. Пример: return operations.filter(o => o.type==="Доход").reduce((acc,o)=>{ const p=o.project||o.projName||"Без проекта"; acc[p]=(acc[p]||0)+o.amount; return acc; }, {});',
@@ -1387,11 +1394,11 @@ const buildSystemPrompt = () => {
     'DISPLAY_MODES:',
     'Режим СВОДКИ (по умолчанию): выводи только финальные цифры и короткие выводы. Запрещено показывать промежуточные формулы, логи кода и внутреннюю арифметику.',
     'Режим PROVE_IT: если пользователь просит "покажи расчеты", "распиши", "докажи", "как ты это посчитал" — вызови advanced_data_analyzer заново и выведи структурированный отчет: 1) Доходы, 2) Расходы, 3) Итог.',
-    'Если пользователь спрашивает про конкретную категорию (например: Комуналка, Ремонт, Аренда), ты ОБЯЗАН сразу вызвать get_transactions для точного списка операций, а не ограничиваться totals.',
+    'Если пользователь спрашивает про конкретную сущность, ты ОБЯЗАН вызвать get_transactions для точного списка операций, а не ограничиваться totals.',
     'Если пользователь спрашивает про аномалии, ты ОБЯЗАН прочитать deterministicFacts.anomalies через get_snapshot_metrics и опираться только на этот массив.',
     'Никогда не угадывай названия сущностей вслепую.',
     'Перед update_semantic_weights ты ОБЯЗАН вызвать get_business_dictionary и выбрать точные сущности только из словаря.',
-    'Если пользователь говорит "все налоги"/"все категории со словом ...", сохрани canonicalNames как массив точных названий из словаря, а не текстовую фразу.',
+    'Если пользователь просит группу сущностей, сохрани canonicalNames как массив точных названий из словаря, а не текстовую фразу.',
     'Если уверенность semantic_entity_matcher ниже порога — выдай нумерованный список вариантов (1,2,3) + "Создать новое", попроси ответить одной цифрой и останови ответ.',
     'Если пользователь ответил одной цифрой, возьми из history свое предыдущее сообщение с нумерованным списком, сопоставь цифру с точным названием и вызови update_semantic_weights с названием, а не с цифрой.',
     'Если пользователь поправил соответствие, немедленно вызови update_semantic_weights, чтобы обучить систему.',
