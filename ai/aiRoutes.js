@@ -327,6 +327,15 @@ module.exports = function createAiRouter(deps) {
     return out.slice(-10);
   };
 
+  const _isNumericChoiceAnswer = (value) => /^\s*[1-9]\d?\s*$/.test(String(value || ''));
+
+  const _isAssistantSemanticChoicePrompt = (value) => {
+    const text = String(value || '');
+    if (!text) return false;
+    return /Что\s+вы\s+имеете\s+в\s+виду\s+под/i.test(text)
+      && /Ответьте\s+одной\s+цифрой/i.test(text);
+  };
+
   const _fmtDDMMYY = (date) => {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '?';
     const dd = String(date.getDate()).padStart(2, '0');
@@ -2698,6 +2707,15 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
+        const chatMessagesBeforeReset = Array.isArray(chatHistory?.messages)
+          ? [...chatHistory.messages]
+          : [];
+        const lastAssistantBeforeReset = [...chatMessagesBeforeReset]
+          .reverse()
+          .find((row) => String(row?.role || '').toLowerCase() === 'assistant');
+        const semanticChoiceFollowUp = _isNumericChoiceAnswer(q)
+          && _isAssistantSemanticChoicePrompt(lastAssistantBeforeReset?.content);
+
         const snapshotChecksum = _normalizeSnapshotChecksum(req?.body?.snapshotChecksum);
         const requestedDataChanged = _parseBooleanFlag(req?.body?.isDataChanged);
         const lastSnapshotChecksum = _extractLastSnapshotChecksum(chatHistory?.messages);
@@ -2708,7 +2726,8 @@ module.exports = function createAiRouter(deps) {
           && Array.isArray(chatHistory?.messages)
           && chatHistory.messages.length > 0
         );
-        const isDataChangedEffective = requestedDataChanged || checksumChanged || checksumBaselineMissing;
+        const rawDataChanged = requestedDataChanged || checksumChanged || checksumBaselineMissing;
+        const isDataChangedEffective = rawDataChanged && !semanticChoiceFollowUp;
         const historyResetApplied = isDataChangedEffective && Array.isArray(chatHistory.messages) && chatHistory.messages.length > 0;
         if (historyResetApplied) {
           chatHistory.messages = [];
@@ -2721,10 +2740,12 @@ module.exports = function createAiRouter(deps) {
           metadata: {
             snapshotChecksum: snapshotChecksum || null,
             isDataChanged: isDataChangedEffective,
+            rawDataChanged,
             requestedDataChanged,
             checksumChanged,
             checksumBaselineMissing,
-            historyResetApplied
+            historyResetApplied,
+            semanticChoiceFollowUp
           }
         });
         chatHistory.updatedAt = new Date();
@@ -2947,11 +2968,17 @@ module.exports = function createAiRouter(deps) {
           });
         }
 
-        const frontendHistoryRaw = _normalizeAgentHistory(req?.body?.history);
+        const frontendHistoryRaw = _normalizeAgentHistory(
+          req?.body?.history
+          || req?.body?.currentContext?.history
+          || req?.body?.currentContext?.messages
+          || req?.body?.currentContext?.chatHistory
+        );
         const persistedHistoryRaw = _normalizeAgentHistory(
           isDataChangedEffective ? [] : chatHistory.messages.slice(0, -1)
         );
-        const historyForAgent = (() => {
+        const preResetHistoryRaw = _normalizeAgentHistory(chatMessagesBeforeReset.slice(0, -1));
+        let historyForAgent = (() => {
           const merged = [...persistedHistoryRaw, ...frontendHistoryRaw];
           const base = [];
           merged.forEach((row) => {
@@ -2965,9 +2992,13 @@ module.exports = function createAiRouter(deps) {
           }
           return base.slice(-10);
         })();
-        const historySource = frontendHistoryRaw.length
+        let historySource = frontendHistoryRaw.length
           ? (persistedHistoryRaw.length ? 'merged_frontend_server_history' : 'frontend_history')
           : 'server_chat_history';
+        if (!historyForAgent.length && semanticChoiceFollowUp && preResetHistoryRaw.length) {
+          historyForAgent = preResetHistoryRaw.slice(-10);
+          historySource = 'fallback_pre_reset_server_history';
+        }
 
         const llmResult = await snapshotAgent.run({
           question: q,
