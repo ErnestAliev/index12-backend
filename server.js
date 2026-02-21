@@ -1826,7 +1826,9 @@ app.put('/api/projects/:id', isAuthenticated, async (req, res) => {
 app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
     try {
         const { id } = req.params;
+        const { deleteOperations } = req.query;
         const userId = await getCompositeUserId(req);
+        const workspaceId = req.user.currentWorkspaceId || null;
 
         const project = await Project.findOne({ _id: id, userId });
 
@@ -1834,21 +1836,35 @@ app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
             return res.status(404).json({ error: 'Project not found' });
         }
 
-        // Check if project is used in operations
-        const operationCount = await Event.countDocuments({
+        const relatedOps = await Event.find({
             userId,
             projectId: id,
             isDeleted: { $ne: true }
         });
+        const affectedDates = relatedOps.map((op) => op?.date).filter(Boolean);
+        const relatedOpIds = relatedOps.map((op) => op?._id).filter(Boolean);
+        let deletedOpsCount = 0;
 
-        if (operationCount > 0) {
-            return res.status(409).json({
-                error: 'Cannot delete project with existing operations',
-                operationCount
-            });
+        if (deleteOperations === 'true') {
+            if (relatedOpIds.length > 0) {
+                await Event.deleteMany({ _id: { $in: relatedOpIds } });
+                deletedOpsCount = relatedOpIds.length;
+            }
+        } else if (relatedOpIds.length > 0) {
+            // Default behavior for inline delete: keep operations and only nullify project binding.
+            await Event.updateMany({ userId, projectId: id }, { projectId: null });
         }
 
         await Project.deleteOne({ _id: id, userId });
+
+        if (affectedDates.length > 0) {
+            triggerContextPacketRebuildByDates({
+                userId,
+                workspaceId,
+                dates: affectedDates,
+                reason: `projects_delete_${deleteOperations === 'true' ? 'delete_ops' : 'nullify_refs'}`
+            });
+        }
 
         // Emit socket event to other clients
         emitToWorkspace(req, req.user.currentWorkspaceId, 'entity:deleted', {
@@ -1856,7 +1872,7 @@ app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
             id
         });
 
-        res.json({ success: true, message: 'Project deleted' });
+        res.json({ success: true, message: 'Project deleted', deletedOpsCount });
     } catch (error) {
         console.error('Delete project error:', error);
         res.status(500).json({ error: 'Failed to delete project' });
