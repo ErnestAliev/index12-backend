@@ -724,8 +724,58 @@ const aggregateOps = (rows) => {
   }, { income: 0, expense: 0, transfer: 0, offsetNetting: 0 });
 };
 
+const resolveBreakdownGroupName = (row, groupBy) => {
+  const key = String(groupBy || 'category').trim().toLowerCase();
+  if (key === 'project') return String(row?.project || 'Без проекта');
+  if (key === 'counterparty') return String(row?.counterparty || 'Без контрагента');
+  if (key === 'account') return String(row?.account || 'Без счета');
+  if (key === 'date' || key === 'day') return String(row?.date || 'Без даты');
+  return String(row?.category || 'Без категории');
+};
+
+const sortBreakdownRows = (items) => {
+  return (Array.isArray(items) ? items : [])
+    .sort((a, b) => Number(b?.amount || 0) - Number(a?.amount || 0)
+      || String(a?.name || '').localeCompare(String(b?.name || ''), 'ru'));
+};
+
+const buildExpenseDoubleBreakdown = (rows, groupBy) => {
+  const physicalMap = new Map();
+  const offsetsMap = new Map();
+  let physicalExpenses = 0;
+  let offsetExpenses = 0;
+
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    if (normalizeOperationType(row?.type) !== 'Расход') return;
+    const amount = Math.abs(toNum(row?.amount));
+    if (!amount) return;
+    const name = resolveBreakdownGroupName(row, groupBy);
+    const isOffset = Boolean(row?.isOffsetExpense);
+    if (isOffset) {
+      offsetExpenses += amount;
+      offsetsMap.set(name, (offsetsMap.get(name) || 0) + amount);
+    } else {
+      physicalExpenses += amount;
+      physicalMap.set(name, (physicalMap.get(name) || 0) + amount);
+    }
+  });
+
+  return {
+    totals: {
+      physicalExpenses,
+      offsetExpenses,
+      grandTotal: physicalExpenses + offsetExpenses
+    },
+    breakdown: {
+      physical: sortBreakdownRows(Array.from(physicalMap.entries()).map(([name, amount]) => ({ name, amount }))),
+      offsets: sortBreakdownRows(Array.from(offsetsMap.entries()).map(([name, amount]) => ({ name, amount })))
+    }
+  };
+};
+
 const buildMetricsResponse = (state, args = {}) => {
   const periodArg = String(args?.period || '').trim();
+  const groupBy = String(args?.groupBy || '').trim().toLowerCase();
   const includeBalances = args?.includeBalances !== false;
   const includeOffsets = args?.includeOffsets !== false;
   const deterministicTopExpenseCategories = Array.isArray(state?.deterministicFacts?.topExpenseCategories)
@@ -737,6 +787,27 @@ const buildMetricsResponse = (state, args = {}) => {
   const deterministicLargestExpenseCategory = state?.deterministicFacts?.largestExpenseCategory
     || deterministicTopExpenseCategories[0]
     || null;
+
+  const byPeriodOps = (() => {
+    if (!periodArg) return state.operations;
+    if (isDayKey(periodArg)) return state.operations.filter((op) => String(op?.date || '') === periodArg);
+    if (isMonthKey(periodArg)) return state.operations.filter((op) => String(op?.date || '').startsWith(`${periodArg}-`));
+    return state.operations;
+  })();
+
+  if (groupBy) {
+    const expenseBreakdown = buildExpenseDoubleBreakdown(byPeriodOps, groupBy);
+    return {
+      source: byPeriodOps.length ? 'operations_breakdown' : 'operations_breakdown_empty',
+      period: periodArg || String(state?.periodAnalytics?.label || 'current'),
+      groupBy,
+      totals: expenseBreakdown.totals,
+      breakdown: expenseBreakdown.breakdown,
+      topExpenseCategories: deterministicTopExpenseCategories,
+      anomalies: deterministicAnomalies,
+      largestExpenseCategory: deterministicLargestExpenseCategory
+    };
+  }
 
   const histPeriods = Array.isArray(state?.historicalContext?.periods) ? state.historicalContext.periods : [];
   const directPeriod = histPeriods.find((row) => String(row?.period || '') === periodArg);
@@ -767,13 +838,6 @@ const buildMetricsResponse = (state, args = {}) => {
       largestExpenseCategory: deterministicLargestExpenseCategory
     };
   }
-
-  const byPeriodOps = (() => {
-    if (!periodArg) return state.operations;
-    if (isDayKey(periodArg)) return state.operations.filter((op) => String(op?.date || '') === periodArg);
-    if (isMonthKey(periodArg)) return state.operations.filter((op) => String(op?.date || '').startsWith(`${periodArg}-`));
-    return state.operations;
-  })();
 
   const agg = aggregateOps(byPeriodOps);
   const defaultTotals = state?.periodAnalytics?.totals || state?.deterministicFacts?.totals || {};
@@ -1183,13 +1247,22 @@ const TOOL_DEFINITIONS = [
     type: 'function',
     function: {
       name: 'get_snapshot_metrics',
-      description: 'Вытаскивает точные финансовые цифры (доход, расход, чистая прибыль, взаимозачеты, балансы) из детерминированных фактов за нужный период.',
+      description: [
+        'Вытаскивает точные финансовые цифры (доход, расход, чистая прибыль, взаимозачеты, балансы) из детерминированных фактов за нужный период.',
+        'Если передан groupBy, возвращает breakdown с двумя массивами расходов: physical и offsets, а также totals.physicalExpenses/offsetExpenses/grandTotal.',
+        'Если в ответе есть breakdown.physical и breakdown.offsets, показывай пользователю строго в порядке:',
+        '1) Фактические расходы, 2) Взаимозачеты, 3) Общий итог расходов.'
+      ].join(' '),
       parameters: {
         type: 'object',
         properties: {
           period: {
             type: 'string',
             description: 'Период в формате YYYY-MM или YYYY-MM-DD. Если не указан, используется текущий период снапшота.'
+          },
+          groupBy: {
+            type: 'string',
+            description: 'Для разбивки расходов: category | project | counterparty | account | date'
           },
           includeBalances: {
             type: 'boolean',
@@ -1499,6 +1572,7 @@ const buildSystemPrompt = (state, schemaAwareness = null) => {
     'Режим PROVE_IT: если пользователь просит "покажи расчеты", "распиши", "докажи", "как ты это посчитал" — вызови advanced_data_analyzer заново и выведи структурированный отчет: 1) Доходы, 2) Расходы, 3) Итог.',
     'Если пользователь спрашивает про конкретную сущность, ты ОБЯЗАН вызвать get_transactions для точного списка операций, а не ограничиваться totals.',
     'Если пользователь спрашивает про аномалии, ты ОБЯЗАН прочитать deterministicFacts.anomalies через get_snapshot_metrics и опираться только на этот массив.',
+    'Если get_snapshot_metrics вернул breakdown.physical и breakdown.offsets, выводи строго в порядке: 1) Фактические расходы, 2) Взаимозачеты, 3) Общий итог расходов.',
     'Никогда не угадывай названия сущностей вслепую.',
     'Перед update_semantic_weights ты ОБЯЗАН вызвать get_business_dictionary и выбрать точные сущности только из словаря.',
     'Если пользователь просит группу сущностей, сохрани canonicalNames как массив точных названий из словаря, а не текстовую фразу.',
