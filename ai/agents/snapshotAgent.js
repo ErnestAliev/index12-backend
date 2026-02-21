@@ -58,6 +58,16 @@ const asksAnomalies = (question) => /(аномал|подозр|выброс|н�
   .test(normalizeQuestionForRules(question));
 const asksChart = (question) => /(график|диаграм|chart|барчарт|bar\s*chart|line\s*chart|динамик)/i
   .test(normalizeQuestionForRules(question));
+const asksDailyBriefing = (question) => {
+  const q = normalizeQuestionForRules(question);
+  if (!q) return false;
+  const trigger = /(как\s+дела|что\s+нового|сводк|daily\s*brief|morning\s*coffee|утренн(?:ая|ий)?\s+сводк|привет|доброе\s+утро|здравств)/i;
+  if (!trigger.test(q)) return false;
+  const specificIntent = /(по\s+проект|по\s+категор|по\s+контрагент|в\s+разрезе|доход|расход|перевод|баланс|сч[её]т|налог|коммунал|прогноз|маржинал|аномал|взаимозач|offset|сколько|какой|какая|какие|детальн)/i;
+  if (!specificIntent.test(q)) return true;
+  const shortGreeting = /(как\s+дела|что\s+нового|сводк|привет)/i.test(q) && q.split(/\s+/).length <= 5;
+  return shortGreeting;
+};
 const asksBasicOperationLookup = (question) => /(доход|расход|перевод|баланс)/i
   .test(normalizeQuestionForRules(question));
 const asksBroadCategoryLookup = (question) => /(налог|коммунал|комунал|коммуналка|комуналка)/i
@@ -1558,8 +1568,27 @@ const buildSystemPrompt = (state, schemaAwareness = null) => {
     'Ты не угадываешь цифры из головы.',
     'Ты ОБЯЗАН использовать инструмент get_snapshot_metrics для получения данных.',
     'Ты ОБЯЗАН использовать инструмент calculator перед любыми прогнозами будущих балансов и прибыли.',
+    'ПАТТЕРН DAILY BRIEFING (СВОДКА / КАК ДЕЛА):',
+    'Если пользователь задает общие вопросы ("как дела?", "привет", "сводка", "что нового?"), КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ вызывать инструменты поиска (semantic_entity_matcher) или расчетов.',
+    'Сформируй ответ ТОЛЬКО на основе уже имеющихся в контексте deterministicFacts и periodAnalytics.',
+    'Твоя роль — профессиональный ИИ-финансовый директор за утренним кофе. Выдай живой, связный текст.',
+    'ОБЯЗАТЕЛЬНЫЕ ВЕСА И ПОРЯДОК ИНФОРМАЦИИ:',
+    '1. Эмоциональная оценка на основе фактов: коротко оцени статус и обоснуй totals.net и маржинальностью или сравнением с history.',
+    '2. Доступная ликвидность: укажи остаток только на открытых (операционных) счетах (balances.open). Закрытые резервы (balances.hidden) упомяни общим итогом.',
+    '3. Радар: посмотри в план и nextObligation, укажи ближайшие события.',
+    'КРИТИЧЕСКИ ВАЖНО: если ожидаемый доход связан с взаимозачетом (offsetAmount > 0, netAmount или связанные расходы), запрещено называть номинальную сумму как живые деньги.',
+    'Озвучивай это так: "По плану [дата] ожидаем начисление на [amount], но так как висят обязательства по взаимозачету на [offsetAmount], по факту живыми деньгами зайдет только [netAmount]".',
+    'Если на радаре пусто — скажи: "на радаре пока тихо".',
+    '4. Прогноз на конец: укажи, с каким итоговым плюсом закроем месяц, если новых операций не будет.',
+    'ПРАВИЛА ФОРМАТИРОВАНИЯ И ТОНА (СТРОГО):',
+    'Пиши живым языком и разделяй мысли пустыми строками.',
+    'Выделяй жирным только ключевые суммы и даты.',
+    'КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать нумерованные списки и буллиты.',
+    'КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО давать банальные советы и нравоучения. Только констатация фактов.',
+    'Заверши сообщение коротким вопросом о том, что еще посмотреть детальнее.',
     'Если видишь offsetNetting или isOffsetExpense, исключай эти суммы из прогнозов будущих расходов, потому что это не физические cash-траты.',
     'Маршрутизация интента обязательна:',
+    '0) DAILY_BRIEFING имеет наивысший приоритет: для таких запросов не вызывай semantic_entity_matcher, calculator, advanced_data_analyzer и другие инструменты.',
     '1) Базовые операции и метрики: semantic_entity_matcher НЕ использовать. Бери данные напрямую из get_transactions/get_snapshot_metrics/advanced_data_analyzer.',
     '2) Широкие групповые запросы: выполняй фильтрацию и агрегацию по операциям через get_transactions + advanced_data_analyzer.',
     '3) Уникальный сленг/аббревиатуры: сначала semantic_entity_matcher, затем get_transactions.',
@@ -1877,6 +1906,7 @@ const run = async ({
   const wantsForecastStyle = asksForecastOrBalanceImpact(questionText);
   const wantsAnomalies = asksAnomalies(questionText);
   const wantsChart = asksChart(questionText);
+  const dailyBriefingIntent = asksDailyBriefing(questionText);
   const basicOperationIntent = asksBasicOperationLookup(questionText);
   const broadCategoryIntent = asksBroadCategoryLookup(questionText);
   const broadCategoryKeyword = detectBroadCategoryKeyword(questionText);
@@ -1886,12 +1916,15 @@ const run = async ({
   const rawSemanticCandidateTerm = semanticCorrection?.term || detectSemanticCandidateTerm(questionText, state);
   const semanticCandidateExistsInSchema = termExistsInSnapshotSchema(rawSemanticCandidateTerm, schemaAwareness);
   const semanticCandidateIsGeneric = isGenericSemanticWord(rawSemanticCandidateTerm);
-  const shouldUseSemanticMatcher = Boolean(semanticCorrection) || (
-    !basicOperationIntent
-    && !broadCategoryIntent
-    && Boolean(rawSemanticCandidateTerm)
-    && !semanticCandidateExistsInSchema
-    && !semanticCandidateIsGeneric
+  const shouldUseSemanticMatcher = !dailyBriefingIntent && (
+    Boolean(semanticCorrection)
+    || (
+      !basicOperationIntent
+      && !broadCategoryIntent
+      && Boolean(rawSemanticCandidateTerm)
+      && !semanticCandidateExistsInSchema
+      && !semanticCandidateIsGeneric
+    )
   );
   const semanticCandidateTerm = shouldUseSemanticMatcher
     ? rawSemanticCandidateTerm
@@ -1927,6 +1960,16 @@ const run = async ({
       ? [{
           role: 'system',
           content: 'Запрос про прогноз/влияние на баланс: дай пользователю итоговые цифры без промежуточной арифметики (если он не просил режим PROVE_IT).'
+        }]
+      : []),
+    ...(dailyBriefingIntent
+      ? [{
+          role: 'system',
+          content: [
+            'Активирован режим DAILY_BRIEFING.',
+            'Запрещено вызывать инструменты поиска и расчетов. Используй только уже переданный контекст (deterministicFacts/periodAnalytics/history).',
+            'Ответ: живой и связный текст, без списков, без советов, с завершением коротким вопросом.'
+          ].join(' ')
         }]
       : []),
     ...(isLikelyFollowUp
@@ -2024,6 +2067,9 @@ const run = async ({
     for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
       const firstStepForcedToolChoice = (() => {
         if (step !== 0) return 'auto';
+        if (dailyBriefingIntent) {
+          return 'none';
+        }
         if (semanticCorrection) {
           return { type: 'function', function: { name: 'get_business_dictionary' } };
         }
@@ -2085,6 +2131,7 @@ const run = async ({
             wantsForecastStyle,
             wantsAnomalies,
             wantsChart,
+            dailyBriefingIntent,
             basicOperationIntent,
             broadCategoryIntent,
             broadCategoryKeyword,
@@ -2171,6 +2218,7 @@ const run = async ({
             wantsForecastStyle,
             wantsAnomalies,
             wantsChart,
+            dailyBriefingIntent,
             basicOperationIntent,
             broadCategoryIntent,
             broadCategoryKeyword,
