@@ -1569,23 +1569,21 @@ const buildSystemPrompt = (state, schemaAwareness = null) => {
     'Ты ОБЯЗАН использовать инструмент get_snapshot_metrics для получения данных.',
     'Ты ОБЯЗАН использовать инструмент calculator перед любыми прогнозами будущих балансов и прибыли.',
     'ПАТТЕРН DAILY BRIEFING (СВОДКА / КАК ДЕЛА):',
-    'Если пользователь задает общие вопросы ("как дела?", "привет", "сводка", "что нового?"), КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ вызывать инструменты поиска (semantic_entity_matcher) или расчетов.',
-    'Сформируй ответ ТОЛЬКО на основе уже имеющихся в контексте deterministicFacts и periodAnalytics.',
-    'Твоя роль — профессиональный ИИ-финансовый директор за утренним кофе. Выдай живой, связный текст.',
-    'ОБЯЗАТЕЛЬНЫЕ ВЕСА И ПОРЯДОК ИНФОРМАЦИИ:',
-    '1. Эмоциональная оценка на основе фактов: коротко оцени статус и обоснуй totals.net и маржинальностью или сравнением с history.',
-    '2. Доступная ликвидность: укажи остаток только на открытых (операционных) счетах (balances.open). Закрытые резервы (balances.hidden) упомяни общим итогом.',
-    '3. Радар: посмотри в план и nextObligation, укажи ближайшие события.',
-    'КРИТИЧЕСКИ ВАЖНО: если ожидаемый доход связан с взаимозачетом (offsetAmount > 0, netAmount или связанные расходы), запрещено называть номинальную сумму как живые деньги.',
-    'Озвучивай это так: "По плану [дата] ожидаем начисление на [amount], но так как висят обязательства по взаимозачету на [offsetAmount], по факту живыми деньгами зайдет только [netAmount]".',
-    'Если на радаре пусто — скажи: "на радаре пока тихо".',
-    '4. Прогноз на конец: укажи, с каким итоговым плюсом закроем месяц, если новых операций не будет.',
-    'ПРАВИЛА ФОРМАТИРОВАНИЯ И ТОНА (СТРОГО):',
-    'Пиши живым языком и разделяй мысли пустыми строками.',
-    'Выделяй жирным только ключевые суммы и даты.',
+    'Если пользователь пишет "как дела?", "сводка", "что нового?", КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ вызывать инструменты поиска (semantic_entity_matcher) или расчетов.',
+    'Сформируй ответ ТОЛЬКО на основе уже имеющегося контекста deterministicFacts. Твоя роль — профессиональный ИИ-финансовый директор. Выдай живой текст.',
+    'ОБЯЗАТЕЛЬНАЯ СТРУКТУРА И ИСТОЧНИКИ ДАННЫХ (ИСПОЛЬЗУЙ ТОЛЬКО ЭТИ ПЕРЕМЕННЫЕ):',
+    '1) Приветствие и оценка: обязательно сверься со временем в requestMeta.asOf (утро/день/вечер/ночь) и оцени статус, используя ТОЛЬКО deterministicFacts.totals.net.',
+    '2) Доступная ликвидность: укажи остаток живых денег ТОЛЬКО из deterministicFacts.endBalances.open. Закрытые резервы упомяни кратко через deterministicFacts.endBalances.hidden.',
+    '3) Радар (ожидаемые события): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО читать operations для этого шага. Смотри ТОЛЬКО в deterministicFacts.plan.totals и deterministicFacts.nextObligation.',
+    'ПРАВИЛО ВЗАИМОЗАЧЕТОВ: если в plan.totals ожидаемый доход связан со взаимозачетом (есть offsetNetting.amount или expense), озвучь это так: "По плану ожидаем начисление на [plan.totals.income], но так как висят обязательства по взаимозачету на [plan.totals.expense], по факту живыми деньгами зайдет только [plan.totals.net]".',
+    'Если plan.totals по нулям — скажи: "на радаре пока тихо".',
+    '4) Прогноз: укажи итоговый баланс закрытия периода из deterministicFacts.plan.toEndBalances.total.',
+    'ПРАВИЛА ФОРМАТИРОВАНИЯ И TONE OF VOICE (СТРОГО):',
+    'Пиши живым языком и разделяй смысловые блоки пустыми строками.',
+    'Выделяй жирным только ключевые суммы.',
     'КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать нумерованные списки и буллиты.',
-    'КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО давать банальные советы и нравоучения. Только констатация фактов.',
-    'Заверши сообщение коротким вопросом о том, что еще посмотреть детальнее.',
+    'КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО давать непрошеные советы и нравоучения. Только констатация фактов.',
+    'Заверши сообщение коротким вопросом: "Что-то посмотрим детальнее?".',
     'Если видишь offsetNetting или isOffsetExpense, исключай эти суммы из прогнозов будущих расходов, потому что это не физические cash-траты.',
     'Маршрутизация интента обязательна:',
     '0) DAILY_BRIEFING имеет наивысший приоритет: для таких запросов не вызывай semantic_entity_matcher, calculator, advanced_data_analyzer и другие инструменты.',
@@ -1624,9 +1622,90 @@ const buildSystemPrompt = (state, schemaAwareness = null) => {
 
 const buildContextPrimer = (state) => {
   const periods = Array.isArray(state?.historicalContext?.periods) ? state.historicalContext.periods : [];
+  const detFacts = state?.deterministicFacts && typeof state.deterministicFacts === 'object'
+    ? state.deterministicFacts
+    : {};
+  const asOf = String(
+    state?.currentContext?.requestMeta?.asOf
+    || state?.currentContext?.asOf
+    || state?.snapshotMeta?.asOf
+    || state?.snapshotMeta?.timelineDate
+    || ''
+  );
+  const plan = detFacts?.plan && typeof detFacts.plan === 'object' ? detFacts.plan : {};
+  const nextObligationFallback = (() => {
+    const liquidityView = state?.currentContext?.accountViewContext?.liquidityView || {};
+    const amount = toNum(liquidityView?.nextObligationAmount);
+    const date = String(liquidityView?.nextObligationDate || '').trim();
+    if (!amount && !date) return null;
+    return {
+      amount,
+      date: date || null,
+      title: null
+    };
+  })();
+  const nextObligationRaw = detFacts?.nextObligation
+    || state?.currentContext?.nextObligation
+    || nextObligationFallback
+    || null;
+  const normalizedNextObligation = (() => {
+    if (!nextObligationRaw || typeof nextObligationRaw !== 'object') return nextObligationRaw || null;
+    return {
+      amount: toNum(
+        nextObligationRaw?.amount
+        ?? nextObligationRaw?.sum
+        ?? nextObligationRaw?.value
+        ?? nextObligationRaw?.nextObligationAmount
+      ),
+      date: String(
+        nextObligationRaw?.date
+        || nextObligationRaw?.dueDate
+        || nextObligationRaw?.nextObligationDate
+        || ''
+      ).trim() || null,
+      title: String(
+        nextObligationRaw?.title
+        || nextObligationRaw?.name
+        || nextObligationRaw?.description
+        || ''
+      ).trim() || null
+    };
+  })();
   return {
     timelineDate: String(state?.snapshotMeta?.timelineDate || ''),
+    requestMeta: {
+      asOf
+    },
     range: state?.snapshot?.range || state?.deterministicFacts?.range || null,
+    deterministicFacts: {
+      totals: {
+        income: toNum(detFacts?.totals?.income),
+        expense: toNum(detFacts?.totals?.expense),
+        net: toNum(detFacts?.totals?.net),
+        transfer: toNum(detFacts?.totals?.transfer)
+      },
+      endBalances: {
+        open: toNum(detFacts?.endBalances?.open),
+        hidden: toNum(detFacts?.endBalances?.hidden),
+        total: toNum(detFacts?.endBalances?.total)
+      },
+      plan: {
+        totals: {
+          income: toNum(plan?.totals?.income),
+          expense: toNum(plan?.totals?.expense),
+          net: toNum(plan?.totals?.net)
+        },
+        offsetNetting: {
+          amount: toNum(plan?.offsetNetting?.amount)
+        },
+        toEndBalances: {
+          open: toNum(plan?.toEndBalances?.open),
+          hidden: toNum(plan?.toEndBalances?.hidden),
+          total: toNum(plan?.toEndBalances?.total)
+        }
+      },
+      nextObligation: normalizedNextObligation
+    },
     operationsCount: Array.isArray(state?.operations) ? state.operations.length : 0,
     historicalPeriods: periods.slice(0, 12).map((p) => String(p?.period || '')).filter(Boolean),
     hasOffsetNetting: toNum(state?.deterministicFacts?.offsetNetting?.amount) > 0
