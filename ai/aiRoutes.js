@@ -36,7 +36,9 @@ module.exports = function createAiRouter(deps) {
   const quickJournalAdapter = createQuickJournalAdapter({ Event });
 
   const snapshotAgent = require('./agents/snapshotAgent');
+  const intentClassifier = require('./routers/intentClassifier');
   const cfoKnowledgeBase = require('./utils/cfoKnowledgeBase');
+  const { buildSnapshotSchemaAwareness } = require('./utils/schemaContext');
   const snapshotAnswerEngine = require('./utils/snapshotAnswerEngine');
   const snapshotIntentParser = require('./utils/snapshotIntentParser');
 
@@ -3000,6 +3002,39 @@ module.exports = function createAiRouter(deps) {
           historySource = 'fallback_pre_reset_server_history';
         }
 
+        const toClassifierOperation = (op = {}) => ({
+          category: String(op?.category || op?.catName || op?.categoryName || '').trim(),
+          project: String(op?.project || op?.projName || op?.projectName || op?.project?.name || '').trim(),
+          account: String(op?.account || op?.accName || op?.accountName || op?.accountFromTo || '').trim(),
+          counterparty: String(op?.counterparty || op?.counterpartyName || op?.contractorName || '').trim()
+        });
+
+        const classifierOperations = [];
+        (Array.isArray(deterministicFacts?.operations) ? deterministicFacts.operations : [])
+          .forEach((op) => classifierOperations.push(toClassifierOperation(op)));
+        (Array.isArray(periodAnalytics?.topOperations) ? periodAnalytics.topOperations : [])
+          .forEach((op) => classifierOperations.push(toClassifierOperation(op)));
+
+        if (!classifierOperations.length) {
+          const days = Array.isArray(snapshot?.days) ? snapshot.days : [];
+          days.forEach((day) => {
+            const lists = day?.lists || {};
+            ['income', 'expense', 'withdrawal', 'transfer'].forEach((key) => {
+              (Array.isArray(lists?.[key]) ? lists[key] : [])
+                .forEach((op) => classifierOperations.push(toClassifierOperation(op)));
+            });
+          });
+        }
+
+        const schemaAwareness = buildSnapshotSchemaAwareness({ operations: classifierOperations });
+        let classifiedIntent = null;
+        try {
+          classifiedIntent = await intentClassifier.classifyIntent(q, schemaAwareness);
+        } catch (intentError) {
+          console.warn('[AI Snapshot] Intent classifier failed:', intentError?.message || intentError);
+          classifiedIntent = null;
+        }
+
         const llmResult = await snapshotAgent.run({
           question: q,
           history: historyForAgent,
@@ -3012,7 +3047,8 @@ module.exports = function createAiRouter(deps) {
             range: snapshot.range,
             visibilityMode: snapshot.visibilityMode,
             timelineDate
-          }
+          },
+          classifiedIntent
         });
         const uiPayload = llmResult?.uiPayload && typeof llmResult.uiPayload === 'object'
           ? llmResult.uiPayload
@@ -3070,6 +3106,8 @@ module.exports = function createAiRouter(deps) {
           historicalContext,
           deterministicFacts,
           periodAnalytics,
+          classifiedIntent,
+          schemaAwareness,
           llm: llmResult ? {
             ok: llmResult.ok,
             text: llmResult.text,
@@ -3119,6 +3157,7 @@ module.exports = function createAiRouter(deps) {
             discriminatorLog,
             llm: llmResult?.debug || null,
             uiPayload,
+            classifiedIntent: classifiedIntent || null,
             requestMeta: {
               snapshotChecksum: snapshotChecksum || null,
               isDataChanged: isDataChangedEffective,

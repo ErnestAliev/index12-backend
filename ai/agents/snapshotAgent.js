@@ -6,6 +6,7 @@ const axios = require('axios');
 const vm = require('node:vm');
 const intentParser = require('../utils/intentParser');
 const cfoKnowledgeBase = require('../utils/cfoKnowledgeBase');
+const { buildSnapshotSchemaAwareness } = require('../utils/schemaContext');
 
 const MAX_TOOL_STEPS = 8;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
@@ -42,6 +43,24 @@ const parseJsonSafe = (value, fallback = {}) => {
   } catch (_) {
     return fallback;
   }
+};
+
+const normalizeClassifiedIntent = (value) => {
+  const src = value && typeof value === 'object' ? value : {};
+  const allowedIntents = new Set(['DAILY_BRIEFING', 'DEEP_ANALYTICS', 'SLANG_LOOKUP', 'BASIC_OPERATION']);
+  const allowedEntityTypes = new Set(['category', 'project', 'account', 'counterparty']);
+  const intentRaw = String(src?.intent || '').trim().toUpperCase();
+  const intent = allowedIntents.has(intentRaw) ? intentRaw : '';
+  const targetEntityRaw = String(src?.targetEntity || '').trim();
+  const entityTypeRaw = String(src?.entityType || '').trim().toLowerCase();
+  const slangTermRaw = String(src?.slangTerm || '').trim();
+
+  return {
+    intent,
+    targetEntity: targetEntityRaw || null,
+    entityType: allowedEntityTypes.has(entityTypeRaw) ? entityTypeRaw : null,
+    slangTerm: slangTermRaw || null
+  };
 };
 
 const normalizeQuestionForRules = (value) => String(value || '')
@@ -85,18 +104,6 @@ const DIGIT_CHOICE_RE = /^([1-9]\d?)$/;
 
 const isDayKey = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
 const isMonthKey = (value) => /^\d{4}-\d{2}$/.test(String(value || ''));
-const SEMANTIC_STOPWORDS = new Set([
-  'и', 'или', 'а', 'но', 'что', 'как', 'это', 'этот', 'эта', 'эти', 'там', 'тут', 'про',
-  'по', 'за', 'в', 'на', 'до', 'после', 'при', 'для', 'из', 'о', 'об', 'к', 'ко', 'у',
-  'не', 'нет', 'да', 'ну', 'вопрос', 'ответ', 'почему', 'сколько', 'покажи', 'расскажи',
-  'подскажи', 'дай', 'итог', 'итоги', 'сумма', 'суммы', 'доход', 'доходы', 'расход',
-  'расходы', 'прибыль', 'убыток', 'баланс', 'балансы', 'ликвидность', 'месяц', 'месяца',
-  'деньги', 'денег', 'траты', 'трат', 'средства', 'средств', 'выручка', 'оборот',
-  'январь', 'января', 'февраль', 'февраля', 'март', 'марта', 'апрель', 'апреля', 'май',
-  'мая', 'июнь', 'июня', 'июль', 'июля', 'август', 'августа', 'сентябрь', 'сентября',
-  'октябрь', 'октября', 'ноябрь', 'ноября', 'декабрь', 'декабря'
-]);
-const GENERIC_SEMANTIC_TERMS_RE = /(деньг|трат|средств|выручк|оборот|финанс|прибыл|убыт|кэш|cash|money|spend)/i;
 
 const normalizeOperationType = (value) => {
   const token = normalizeToken(value);
@@ -1497,42 +1504,6 @@ const TOOL_DEFINITIONS = [
   }
 ];
 
-const isPlaceholderEntityName = (value) => {
-  const raw = String(value || '').trim();
-  if (!raw) return true;
-  const norm = normalizeText(raw);
-  if (!norm) return true;
-  return /^без\s+/.test(norm);
-};
-
-const collectUniqueOperationValues = (state, key) => {
-  const ops = Array.isArray(state?.operations) ? state.operations : [];
-  return uniqueNames(
-    ops
-      .map((row) => String(row?.[key] || '').trim())
-      .filter((value) => value && !isPlaceholderEntityName(value))
-  );
-};
-
-const buildSnapshotSchemaAwareness = (state) => {
-  const categories = collectUniqueOperationValues(state, 'category');
-  const projects = collectUniqueOperationValues(state, 'project');
-  const accounts = collectUniqueOperationValues(state, 'account');
-  const counterparties = collectUniqueOperationValues(state, 'counterparty');
-  const allNorm = Array.from(new Set(
-    [...categories, ...projects, ...accounts, ...counterparties]
-      .map((item) => normalizeText(item))
-      .filter(Boolean)
-  ));
-  return {
-    categories,
-    projects,
-    accounts,
-    counterparties,
-    allNorm
-  };
-};
-
 const formatSchemaValues = (items, limit = 60) => {
   const rows = Array.isArray(items) ? items : [];
   if (!rows.length) return 'нет данных';
@@ -1544,25 +1515,9 @@ const formatSchemaValues = (items, limit = 60) => {
     : visible.join(', ');
 };
 
-const isGenericSemanticWord = (term) => {
-  const norm = normalizeText(term);
-  if (!norm) return false;
-  return SEMANTIC_STOPWORDS.has(norm) || GENERIC_SEMANTIC_TERMS_RE.test(norm);
-};
-
-const termExistsInSnapshotSchema = (term, schemaAwareness) => {
-  const norm = normalizeText(term);
-  if (!norm) return false;
-  const source = Array.isArray(schemaAwareness?.allNorm) ? schemaAwareness.allNorm : [];
-  return source.some((entityNorm) => (
-    entityNorm === norm
-    || entityNorm.includes(norm)
-    || norm.includes(entityNorm)
-  ));
-};
-
-const buildSystemPrompt = (state, schemaAwareness = null) => {
+const buildSystemPrompt = (state, schemaAwareness = null, classifiedIntent = null) => {
   const schema = schemaAwareness || buildSnapshotSchemaAwareness(state);
+  const classified = normalizeClassifiedIntent(classifiedIntent);
   return [
     'Ты — Финансовый директор сервиса Index12.',
     'Ты не угадываешь цифры из головы.',
@@ -1616,6 +1571,9 @@ const buildSystemPrompt = (state, schemaAwareness = null) => {
     'Если пользователь поправил соответствие, немедленно вызови update_semantic_weights, чтобы обучить систему.',
     'СТРОГОЕ ПРАВИЛО ФОРМАТИРОВАНИЯ ЧИСЕЛ: всегда выводи суммы с разделителем тысяч через пробел (допустим неразрывный пробел), никогда не используй запятые для тысяч. Правильно: "1 220 078 KZT". Неправильно: "1,220,078 KZT".',
     'Если пользователь просит график, вызови render_ui_widget и верни структуру uiCommand для рендера.',
+    'Ты получаешь Supervisor-классификацию в служебном блоке SUPERVISOR_CLASSIFIED_INTENT_JSON. Следуй ей как приоритетному маршрутизатору.',
+    `Текущий Supervisor intent: ${classified.intent || 'UNKNOWN'}.`,
+    `Текущая Supervisor targetEntity: ${classified.targetEntity || 'null'}.`,
     'Отвечай кратко, по делу, с конкретными финальными цифрами.'
   ].join('\n');
 };
@@ -1756,37 +1714,6 @@ const detectCategoryMention = (question, state) => {
   return null;
 };
 
-const looksLikeSlangToken = (token) => {
-  const raw = String(token || '').trim().toLowerCase();
-  if (!raw || raw.length < 2 || raw.length > 16) return false;
-  if (/^\d+$/.test(raw)) return false;
-  if (/^[a-z0-9_-]{2,10}$/i.test(raw)) return true;
-  if (/^[а-яa-z]{2,6}$/i.test(raw)) return true;
-  if (/[0-9]/.test(raw) || raw.includes('-') || raw.includes('_')) return true;
-  return false;
-};
-
-const detectSemanticCandidateTerm = (question, state) => {
-  const tokens = splitTextTokens(question);
-  if (!tokens.length) return '';
-
-  const knownTokens = new Set();
-  buildEntityCatalog(state).forEach((entity) => {
-    splitTextTokens(entity?.name).forEach((t) => knownTokens.add(t));
-    const compact = normalizeToken(entity?.name);
-    if (compact) knownTokens.add(compact);
-  });
-
-  for (const token of tokens) {
-    if (!token || token.length < 3) continue;
-    if (/^\d+$/.test(token)) continue;
-    if (SEMANTIC_STOPWORDS.has(token)) continue;
-    if (knownTokens.has(token)) continue;
-    if (looksLikeSlangToken(token)) return token;
-  }
-  return '';
-};
-
 const detectSemanticCorrection = (question) => {
   const src = String(question || '').trim();
   if (!src || src.length > 220) return null;
@@ -1885,6 +1812,7 @@ const run = async ({
   deterministicFacts = null,
   periodAnalytics = null,
   snapshotMeta = null,
+  classifiedIntent = null,
   userId = ''
 }) => {
   const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
@@ -1981,40 +1909,46 @@ const run = async ({
     }
   }
 
+  const classified = normalizeClassifiedIntent(classifiedIntent);
+  const classifiedIntentType = classified.intent || '';
+  const classifiedTargetEntity = classified.targetEntity || '';
+  const classifiedEntityType = classified.entityType || '';
+  const classifiedSlangTerm = classified.slangTerm || '';
+
   const wantsCalculationBreakdown = asksHowCalculated(questionText);
   const wantsForecastStyle = asksForecastOrBalanceImpact(questionText);
   const wantsAnomalies = asksAnomalies(questionText);
   const wantsChart = asksChart(questionText);
-  const dailyBriefingIntent = asksDailyBriefing(questionText);
-  const basicOperationIntent = asksBasicOperationLookup(questionText);
-  const broadCategoryIntent = asksBroadCategoryLookup(questionText);
-  const broadCategoryKeyword = detectBroadCategoryKeyword(questionText);
-  const categoryMention = detectCategoryMention(questionText, state);
   const semanticCorrection = detectSemanticCorrection(questionText);
   const schemaAwareness = buildSnapshotSchemaAwareness(state);
-  const rawSemanticCandidateTerm = semanticCorrection?.term || detectSemanticCandidateTerm(questionText, state);
-  const semanticCandidateExistsInSchema = termExistsInSnapshotSchema(rawSemanticCandidateTerm, schemaAwareness);
-  const semanticCandidateIsGeneric = isGenericSemanticWord(rawSemanticCandidateTerm);
-  const shouldUseSemanticMatcher = !dailyBriefingIntent && (
-    Boolean(semanticCorrection)
-    || (
-      !basicOperationIntent
-      && !broadCategoryIntent
-      && Boolean(rawSemanticCandidateTerm)
-      && !semanticCandidateExistsInSchema
-      && !semanticCandidateIsGeneric
-    )
-  );
-  const semanticCandidateTerm = shouldUseSemanticMatcher
-    ? rawSemanticCandidateTerm
+  const dailyBriefingIntent = classifiedIntentType === 'DAILY_BRIEFING' || asksDailyBriefing(questionText);
+  const basicOperationIntent = classifiedIntentType === 'BASIC_OPERATION' || asksBasicOperationLookup(questionText);
+  const deepAnalyticsIntent = classifiedIntentType === 'DEEP_ANALYTICS';
+  const broadCategoryIntent = asksBroadCategoryLookup(questionText);
+  const broadCategoryKeyword = detectBroadCategoryKeyword(questionText);
+  const categoryMention = (classifiedEntityType === 'category' && classifiedTargetEntity)
+    ? classifiedTargetEntity
+    : detectCategoryMention(questionText, state);
+  const semanticCandidateTerm = classifiedIntentType === 'SLANG_LOOKUP'
+    ? classifiedSlangTerm
     : (semanticCorrection?.term || '');
+  const shouldUseSemanticMatcher = classifiedIntentType === 'SLANG_LOOKUP' || Boolean(semanticCorrection);
   const isLikelyFollowUp = isShortFollowUp(questionText) && Boolean(lastUserMessage);
 
   const messages = [
-    { role: 'system', content: buildSystemPrompt(state, schemaAwareness) },
+    { role: 'system', content: buildSystemPrompt(state, schemaAwareness, classified) },
     {
       role: 'system',
       content: `INDEX_JSON: ${JSON.stringify(buildContextPrimer(state))}`
+    },
+    {
+      role: 'system',
+      content: `SUPERVISOR_CLASSIFIED_INTENT_JSON: ${JSON.stringify({
+        intent: classifiedIntentType || null,
+        targetEntity: classifiedTargetEntity || null,
+        entityType: classifiedEntityType || null,
+        slangTerm: classifiedSlangTerm || null
+      })}`
     },
     ...(semanticSelection
       ? [{
@@ -2039,6 +1973,12 @@ const run = async ({
       ? [{
           role: 'system',
           content: 'Запрос про прогноз/влияние на баланс: дай пользователю итоговые цифры без промежуточной арифметики (если он не просил режим PROVE_IT).'
+        }]
+      : []),
+    ...(deepAnalyticsIntent
+      ? [{
+          role: 'system',
+          content: `Supervisor определил DEEP_ANALYTICS${classifiedTargetEntity ? ` по сущности "${classifiedTargetEntity}"` : ''}. Для расчетов используй advanced_data_analyzer.`
         }]
       : []),
     ...(dailyBriefingIntent
@@ -2075,16 +2015,10 @@ const run = async ({
           content: `Обнаружена категория "${categoryMention}". Сразу вызови get_transactions для точного списка операций и сумм по этой категории.`
         }]
       : []),
-    ...(rawSemanticCandidateTerm && !shouldUseSemanticMatcher
-      ? [{
-          role: 'system',
-          content: `Термин "${rawSemanticCandidateTerm}" не требует semantic_entity_matcher (либо уже есть в Snapshot-схеме, либо общеупотребимый). Работай напрямую через get_transactions/advanced_data_analyzer.`
-        }]
-      : []),
     ...(semanticCandidateTerm && shouldUseSemanticMatcher
       ? [{
           role: 'system',
-          content: `Перед поиском операций обработай термин "${semanticCandidateTerm}" через semantic_entity_matcher.`
+          content: `Supervisor определил SLANG_LOOKUP. Перед поиском операций обработай термин "${semanticCandidateTerm}" через semantic_entity_matcher.`
         }]
       : []),
     ...(semanticCorrection
@@ -2121,7 +2055,14 @@ const run = async ({
       runtimeToolState.businessDictionaryFetched = true;
       return getBusinessDictionaryResponse(state, argsObj);
     }
-    if (name === 'semantic_entity_matcher') return semanticEntityMatcher(state, argsObj, toolUserContext);
+    if (name === 'semantic_entity_matcher') {
+      const matcherArgs = { ...(argsObj || {}) };
+      if (classifiedIntentType === 'SLANG_LOOKUP') {
+        if (semanticCandidateTerm) matcherArgs.term = semanticCandidateTerm;
+        if (classifiedEntityType && !matcherArgs.entityType) matcherArgs.entityType = classifiedEntityType;
+      }
+      return semanticEntityMatcher(state, matcherArgs, toolUserContext);
+    }
     if (name === 'update_semantic_weights') {
       if (!runtimeToolState.businessDictionaryFetched) {
         return {
@@ -2146,29 +2087,11 @@ const run = async ({
     for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
       const firstStepForcedToolChoice = (() => {
         if (step !== 0) return 'auto';
-        if (dailyBriefingIntent) {
+        if (classifiedIntentType === 'DAILY_BRIEFING') {
           return 'none';
         }
-        if (semanticCorrection) {
-          return { type: 'function', function: { name: 'get_business_dictionary' } };
-        }
-        if (semanticCandidateTerm && shouldUseSemanticMatcher) {
+        if (classifiedIntentType === 'SLANG_LOOKUP') {
           return { type: 'function', function: { name: 'semantic_entity_matcher' } };
-        }
-        if (wantsCalculationBreakdown) {
-          return { type: 'function', function: { name: 'advanced_data_analyzer' } };
-        }
-        if (categoryMention || broadCategoryIntent) {
-          return { type: 'function', function: { name: 'get_transactions' } };
-        }
-        if (basicOperationIntent) {
-          return { type: 'function', function: { name: 'get_snapshot_metrics' } };
-        }
-        if (wantsChart) {
-          return { type: 'function', function: { name: 'render_ui_widget' } };
-        }
-        if (wantsAnomalies) {
-          return { type: 'function', function: { name: 'get_snapshot_metrics' } };
         }
         return 'auto';
       })();
@@ -2212,13 +2135,18 @@ const run = async ({
             wantsChart,
             dailyBriefingIntent,
             basicOperationIntent,
+            deepAnalyticsIntent,
             broadCategoryIntent,
             broadCategoryKeyword,
             categoryMention,
-            rawSemanticCandidateTerm,
-            semanticCandidateExistsInSchema,
-            semanticCandidateIsGeneric,
+            semanticCandidateTerm,
             semanticSelection,
+            classifiedIntent: {
+              intent: classifiedIntentType || null,
+              targetEntity: classifiedTargetEntity || null,
+              entityType: classifiedEntityType || null,
+              slangTerm: classifiedSlangTerm || null
+            },
             isLikelyFollowUp
           },
           uiPayload: runtimeToolState.uiPayload
@@ -2249,7 +2177,7 @@ const run = async ({
           clarificationQuestion = String(
             toolResult?.clarificationPrompt
             || toolResult?.clarificationQuestion
-            || `Что вы имеете в виду под "${String(argsObj?.term || argsObj?.query || questionText)}"?`
+            || `Что вы имеете в виду под "${String(argsObj?.term || semanticCandidateTerm || argsObj?.query || questionText)}"?`
           );
           clarificationOptions = Array.isArray(toolResult?.clarificationOptions)
             ? toolResult.clarificationOptions
@@ -2299,15 +2227,19 @@ const run = async ({
             wantsChart,
             dailyBriefingIntent,
             basicOperationIntent,
+            deepAnalyticsIntent,
             broadCategoryIntent,
             broadCategoryKeyword,
             categoryMention,
             semanticCandidateTerm,
-            rawSemanticCandidateTerm,
-            semanticCandidateExistsInSchema,
-            semanticCandidateIsGeneric,
             semanticCorrectionDetected: Boolean(semanticCorrection),
             semanticSelection,
+            classifiedIntent: {
+              intent: classifiedIntentType || null,
+              targetEntity: classifiedTargetEntity || null,
+              entityType: classifiedEntityType || null,
+              slangTerm: classifiedSlangTerm || null
+            },
             clarificationOptions,
             clarificationRequired: true,
             isLikelyFollowUp
