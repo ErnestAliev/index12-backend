@@ -165,6 +165,7 @@ const workspaceSchema = new mongoose.Schema({
         userId: { type: String, required: true },
         email: String,
         role: { type: String, enum: ['analyst', 'manager', 'admin'], default: 'analyst' },
+        accessibleAccountIds: { type: [String], default: [] },
         sharedAt: { type: Date, default: Date.now }
     }],
     isShared: { type: Boolean, default: false }
@@ -692,6 +693,53 @@ async function getCompositeUserId(req) {
     }
 }
 
+function getWorkspaceStorageUserId(workspace) {
+    if (!workspace?.userId) return null;
+    const ownerId = String(workspace.userId);
+    if (workspace.isDefault) return ownerId;
+    return `${ownerId}_ws_${workspace._id}`;
+}
+
+const normalizeEntityId = (value) => {
+    if (!value) return null;
+    if (typeof value === 'object' && value !== null) {
+        return value._id ? String(value._id) : null;
+    }
+    return String(value);
+};
+
+async function getManagerAccessibleAccountIds(req) {
+    if (req.workspaceRole !== 'manager') return null;
+
+    const workspace = req.cachedWorkspace || await Workspace.findById(req.user?.currentWorkspaceId).lean();
+    if (!workspace) return [];
+
+    const share = workspace.sharedWith?.find((item) => String(item.userId) === String(req.user.id));
+    if (!share) return [];
+
+    return Array.isArray(share.accessibleAccountIds)
+        ? share.accessibleAccountIds.map((id) => String(id))
+        : [];
+}
+
+async function ensureManagerCanAccessOperationAccounts(req, payload = {}, existingEvent = null) {
+    if (req.workspaceRole !== 'manager') return;
+
+    const allowedSet = new Set(await getManagerAccessibleAccountIds(req));
+    const effectiveIds = [
+        payload.accountId !== undefined ? normalizeEntityId(payload.accountId) : normalizeEntityId(existingEvent?.accountId),
+        payload.fromAccountId !== undefined ? normalizeEntityId(payload.fromAccountId) : normalizeEntityId(existingEvent?.fromAccountId),
+        payload.toAccountId !== undefined ? normalizeEntityId(payload.toAccountId) : normalizeEntityId(existingEvent?.toAccountId)
+    ].filter(Boolean);
+
+    const blockedAccountId = effectiveIds.find((accountId) => !allowedSet.has(accountId));
+    if (blockedAccountId) {
+        const error = new Error('У менеджера нет доступа к выбранному счету или кассе');
+        error.statusCode = 403;
+        throw error;
+    }
+}
+
 // QUICK-only mode: deep/chat/context-packet rebuild is disabled.
 function triggerContextPacketRebuildByDates() {
     return;
@@ -839,12 +887,23 @@ app.get('/api/auth/me', async (req, res) => {
             }
         }
 
+        const managerAccessibleAccountIds = (() => {
+            if (workspaceRole !== 'manager') return [];
+            const ws = req.cachedWorkspace;
+            if (!ws) return [];
+            const share = ws.sharedWith?.find((item) => String(item.userId) === String(userId));
+            return Array.isArray(share?.accessibleAccountIds)
+                ? share.accessibleAccountIds.map((id) => String(id))
+                : [];
+        })();
+
         console.log('✅ [GET /api/auth/me] Returning user data:', {
             userId,
             effectiveUserId,
             currentWorkspaceId: req.user.currentWorkspaceId,
             workspaceRole,
-            isWorkspaceOwner
+            isWorkspaceOwner,
+            managerAccessibleAccountIdsCount: managerAccessibleAccountIds.length
         });
 
         res.json({
@@ -853,7 +912,8 @@ app.get('/api/auth/me', async (req, res) => {
             effectiveUserId: effectiveUserId,
             minEventDate: firstEvent ? firstEvent.date : null,
             workspaceRole,
-            isWorkspaceOwner
+            isWorkspaceOwner,
+            managerAccessibleAccountIds
         });
     } catch (err) {
         console.error('❌ [GET /api/auth/me] Error:', err);
@@ -1468,6 +1528,31 @@ app.get('/api/workspaces/:id/invites', isAuthenticated, async (req, res) => {
     }
 });
 
+app.get('/api/workspaces/:id/account-access-options', isAuthenticated, async (req, res) => {
+    try {
+        const ownerId = req.user.id;
+        const { id } = req.params;
+
+        const workspace = await Workspace.findOne({ _id: id, userId: ownerId }).lean();
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found' });
+        }
+
+        const storageUserId = getWorkspaceStorageUserId(workspace);
+        const accounts = await Account.find({ userId: storageUserId }).sort({ order: 1 }).lean();
+
+        res.json(accounts.map((account) => ({
+            _id: String(account._id),
+            name: account.name,
+            isCashRegister: account.isCashRegister === true,
+            isExcluded: account.isExcluded === true
+        })));
+    } catch (err) {
+        console.error('Load account access options error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
 // 🟢 NEW: GET /api/workspace-invite/:token - Get invite details
 app.get('/api/workspace-invite/:token', async (req, res) => {
     try {
@@ -1625,11 +1710,65 @@ app.patch('/api/workspaces/:workspaceId/members/:userId/role', isAuthenticated, 
         }
 
         share.role = role;
+        if (role === 'manager' && !Array.isArray(share.accessibleAccountIds)) {
+            share.accessibleAccountIds = [];
+        }
         await workspace.save();
 
         res.json({ success: true, share });
     } catch (err) {
         console.error('Update role error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+app.patch('/api/workspaces/:workspaceId/members/:userId/account-access', isAuthenticated, async (req, res) => {
+    try {
+        const ownerId = req.user.id;
+        const { workspaceId, userId } = req.params;
+        const { accessibleAccountIds } = req.body;
+
+        if (!Array.isArray(accessibleAccountIds)) {
+            return res.status(400).json({ message: 'accessibleAccountIds must be an array' });
+        }
+
+        const workspace = await Workspace.findOne({ _id: workspaceId, userId: ownerId });
+        if (!workspace) {
+            return res.status(404).json({ message: 'Workspace not found or you are not the owner' });
+        }
+
+        const share = workspace.sharedWith.find((item) => item.userId === userId);
+        if (!share) {
+            return res.status(404).json({ message: 'User not found in workspace' });
+        }
+
+        if (share.role !== 'manager') {
+            return res.status(400).json({ message: 'Account access can only be configured for managers' });
+        }
+
+        const storageUserId = getWorkspaceStorageUserId(workspace);
+        const workspaceAccounts = await Account.find({ userId: storageUserId }).select('_id').lean();
+        const existingIds = new Set(workspaceAccounts.map((account) => String(account._id)));
+        const normalizedIds = [...new Set(accessibleAccountIds.map((id) => String(id)).filter(Boolean))];
+        const invalidIds = normalizedIds.filter((id) => !existingIds.has(id));
+
+        if (invalidIds.length > 0) {
+            return res.status(400).json({ message: 'Some accounts are not part of this workspace' });
+        }
+
+        share.accessibleAccountIds = normalizedIds;
+        await workspace.save();
+
+        res.json({
+            success: true,
+            share: {
+                userId: share.userId,
+                role: share.role,
+                accessibleAccountIds: share.accessibleAccountIds
+            }
+        });
+    } catch (err) {
+        console.error('Update manager account access error:', err);
         res.status(500).json({ message: err.message });
     }
 });
@@ -2268,6 +2407,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
     try {
         const data = req.body;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
+        await ensureManagerCanAccessOperationAccounts(req, data);
         let date, dateKey, dayOfYear;
 
         // 🟢 FIX: TRUST CLIENT DATEKEY IF PROVIDED!
@@ -2333,7 +2473,10 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_added', newEvent);
 
         res.status(201).json(newEvent);
-    } catch (err) { res.status(400).json({ message: err.message }); }
+    } catch (err) {
+        const statusCode = err.statusCode || 400;
+        res.status(statusCode).json({ message: err.message });
+    }
 });
 
 // 🟢 UPDATED: Use canEdit middleware
@@ -2372,6 +2515,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         }
         // Admin can edit ANY operation (no ownership check)
 
+        await ensureManagerCanAccessOperationAccounts(req, updatedData, existingEvent);
+
 
         if (updatedData.date) {
             updatedData.date = new Date(updatedData.date);
@@ -2404,7 +2549,10 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', updatedEvent);
 
         res.status(200).json(updatedEvent);
-    } catch (err) { res.status(400).json({ message: err.message }); }
+    } catch (err) {
+        const statusCode = err.statusCode || 400;
+        res.status(statusCode).json({ message: err.message });
+    }
 });
 
 // 🟢 UPDATED: Allow managers to delete their own operations
