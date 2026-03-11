@@ -102,23 +102,31 @@ app.use((req, res, next) => {
     next();
 });
 
+const buildSocketMeta = (req) => ({
+    sourceSocketId: req?.headers?.['x-socket-id'] || null,
+    sourceClientInstanceId: req?.headers?.['x-client-instance-id'] || null,
+    sourceUserId: req?.user?.id ? String(req.user.id) : null
+});
+
 // 🟢 HELPER: Smart Emit (Excludes Sender to prevent duplication)
 const emitToUser = (req, userId, event, data) => {
     if (!req.io) return;
     const socketId = req.headers['x-socket-id'];
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
+    const meta = buildSocketMeta(req);
 
     if (socketId) {
-        req.io.to(userId).except(socketId).emit(event, payload);
+        req.io.to(userId).except(socketId).emit(event, payload, meta);
     } else {
-        req.io.to(userId).emit(event, payload);
+        req.io.to(userId).emit(event, payload, meta);
     }
 };
 
 const emitToAll = (req, userId, event, data) => {
     if (!req.io) return;
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
-    req.io.to(userId).emit(event, payload);
+    const meta = buildSocketMeta(req);
+    req.io.to(userId).emit(event, payload, meta);
 };
 
 // 🟢 NEW: Emit to workspace room (all members receive update)
@@ -126,15 +134,29 @@ const emitToWorkspace = (req, workspaceId, event, data) => {
     if (!req.io || !workspaceId) return;
 
     const socketId = req.headers['x-socket-id'];
+    const clientInstanceId = req.headers['x-client-instance-id'];
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
+    const meta = buildSocketMeta(req);
 
-    console.log(`📡 [Socket.io] Emitting '${event}' to workspace:`, workspaceId);
+    console.log(`📡 [Socket.io] Emitting '${event}' to workspace:`, {
+        workspaceId: String(workspaceId),
+        socketId: socketId || null,
+        clientInstanceId: clientInstanceId || null
+    });
+
+    if (!socketId) {
+        console.warn(`⚠️ [Socket.io] Missing X-Socket-ID for '${event}', relying on client anti-echo`, {
+            workspaceId: String(workspaceId),
+            clientInstanceId: clientInstanceId || null,
+            userId: req?.user?.id || null
+        });
+    }
 
     if (socketId) {
         // Exclude sender to prevent duplication on their end
-        req.io.to(String(workspaceId)).except(socketId).emit(event, payload);
+        req.io.to(String(workspaceId)).except(socketId).emit(event, payload, meta);
     } else {
-        req.io.to(String(workspaceId)).emit(event, payload);
+        req.io.to(String(workspaceId)).emit(event, payload, meta);
     }
 };
 
