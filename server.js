@@ -314,6 +314,7 @@ const Category = mongoose.model('Category', categorySchema);
 const eventSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and String
     createdBy: { type: String, required: false }, // Track who created this operation
+    createdByRole: { type: String, required: false },
     date: { type: Date, required: true },
     dateKey: { type: String, required: true, index: true },
     dayOfYear: Number,
@@ -722,6 +723,21 @@ async function getCompositeUserId(req) {
         console.error('❌ [getCompositeUserId] Error:', err);
         return realUserId;
     }
+}
+
+function getCurrentWorkspaceActorRole(req) {
+    if (req.workspaceRole) return req.workspaceRole;
+    if (!req.user) return null;
+
+    const workspace = req.cachedWorkspace;
+    if (!workspace) return req.user.role || null;
+
+    if (String(workspace.userId) === String(req.user.id)) {
+        return 'admin';
+    }
+
+    const share = workspace.sharedWith?.find((item) => String(item.userId) === String(req.user.id));
+    return share?.role || req.user.role || null;
 }
 
 function getWorkspaceStorageUserId(workspace) {
@@ -2480,6 +2496,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             dayOfYear,
             userId,
             createdBy: req.user.id, // Track real user who created this operation
+            createdByRole: getCurrentWorkspaceActorRole(req),
             workspaceId: req.user.currentWorkspaceId // 🟢 NEW
         });
 
@@ -2694,7 +2711,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 categoryId: null,
                 destination: 'Личные нужды', description: 'Вывод на личные цели',
                 date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
-                createdBy: req.user.id
+                createdBy: req.user.id,
+                createdByRole: getCurrentWorkspaceActorRole(req)
             });
             await withdrawalEvent.save();
             await withdrawalEvent.populate([
@@ -2739,7 +2757,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             transferReason: transferReason || null,
             transferGroupId: groupId, description: desc,
             date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
-            createdBy: req.user.id
+            createdBy: req.user.id,
+            createdByRole: getCurrentWorkspaceActorRole(req)
         });
 
         await transferEvent.save();
@@ -2801,7 +2820,8 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
                 contractorId,
                 isTransfer: false,
                 userId,
-                createdBy: req.user.id
+                createdBy: req.user.id,
+                createdByRole: getCurrentWorkspaceActorRole(req)
             });
         }
         if (createdOps.length > 0) {
