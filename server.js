@@ -2693,7 +2693,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 transferReason: 'personal_use',
                 categoryId: null,
                 destination: 'Личные нужды', description: 'Вывод на личные цели',
-                date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
+                date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
+                createdBy: req.user.id
             });
             await withdrawalEvent.save();
             await withdrawalEvent.populate([
@@ -2737,7 +2738,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             transferPurpose: transferPurpose || 'internal',
             transferReason: transferReason || null,
             transferGroupId: groupId, description: desc,
-            date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId
+            date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
+            createdBy: req.user.id
         });
 
         await transferEvent.save();
@@ -2784,7 +2786,23 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
 
             let nextCellIndex = cellIndexCache.has(dateKey) ? cellIndexCache.get(dateKey) : await getFirstFreeCellIndex(dateKey, userId);
             cellIndexCache.set(dateKey, nextCellIndex + 1);
-            createdOps.push({ date, dayOfYear, dateKey, cellIndex: nextCellIndex, type: opData.type, amount: opData.amount, categoryId, projectId, accountId, companyId, individualId, contractorId, isTransfer: false, userId });
+            createdOps.push({
+                date,
+                dayOfYear,
+                dateKey,
+                cellIndex: nextCellIndex,
+                type: opData.type,
+                amount: opData.amount,
+                categoryId,
+                projectId,
+                accountId,
+                companyId,
+                individualId,
+                contractorId,
+                isTransfer: false,
+                userId,
+                createdBy: req.user.id
+            });
         }
         if (createdOps.length > 0) {
             const insertedDocs = await Event.insertMany(createdOps);
