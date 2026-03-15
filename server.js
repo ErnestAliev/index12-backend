@@ -740,6 +740,49 @@ function getCurrentWorkspaceActorRole(req) {
     return share?.role || req.user.role || null;
 }
 
+function normalizeOptionalId(value) {
+    if (!value || value === 'null' || value === 'undefined' || value === '') return null;
+    if (typeof value === 'object' && value !== null) {
+        return value._id ? String(value._id) : null;
+    }
+    return String(value);
+}
+
+function normalizeOptionalIdArray(values) {
+    if (!Array.isArray(values)) return [];
+    return Array.from(new Set(values.map(normalizeOptionalId).filter(Boolean)));
+}
+
+function normalizeEventCategoryFields(data = {}) {
+    const normalized = { ...data };
+    const hasCategoryId = Object.prototype.hasOwnProperty.call(data, 'categoryId');
+    const hasCategoryIds = Object.prototype.hasOwnProperty.call(data, 'categoryIds');
+
+    const categoryId = normalizeOptionalId(data.categoryId);
+
+    if (hasCategoryIds) {
+        let categoryIds = normalizeOptionalIdArray(data.categoryIds);
+
+        if (categoryId && !categoryIds.some((id) => String(id) === String(categoryId))) {
+            categoryIds = [categoryId, ...categoryIds];
+        }
+
+        normalized.categoryId = categoryId;
+        normalized.categoryIds = categoryIds.length
+            ? categoryIds
+            : (categoryId ? [categoryId] : []);
+
+        return normalized;
+    }
+
+    if (hasCategoryId) {
+        normalized.categoryId = categoryId;
+        normalized.categoryIds = categoryId ? [categoryId] : [];
+    }
+
+    return normalized;
+}
+
 function getWorkspaceStorageUserId(workspace) {
     if (!workspace?.userId) return null;
     const ownerId = String(workspace.userId);
@@ -2452,7 +2495,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 
 app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
     try {
-        const data = req.body;
+        const data = normalizeEventCategoryFields(req.body);
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
         await ensureManagerCanAccessOperationAccounts(req, data);
         let date, dateKey, dayOfYear;
@@ -2532,7 +2575,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
     try {
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
-        const updatedData = { ...req.body };
+        const updatedData = normalizeEventCategoryFields(req.body);
 
         // 🔥 CRITICAL: Support both ObjectId and String for userId (same as GET endpoint)
         let userIdQuery;
