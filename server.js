@@ -315,6 +315,8 @@ const eventSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and String
     createdBy: { type: String, required: false }, // Track who created this operation
     createdByRole: { type: String, required: false },
+    updatedBy: { type: String, required: false },
+    updatedByRole: { type: String, required: false },
     date: { type: Date, required: true },
     dateKey: { type: String, required: true, index: true },
     dayOfYear: Number,
@@ -781,6 +783,27 @@ function normalizeEventCategoryFields(data = {}) {
     }
 
     return normalized;
+}
+
+function normalizeComparableEventValue(value) {
+    if (value instanceof Date) return value.toISOString();
+    if (Array.isArray(value)) return value.map(normalizeComparableEventValue);
+    if (value && typeof value === 'object') {
+        if (value._id) return String(value._id);
+        if (typeof value.toString === 'function') {
+            const asString = value.toString();
+            if (asString && asString !== '[object Object]') return asString;
+        }
+    }
+    return value ?? null;
+}
+
+function hasMeaningfulEventChanges(existingEvent, updatedData = {}) {
+    return Object.keys(updatedData).some((key) => {
+        const prevValue = normalizeComparableEventValue(existingEvent?.[key]);
+        const nextValue = normalizeComparableEventValue(updatedData[key]);
+        return JSON.stringify(prevValue) !== JSON.stringify(nextValue);
+    });
 }
 
 function getWorkspaceStorageUserId(workspace) {
@@ -2575,7 +2598,9 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
     try {
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
-        const updatedData = normalizeEventCategoryFields(req.body);
+        const rawUpdatedData = { ...req.body };
+        const updatedData = normalizeEventCategoryFields(rawUpdatedData);
+        const actorRole = getCurrentWorkspaceActorRole(req);
 
         // 🔥 CRITICAL: Support both ObjectId and String for userId (same as GET endpoint)
         let userIdQuery;
@@ -2624,6 +2649,37 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         else if (updatedData.dateKey) {
             updatedData.date = _parseDateKey(updatedData.dateKey);
             updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+        }
+
+        const comparableUpdatedData = { ...rawUpdatedData };
+        if (Object.prototype.hasOwnProperty.call(rawUpdatedData, 'date') || Object.prototype.hasOwnProperty.call(rawUpdatedData, 'dateKey')) {
+            comparableUpdatedData.date = updatedData.date;
+            comparableUpdatedData.dateKey = updatedData.dateKey;
+            comparableUpdatedData.dayOfYear = updatedData.dayOfYear;
+        }
+        if (Object.prototype.hasOwnProperty.call(rawUpdatedData, 'categoryId')) {
+            comparableUpdatedData.categoryId = updatedData.categoryId;
+        }
+        if (Object.prototype.hasOwnProperty.call(rawUpdatedData, 'categoryIds')) {
+            comparableUpdatedData.categoryIds = updatedData.categoryIds;
+        }
+
+        const hasActualChanges = hasMeaningfulEventChanges(existingEvent, comparableUpdatedData);
+
+        if (actorRole === 'manager') {
+            updatedData.updatedBy = req.user.id;
+            updatedData.updatedByRole = 'manager';
+
+            if (
+                (!existingEvent.createdByRole || existingEvent.createdByRole !== 'manager') &&
+                (!existingEvent.createdBy || String(existingEvent.createdBy) === String(req.user.id))
+            ) {
+                updatedData.createdBy = req.user.id;
+                updatedData.createdByRole = 'manager';
+            }
+        } else if (hasActualChanges) {
+            updatedData.updatedBy = req.user.id;
+            updatedData.updatedByRole = actorRole;
         }
 
         const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userIdQuery }, updatedData, { new: true });
