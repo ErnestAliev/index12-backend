@@ -160,6 +160,15 @@ const emitToWorkspace = (req, workspaceId, event, data) => {
     }
 };
 
+const emitEntityEvent = (req, userId, event, data) => {
+    const workspaceId = req.user?.currentWorkspaceId || null;
+    if (workspaceId) {
+        emitToWorkspace(req, workspaceId, event, data);
+        return;
+    }
+    emitToUser(req, userId, event, data);
+};
+
 // --- СХЕМЫ (ВОССТАНОВЛЕНЫ ВСЕ) ---
 const userSchema = new mongoose.Schema({
     googleId: { type: String, unique: true, sparse: true },
@@ -2804,7 +2813,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
 
     app.get(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
-            const userId = req.user.id;
+            const userId = await getCompositeUserId(req);
 
             let query = model.find({ userId: userId }).sort({ _id: 1 });
             if (model.schema.paths.order) { query = query.sort({ order: 1 }); }
@@ -2849,8 +2858,8 @@ const generateCRUD = (model, path, emitEventName = null) => {
 
     app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
         try {
-            const userId = req.user.id;
-            const workspaceId = req.user.currentWorkspaceId; // 🟢 Get current workspace
+            const userId = await getCompositeUserId(req);
+            const workspaceId = req.user.currentWorkspaceId || null;
 
             let createData = { ...req.body, userId };
 
@@ -2925,7 +2934,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
             const savedItem = await newItem.save();
 
             if (emitEventName) {
-                emitToUser(req, userId, emitEventName + '_added', savedItem);
+                emitEntityEvent(req, userId, emitEventName + '_added', savedItem);
             }
 
             res.status(201).json(savedItem);
@@ -2945,7 +2954,7 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
 
     app.put(`/api/${path}/batch-update`, isAuthenticated, async (req, res) => {
         try {
-            const items = req.body; const userId = req.user.id;
+            const items = req.body; const userId = await getCompositeUserId(req);
             const updatePromises = items.map(item => {
                 const updateData = { ...item }; delete updateData._id; delete updateData.userId;
                 return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData, { new: true });
@@ -2959,7 +2968,7 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
             const updatedList = await query;
 
             if (emitEventName) {
-                emitToUser(req, userId, emitEventName + '_list_updated', updatedList);
+                emitEntityEvent(req, userId, emitEventName + '_list_updated', updatedList);
             }
 
             res.status(200).json(updatedList);
@@ -2979,7 +2988,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
 
     app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
         try {
-            const { id } = req.params; const { deleteOperations } = req.query; const userId = req.user.id;
+            const { id } = req.params; const { deleteOperations } = req.query; const userId = await getCompositeUserId(req);
             const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
             if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
 
@@ -3038,7 +3047,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
             }
 
             if (emitEventName) {
-                emitToUser(req, userId, emitEventName + '_deleted', id);
+                emitEntityEvent(req, userId, emitEventName + '_deleted', id);
             }
 
             res.status(200).json({ message: 'Deleted', id, deletedOpsCount });
