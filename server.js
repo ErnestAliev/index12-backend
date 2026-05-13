@@ -243,7 +243,7 @@ const accountSchema = new mongoose.Schema({
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual', default: null },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor', default: null },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Account = mongoose.model('Account', accountSchema);
@@ -255,7 +255,7 @@ const companySchema = new mongoose.Schema({
     taxRegime: { type: String, default: 'simplified' },
     taxPercent: { type: Number, default: 3 },
     identificationNumber: { type: String, default: null },  // ИИН/БИН
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Company = mongoose.model('Company', companySchema);
@@ -271,7 +271,7 @@ const individualSchema = new mongoose.Schema({
     defaultCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', default: null },
     defaultProjectIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Project' }],
     defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Individual = mongoose.model('Individual', individualSchema);
@@ -287,7 +287,7 @@ const contractorSchema = new mongoose.Schema({
     identificationNumber: { type: String, default: null },  // БИН/ИИН
     contractNumber: { type: String, default: null },        // Номер договора
     contractDate: { type: Date, default: null },            // Дата договора
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Contractor = mongoose.model('Contractor', contractorSchema);
@@ -295,7 +295,7 @@ const Contractor = mongoose.model('Contractor', contractorSchema);
 const projectSchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
 const Project = mongoose.model('Project', projectSchema);
@@ -303,7 +303,7 @@ const Project = mongoose.model('Project', projectSchema);
 const categorySchema = new mongoose.Schema({
     name: String,
     order: { type: Number, default: 0 },
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
     type: { type: String, enum: ['income', 'expense'] },
     color: String,
