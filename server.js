@@ -130,13 +130,13 @@ const emitToAll = (req, userId, event, data) => {
 };
 
 // 🟢 NEW: Emit to workspace room (all members receive update)
-const emitToWorkspace = (req, workspaceId, event, data) => {
+const emitToWorkspace = (req, workspaceId, event, data, extraMeta = {}) => {
     if (!req.io || !workspaceId) return;
 
     const socketId = req.headers['x-socket-id'];
     const clientInstanceId = req.headers['x-client-instance-id'];
     const payload = (data && typeof data.toJSON === 'function') ? data.toJSON() : data;
-    const meta = buildSocketMeta(req);
+    const meta = { ...buildSocketMeta(req), ...extraMeta };
 
     console.log(`📡 [Socket.io] Emitting '${event}' to workspace:`, {
         workspaceId: String(workspaceId),
@@ -317,6 +317,7 @@ const eventSchema = new mongoose.Schema({
     createdByRole: { type: String, required: false },
     updatedBy: { type: String, required: false },
     updatedByRole: { type: String, required: false },
+    syncVersion: { type: Number, default: 0 },
     date: { type: Date, required: true },
     dateKey: { type: String, required: true, index: true },
     dayOfYear: Number,
@@ -2557,6 +2558,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 
         const newEvent = new Event({
             ...data,
+            syncVersion: 0,
             date,
             dateKey,
             dayOfYear,
@@ -2682,7 +2684,14 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             updatedData.updatedByRole = actorRole;
         }
 
-        const updatedEvent = await Event.findOneAndUpdate({ _id: id, userId: userIdQuery }, updatedData, { new: true });
+        // The server owns the revision. Increment it atomically with the write
+        // so HTTP responses and socket messages have the same ordering key.
+        delete updatedData.syncVersion;
+        const updatedEvent = await Event.findOneAndUpdate(
+            { _id: id, userId: userIdQuery },
+            { $set: updatedData, $inc: { syncVersion: 1 } },
+            { new: true }
+        );
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
         await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
@@ -2693,7 +2702,9 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             reason: 'event_updated'
         });
 
-        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', updatedEvent);
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', updatedEvent, {
+            affectedDateKeys: [...new Set([_getDateKey(previousDate), updatedEvent.dateKey])]
+        });
 
         res.status(200).json(updatedEvent);
     } catch (err) {
@@ -2737,13 +2748,28 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
         // Proceed with regular delete
 
         const affectedDates = [eventToDelete.date];
-        await Event.deleteOne({ _id: id });
+        const deletedOperationIds = [String(eventToDelete._id)];
+        // Legacy transfer chips contain two events. Remove the group in one
+        // request so one successful half cannot leave a chip behind.
+        if (eventToDelete.transferGroupId && req.query?.cascadeTransfer === 'true') {
+            const siblings = await Event.find({ transferGroupId: eventToDelete.transferGroupId, userId: userIdQuery })
+                .select('_id date createdBy').lean();
+            if (req.workspaceRole === 'manager' && siblings.some(row => row.createdBy && String(row.createdBy) !== String(req.user.id))) {
+                return res.status(403).json({ message: 'Managers can only delete their own operations' });
+            }
+            affectedDates.push(...siblings.map(row => row.date).filter(Boolean));
+            deletedOperationIds.push(...siblings.map(row => String(row._id)).filter(siblingId => siblingId !== String(id)));
+            await Event.deleteMany({ transferGroupId: eventToDelete.transferGroupId, userId: userIdQuery });
+        } else {
+            await Event.deleteOne({ _id: id, userId: userIdQuery });
+        }
 
         // Cascade delete split children if parent
         if (eventToDelete.isSplitParent) {
-            const splitChildren = await Event.find({ parentOpId: eventToDelete._id }).select('date').lean();
+            const splitChildren = await Event.find({ parentOpId: eventToDelete._id, userId: userIdQuery }).select('_id date').lean();
             affectedDates.push(...splitChildren.map((row) => row?.date).filter(Boolean));
-            await Event.deleteMany({ parentOpId: eventToDelete._id });
+            deletedOperationIds.push(...splitChildren.map(row => String(row._id)));
+            await Event.deleteMany({ parentOpId: eventToDelete._id, userId: userIdQuery });
         }
 
         triggerContextPacketRebuildByDates({
@@ -2753,7 +2779,10 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
             reason: 'event_deleted'
         });
 
-        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', id);
+        emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', id, {
+            deletedOperationIds,
+            affectedDateKeys: [...new Set(affectedDates.map(date => _getDateKey(new Date(date))))]
+        });
 
         res.status(200).json(eventToDelete);
     } catch (err) { res.status(500).json({ message: err.message }); }
