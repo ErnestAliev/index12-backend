@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const vm = require('node:vm');
+const { withDaySlotLock } = require('../utils/daySlotLock');
 
 // Exercise the actual HTTP handlers with controlled database completion. Loading
 // server.js itself would connect to the configured database and start a listener.
@@ -10,7 +11,7 @@ const source = readFileSync(resolve(__dirname, '../server.js'), 'utf8');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const dateKey = date => new Date(date).toISOString().slice(0, 10);
 
-function loadHandler(method, endMarker, Event) {
+function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
   let handler;
   const emitted = [];
   const rebuilds = [];
@@ -19,6 +20,9 @@ function loadHandler(method, endMarker, Event) {
     app, Event, mongoose: { Types: { ObjectId: class {} } },
     checkWorkspacePermission: () => (_req, _res, next) => next(),
     canEdit: () => {}, canDelete: () => {},
+    isAuthenticated: () => {},
+    console: { log: () => {} },
+    withDaySlotLock,
     getCompositeUserId: async () => 'owner',
     normalizeEventCategoryFields: data => data,
     getCurrentWorkspaceActorRole: () => 'admin',
@@ -28,7 +32,10 @@ function loadHandler(method, endMarker, Event) {
     triggerContextPacketRebuildByDates: payload => rebuilds.push(payload),
     emitToWorkspace: (...args) => emitted.push(args),
   };
-  const start = source.indexOf(`app.${method}('/api/events/:id'`);
+  const helperStart = source.indexOf('const getFirstFreeCellIndex =');
+  const helperEnd = source.indexOf('const findCategoryByName =', helperStart);
+  vm.runInNewContext(source.slice(helperStart, helperEnd) + '\nglobalThis.getFirstFreeCellIndex = getFirstFreeCellIndex;', context);
+  const start = source.indexOf(`app.${method}('${route}'`);
   const end = source.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start);
   vm.runInNewContext(source.slice(start, end), context);
@@ -163,4 +170,101 @@ test('workspace broadcasts preserve anti-echo metadata alongside deleted IDs', (
   assert.equal(broadcast[2].sourceSocketId, 'sender');
   assert.equal(broadcast[2].sourceClientInstanceId, 'client');
   assert.deepEqual(broadcast[2].deletedOperationIds, ['operation', 'child']);
+});
+
+function creationModel() {
+  const rows = [{ _id: 'source', userId: 'owner', dateKey: '2026-10-09', cellIndex: 0 }];
+  let sequence = 0;
+  class Event {
+    constructor(data) { Object.assign(this, data, { _id: `copy-${++sequence}` }); }
+    async save() { await tick(); rows.push(this); }
+    async populate() { return this; }
+    static async find(filter) {
+      return rows.filter(row => row.userId === filter.userId && row.dateKey === filter.dateKey);
+    }
+    static async findOne(filter) {
+      return rows.find(row => Object.entries(filter).every(([key, value]) => row[key] === value));
+    }
+  }
+  return { Event, rows };
+}
+
+function loadCreation(Event, route = '/api/events') {
+  const end = route === '/api/events' ? '// 🟢 UPDATED: Use canEdit middleware' : "app.post('/api/import/operations'";
+  const result = loadHandler('post', end, Event, route);
+  result.req.body = { date: '2026-10-09T12:00:00Z', dateKey: '2026-10-09', amount: 100, type: 'income', cellIndex: 0 };
+  return result;
+}
+
+test('creating a copy with the source slot reallocates it on the server', async () => {
+  const { Event, rows } = creationModel();
+  const { handler, req, res } = loadCreation(Event);
+  await handler(req, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.cellIndex, 1);
+  assert.deepEqual(rows.map(row => row.cellIndex), [0, 1]);
+});
+
+test('creating an operation preserves a requested slot when it is free', async () => {
+  const { Event } = creationModel();
+  const { handler, req, res } = loadCreation(Event);
+  req.body.cellIndex = 4;
+  await handler(req, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.cellIndex, 4);
+});
+
+test('simultaneous event and transfer copies cannot allocate the same slot', async () => {
+  const { Event, rows } = creationModel();
+  const event = loadCreation(Event);
+  const transfer = loadCreation(Event, '/api/transfers');
+  Object.assign(transfer.req.body, { fromAccountId: 'from', toAccountId: 'to', transferPurpose: 'internal' });
+  await Promise.all([event.handler(event.req, event.res), transfer.handler(transfer.req, transfer.res)]);
+  assert.equal(event.res.statusCode, 201);
+  assert.equal(transfer.res.statusCode, 201);
+  assert.deepEqual(rows.map(row => row.cellIndex), [0, 1, 2]);
+});
+
+test('personal transfer copies also allocate a free slot on the server', async () => {
+  const { Event } = creationModel();
+  const { handler, req, res } = loadCreation(Event, '/api/transfers');
+  Object.assign(req.body, { fromAccountId: 'from', toAccountId: 'to', transferPurpose: 'personal', transferReason: 'personal_use' });
+  await handler(req, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.cellIndex, 1);
+});
+
+test('split children share their parent chip slot instead of creating extra timeline slots', async () => {
+  const { Event, rows } = creationModel();
+  rows[0].isSplitParent = true;
+  const { handler, req, res } = loadCreation(Event);
+  Object.assign(req.body, { parentOpId: 'source', isSplitChild: true, cellIndex: 5 });
+  await handler(req, res);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.cellIndex, 0);
+});
+
+test('a split child cannot borrow a parent slot from another day', async () => {
+  const { Event, rows } = creationModel();
+  rows[0].isSplitParent = true;
+  const { handler, req, res } = loadCreation(Event);
+  Object.assign(req.body, { parentOpId: 'source', isSplitChild: true, dateKey: '2026-10-10' });
+  await handler(req, res);
+  assert.equal(res.statusCode, 400);
+  assert.equal(rows.length, 1);
+});
+
+test('a failed creation releases the day lock so the next copy can be saved', async () => {
+  const { Event, rows } = creationModel();
+  const save = Event.prototype.save;
+  Event.prototype.save = async function () { throw new Error('Save failed'); };
+  const failed = loadCreation(Event);
+  await failed.handler(failed.req, failed.res);
+  assert.equal(failed.res.statusCode, 400);
+  Event.prototype.save = save;
+  const next = loadCreation(Event);
+  await next.handler(next.req, next.res);
+  assert.equal(next.res.statusCode, 201);
+  assert.equal(next.res.body.cellIndex, 1);
+  assert.deepEqual(rows.map(row => row.cellIndex), [0, 1]);
 });

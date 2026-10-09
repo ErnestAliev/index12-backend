@@ -11,6 +11,7 @@ const http = require('http'); // 🟢 Native Node.js HTTP module
 const socketIo = require('socket.io'); // 🟢 Socket.io
 const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
 const crypto = require('crypto'); // 🟢 For invitation tokens
+const { withDaySlotLock } = require('./utils/daySlotLock');
 
 // 🟢 Загрузка .env
 const envPath = path.resolve(__dirname, '.env');
@@ -540,10 +541,11 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     } catch (err) { return null; }
 };
 
-const getFirstFreeCellIndex = async (dateKey, userId) => {
+const getFirstFreeCellIndex = async (dateKey, userId, preferredIndex = 0) => {
     const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
     const used = new Set(events.map(e => e.cellIndex));
-    let idx = 0; while (used.has(idx)) { idx++; }
+    let idx = Number.isInteger(preferredIndex) && preferredIndex >= 0 ? preferredIndex : 0;
+    while (used.has(idx)) { idx++; }
     return idx;
 };
 
@@ -2556,26 +2558,40 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             return res.status(400).json({ message: 'Missing date info' });
         }
 
-        const newEvent = new Event({
-            ...data,
-            syncVersion: 0,
-            date,
-            dateKey,
-            dayOfYear,
-            userId,
-            createdBy: req.user.id, // Track real user who created this operation
-            createdByRole: getCurrentWorkspaceActorRole(req),
-            workspaceId: req.user.currentWorkspaceId // 🟢 NEW
-        });
+        const newEvent = await withDaySlotLock(userId, dateKey, async () => {
+            let cellIndex;
+            if (data.isSplitChild) {
+                const parent = await Event.findOne({ _id: data.parentOpId, userId, dateKey, isSplitParent: true });
+                if (!parent || !Number.isInteger(parent.cellIndex)) {
+                    throw new Error('Не найден родитель разбиения для указанного дня');
+                }
+                cellIndex = parent.cellIndex;
+            } else {
+                cellIndex = await getFirstFreeCellIndex(dateKey, userId, data.cellIndex);
+            }
+            const newEvent = new Event({
+                ...data,
+                syncVersion: 0,
+                cellIndex,
+                date,
+                dateKey,
+                dayOfYear,
+                userId,
+                createdBy: req.user.id, // Track real user who created this operation
+                createdByRole: getCurrentWorkspaceActorRole(req),
+                workspaceId: req.user.currentWorkspaceId // 🟢 NEW
+            });
 
-        console.log('📝 [POST /api/events] Creating operation:', {
-            userId,
-            createdBy: req.user.id,
-            workspaceId: req.user.currentWorkspaceId,
-            userRole: req.user.role
-        });
+            console.log('📝 [POST /api/events] Creating operation:', {
+                userId,
+                createdBy: req.user.id,
+                workspaceId: req.user.currentWorkspaceId,
+                userRole: req.user.role
+            });
 
-        await newEvent.save();
+            await newEvent.save();
+            return newEvent;
+        });
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
@@ -2820,29 +2836,32 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         else { return res.status(400).json({ message: 'Missing date' }); }
 
         if (transferPurpose === 'personal' && transferReason === 'personal_use') {
-            const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
-            const withdrawalEvent = new Event({
-                type: 'transfer', amount: Math.abs(amount),
-                isTransfer: true,
-                isWithdrawal: true,
-                accountId: safeId(fromAccountId),
-                companyId: safeId(fromCompanyId),
-                individualId: safeId(fromIndividualId),
-                fromAccountId: safeId(fromAccountId),
-                toAccountId: safeId(toAccountId),
-                fromCompanyId: safeId(fromCompanyId),
-                toCompanyId: safeId(toCompanyId),
-                fromIndividualId: safeId(fromIndividualId),
-                toIndividualId: safeId(toIndividualId),
-                transferPurpose: 'personal',
-                transferReason: 'personal_use',
-                categoryId: null,
-                destination: 'Личные нужды', description: 'Вывод на личные цели',
-                date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
-                createdBy: req.user.id,
-                createdByRole: getCurrentWorkspaceActorRole(req)
+            const withdrawalEvent = await withDaySlotLock(userId, finalDateKey, async () => {
+                const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex);
+                const withdrawalEvent = new Event({
+                    type: 'transfer', amount: Math.abs(amount),
+                    isTransfer: true,
+                    isWithdrawal: true,
+                    accountId: safeId(fromAccountId),
+                    companyId: safeId(fromCompanyId),
+                    individualId: safeId(fromIndividualId),
+                    fromAccountId: safeId(fromAccountId),
+                    toAccountId: safeId(toAccountId),
+                    fromCompanyId: safeId(fromCompanyId),
+                    toCompanyId: safeId(toCompanyId),
+                    fromIndividualId: safeId(fromIndividualId),
+                    toIndividualId: safeId(toIndividualId),
+                    transferPurpose: 'personal',
+                    transferReason: 'personal_use',
+                    categoryId: null,
+                    destination: 'Личные нужды', description: 'Вывод на личные цели',
+                    date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
+                    createdBy: req.user.id,
+                    createdByRole: getCurrentWorkspaceActorRole(req)
+                });
+                await withdrawalEvent.save();
+                return withdrawalEvent;
             });
-            await withdrawalEvent.save();
             await withdrawalEvent.populate([
                 'accountId', 'companyId', 'individualId',
                 'fromAccountId', 'toAccountId',
@@ -2863,7 +2882,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         }
 
         const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId);
+
         let desc = 'Внутренний перевод';
         if (transferPurpose === 'personal') {
             desc = 'Перевод на личную карту (Развитие бизнеса)';
@@ -2871,25 +2890,29 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             desc = fromIndividualId ? 'Вложение средств (Личные -> Бизнес)' : 'Межкомпанийский перевод';
         }
 
-        const transferEvent = new Event({
-            type: 'transfer', amount: Math.abs(amount),
-            fromAccountId: safeId(fromAccountId),
-            toAccountId: safeId(toAccountId),
-            fromCompanyId: safeId(fromCompanyId),
-            toCompanyId: safeId(toCompanyId),
-            fromIndividualId: safeId(fromIndividualId),
-            toIndividualId: safeId(toIndividualId),
-            categoryId: safeId(categoryId),
-            isTransfer: true,
-            transferPurpose: transferPurpose || 'internal',
-            transferReason: transferReason || null,
-            transferGroupId: groupId, description: desc,
-            date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
-            createdBy: req.user.id,
-            createdByRole: getCurrentWorkspaceActorRole(req)
-        });
+        const transferEvent = await withDaySlotLock(userId, finalDateKey, async () => {
+            const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex);
+            const transferEvent = new Event({
+                type: 'transfer', amount: Math.abs(amount),
+                fromAccountId: safeId(fromAccountId),
+                toAccountId: safeId(toAccountId),
+                fromCompanyId: safeId(fromCompanyId),
+                toCompanyId: safeId(toCompanyId),
+                fromIndividualId: safeId(fromIndividualId),
+                toIndividualId: safeId(toIndividualId),
+                categoryId: safeId(categoryId),
+                isTransfer: true,
+                transferPurpose: transferPurpose || 'internal',
+                transferReason: transferReason || null,
+                transferGroupId: groupId, description: desc,
+                date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
+                createdBy: req.user.id,
+                createdByRole: getCurrentWorkspaceActorRole(req)
+            });
 
-        await transferEvent.save();
+            await transferEvent.save();
+            return transferEvent;
+        });
 
         await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
 
