@@ -733,6 +733,8 @@ module.exports = function createDataProvider(deps) {
                 toAccountId: op.toAccountId?._id ? String(op.toAccountId._id) : (op.toAccountId ? String(op.toAccountId) : null),
                 fromAccountName: op.fromAccountId?.name || accNameById.get(String(op.fromAccountId || '')) || null,
                 toAccountName: op.toAccountId?.name || accNameById.get(String(op.toAccountId || '')) || null,
+                projectScope: op.projectScope || 'selected',
+                projectName: op.projectScope === 'all' ? 'Все проекты' : null,
                 projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
                 contractorId: op.contractorId?._id ? String(op.contractorId._id) : (op.contractorId ? String(op.contractorId) : null),
                 subcategoryId: op.subcategoryId?._id ? String(op.subcategoryId._id) : (op.subcategoryId ? String(op.subcategoryId) : null),

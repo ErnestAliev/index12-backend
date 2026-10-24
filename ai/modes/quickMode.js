@@ -675,7 +675,7 @@ function handleProjectsQuery({ dbData, formatTenge, query }) {
 }
 
 function buildProjectReport(project, dbData, formatTenge) {
-    const ops = (dbData.operations || []).filter(op => String(op.projectId || '') === String(project.id || project._id));
+    const ops = (dbData.operations || []).filter(op => op.projectScope !== 'all' && String(op.projectId || '') === String(project.id || project._id));
     const periodStart = dbData.meta?.periodStart || '?';
     const periodEnd = dbData.meta?.periodEnd || '?';
 
@@ -699,6 +699,7 @@ function buildProjectReport(project, dbData, formatTenge) {
     lines.push(`Проект: ${project.name}`);
     lines.push(`Период: ${periodStart} — ${periodEnd}`);
     lines.push('');
+    lines.push('Результат проекта до распределения общих расходов («Все проекты»).');
     lines.push(`Прибыль (факт): ${formatTenge(factNet)} (${factCount} операций)`);
     lines.push(`Прибыль (прогноз): ${formatTenge(forecastNet)} (${forecastCount} операций)`);
 
@@ -714,13 +715,13 @@ function buildAllProjectsReport(projects, dbData, formatTenge) {
     const projectStats = new Map();
 
     ops.forEach(op => {
-        const pid = String(op.projectId || '');
+        const pid = op.projectScope === 'all' ? '__all_projects__' : String(op.projectId || '');
         if (!pid) return;
 
         if (!projectStats.has(pid)) {
             const proj = projects.find(p => String(p.id || p._id) === pid);
             projectStats.set(pid, {
-                name: proj?.name || `Проект ${pid.slice(-4)}`,
+                name: pid === '__all_projects__' ? 'Все проекты (без распределения)' : proj?.name || `Проект ${pid.slice(-4)}`,
                 factIncome: 0,
                 factExpense: 0,
                 forecastIncome: 0,

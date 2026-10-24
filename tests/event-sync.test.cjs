@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const vm = require('node:vm');
+const { normalizeProjectScope, equalProjectShares } = require('../utils/projectScope');
 const { withDaySlotLock } = require('../utils/daySlotLock');
 
 // Exercise the actual HTTP handlers with controlled database completion. Loading
@@ -22,7 +23,8 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
     canEdit: () => {}, canDelete: () => {},
     isAuthenticated: () => {},
     console: { log: () => {} },
-    withDaySlotLock,
+    withDaySlotLock, normalizeProjectScope, equalProjectShares,
+    normalizeOptionalIdArray: values => [...new Set(values.filter(Boolean))],
     getCompositeUserId: async () => 'owner',
     normalizeEventCategoryFields: data => data,
     validateEventSubcategory: async data => data,

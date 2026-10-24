@@ -1,5 +1,6 @@
 // backend/server.js
 const express = require('express');
+const { normalizeProjectScope, equalProjectShares } = require('./utils/projectScope');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const session = require('express-session');
@@ -339,6 +340,7 @@ const eventSchema = new mongoose.Schema({
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
+    projectScope: { type: String, enum: ['selected', 'all'], default: 'selected' },
     isTransfer: { type: Boolean, default: false },
     isWithdrawal: { type: Boolean, default: false },
     isClosed: { type: Boolean, default: false },
@@ -2272,7 +2274,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                     categoryId: 1, subcategoryId: 1, excludeFromTotals: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
                     companyId: 1, fromCompanyId: 1, toCompanyId: 1,
                     individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
-                    contractorId: 1, projectId: 1,
+                    contractorId: 1, projectId: 1, projectScope: 1,
                     absAmount: { $abs: "$amount" },
                     isSystemWithdrawalTransfer: {
                         $and: [
@@ -2352,8 +2354,8 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                         { $group: { _id: "$contractorId", total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
                     ],
                     projects: [
-                        { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, isWorkAct: false, projectId: { $ne: null } } },
-                        { $group: { _id: "$projectId", total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
+                        { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, isWorkAct: false, $or: [{ projectId: { $ne: null } }, { projectScope: 'all' }] } },
+                        { $group: { _id: { $cond: [{ $eq: ['$projectScope', 'all'] }, '__all_projects__', '$projectId'] }, total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
                     ],
                     subcategories: subcategorySnapshotFacet(),
                     categories: [
@@ -2434,6 +2436,8 @@ const mergeLegacyInterCompanyTransfers = (events = []) => {
             toIndividualId: incoming.individualId || incoming.toIndividualId || null,
             categoryId: incoming.categoryId || outgoing.categoryId || null,
             subcategoryId: incoming.subcategoryId || outgoing.subcategoryId || null,
+            projectScope: incoming.projectScope === 'all' || outgoing.projectScope === 'all' ? 'all' : 'selected',
+            projectId: incoming.projectId || outgoing.projectId || null,
             accountId: null,
             companyId: null,
             individualId: null,
@@ -2528,7 +2532,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 
 app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
     try {
-        const data = normalizeEventCategoryFields(req.body);
+        const data = normalizeProjectScope(normalizeEventCategoryFields(req.body));
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
         await validateEventSubcategory(data, null, { Subcategory, userId });
         await ensureManagerCanAccessOperationAccounts(req, data);
@@ -2625,7 +2629,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
         const rawUpdatedData = { ...req.body };
-        const updatedData = normalizeEventCategoryFields(rawUpdatedData);
+        let updatedData = normalizeEventCategoryFields(rawUpdatedData);
         const actorRole = getCurrentWorkspaceActorRole(req);
 
         // 🔥 CRITICAL: Support both ObjectId and String for userId (same as GET endpoint)
@@ -2645,6 +2649,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (!existingEvent) {
             return res.status(404).json({ message: 'Event not found' });
         }
+        updatedData = normalizeProjectScope(updatedData, existingEvent);
         const previousDate = existingEvent.date;
 
         // Check ownership for manager role (req.workspaceRole set by checkWorkspacePermission middleware)
@@ -2676,6 +2681,25 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         else if (updatedData.dateKey) {
             updatedData.date = _parseDateKey(updatedData.dateKey);
             updatedData.dayOfYear = _getDayOfYear(updatedData.date);
+        }
+
+        // Editing a shared payment can restore explicit project allocations.
+        const projectSelectionChanged = Object.prototype.hasOwnProperty.call(updatedData, 'projectId') || Object.prototype.hasOwnProperty.call(updatedData, 'projectIds');
+        const rebuildProjectShares = updatedData.projectScope !== 'all' && !existingEvent.isSplitChild &&
+            (existingEvent.type === 'income' || existingEvent.type === 'expense') &&
+            (projectSelectionChanged || (existingEvent.isSplitParent && Object.prototype.hasOwnProperty.call(updatedData, 'amount')));
+        if (rebuildProjectShares) {
+            const ids = Object.prototype.hasOwnProperty.call(updatedData, 'projectIds')
+                ? normalizeOptionalIdArray(updatedData.projectIds)
+                : existingEvent.isSplitParent && !projectSelectionChanged ? existingEvent.splitMeta.map(share => String(share.projectId)) : [updatedData.projectId].filter(Boolean);
+            if (ids.length > 1) {
+                updatedData.splitMeta = equalProjectShares(ids, updatedData.amount ?? existingEvent.amount);
+                updatedData.projectId = null;
+                updatedData.isSplitParent = true;
+                updatedData.excludeFromTotals = true;
+            } else if (existingEvent.isSplitParent) {
+                Object.assign(updatedData, { projectId: ids[0] || null, splitMeta: [], isSplitParent: false, excludeFromTotals: false });
+            }
         }
 
         const comparableUpdatedData = { ...rawUpdatedData };
@@ -2718,7 +2742,27 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             { new: true }
         );
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
-        if (existingEvent.isSplitParent && Object.prototype.hasOwnProperty.call(updatedData, 'subcategoryId')) {
+        const allocationChanges = { deletedIds: [], operations: [] };
+        if (rebuildProjectShares || (existingEvent.isSplitParent && updatedData.projectScope === 'all')) {
+            const children = await Event.find({ userId: userIdQuery, parentOpId: existingEvent._id, isSplitChild: true }).lean();
+            const shares = updatedEvent.isSplitParent ? updatedEvent.splitMeta : [];
+            for (const share of shares) {
+                const previousChild = children.find(child => String(child.projectId) === String(share.projectId));
+                const childData = { ...updatedEvent.toObject(), projectScope: 'selected', projectId: share.projectId, amount: share.amount, parentOpId: updatedEvent._id, isSplitParent: false, isSplitChild: true, splitMeta: [], excludeFromTotals: false };
+                delete childData._id; delete childData.__v; delete childData.syncVersion;
+                const child = previousChild
+                    ? await Event.findByIdAndUpdate(previousChild._id, { $set: childData, $inc: { syncVersion: 1 } }, { new: true })
+                    : await Event.create(childData);
+                await child.populate('projectId categoryId categoryIds subcategoryId accountId');
+                allocationChanges.operations.push(child);
+                emitToWorkspace(req, req.user.currentWorkspaceId, previousChild ? 'operation_updated' : 'operation_added', child);
+            }
+            const removed = children.filter(child => !shares.some(share => String(share.projectId) === String(child.projectId)));
+            allocationChanges.deletedIds = removed.map(child => String(child._id));
+            if (removed.length) await Event.deleteMany({ userId: userIdQuery, _id: { $in: allocationChanges.deletedIds } });
+            for (const child of removed) emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', String(child._id), { affectedDateKeys: [child.dateKey] });
+        }
+        if (existingEvent.isSplitParent && !rebuildProjectShares && updatedData.projectScope !== 'all' && Object.prototype.hasOwnProperty.call(updatedData, 'subcategoryId')) {
             const classification = { subcategoryId: updatedData.subcategoryId };
             if (Object.prototype.hasOwnProperty.call(updatedData, 'categoryId')) classification.categoryId = updatedData.categoryId;
             if (Object.prototype.hasOwnProperty.call(updatedData, 'categoryIds')) classification.categoryIds = updatedData.categoryIds;
@@ -2739,7 +2783,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             affectedDateKeys: [...new Set([_getDateKey(previousDate), updatedEvent.dateKey])]
         });
 
-        res.status(200).json(updatedEvent);
+        res.status(200).json(allocationChanges.deletedIds.length || allocationChanges.operations.length ? { ...updatedEvent.toObject(), allocationChanges } : updatedEvent);
     } catch (err) {
         const statusCode = err.statusCode || 400;
         res.status(statusCode).json({ message: err.message });
@@ -2837,6 +2881,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
     try {
         const classification = normalizeEventCategoryFields({ categoryId, subcategoryId });
+        const projectData = normalizeProjectScope({ projectScope: req.body.projectScope || 'selected', projectId: req.body.projectId || null });
         await validateEventSubcategory(classification, null, { Subcategory, userId });
         let finalDate, finalDateKey, finalDayOfYear;
         if (date) {
@@ -2874,6 +2919,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                     transferReason: 'personal_use',
                     categoryId: classification.categoryId,
                     subcategoryId: classification.subcategoryId,
+                    ...projectData,
                     destination: 'Личные нужды', description: 'Вывод на личные цели',
                     date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
                     createdBy: req.user.id,
@@ -2886,7 +2932,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 'accountId', 'companyId', 'individualId',
                 'fromAccountId', 'toAccountId',
                 'fromCompanyId', 'toCompanyId',
-                'fromIndividualId', 'toIndividualId', 'categoryId', 'subcategoryId'
+                'fromIndividualId', 'toIndividualId', 'categoryId', 'subcategoryId', 'projectId'
             ]);
 
             triggerContextPacketRebuildByDates({
@@ -2922,6 +2968,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 toIndividualId: safeId(toIndividualId),
                 categoryId: classification.categoryId,
                 subcategoryId: classification.subcategoryId,
+                    ...projectData,
                 isTransfer: true,
                 transferPurpose: transferPurpose || 'internal',
                 transferReason: transferReason || null,
@@ -2935,7 +2982,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             return transferEvent;
         });
 
-        await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId', 'subcategoryId']);
+        await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId', 'subcategoryId', 'projectId']);
 
         triggerContextPacketRebuildByDates({
             userId,
@@ -2976,7 +3023,8 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
                 const sub = await Subcategory.findOneAndUpdate({ userId, parentCategoryId: categoryId, nameKey }, { $setOnInsert: { name, nameKey, userId, parentCategoryId: categoryId, workspaceId: req.user.currentWorkspaceId || null } }, { upsert: true, new: true, runValidators: true });
                 subcategoryId = sub._id;
             }
-            const projectId = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
+            const projectScope = opData.projectScope === 'all' || opData.project === 'Все проекты' ? 'all' : 'selected';
+            const projectId = projectScope === 'all' ? null : await findOrCreateEntity(Project, opData.project, caches.projects, userId);
             const accountId = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
             const companyId = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
             const individualId = await findOrCreateEntity(Individual, opData.individual, caches.individuals, userId);
@@ -2993,6 +3041,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
                 amount: opData.amount,
                 categoryId,
                 subcategoryId,
+                projectScope,
                 projectId,
                 accountId,
                 companyId,

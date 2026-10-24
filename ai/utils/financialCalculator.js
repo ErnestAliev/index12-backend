@@ -190,7 +190,7 @@ function calculateAggregates(rows) {
         detail.total.count++;
 
         // Project aggregation
-        const project = String(row?.project || 'Без проекта').trim();
+        const project = row?.projectScope === 'all' ? 'Все проекты' : String(row?.project || 'Без проекта').trim();
         if (!result.byProject[project]) {
             result.byProject[project] = {
                 name: project,

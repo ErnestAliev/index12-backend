@@ -8,6 +8,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const mongoose = require('mongoose');
 const express = require('express');
+const { normalizeProjectScope, equalProjectShares } = require('../../utils/projectScope');
 const { withDaySlotLock } = require('../../utils/daySlotLock');
 const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('../../utils/subcategories');
 
@@ -35,7 +36,7 @@ async function startFixture() {
     app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || userId, workspaceRole: 'admin', role: 'admin' }; req.workspaceRole = 'admin'; next(); });
     const emitted = [];
     const context = { app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
-      createSubcategoryModel, validateEventSubcategory, subcategorySnapshotFacet, withDaySlotLock,
+      createSubcategoryModel, validateEventSubcategory, subcategorySnapshotFacet, withDaySlotLock, normalizeProjectScope, equalProjectShares,
       getCompositeUserId: async req => req.user.id,
       getCurrentWorkspaceActorRole: () => 'admin',
       isAuthenticated: (_req, _res, next) => next(),
