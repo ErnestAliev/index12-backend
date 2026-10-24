@@ -46,6 +46,12 @@ function registerMcpImportRoutes(app, deps, context) {
     const labels = { contractor: 'контрагента', category: 'категорию', subcategory: 'подкатегорию' };
     const requests = () => mongoose.connection.db.collection('mcpImportRequests');
     const reservations = () => mongoose.connection.db.collection('mcpEntityReservations');
+    let indexReady;
+    async function ensureIndexes() {
+        // Created only after approval. Distinct request keys cannot import one file twice.
+        if (!indexReady) indexReady = requests().createIndex({ workspaceId: 1, documentFingerprint: 1 }, { unique: true, partialFilterExpression: { documentFingerprint: { $type: 'string' } }, name: 'one_document_per_workspace' }).catch(error => { indexReady = null; throw error; });
+        await indexReady;
+    }
     const scope = req => req.mcpContext.scope;
     const writer = req => ['admin','manager'].includes(req.workspaceRole);
     function requirePermissions(req, input) {
@@ -142,15 +148,16 @@ function registerMcpImportRoutes(app, deps, context) {
         return payload;
     }
     function requestKey(req, input) {
-        return digest(canonical({ workspaceId: String(req.user.currentWorkspaceId), actorId: input.documentFingerprint ? null : String(req.user.id), key: input.documentFingerprint || input.idempotencyKey }));
+        return digest(canonical({ workspaceId: String(req.user.currentWorkspaceId), actorId: String(req.user.id), key: input.idempotencyKey }));
     }
     async function inspect(req, token) {
         const payload = unpack(req, token);
         requirePermissions(req, payload.input);
         const key = requestKey(req, payload.input);
         const saved = await requests().findOne({ _id: key });
+        if (!saved && payload.input.documentFingerprint && await requests().findOne({ workspaceId: String(req.user.currentWorkspaceId), documentFingerprint: payload.input.documentFingerprint })) fail('DUPLICATE_DOCUMENT', 'documentFingerprint', 'Этот документ уже импортируется или был импортирован. Проверьте ранее созданную запись.', 409);
         const requestHash = digest(canonical(payload.input));
-        if (saved && (saved.requestHash !== requestHash || saved.actorId !== String(req.user.id))) fail(payload.input.documentFingerprint ? 'DUPLICATE_DOCUMENT' : 'IDEMPOTENCY_CONFLICT', 'idempotencyKey', 'Этот ключ или документ уже использован для другого плана. Проверьте ранее созданную запись.', 409);
+        if (saved && (saved.requestHash !== requestHash || saved.actorId !== String(req.user.id))) fail('IDEMPOTENCY_CONFLICT', 'idempotencyKey', 'Этот ключ или документ уже использован для другого плана. Проверьте ранее созданную запись.', 409);
         if (saved?.result) return { payload, key, requestHash, saved, completed: true };
         if (payload.expiresAt <= Date.now() && !saved?.approvedAt) fail('PLAN_EXPIRED', 'planToken', 'Время согласования истекло. Подготовьте свежий план.', 409);
         return { payload, key, requestHash, saved, completed: false };
@@ -208,10 +215,17 @@ function registerMcpImportRoutes(app, deps, context) {
             if (fresh.id !== old.id || !sameEntity(fresh, old)) fail('PLAN_STALE', old.kind, 'Запись изменилась после подготовки плана. Согласуйте новый план.', 409);
         }
         if (!state.saved?.approvedAt && canonical(refreshed.relatedNames) !== canonical(state.payload.prepared.relatedNames)) fail('PLAN_STALE', 'planToken', 'Названия связанных записей изменились после подготовки плана. Согласуйте новый план.', 409);
+        await ensureIndexes();
         const attempt = crypto.randomUUID();
         if (!state.saved) {
             try { await requests().insertOne({ _id: state.key, requestHash: state.requestHash, actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), approvedAt: new Date(), summary: state.payload.prepared.summary, source: 'mcp', documentFingerprint: state.payload.input.documentFingerprint || null, steps: {}, state: 'running', attempt, leaseUntil: new Date(Date.now()+120000) }); }
-            catch (error) { if (error.code === 11000) fail('IMPORT_IN_PROGRESS', 'planToken', 'Этот план уже выполняется. Повторите тот же запрос после завершения.', 409); throw error; }
+            catch (error) {
+                if (error.code === 11000) {
+                    if (state.payload.input.documentFingerprint && await requests().findOne({ _id: { $ne: state.key }, workspaceId: String(req.user.currentWorkspaceId), documentFingerprint: state.payload.input.documentFingerprint })) fail('DUPLICATE_DOCUMENT', 'documentFingerprint', 'Этот документ уже импортируется или был импортирован. Проверьте ранее созданную запись.', 409);
+                    fail('IMPORT_IN_PROGRESS', 'planToken', 'Этот план уже выполняется. Повторите тот же запрос после завершения.', 409);
+                }
+                throw error;
+            }
         } else {
             const claim = await requests().updateOne({ _id: state.key, $or: [{ state: 'failed' }, { leaseUntil: { $lt: new Date() } }] }, { $set: { state: 'running', attempt, leaseUntil: new Date(Date.now()+120000) } });
             if (!claim.modifiedCount) fail('IMPORT_IN_PROGRESS', 'planToken', 'Этот план уже выполняется. Повторите тот же запрос после завершения.', 409);
