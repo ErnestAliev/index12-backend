@@ -13,12 +13,12 @@ async function verifyWrites({ fixture, client, configFile, owner, workspace, oth
     const config = { ownerId:String(owner),workspaceId:String(workspace) };
     await fs.writeFile(configFile,JSON.stringify(config));
     const { stdout } = await promisify(execFile)(process.execPath,[path.resolve(__dirname,'../../mcp/configure.cjs'),'--api-url',fixture.apiUrl.replace(/\/api$/,'')],{env:{...process.env,INDEX12_MCP_CONFIG:configFile,INDEX12_MCP_DB_URL:'mongodb://127.0.0.1:27028/subcategory_test'}});
-    assert.deepEqual(JSON.parse(stdout).scopes,['read','create','update']);
+    assert.deepEqual(JSON.parse(stdout).scopes,['read','create','update','entities:create','imports:execute']);
     const configured = JSON.parse(await fs.readFile(configFile,'utf8')); assert.equal((await fs.stat(configFile)).mode & 0o777,0o600);
     const invoke = async (name,args={}) => client.callTool({name,arguments:args});
     const call = async(name,args={}) => {const r=await invoke(name,args);assert.ok(!r.isError,JSON.stringify(r));return r.structuredContent;};
     const error = async(name,args,code,field) => {const r=await invoke(name,args);assert.equal(r.isError,true,JSON.stringify(r));assert.equal(r.structuredContent.error.code,code,JSON.stringify(r));if(field!==undefined)assert.equal(r.structuredContent.error.field,field);return r;};
-    const status = await call('index12_status');assert.deepEqual(status.capabilities,{read:true,create:true,update:true,delete:false,bankPayments:false});
+    const status = await call('index12_status');assert.deepEqual(status.capabilities,{read:true,create:true,update:true,delete:false,bankPayments:false,createContractors:true,createCategories:true,createSubcategories:true,prepareImport:true,executeImport:true});
     await error('index12_create_operation',{type:'transfer'},'VALIDATION_ERROR');
     await error('index12_update_operation',{id:'broken',expectedVersion:0,changes:{description:'x'}},'VALIDATION_ERROR','id');
     await fs.writeFile(configFile,JSON.stringify({...configured,workspaceId:String(otherWorkspace)}));

@@ -5,6 +5,9 @@ const fail = message => { const error = new Error(message); error.statusCode = 4
 
 function createSubcategoryModel(mongoose) {
     const schema = new mongoose.Schema({
+        createdVia: String,
+        createdBy: String,
+        mcpImportId: String,
         name: { type: String, required: true, trim: true, maxlength: 120 },
         nameKey: { type: String, required: true },
         parentCategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category', required: true, immutable: true },
@@ -40,24 +43,26 @@ async function validateEventSubcategory(data, existing, { Subcategory, userId })
     return data;
 }
 
-function registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }) {
+function registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler = (_kind, handler) => handler }) {
     app.get('/api/subcategories', isAuthenticated, async (req, res) => {
         try { res.json(await Subcategory.find({ userId: await getCompositeUserId(req) }).sort({ order: 1, name: 1 }).lean()); }
         catch (error) { res.status(400).json({ message: error.message }); }
     });
-    app.post('/api/subcategories', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
+    app.post('/api/subcategories', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), captureCreateHandler('subcategories', async (req, res) => {
         try {
             const userId = await getCompositeUserId(req);
             const name = String(req.body.name || '').trim();
             const parentCategoryId = idOf(req.body.parentCategoryId);
             if (!name || name.length > 120) fail('Укажите название подкатегории до 120 символов');
-            if (!parentCategoryId || !await Category.exists({ _id: parentCategoryId, userId })) fail('Категория не найдена');
+            const owned = req.mcpContext?.scope || { userId };
+            if (!parentCategoryId || !await Category.exists({ _id: parentCategoryId, ...owned })) fail('Категория не найдена');
             const nameKey = name.toLocaleLowerCase('ru-RU');
-            const filter = { userId, parentCategoryId, nameKey };
+            const filter = { ...owned, parentCategoryId, nameKey };
             // Concurrent creation of the same name returns the existing entry.
             let item;
             try {
-                item = await Subcategory.findOneAndUpdate(filter, { $setOnInsert: { ...filter, name, workspaceId: req.user.currentWorkspaceId || null } }, { upsert: true, new: true, runValidators: true });
+                const source = req.mcpContext?.importId ? { _id: req.mcpContext.entityId, createdVia: 'mcp', createdBy: req.user.id, mcpImportId: req.mcpContext.importId } : {};
+                item = await Subcategory.findOneAndUpdate(filter, { $setOnInsert: { userId, parentCategoryId, nameKey, name, workspaceId: req.user.currentWorkspaceId || null, ...source } }, { upsert: true, new: true, runValidators: true });
             } catch (error) {
                 if (error.code !== 11000) throw error;
                 item = await Subcategory.findOne(filter);
@@ -65,7 +70,7 @@ function registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompo
             emitEntityEvent(req, userId, 'subcategory_added', item);
             res.status(201).json(item);
         } catch (error) { res.status(400).json({ message: error.message }); }
-    });
+    }));
     app.put('/api/subcategories/:id', isAuthenticated, checkWorkspacePermission(['admin']), async (req, res) => {
         try {
             const userId = await getCompositeUserId(req);

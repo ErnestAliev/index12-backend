@@ -17,6 +17,8 @@ const { workspaceAccess } = require('./utils/operationAccess');
 const { withRelatedOperationGuard } = require('./utils/relatedOperationGuard');
 const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require('./utils/mcpOperations');
 const mcpEventHandlers = {};
+const mcpEntityHandlers = {};
+const captureMcpEntityHandler = (kind, handler) => (mcpEntityHandlers[kind] = handler);
 const captureMcpHandler = (kind, handler) => (mcpEventHandlers[kind] = handler);
 const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('./utils/subcategories');
 
@@ -285,6 +287,9 @@ const individualSchema = new mongoose.Schema({
 const Individual = mongoose.model('Individual', individualSchema);
 
 const contractorSchema = new mongoose.Schema({
+    createdVia: String,
+    createdBy: String,
+    mcpImportId: String,
     name: String,
     order: { type: Number, default: 0 },
     defaultProjectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', default: null },
@@ -309,6 +314,9 @@ const projectSchema = new mongoose.Schema({
 const Project = mongoose.model('Project', projectSchema);
 
 const categorySchema = new mongoose.Schema({
+    createdVia: String,
+    createdBy: String,
+    mcpImportId: String,
     name: String,
     order: { type: Number, default: 0 },
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
@@ -2526,7 +2534,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
         const data = normalizeProjectScope(normalizeEventCategoryFields(req.body));
         delete data.changeHistory; delete data.createdVia; delete data.updatedVia; delete data.mcpRelationLocks;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
-        await validateEventSubcategory(data, null, { Subcategory, userId });
+        await validateEventSubcategory(data, null, { Subcategory, userId: req.mcpContext?.scope?.userId || userId });
         await ensureManagerCanAccessOperationAccounts(req, data);
         let date, dateKey, dayOfYear;
 
@@ -3127,12 +3135,14 @@ const generateCRUD = (model, path, emitEventName = null) => {
         return 0;
     };
 
-    app.post(`/api/${path}`, isAuthenticated, async (req, res) => {
+    app.post(`/api/${path}`, isAuthenticated, captureMcpEntityHandler(path, async (req, res) => {
         try {
             const userId = await getCompositeUserId(req);
             const workspaceId = req.user.currentWorkspaceId || null;
 
             let createData = { ...req.body, userId };
+            delete createData.createdVia; delete createData.createdBy; delete createData.mcpImportId;
+            if (req.mcpContext?.importId) Object.assign(createData, { _id: req.mcpContext.entityId, createdVia: 'mcp', createdBy: req.user.id, mcpImportId: req.mcpContext.importId });
 
             // 🟢 Add workspaceId if schema supports it
             if (model.schema.paths.workspaceId && workspaceId) {
@@ -3210,7 +3220,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
 
             res.status(201).json(savedItem);
         } catch (err) { res.status(400).json({ message: err.message }); }
-    });
+    }));
 };
 
 const generateBatchUpdate = (model, path, emitEventName = null) => {
@@ -3339,8 +3349,8 @@ generateCRUD(Individual, 'individuals');
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
-registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent });
-registerMcpOperationRoutes(app, { mongoose, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, handlers: mcpEventHandlers });
+registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
+registerMcpOperationRoutes(app, { mongoose, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
 
 
 

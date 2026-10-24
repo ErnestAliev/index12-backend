@@ -33,10 +33,10 @@ const { hashToken } = require('../utils/mcpOperations');
         const workspace = await db.collection('workspaces').findOne({ _id: new ObjectId(config.workspaceId), userId: config.ownerId });
         const access = actor && workspace ? workspaceAccess(workspace, actorId) : null;
         if (!access) throw new Error('У пользователя нет доступа к рабочей области.');
-        const scopes = args.includes('--read-only') || access.role === 'analyst' ? ['read'] : ['read','create','update'];
+        const scopes = args.includes('--read-only') || access.role === 'analyst' ? ['read'] : ['read','create','update','entities:create','imports:execute'];
         const token = `idx12_${crypto.randomBytes(32).toString('base64url')}`;
         const expiresAt = new Date(Date.now() + 90 * 86400000);
-        await db.collection('mcpCredentials').insertOne({ _id: hashToken(token), actorId, ownerId: config.ownerId, workspaceId: config.workspaceId, scopes, createdAt: new Date(), expiresAt, revokedAt: null, source: 'local_operator' });
+        await db.collection('mcpCredentials').insertOne({ _id: hashToken(token), actorId, ownerId: config.ownerId, workspaceId: config.workspaceId, scopes, planSigningKey: crypto.randomBytes(32).toString('hex'), createdAt: new Date(), expiresAt, revokedAt: null, source: 'local_operator' });
         const temp = `${file}.tmp`;
         try {
             fs.writeFileSync(temp, JSON.stringify({ ...config, actorId, apiUrl: url.origin, apiToken: token }, null, 2) + '\n', { mode: 0o600 });

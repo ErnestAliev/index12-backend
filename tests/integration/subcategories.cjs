@@ -40,7 +40,9 @@ async function startFixture() {
     app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, workspaceRole: 'admin', role: 'admin' }; req.workspaceRole = 'admin'; next(); });
     const emitted = [];
     const handlers = {};
+    const entityHandlers = {};
     const context = { app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
+      captureMcpEntityHandler: (kind, handler) => (entityHandlers[kind] = handler),
       captureMcpHandler: (kind, handler) => (handlers[kind] = handler), mcpVersionFilter, mcpAuditEntry,
       withRelatedOperationGuard,
       createSubcategoryModel, validateEventSubcategory, subcategorySnapshotFacet, withDaySlotLock, normalizeProjectScope, equalProjectShares,
@@ -83,8 +85,8 @@ async function startFixture() {
     run('const checkWorkspacePermission =', '// GET /api/workspaces', '\nglobalThis.mcpPermissions = checkWorkspacePermission;');
     run('async function canEdit(', '// 🟢 NEW: Get effective userId', '\nglobalThis.mcpCanEdit = canEdit;');
     run('const normalizeEntityId =', '// QUICK-only mode', '\nglobalThis.mcpAccounts = ensureManagerCanAccessOperationAccounts;');
-    registerMcpOperationRoutes(app, { mongoose, ...context.identityModels, ...models, handlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
-    registerSubcategoryRoutes(app, { ...models, getCompositeUserId: context.getCompositeUserId, isAuthenticated: context.isAuthenticated, checkWorkspacePermission: context.checkWorkspacePermission, emitEntityEvent: (...args) => emitted.push(args) });
+    registerMcpOperationRoutes(app, { mongoose, ...context.identityModels, ...models, handlers, entityHandlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
+    registerSubcategoryRoutes(app, { ...models, captureCreateHandler: context.captureMcpEntityHandler, getCompositeUserId: context.getCompositeUserId, isAuthenticated: context.isAuthenticated, checkWorkspacePermission: context.checkWorkspacePermission, emitEntityEvent: (...args) => emitted.push(args) });
     app.get('/api/auth/me', (req, res) => res.json({ _id: req.user.id, id: req.user.id, role: 'admin', workspaceRole: 'admin', createdAt: '2026-01-01' }));
     const entityRegistrations = [['Account', 'accounts'], ['Company', 'companies'], ['Individual', 'individuals'], ['Contractor', 'contractors'], ['Project', 'projects'], ['Category', 'categories']];
     run('const generateCRUD =', 'const generateBatchUpdate =', '\n' + entityRegistrations.map(([model, endpoint]) => `generateCRUD(${model}, '${endpoint}');`).join('\n'));
@@ -98,7 +100,7 @@ async function startFixture() {
       const response = await fetch(`${apiUrl}${endpoint}`, { method, headers: { 'Content-Type': 'application/json', ...(owner ? { 'x-test-owner': owner } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, data: await response.json() };
     }
-    return { close, apiUrl, models, userId, request, emitted, identityModels: context.identityModels, setBrowserActor: id => { browserActor = id; } };
+    return { close, apiUrl, models, entityHandlers, userId, request, emitted, identityModels: context.identityModels, setBrowserActor: id => { browserActor = id; } };
   } catch (error) { await close(); throw error; }
 }
 

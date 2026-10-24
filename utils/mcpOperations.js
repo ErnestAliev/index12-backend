@@ -5,6 +5,7 @@ const { z } = require('zod');
 const { workspaceAccess } = require('./operationAccess');
 const { parseMoney } = require('./operationMoney');
 const { scopeQuery, eventDay } = require('../mcp/finance.cjs');
+const { registerMcpImportRoutes } = require('./mcpImports');
 
 const ID = z.string().regex(/^[a-f\d]{24}$/i);
 const fields = {
@@ -48,7 +49,7 @@ function mcpAuditEntry(req, before, patch, version) {
         const from = auditValue(before?.[key]); const to = auditValue(patch[key]);
         if (from !== to) changes[key] = { before: from, after: to };
     }
-    return { source: 'mcp', action: before ? 'update' : 'create', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version, changes };
+    return { source: 'mcp', ...(req.mcpContext?.importId ? { importId: req.mcpContext.importId, documentFingerprint: req.mcpContext.documentFingerprint || null } : {}), action: before ? 'update' : 'create', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version, changes };
 }
 const serialize = (operation, req, originalRefs = {}) => {
     const raw = operation.toObject ? operation.toObject() : operation;
@@ -154,7 +155,8 @@ function registerMcpOperationRoutes(app, deps) {
     app.get('/api/mcp/status', authenticate, requireScope('read'), wrap(async (req, res) => {
         const { grant, access } = req.mcpContext;
         const writer = access.role === 'admin' || access.role === 'manager' && access.accountIds.length > 0;
-        res.json({ actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: false, bankPayments: false }, updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense'], expiresAt: grant.expiresAt });
+        const importer = ['admin','manager'].includes(access.role) && grant.scopes.includes('read') && grant.scopes.includes('imports:execute') && !!grant.planSigningKey;
+        res.json({ actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: false, bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmation: 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense'], expiresAt: grant.expiresAt });
     }));
     app.get('/api/mcp/operations/:id', authenticate, requireScope('read'), wrap(async (req, res) => {
         const operation = await readOperation(req, req.params.id);
@@ -165,8 +167,8 @@ function registerMcpOperationRoutes(app, deps) {
         await operation.populate(populate.map(spec => ({ ...spec, match: req.mcpContext.scope })));
         res.json({ ...serialize(operation, req, original), editable, editError });
     }));
-    app.post('/api/mcp/operations', authenticate, requireScope('create'), checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
-        const input = createSchema.parse(req.body);
+    async function createOperation(req, rawInput) {
+        const input = createSchema.parse(rawInput);
         const data = await prepare(req, input);
         const { grant } = req.mcpContext;
         const key = hashToken(JSON.stringify([grant.actorId, grant.workspaceId, input.idempotencyKey]));
@@ -177,20 +179,24 @@ function registerMcpOperationRoutes(app, deps) {
         const claim = await requests.updateOne({ _id: key }, { $setOnInsert: { actorId: grant.actorId, workspaceId: grant.workspaceId, requestHash, operationId, createdAt: new Date() } }, { upsert: true });
         const saved = await requests.findOne({ _id: key });
         if (saved.requestHash !== requestHash) fail('IDEMPOTENCY_CONFLICT', 'idempotencyKey', 'Этот ключ уже использован с другими полями.', 409);
-        if (saved.result) return res.json({ ...saved.result, replayed: true });
+        if (saved.result) return { ...saved.result, replayed: true };
         if (!claim.upsertedCount) {
             const existing = await Event.findOne({ _id: saved.operationId, ...req.mcpContext.scope });
             if (!existing) fail('IDEMPOTENCY_IN_PROGRESS', 'idempotencyKey', `Предыдущий запрос ещё выполняется или требует проверки. Не создавайте новый ключ. ID для проверки: ${saved.operationId}.`, 409);
             await existing.populate(populate);
             const result = serialize(existing, req);
             await requests.updateOne({ _id: key }, { $set: { result, completedAt: new Date() } });
-            return res.json({ ...result, replayed: true });
+            return { ...result, replayed: true };
         }
         req.body = data; req.mcpContext.operationId = saved.operationId;
         const operation = await invoke(handlers.create, req);
         const result = serialize(operation, req);
         await requests.updateOne({ _id: key }, { $set: { result, completedAt: new Date() } });
-        res.status(201).json({ ...result, replayed: false });
+        return { ...result, replayed: false };
+    }
+    app.post('/api/mcp/operations', authenticate, requireScope('create'), checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
+        const result = await createOperation(req, req.body);
+        res.status(result.replayed ? 200 : 201).json(result);
     }));
     const bindOperation = async (req, _res, next) => { try { req.mcpOperation = await readOperation(req, req.params.id); next(); } catch (error) { next(error); } };
     app.patch('/api/mcp/operations/:id', authenticate, requireScope('update'), checkWorkspacePermission(['admin','manager']), bindOperation, canEdit, wrap(async (req, res) => {
@@ -204,8 +210,9 @@ function registerMcpOperationRoutes(app, deps) {
         const operation = await invoke(handlers.update, req);
         res.json(serialize(operation, req));
     }));
+    registerMcpImportRoutes(app, deps, { authenticate, requireScope, wrap, fail, createSchema, prepareOperation: prepare, createOperation, invoke });
     app.use('/api/mcp', (error, _req, res, _next) => {
-        const structured = error instanceof OperationError ? { code: error.code, field: error.field, message: error.message } : error instanceof z.ZodError ? validationError(error) : { code: error.statusCode === 403 ? 'FORBIDDEN' : 'INTERNAL_ERROR', field: null, message: error.statusCode === 403 ? 'Нет доступа к выбранному счёту.' : 'Не удалось обработать операцию INDEX12.' };
+        const structured = error instanceof OperationError ? { code: error.code, field: error.field, message: error.message, ...(error.details ? { details: error.details } : {}) } : error instanceof z.ZodError ? validationError(error) : { code: error.statusCode === 403 ? 'FORBIDDEN' : 'INTERNAL_ERROR', field: null, message: error.statusCode === 403 ? 'Нет доступа к выбранному счёту.' : 'Не удалось обработать операцию INDEX12.' };
         res.status(error.statusCode || (error instanceof z.ZodError ? 400 : 500)).json({ error: structured });
     });
 }
