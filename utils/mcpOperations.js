@@ -5,7 +5,7 @@ const { z } = require('zod');
 const { workspaceAccess } = require('./operationAccess');
 const { parseMoney } = require('./operationMoney');
 const { scopeQuery, eventDay } = require('../mcp/finance.cjs');
-const { registerMcpImportRoutes } = require('./mcpImports');
+const { registerMcpImportRoutes, confirmationMode } = require('./mcpImports');
 
 const ID = z.string().regex(/^[a-f\d]{24}$/i);
 const fields = {
@@ -49,7 +49,7 @@ function mcpAuditEntry(req, before, patch, version) {
         const from = auditValue(before?.[key]); const to = auditValue(patch[key]);
         if (from !== to) changes[key] = { before: from, after: to };
     }
-    return { source: 'mcp', ...(req.mcpContext?.importId ? { importId: req.mcpContext.importId, documentFingerprint: req.mcpContext.documentFingerprint || null } : {}), action: before ? 'update' : 'create', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version, changes };
+    return { source: 'mcp', ...(req.mcpContext?.importId ? { importId: req.mcpContext.importId, documentFingerprint: req.mcpContext.documentFingerprint || null, ...(req.mcpContext.importConfirmation ? { confirmation: req.mcpContext.importConfirmation } : {}) } : {}), action: before ? 'update' : 'create', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version, changes };
 }
 const serialize = (operation, req, originalRefs = {}) => {
     const raw = operation.toObject ? operation.toObject() : operation;
@@ -156,7 +156,7 @@ function registerMcpOperationRoutes(app, deps) {
         const { grant, access } = req.mcpContext;
         const writer = access.role === 'admin' || access.role === 'manager' && access.accountIds.length > 0;
         const importer = ['admin','manager'].includes(access.role) && grant.scopes.includes('read') && grant.scopes.includes('imports:execute') && !!grant.planSigningKey;
-        res.json({ actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: false, bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmation: 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense'], expiresAt: grant.expiresAt });
+        res.json({ actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: false, bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense'], expiresAt: grant.expiresAt });
     }));
     app.get('/api/mcp/operations/:id', authenticate, requireScope('read'), wrap(async (req, res) => {
         const operation = await readOperation(req, req.params.id);

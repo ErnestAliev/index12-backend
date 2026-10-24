@@ -54,6 +54,7 @@ const {startFixture}=require('./subcategories.cjs');
     const {verifyWrites}=require('./mcp-writes.cjs');
     const verified=await verifyWrites({fixture,client,configFile,owner,workspace,otherWorkspace,foreign,project,account,category,sub});
     const imported=await require('./mcp-imports.cjs').verifyImports({fixture,client,configFile,owner,workspace,otherWorkspace,foreign,project,account,category,sub});
+    await require('./mcp-direct-writes.cjs').verifyDirectWrites({fixture,client,configFile,owner,workspace,project,account});
     if(process.argv.includes('--ui')) {
       fixture.setBrowserActor(String(owner));
       // Clear deliberate corruption/foreign fixtures after their isolation checks.

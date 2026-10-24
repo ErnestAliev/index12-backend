@@ -7,7 +7,11 @@ const { parseMoney } = require('./operationMoney');
 const id = z.string().regex(/^[a-f\d]{24}$/i);
 const name = z.string().trim().min(1).max(120).transform(value => value.normalize('NFKC').replace(/\s+/gu, ' '));
 const tokenSchema = z.object({ planToken: z.string().min(10).max(200000) }).strict();
+const executeSchema = tokenSchema.extend({ requestText: z.string().trim().min(1).max(1000).optional() }).strict();
 const normalizeName = value => String(value || '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('ru-RU').replace(/ё/g, 'е');
+// Direct imports are an explicit operator-granted capability. A tool argument or
+// a document cannot switch a form credential into direct mode.
+const confirmationMode = grant => grant.confirmationMode === 'direct' && grant.scopes?.includes('imports:direct') && grant.scopes.includes('imports:execute') ? 'direct' : 'form';
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a],[b]) => a.localeCompare(b))) : item);
 function makeImportSchema(createSchema) {
@@ -166,12 +170,12 @@ function registerMcpImportRoutes(app, deps, context) {
         const input = schema.parse(req.body);
         const prepared = await plan(req, input);
         const payload = { version: 1, actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), credentialId: req.mcpContext.grant._id, input, prepared, expiresAt: Date.now() + 30 * 60000 };
-        res.json({ workspaceId: payload.workspaceId, planToken: signPlan(payload, req.mcpContext.grant.planSigningKey), expiresAt: new Date(payload.expiresAt).toISOString(), ...prepared, requiresApproval: true, written: false });
+        res.json({ workspaceId: payload.workspaceId, planToken: signPlan(payload, req.mcpContext.grant.planSigningKey), expiresAt: new Date(payload.expiresAt).toISOString(), ...prepared, confirmationMode: confirmationMode(req.mcpContext.grant), requiresApproval: confirmationMode(req.mcpContext.grant) === 'form', written: false });
     }));
     app.post('/api/mcp/imports/check', authenticate, requireScope('read'), wrap(async (req, res) => {
         const { planToken } = tokenSchema.parse(req.body);
         const state = await inspect(req, planToken);
-        res.json({ workspaceId: String(req.user.currentWorkspaceId), summary: state.payload.prepared.summary, approved: !!state.saved?.approvedAt, completed: state.completed, result: state.saved?.result || null });
+        res.json({ workspaceId: String(req.user.currentWorkspaceId), summary: state.payload.prepared.summary, confirmationMode: confirmationMode(req.mcpContext.grant), approved: !!state.saved?.approvedAt || confirmationMode(req.mcpContext.grant) === 'direct', approvalRequired: !state.saved?.approvedAt && confirmationMode(req.mcpContext.grant) === 'form', completed: state.completed, result: state.saved?.result || null });
     }));
     async function ensureEntity(req, item, input, parentId) {
         const model = models[item.kind];
@@ -201,9 +205,10 @@ function registerMcpImportRoutes(app, deps, context) {
         return { ...actual, id: String(saved._id), name: saved.name, created: true };
     }
     app.post('/api/mcp/imports/execute', authenticate, requireScope('imports:execute'), deps.checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
-        const { planToken, approval } = tokenSchema.extend({ approval: z.string().regex(/^[a-f\d]{64}$/).optional() }).strict().parse(req.body);
+        const { planToken, approval, requestText } = executeSchema.extend({ approval: z.string().regex(/^[a-f\d]{64}$/).optional() }).strict().parse(req.body);
         const state = await inspect(req, planToken);
         if (state.completed) return res.json({ ...state.saved.result, replayed: true });
+        const mode = confirmationMode(req.mcpContext.grant);
         if (!state.saved?.approvedAt) {
             const expected = approvalProof(req.mcpContext.grant._id, planToken);
             if (!approval || !crypto.timingSafeEqual(Buffer.from(approval), Buffer.from(expected))) fail('APPROVAL_REQUIRED', 'approval', 'План должен быть подтверждён пользователем через MCP. До подтверждения записи не создаются.', 403);
@@ -218,7 +223,7 @@ function registerMcpImportRoutes(app, deps, context) {
         await ensureIndexes();
         const attempt = crypto.randomUUID();
         if (!state.saved) {
-            try { await requests().insertOne({ _id: state.key, requestHash: state.requestHash, actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), approvedAt: new Date(), summary: state.payload.prepared.summary, source: 'mcp', documentFingerprint: state.payload.input.documentFingerprint || null, steps: {}, state: 'running', attempt, leaseUntil: new Date(Date.now()+120000) }); }
+            try { await requests().insertOne({ _id: state.key, requestHash: state.requestHash, actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), approvedAt: new Date(), confirmation: { channel: mode, ...(mode === 'direct' ? { authorization: 'operator_grant' } : {}), ...(requestText ? { requestText } : {}) }, summary: state.payload.prepared.summary, source: 'mcp', documentFingerprint: state.payload.input.documentFingerprint || null, steps: {}, state: 'running', attempt, leaseUntil: new Date(Date.now()+120000) }); }
             catch (error) {
                 if (error.code === 11000) {
                     if (state.payload.input.documentFingerprint && await requests().findOne({ _id: { $ne: state.key }, workspaceId: String(req.user.currentWorkspaceId), documentFingerprint: state.payload.input.documentFingerprint })) fail('DUPLICATE_DOCUMENT', 'documentFingerprint', 'Этот документ уже импортируется или был импортирован. Проверьте ранее созданную запись.', 409);
@@ -233,6 +238,7 @@ function registerMcpImportRoutes(app, deps, context) {
         const steps = { ...(state.saved?.steps || {}) };
         req.mcpContext.importId = state.key;
         req.mcpContext.documentFingerprint = state.payload.input.documentFingerprint || null;
+        req.mcpContext.importConfirmation = state.saved?.confirmation || { channel: mode, ...(mode === 'direct' ? { authorization: 'operator_grant' } : {}), ...(requestText ? { requestText } : {}) };
         try {
             for (const item of refreshed.items) {
                 if (steps[item.kind]) {
@@ -263,4 +269,4 @@ function registerMcpImportRoutes(app, deps, context) {
         }
     }));
 }
-module.exports = { makeImportSchema, tokenSchema, normalizeName, canonical, signPlan, unpackPlan, approvalProof, registerMcpImportRoutes };
+module.exports = { makeImportSchema, tokenSchema, executeSchema, confirmationMode, normalizeName, canonical, signPlan, unpackPlan, approvalProof, registerMcpImportRoutes };

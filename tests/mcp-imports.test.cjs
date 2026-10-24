@@ -23,3 +23,15 @@ test('Import input is bounded, strict and accepts only existing operation fields
   assert.equal(schema.parse({idempotencyKey:'invoice-123',category:{name:'  Коммуналка  ',type:'expense'}}).category.name,'Коммуналка');
   for(const input of [{idempotencyKey:'invoice-123'},{idempotencyKey:'invoice-123',contractor:{name:' ' }},{idempotencyKey:'invoice-123',category:{name:'Свет'},approved:true},{idempotencyKey:'invoice-123',operation:{type:'transfer',amount:'1',date:'2026-10-24',accountId:'a'.repeat(24)}}])assert.equal(schema.safeParse(input).success,false);
 });
+
+test('Direct mode is operator-granted and cannot be enabled by tool arguments',()=>{
+  const {confirmationMode,executeSchema}=require('../utils/mcpImports');
+  assert.equal(confirmationMode({scopes:['imports:execute']}),'form');
+  assert.equal(confirmationMode({confirmationMode:'direct',scopes:['imports:execute']}),'form');
+  assert.equal(confirmationMode({scopes:['imports:execute','imports:direct']}),'form');
+  assert.equal(confirmationMode({confirmationMode:'direct',scopes:['imports:direct']}),'form');
+  assert.equal(confirmationMode({confirmationMode:'direct',scopes:['imports:execute','imports:direct']}),'direct');
+  assert.equal(executeSchema.safeParse({planToken:'x'.repeat(20)}).success,true);
+  assert.equal(executeSchema.safeParse({planToken:'x'.repeat(20),requestText:'Создай расход на электроэнергию'}).success,true);
+  for(const input of [{approved:true},{confirmationMode:'direct'},{requestText:''}])assert.equal(executeSchema.safeParse({planToken:'x'.repeat(20),...input}).success,false);
+});
