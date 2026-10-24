@@ -12,6 +12,7 @@ const socketIo = require('socket.io'); // 🟢 Socket.io
 const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
 const crypto = require('crypto'); // 🟢 For invitation tokens
 const { withDaySlotLock } = require('./utils/daySlotLock');
+const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('./utils/subcategories');
 
 // 🟢 Загрузка .env
 const envPath = path.resolve(__dirname, '.env');
@@ -311,6 +312,7 @@ const categorySchema = new mongoose.Schema({
     icon: String
 });
 const Category = mongoose.model('Category', categorySchema);
+const Subcategory = createSubcategoryModel(mongoose);
 
 const eventSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and String
@@ -328,6 +330,7 @@ const eventSchema = new mongoose.Schema({
     description: String,
 
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
+    subcategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
 
     accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
 
@@ -366,6 +369,7 @@ const eventSchema = new mongoose.Schema({
 eventSchema.index({ userId: 1, date: 1 });
 // 🚀 PERFORMANCE: Compound index for dateKey queries (critical for /api/events?dateKey=...)
 eventSchema.index({ userId: 1, dateKey: 1 });
+eventSchema.index({ userId: 1, subcategoryId: 1, date: 1 });
 
 const Event = mongoose.model('Event', eventSchema);
 
@@ -2207,7 +2211,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // =================================================================
 app.use('/api/ai', createAiRouter({
     mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category, ChatHistory },
+    models: { Event, Account, Company, Contractor, Individual, Project, Category, Subcategory, ChatHistory },
     FRONTEND_URL,
     isAuthenticated,
     getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation
@@ -2265,7 +2269,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                 $project: {
                     type: 1, amount: 1, isTransfer: 1,
                     transferPurpose: 1, transferReason: 1,
-                    categoryId: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
+                    categoryId: 1, subcategoryId: 1, excludeFromTotals: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
                     companyId: 1, fromCompanyId: 1, toCompanyId: 1,
                     individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
                     contractorId: 1, projectId: 1,
@@ -2351,6 +2355,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                         { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, isWorkAct: false, projectId: { $ne: null } } },
                         { $group: { _id: "$projectId", total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
                     ],
+                    subcategories: subcategorySnapshotFacet(),
                     categories: [
                         { $match: { isTransfer: { $ne: true }, type: { $ne: 'transfer' }, isWriteOff: false, categoryId: { $ne: null } } },
                         { $group: { _id: "$categoryId", income: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", 0] } }, expense: { $sum: { $cond: [{ $eq: ["$type", "expense"] }, "$absAmount", 0] } }, total: { $sum: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } } } }
@@ -2360,7 +2365,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         ]);
 
         const results = aggregationResult[0];
-        const accountBalances = {}; const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {};
+        const accountBalances = {}; const companyBalances = {}; const individualBalances = {}; const contractorBalances = {}; const projectBalances = {}; const categoryTotals = {}; const subcategoryTotals = {};
 
         results.accounts.forEach(item => { const id = item._id.toString(); if (accountBalances[id] === undefined) accountBalances[id] = 0; accountBalances[id] += item.total; });
         results.companies.forEach(item => companyBalances[item._id.toString()] = item.total);
@@ -2369,7 +2374,8 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         results.projects.forEach(item => projectBalances[item._id.toString()] = item.total);
         results.categories.forEach(item => { categoryTotals[item._id.toString()] = { income: item.income, expense: item.expense, total: item.total }; });
 
-        res.json({ timestamp: now, totalBalance: 0, accountBalances, companyBalances, individualBalances, contractorBalances, projectBalances, categoryTotals });
+        (results.subcategories || []).forEach(item => { subcategoryTotals[String(item._id)] = { income: item.income, expense: item.expense, transfers: item.transfers, total: item.total }; });
+        res.json({ timestamp: now, subcategoryTotals, totalBalance: 0, accountBalances, companyBalances, individualBalances, contractorBalances, projectBalances, categoryTotals });
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
@@ -2427,6 +2433,7 @@ const mergeLegacyInterCompanyTransfers = (events = []) => {
             fromIndividualId: outgoing.individualId || outgoing.fromIndividualId || null,
             toIndividualId: incoming.individualId || incoming.toIndividualId || null,
             categoryId: incoming.categoryId || outgoing.categoryId || null,
+            subcategoryId: incoming.subcategoryId || outgoing.subcategoryId || null,
             accountId: null,
             companyId: null,
             individualId: null,
@@ -2466,7 +2473,7 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
         const events = await Event.find({ userId: userId })
             .lean()
             .sort({ date: 1 })
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId categoryIds subcategoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
         res.json(mergeLegacyInterCompanyTransfers(events));
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -2512,7 +2519,7 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
         const events = await Event.find(query)
             .lean()
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
+            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId categoryIds subcategoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
 
         res.json(events);
@@ -2523,6 +2530,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
     try {
         const data = normalizeEventCategoryFields(req.body);
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
+        await validateEventSubcategory(data, null, { Subcategory, userId });
         await ensureManagerCanAccessOperationAccounts(req, data);
         let date, dateKey, dayOfYear;
 
@@ -2593,7 +2601,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             return newEvent;
         });
 
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         triggerContextPacketRebuildByDates({
             userId,
@@ -2649,6 +2657,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         }
         // Admin can edit ANY operation (no ownership check)
 
+        await validateEventSubcategory(updatedData, existingEvent, { Subcategory, userId: userIdQuery });
         await ensureManagerCanAccessOperationAccounts(req, updatedData, existingEvent);
 
 
@@ -2709,7 +2718,15 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             { new: true }
         );
         if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
-        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        if (existingEvent.isSplitParent && Object.prototype.hasOwnProperty.call(updatedData, 'subcategoryId')) {
+            const classification = { subcategoryId: updatedData.subcategoryId };
+            if (Object.prototype.hasOwnProperty.call(updatedData, 'categoryId')) classification.categoryId = updatedData.categoryId;
+            if (Object.prototype.hasOwnProperty.call(updatedData, 'categoryIds')) classification.categoryIds = updatedData.categoryIds;
+            await Event.updateMany({ userId: userIdQuery, parentOpId: existingEvent._id, isSplitChild: true }, { $set: classification, $inc: { syncVersion: 1 } });
+            const children = await Event.find({ userId: userIdQuery, parentOpId: existingEvent._id, isSplitChild: true }).populate('categoryId categoryIds subcategoryId');
+            for (const child of children) emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', child);
+        }
+        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         triggerContextPacketRebuildByDates({
             userId,
@@ -2810,7 +2827,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         fromAccountId, toAccountId,
         fromCompanyId, toCompanyId,
         fromIndividualId, toIndividualId,
-        categoryId,
+        categoryId, subcategoryId,
         transferPurpose, transferReason
     } = req.body;
 
@@ -2819,6 +2836,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
     const safeId = (val) => (val && val !== 'null' && val !== 'undefined' && val !== '') ? val : null;
 
     try {
+        const classification = normalizeEventCategoryFields({ categoryId, subcategoryId });
+        await validateEventSubcategory(classification, null, { Subcategory, userId });
         let finalDate, finalDateKey, finalDayOfYear;
         if (date) {
             finalDate = new Date(date);
@@ -2853,7 +2872,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                     toIndividualId: safeId(toIndividualId),
                     transferPurpose: 'personal',
                     transferReason: 'personal_use',
-                    categoryId: null,
+                    categoryId: classification.categoryId,
+                    subcategoryId: classification.subcategoryId,
                     destination: 'Личные нужды', description: 'Вывод на личные цели',
                     date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
                     createdBy: req.user.id,
@@ -2866,7 +2886,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 'accountId', 'companyId', 'individualId',
                 'fromAccountId', 'toAccountId',
                 'fromCompanyId', 'toCompanyId',
-                'fromIndividualId', 'toIndividualId'
+                'fromIndividualId', 'toIndividualId', 'categoryId', 'subcategoryId'
             ]);
 
             triggerContextPacketRebuildByDates({
@@ -2900,7 +2920,8 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                 toCompanyId: safeId(toCompanyId),
                 fromIndividualId: safeId(fromIndividualId),
                 toIndividualId: safeId(toIndividualId),
-                categoryId: safeId(categoryId),
+                categoryId: classification.categoryId,
+                subcategoryId: classification.subcategoryId,
                 isTransfer: true,
                 transferPurpose: transferPurpose || 'internal',
                 transferReason: transferReason || null,
@@ -2914,7 +2935,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
             return transferEvent;
         });
 
-        await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId']);
+        await transferEvent.populate(['fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId', 'categoryId', 'subcategoryId']);
 
         triggerContextPacketRebuildByDates({
             userId,
@@ -2948,6 +2969,13 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
             const dayOfYear = _getDayOfYear(date); const dateKey = _getDateKey(date);
 
             const categoryId = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
+            let subcategoryId = null;
+            if (categoryId && opData.subcategory) {
+                const name = String(opData.subcategory).trim();
+                const nameKey = name.toLocaleLowerCase('ru-RU');
+                const sub = await Subcategory.findOneAndUpdate({ userId, parentCategoryId: categoryId, nameKey }, { $setOnInsert: { name, nameKey, userId, parentCategoryId: categoryId, workspaceId: req.user.currentWorkspaceId || null } }, { upsert: true, new: true, runValidators: true });
+                subcategoryId = sub._id;
+            }
             const projectId = await findOrCreateEntity(Project, opData.project, caches.projects, userId);
             const accountId = await findOrCreateEntity(Account, opData.account, caches.accounts, userId);
             const companyId = await findOrCreateEntity(Company, opData.company, caches.companies, userId);
@@ -2964,6 +2992,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
                 type: opData.type,
                 amount: opData.amount,
                 categoryId,
+                subcategoryId,
                 projectId,
                 accountId,
                 companyId,
@@ -3181,6 +3210,13 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
             const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
             if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
 
+            if (model === Category) {
+                const children = await Subcategory.find({ userId, parentCategoryId: id }).select('_id').lean();
+                const childIds = children.map(item => item._id);
+                await Event.updateMany({ userId, subcategoryId: { $in: childIds } }, { $set: { subcategoryId: null }, $inc: { syncVersion: 1 } });
+                await Subcategory.deleteMany({ userId, parentCategoryId: id });
+                for (const childId of childIds) emitEntityEvent(req, userId, 'subcategory_deleted', String(childId));
+            }
             let deletedOpsCount = 0;
             let opsDeleted = false;
             const affectedDates = [];
@@ -3250,6 +3286,7 @@ generateCRUD(Individual, 'individuals');
 generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
+registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent });
 
 
 

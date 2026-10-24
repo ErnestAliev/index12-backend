@@ -111,6 +111,7 @@ function calculateAggregates(rows) {
             count: 0
         },
         byCategory: {},
+        bySubcategory: {},
         byProject: {},
         evidenceRows: []
     };
@@ -171,6 +172,23 @@ function calculateAggregates(rows) {
             result.byCategory[category].total.transfer += amountAbs;
         }
 
+        // Subcategory detail uses the same payment and fact/plan bucket.
+        const subcategory = String(row?.subcategory || row?.subcategoryName || 'Без подкатегории').trim();
+        const detailKey = `${category} → ${subcategory}`;
+        if (!result.bySubcategory[detailKey]) {
+            result.bySubcategory[detailKey] = {
+                name: detailKey, category, subcategory,
+                fact: { income: 0, expense: 0, net: 0, transfer: 0, count: 0 },
+                plan: { income: 0, expense: 0, net: 0, transfer: 0, count: 0 },
+                total: { income: 0, expense: 0, net: 0, transfer: 0, count: 0 }
+            };
+        }
+        const detail = result.bySubcategory[detailKey];
+        detail[status][kind] += amountAbs;
+        detail[status].count++;
+        detail.total[kind] += amountAbs;
+        detail.total.count++;
+
         // Project aggregation
         const project = String(row?.project || 'Без проекта').trim();
         if (!result.byProject[project]) {
@@ -204,6 +222,7 @@ function calculateAggregates(rows) {
                 status: row?.status || row?.statusCode || '?',
                 amount: row?.amount,
                 category,
+                subcategory,
                 project,
                 description: row?.description || row?.comment || ''
             });
@@ -221,6 +240,10 @@ function calculateAggregates(rows) {
         cat.total.net = cat.total.income - cat.total.expense;
     });
 
+    Object.values(result.bySubcategory).forEach(detail => {
+        for (const status of ['fact', 'plan', 'total']) detail[status].net = detail[status].income - detail[status].expense;
+    });
+
     Object.values(result.byProject).forEach((proj) => {
         proj.fact.net = proj.fact.income - proj.fact.expense;
         proj.plan.net = proj.plan.income - proj.plan.expense;
@@ -233,14 +256,14 @@ function calculateAggregates(rows) {
 /**
  * Get top movers by metric
  * @param {Object} metrics - Computed metrics
- * @param {string} groupBy - "category" or "project"
+ * @param {string} groupBy - "category", "subcategory" or "project"
  * @param {string} metric - "income", "expense", "net", "transfer"
  * @param {string} status - "fact", "plan", "total"
  * @param {number} limit - Max items to return
  * @returns {Array} Top movers sorted by absolute value
  */
 function getTopMovers(metrics, groupBy = 'category', metric = 'net', status = 'total', limit = 10) {
-    const source = groupBy === 'project' ? metrics.byProject : metrics.byCategory;
+    const source = groupBy === 'project' ? metrics.byProject : groupBy === 'subcategory' ? metrics.bySubcategory : metrics.byCategory;
 
     return Object.values(source)
         .map((item) => ({

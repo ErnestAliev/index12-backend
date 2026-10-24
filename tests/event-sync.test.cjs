@@ -25,6 +25,8 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
     withDaySlotLock,
     getCompositeUserId: async () => 'owner',
     normalizeEventCategoryFields: data => data,
+    validateEventSubcategory: async data => data,
+    Subcategory: {},
     getCurrentWorkspaceActorRole: () => 'admin',
     ensureManagerCanAccessOperationAccounts: async () => {},
     hasMeaningfulEventChanges: () => true,

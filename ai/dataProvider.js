@@ -8,7 +8,7 @@
  * @returns {Object} Data provider with query methods
  */
 module.exports = function createDataProvider(deps) {
-    const { mongoose, Account, Company, Project, Category, Contractor, Individual, Event } = deps;
+    const { mongoose, Account, Company, Project, Category, Subcategory, Contractor, Individual, Event } = deps;
     const _isDebug = () => {
         const v = String(process.env.AI_DEBUG || '').toLowerCase();
         return v === '1' || v === 'true';
@@ -599,6 +599,8 @@ module.exports = function createDataProvider(deps) {
         // Get accounts for intermediary check (use same userId variants) and names for transfers
         const accountsQuery = _withWorkspaceScope({ userId: _uQuery(userId) }, workspaceId);
         const accounts = await Account.find(accountsQuery).lean();
+        const subcategories = Subcategory ? await Subcategory.find(accountsQuery).lean() : [];
+        const subcategoryById = new Map(subcategories.map(item => [String(item._id), item]));
 
         const accNameById = new Map(accounts.map(a => [String(a._id), a.name || 'Счет']));
         const accountIndividualIds = new Set(
@@ -733,6 +735,8 @@ module.exports = function createDataProvider(deps) {
                 toAccountName: op.toAccountId?.name || accNameById.get(String(op.toAccountId || '')) || null,
                 projectId: op.projectId?._id ? String(op.projectId._id) : (op.projectId ? String(op.projectId) : null),
                 contractorId: op.contractorId?._id ? String(op.contractorId._id) : (op.contractorId ? String(op.contractorId) : null),
+                subcategoryId: op.subcategoryId?._id ? String(op.subcategoryId._id) : (op.subcategoryId ? String(op.subcategoryId) : null),
+                subcategoryName: op.subcategoryId?.name || subcategoryById.get(String(op.subcategoryId?._id || op.subcategoryId || ''))?.name || null,
                 categoryId: op.categoryId?._id ? String(op.categoryId._id) : (op.categoryId ? String(op.categoryId) : null),
                 companyId: op.companyId?._id ? String(op.companyId._id) : (op.companyId ? String(op.companyId) : null),
                 fromCompanyId: op.fromCompanyId?._id ? String(op.fromCompanyId._id) : (op.fromCompanyId ? String(op.fromCompanyId) : null),

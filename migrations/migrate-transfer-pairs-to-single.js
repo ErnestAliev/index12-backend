@@ -104,6 +104,7 @@ const buildTransferUpdate = ({ incoming, outgoing, modern }) => {
     fromIndividualId: sourceOutgoing?.individualId || sourceOutgoing?.fromIndividualId || modern?.fromIndividualId || null,
     toIndividualId: sourceIncoming?.individualId || sourceIncoming?.toIndividualId || modern?.toIndividualId || null,
 
+    subcategoryId: modern?.subcategoryId || sourceIncoming?.subcategoryId || sourceOutgoing?.subcategoryId || null,
     categoryId: modern?.categoryId || sourceIncoming?.categoryId || sourceOutgoing?.categoryId || null,
 
     accountId: null,
@@ -253,6 +254,7 @@ const run = async () => {
       'fromIndividualId',
       'toIndividualId',
       'categoryId',
+      'subcategoryId',
       'description',
       'cellIndex',
       'transferPurpose',

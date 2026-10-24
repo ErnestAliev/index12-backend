@@ -17,7 +17,7 @@ module.exports = function createAiRouter(deps) {
     getCompositeUserId,
   } = deps;
 
-  const { Event, Account, Company, Contractor, Individual, Project, Category, ChatHistory } = models;
+  const { Event, Account, Company, Contractor, Individual, Project, Category, Subcategory, ChatHistory } = models;
 
   const createDataProvider = require('./dataProvider');
   const dataProvider = createDataProvider({
@@ -28,7 +28,7 @@ module.exports = function createAiRouter(deps) {
     Contractor,
     Individual,
     Project,
-    Category
+    Category, Subcategory
   });
 
   const quickMode = require('./modes/quickMode');
@@ -653,7 +653,8 @@ module.exports = function createAiRouter(deps) {
           accName: accountName,
           contName: counterparty,
           projName: projectName,
-          catName: categoryName || 'Без категории'
+          catName: op?.subcategoryName ? `${categoryName || 'Без категории'} → ${op.subcategoryName}` : (categoryName || 'Без категории'),
+          subcategoryName: op?.subcategoryName || null
         });
         day.totals.income += amountAbs;
         return;
@@ -669,7 +670,8 @@ module.exports = function createAiRouter(deps) {
           accName: accountName,
           contName: counterparty,
           projName: projectName,
-          catName: categoryName || 'Без категории'
+          catName: op?.subcategoryName ? `${categoryName || 'Без категории'} → ${op.subcategoryName}` : (categoryName || 'Без категории'),
+          subcategoryName: op?.subcategoryName || null
         });
         day.totals.expense += amountAbs;
         return;
@@ -694,7 +696,8 @@ module.exports = function createAiRouter(deps) {
         fromAccName,
         toAccName,
         isOutOfSystemTransfer: isOwnerDrawTransfer,
-        catName: transferCategory
+        catName: op?.subcategoryName ? `${transferCategory} → ${op.subcategoryName}` : transferCategory,
+        subcategoryName: op?.subcategoryName || null
       });
 
       if (isOwnerDrawTransfer) {
