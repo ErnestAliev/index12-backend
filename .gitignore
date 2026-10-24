@@ -34,3 +34,6 @@ jspm_packages/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Local MCP workspace binding
+.mcp.local.json
