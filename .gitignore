@@ -36,4 +36,4 @@ jspm_packages/
 Thumbs.db
 
 # Local MCP workspace binding
-.mcp.local.json
+.mcp.local.json*

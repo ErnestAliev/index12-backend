@@ -5,6 +5,7 @@ const { resolve } = require('node:path');
 const vm = require('node:vm');
 const { normalizeProjectScope, equalProjectShares } = require('../utils/projectScope');
 const { withDaySlotLock } = require('../utils/daySlotLock');
+const { withRelatedOperationGuard } = require('../utils/relatedOperationGuard');
 
 // Exercise the actual HTTP handlers with controlled database completion. Loading
 // server.js itself would connect to the configured database and start a listener.
@@ -19,11 +20,13 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
   const app = { [method]: (_path, ...handlers) => { handler = handlers.at(-1); } };
   const context = {
     app, Event, mongoose: { Types: { ObjectId: class {} } },
+    captureMcpHandler: (_kind, handler) => handler,
     checkWorkspacePermission: () => (_req, _res, next) => next(),
     canEdit: () => {}, canDelete: () => {},
     isAuthenticated: () => {},
     console: { log: () => {} },
     withDaySlotLock, normalizeProjectScope, equalProjectShares,
+    withRelatedOperationGuard,
     normalizeOptionalIdArray: values => [...new Set(values.filter(Boolean))],
     getCompositeUserId: async () => 'owner',
     normalizeEventCategoryFields: data => data,

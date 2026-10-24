@@ -13,6 +13,11 @@ const socketIo = require('socket.io'); // 🟢 Socket.io
 const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
 const crypto = require('crypto'); // 🟢 For invitation tokens
 const { withDaySlotLock } = require('./utils/daySlotLock');
+const { workspaceAccess } = require('./utils/operationAccess');
+const { withRelatedOperationGuard } = require('./utils/relatedOperationGuard');
+const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require('./utils/mcpOperations');
+const mcpEventHandlers = {};
+const captureMcpHandler = (kind, handler) => (mcpEventHandlers[kind] = handler);
 const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('./utils/subcategories');
 
 // 🟢 Загрузка .env
@@ -322,6 +327,11 @@ const eventSchema = new mongoose.Schema({
     updatedBy: { type: String, required: false },
     updatedByRole: { type: String, required: false },
     syncVersion: { type: Number, default: 0 },
+    workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
+    createdVia: String,
+    updatedVia: String,
+    changeHistory: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+    mcpRelationLocks: { type: Number, default: 0 },
     date: { type: Date, required: true },
     dateKey: { type: String, required: true, index: true },
     dayOfYear: Number,
@@ -684,6 +694,7 @@ function getEffectiveUserId(req) {
 // - Shared workspace = owner's userId (see owner's data)
 // - New owned workspaces = composite ID (isolated data)
 async function getCompositeUserId(req) {
+    if (req.mcpContext) return getWorkspaceStorageUserId(req.cachedWorkspace);
     const realUserId = getEffectiveUserId(req);
     if (!realUserId) {
         console.log('🔍 [getCompositeUserId] No realUserId found');
@@ -1268,30 +1279,10 @@ const checkWorkspacePermission = (allowedRoles) => {
                 sharedWith: workspace.sharedWith?.map(s => ({ userId: s.userId, role: s.role }))
             });
 
-            // Owner always has full access (effectively 'admin')
-            // Using strict string comparison and ensuring both are strings
-            if (String(workspace.userId) === String(req.user.id)) {
-                console.log('✅ [checkWorkspacePermission] User is OWNER, granting admin access');
-                req.workspaceRole = 'admin'; // Owner is admin
-                return next();
-            }
-
-            // Check if user is in sharedWith
-            const sharedUser = workspace.sharedWith?.find(s => String(s.userId) === String(req.user.id));
-            if (!sharedUser) {
-                console.log('❌ [checkWorkspacePermission] User not in sharedWith list');
-                return res.status(403).json({ message: 'Access denied: not shared with you' });
-            }
-
-            console.log('🔐 [checkWorkspacePermission] User found in sharedWith, role:', sharedUser.role);
-
-            if (!allowedRoles.includes(sharedUser.role)) {
-                console.log('❌ [checkWorkspacePermission] User role not in allowedRoles:', sharedUser.role, 'vs', allowedRoles);
-                return res.status(403).json({ message: `Access denied: role '${sharedUser.role}' required one of [${allowedRoles.join(', ')}]` });
-            }
-
-            console.log('✅ [checkWorkspacePermission] Permission granted, role:', sharedUser.role);
-            req.workspaceRole = sharedUser.role;
+            const access = workspaceAccess(workspace, req.user.id);
+            if (!access || !allowedRoles.includes(access.role)) return res.status(403).json({ message: 'У вас нет прав на это действие в рабочей области' });
+            req.workspaceRole = access.role;
+            req.cachedWorkspace = workspace;
             next();
         } catch (err) {
             console.error('❌ [checkWorkspacePermission] Error:', err);
@@ -2530,9 +2521,10 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
+app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), captureMcpHandler('create', async (req, res) => {
     try {
         const data = normalizeProjectScope(normalizeEventCategoryFields(req.body));
+        delete data.changeHistory; delete data.createdVia; delete data.updatedVia; delete data.mcpRelationLocks;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
         await validateEventSubcategory(data, null, { Subcategory, userId });
         await ensureManagerCanAccessOperationAccounts(req, data);
@@ -2570,7 +2562,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             return res.status(400).json({ message: 'Missing date info' });
         }
 
-        const newEvent = await withDaySlotLock(userId, dateKey, async () => {
+        const newEvent = await withRelatedOperationGuard(Event, userId, data, () => withDaySlotLock(userId, dateKey, async () => {
             let cellIndex;
             if (data.isSplitChild) {
                 const parent = await Event.findOne({ _id: data.parentOpId, userId, dateKey, isSplitParent: true });
@@ -2583,6 +2575,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             }
             const newEvent = new Event({
                 ...data,
+                ...(req.mcpContext ? { _id: req.mcpContext.operationId, createdVia: 'mcp', changeHistory: [mcpAuditEntry(req, null, data, 0)] } : {}),
                 syncVersion: 0,
                 cellIndex,
                 date,
@@ -2603,7 +2596,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 
             await newEvent.save();
             return newEvent;
-        });
+        }));
 
         await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
@@ -2621,10 +2614,10 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
         const statusCode = err.statusCode || 400;
         res.status(statusCode).json({ message: err.message });
     }
-});
+}));
 
 // 🟢 UPDATED: Use canEdit middleware
-app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, async (req, res) => {
+app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, captureMcpHandler('update', async (req, res) => {
     try {
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
@@ -2736,12 +2729,23 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         // The server owns the revision. Increment it atomically with the write
         // so HTTP responses and socket messages have the same ordering key.
         delete updatedData.syncVersion;
-        const updatedEvent = await Event.findOneAndUpdate(
-            { _id: id, userId: userIdQuery },
-            { $set: updatedData, $inc: { syncVersion: 1 } },
-            { new: true }
-        );
-        if (!updatedEvent) { return res.status(404).json({ message: 'Not found' }); }
+        delete updatedData.changeHistory; delete updatedData.createdVia; delete updatedData.updatedVia; delete updatedData.mcpRelationLocks;
+        const versionGuard = req.mcpContext ? mcpVersionFilter(req.mcpContext.expectedVersion) : {};
+        const audit = req.mcpContext ? { $push: { changeHistory: mcpAuditEntry(req, existingEvent, updatedData, req.mcpContext.expectedVersion + 1) } } : {};
+        if (req.mcpContext) updatedData.updatedVia = 'mcp';
+        const persistUpdate = async () => {
+            if (req.mcpContext && updatedData.dateKey && updatedData.dateKey !== existingEvent.dateKey) {
+                updatedData.cellIndex = await getFirstFreeCellIndex(updatedData.dateKey, userId);
+            }
+            return Event.findOneAndUpdate(
+                { _id: id, userId: userIdQuery, ...versionGuard },
+                { $set: updatedData, $inc: { syncVersion: 1 }, ...audit },
+                { new: true }
+            );
+        };
+        const updatedEvent = await withRelatedOperationGuard(Event, userIdQuery, [existingEvent, updatedData], () => req.mcpContext && updatedData.dateKey && updatedData.dateKey !== existingEvent.dateKey
+            ? withDaySlotLock(userId, updatedData.dateKey, persistUpdate) : persistUpdate());
+        if (!updatedEvent) { return res.status(req.mcpContext ? 409 : 404).json({ message: req.mcpContext ? 'Операция изменена. Прочитайте её заново и повторите правку с новой версией.' : 'Not found' }); }
         const allocationChanges = { deletedIds: [], operations: [] };
         if (rebuildProjectShares || (existingEvent.isSplitParent && updatedData.projectScope === 'all')) {
             const children = await Event.find({ userId: userIdQuery, parentOpId: existingEvent._id, isSplitChild: true }).lean();
@@ -2788,7 +2792,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const statusCode = err.statusCode || 400;
         res.status(statusCode).json({ message: err.message });
     }
-});
+}));
 
 // 🟢 UPDATED: Allow managers to delete their own operations
 app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canDelete, async (req, res) => {
@@ -3336,6 +3340,7 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent });
+registerMcpOperationRoutes(app, { mongoose, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, handlers: mcpEventHandlers });
 
 
 

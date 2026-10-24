@@ -1,4 +1,6 @@
 {
   "ownerId": "000000000000000000000001",
-  "workspaceId": "000000000000000000000002"
+  "workspaceId": "000000000000000000000002",
+  "actorId": "000000000000000000000001",
+  "apiUrl": "https://your-index12-backend.example.com"
 }

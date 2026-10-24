@@ -11,6 +11,9 @@ const express = require('express');
 const { normalizeProjectScope, equalProjectShares } = require('../../utils/projectScope');
 const { withDaySlotLock } = require('../../utils/daySlotLock');
 const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('../../utils/subcategories');
+const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require('../../utils/mcpOperations');
+const { workspaceAccess } = require('../../utils/operationAccess');
+const { withRelatedOperationGuard } = require('../../utils/relatedOperationGuard');
 
 async function startFixture() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'index12-subcategories-'));
@@ -33,12 +36,16 @@ async function startFixture() {
     const source = await fs.readFile(path.join(__dirname, '../../server.js'), 'utf8');
     const app = express(); app.use(require('cors')({ origin: true, credentials: true })); app.use(express.json());
     const userId = 'subcategory-test-owner';
-    app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || userId, workspaceRole: 'admin', role: 'admin' }; req.workspaceRole = 'admin'; next(); });
+    let browserActor = userId;
+    app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, workspaceRole: 'admin', role: 'admin' }; req.workspaceRole = 'admin'; next(); });
     const emitted = [];
+    const handlers = {};
     const context = { app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
+      captureMcpHandler: (kind, handler) => (handlers[kind] = handler), mcpVersionFilter, mcpAuditEntry,
+      withRelatedOperationGuard,
       createSubcategoryModel, validateEventSubcategory, subcategorySnapshotFacet, withDaySlotLock, normalizeProjectScope, equalProjectShares,
-      getCompositeUserId: async req => req.user.id,
-      getCurrentWorkspaceActorRole: () => 'admin',
+      getCompositeUserId: async req => req.mcpContext ? (req.cachedWorkspace.isDefault ? String(req.cachedWorkspace.userId) : `${req.cachedWorkspace.userId}_ws_${req.cachedWorkspace._id}`) : req.user.id,
+      getCurrentWorkspaceActorRole: req => req.workspaceRole || 'admin',
       isAuthenticated: (_req, _res, next) => next(),
       checkWorkspacePermission: () => (_req, _res, next) => next(),
       canEdit: (_req, _res, next) => next(), canDelete: (_req, _res, next) => next(),
@@ -68,6 +75,15 @@ async function startFixture() {
     run("app.post('/api/transfers'", "app.post('/api/import/operations'");
     run("app.post('/api/import/operations'", 'const generateCRUD =');
     run("app.get('/api/snapshot'", '// --- EVENTS ROUTES ---');
+    // Reuse the production permission functions and real actor/workspace models for MCP.
+    run('const userSchema =', '// 🟢 NEW: WorkspaceInvite Schema', '\nglobalThis.identityModels = { User, Workspace };');
+    Object.assign(context, context.identityModels);
+    context.workspaceAccess = workspaceAccess;
+    context.getWorkspaceId = async req => req.user.currentWorkspaceId;
+    run('const checkWorkspacePermission =', '// GET /api/workspaces', '\nglobalThis.mcpPermissions = checkWorkspacePermission;');
+    run('async function canEdit(', '// 🟢 NEW: Get effective userId', '\nglobalThis.mcpCanEdit = canEdit;');
+    run('const normalizeEntityId =', '// QUICK-only mode', '\nglobalThis.mcpAccounts = ensureManagerCanAccessOperationAccounts;');
+    registerMcpOperationRoutes(app, { mongoose, ...context.identityModels, ...models, handlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
     registerSubcategoryRoutes(app, { ...models, getCompositeUserId: context.getCompositeUserId, isAuthenticated: context.isAuthenticated, checkWorkspacePermission: context.checkWorkspacePermission, emitEntityEvent: (...args) => emitted.push(args) });
     app.get('/api/auth/me', (req, res) => res.json({ _id: req.user.id, id: req.user.id, role: 'admin', workspaceRole: 'admin', createdAt: '2026-01-01' }));
     const entityRegistrations = [['Account', 'accounts'], ['Company', 'companies'], ['Individual', 'individuals'], ['Contractor', 'contractors'], ['Project', 'projects'], ['Category', 'categories']];
@@ -82,7 +98,7 @@ async function startFixture() {
       const response = await fetch(`${apiUrl}${endpoint}`, { method, headers: { 'Content-Type': 'application/json', ...(owner ? { 'x-test-owner': owner } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, data: await response.json() };
     }
-    return { close, apiUrl, models, userId, request, emitted };
+    return { close, apiUrl, models, userId, request, emitted, identityModels: context.identityModels, setBrowserActor: id => { browserActor = id; } };
   } catch (error) { await close(); throw error; }
 }
 

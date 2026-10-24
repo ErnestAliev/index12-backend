@@ -9,7 +9,7 @@ const {StdioClientTransport}=require('@modelcontextprotocol/sdk/client/stdio.js'
 const {startFixture}=require('./subcategories.cjs');
 
 (async()=>{
-  const fixture=await startFixture();const directory=await fs.mkdtemp(path.join(os.tmpdir(),'index12-mcp-'));let client;
+  const fixture=await startFixture();const directory=await fs.mkdtemp(path.join(os.tmpdir(),'index12-mcp-'));let client;let vite;
   try {
     const db=mongoose.connection.db;const oid=()=>new mongoose.Types.ObjectId();
     const owner=oid(),workspace=oid(),otherWorkspace=oid(),foreign=oid(),project=oid(),account=oid(),category=oid(),sub=oid();
@@ -32,7 +32,7 @@ const {startFixture}=require('./subcategories.cjs');
     let stderr='';transport.stderr.on('data',chunk=>{stderr+=chunk;});
     client=new Client({name:'index12-integration',version:'1.0.0'});await client.connect(transport);
     assert.match(client.getInstructions(),/по-русски/);
-    const tools=await client.listTools();assert.equal(tools.tools.length,5);assert.ok(tools.tools.every(t=>t.annotations.readOnlyHint && !t.annotations.destructiveHint));
+    const tools=await client.listTools();assert.equal(tools.tools.length,8);assert.equal(tools.tools.filter(t=>t.annotations.readOnlyHint).length,6);assert.equal(tools.tools.filter(t=>t.annotations.destructiveHint).length,2);
     const call=async(name,args={})=>{const r=await client.callTool({name,arguments:args});assert.ok(!r.isError,JSON.stringify(r));return r.structuredContent;};
     const status=await call('index12_status');assert.equal(status.operationCount,402);assert.equal(status.workspaceName,'Test');
     const found=await call('index12_find_entities',{query:'pushkina',type:'projects'});assert.equal(found.candidates[0].id,String(project));assert.equal(found.totalCandidates,1);
@@ -51,5 +51,21 @@ const {startFixture}=require('./subcategories.cjs');
     const denied=await client.callTool({name:'index12_status',arguments:{}});assert.equal(denied.isError,true);assert.ok(!JSON.stringify(denied).includes('mongodb://'));
     assert.equal(await db.collection('events').countDocuments({}),405);assert.equal(stderr,'');
     console.log('MCP integration passed: protocol, 402 complete rows, pagination, arithmetic, subcategories, shared expenses, balances, tenant isolation, validation and read-only behavior.');
-  }finally{if(client)await client.close();await fixture.close();await fs.rm(directory,{recursive:true,force:true});}
+    const {verifyWrites}=require('./mcp-writes.cjs');
+    const verified=await verifyWrites({fixture,client,configFile,owner,workspace,otherWorkspace,foreign,project,account,category,sub});
+    if(process.argv.includes('--ui')) {
+      fixture.setBrowserActor(String(owner));
+      // Clear deliberate corruption/foreign fixtures after their isolation checks.
+      // Keep only the operation created and edited through MCP for visual QA.
+      await db.collection('events').deleteMany({_id:{$ne:new mongoose.Types.ObjectId(verified.createdId)}});
+      for(const collection of ['accounts','companies','individuals','contractors','projects','categories','subcategories'])await db.collection(collection).deleteMany({workspaceId:otherWorkspace});
+      await db.collection('accounts').updateOne({_id:account},{$set:{userId:String(owner),initialBalance:1000}});
+      const {createServer}=await import('../../../index12-frontend/node_modules/vite/dist/node/index.js');
+      const root=path.resolve(__dirname,'../../../index12-frontend');
+      vite=await createServer({root,configFile:path.join(root,'vite.config.js'),envFile:false,define:{'import.meta.env.VITE_API_BASE_URL':JSON.stringify(fixture.apiUrl)},server:{host:'127.0.0.1',port:5188,strictPort:true}});
+      await vite.listen();
+      console.log(JSON.stringify({uiUrl:'http://127.0.0.1:5188',operationId:verified.createdId,amount:'123.46',version:3,apiUrl:fixture.apiUrl}));
+      await new Promise(resolve=>{process.once('SIGTERM',resolve);process.once('SIGINT',resolve);});
+    }
+  }finally{if(vite)await vite.close();if(client)await client.close();await fixture.close();await fs.rm(directory,{recursive:true,force:true});}
 })().catch(error=>{console.error(error);process.exitCode=1;});

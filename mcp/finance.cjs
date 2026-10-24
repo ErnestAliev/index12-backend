@@ -1,6 +1,7 @@
 'use strict';
 
 const { ObjectId } = require('mongoose').mongo;
+const { workspaceAccess } = require('../utils/operationAccess');
 const ENTITY_COLLECTIONS = ['projects', 'categories', 'subcategories', 'contractors', 'accounts', 'companies', 'individuals'];
 const sid = value => value == null ? null : String(value._id || value);
 const ALL_PROJECTS = '__all_projects__';
@@ -61,9 +62,12 @@ function scopeQuery(storageId, workspaceId) {
 
 async function loadSnapshot(db, config) {
   if (![config.ownerId, config.workspaceId].every(v => /^[a-f\d]{24}$/i.test(v || ''))) throw new PublicError('Настройте ownerId и workspaceId в локальной конфигурации MCP.');
-  const owner = await db.collection('users').findOne({ _id: new ObjectId(config.ownerId) }, { projection: { _id: 1, ownerId: 1 }, maxTimeMS: 15000 });
-  const workspace = await db.collection('workspaces').findOne({ _id: new ObjectId(config.workspaceId), userId: config.ownerId }, { projection: { _id: 1, name: 1, isDefault: 1 }, maxTimeMS: 15000 });
-  if (!owner || owner.ownerId || !workspace) throw new PublicError('Рабочее пространство не принадлежит настроенному владельцу. Доступ закрыт.');
+  const actorId = config.actorId || config.ownerId;
+  if (!/^[a-f\d]{24}$/i.test(actorId)) throw new PublicError('Некорректный actorId в конфигурации MCP.');
+  const owner = await db.collection('users').findOne({ _id: new ObjectId(actorId) }, { projection: { _id: 1 }, maxTimeMS: 15000 });
+  const workspace = await db.collection('workspaces').findOne({ _id: new ObjectId(config.workspaceId), userId: config.ownerId }, { projection: { _id: 1, name: 1, userId: 1, isDefault: 1, sharedWith: 1 }, maxTimeMS: 15000 });
+  const access = owner && workspace ? workspaceAccess(workspace, actorId) : null;
+  if (!access) throw new PublicError('У текущего пользователя нет доступа к настроенной рабочей области.');
   const storageId = workspace.isDefault ? config.ownerId : `${config.ownerId}_ws_${config.workspaceId}`;
   const query = scopeQuery(storageId, config.workspaceId);
   const entities = {};
@@ -72,11 +76,12 @@ async function loadSnapshot(db, config) {
     if (collection === 'accounts') Object.assign(projection, { initialBalance: 1, isExcluded: 1 });
     const rows = await db.collection(collection).find(query, { projection, maxTimeMS: 30000 }).limit(MAX_ROWS + 1).toArray();
     if (rows.length > MAX_ROWS) throw new PublicError('Слишком большая выборка справочника; частичный результат не возвращается.');
-    entities[collection] = new Map(rows.map(row => [sid(row._id), { ...row, _id: sid(row._id), parentCategoryId: sid(row.parentCategoryId) }]));
+    entities[collection] = new Map(rows.filter(row => collection !== 'accounts' || !access.accountIds || access.accountIds.includes(sid(row._id))).map(row => [sid(row._id), { ...row, _id: sid(row._id), parentCategoryId: sid(row.parentCategoryId) }]));
   }
   const raw = await db.collection('events').find(query, { projection: FIELDS, maxTimeMS: 60000 }).limit(MAX_ROWS + 1).toArray();
   if (raw.length > MAX_ROWS) throw new PublicError('В рабочем пространстве более 250000 строк. Нужен серверный агрегатор; частичный итог не возвращается.');
-  return buildSnapshot(raw, entities, { workspaceId: config.workspaceId, workspaceName: workspace.name, fetchedAt: new Date().toISOString(), sourceRows: raw.length });
+  const visible = access.accountIds ? raw.filter(e => { const refs = [e.accountId,e.fromAccountId,e.toAccountId].filter(Boolean).map(sid); return refs.length && refs.every(id => access.accountIds.includes(id)); }) : raw;
+  return buildSnapshot(visible, entities, { actorId, role: access.role, workspaceId: config.workspaceId, workspaceName: workspace.name, fetchedAt: new Date().toISOString(), sourceRows: visible.length });
 }
 
 function buildSnapshot(raw, entities, metadata = {}) {
