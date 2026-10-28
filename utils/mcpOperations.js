@@ -18,7 +18,20 @@ const fields = {
 const operationSchema = z.object(fields).strict();
 const createSchema = operationSchema.extend({ idempotencyKey: z.string().min(8).max(160) }).strict();
 const updateSchema = z.object({ id: ID, expectedVersion: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER - 1), changes: operationSchema.partial().refine(v => Object.keys(v).length > 0, 'Укажите поля для изменения.') }).strict();
-const refModels = { projectId: 'Project', categoryId: 'Category', subcategoryId: 'Subcategory', accountId: 'Account', contractorId: 'Contractor', counterpartyIndividualId: 'Individual', individualId: 'Individual', companyId: 'Company' };
+const transferFields = {
+    amount: fields.amount, date: fields.date, projectScope: fields.projectScope, projectId: fields.projectId,
+    categoryId: fields.categoryId, subcategoryId: fields.subcategoryId, description: fields.description,
+    fromAccountId: ID, toAccountId: ID,
+    fromCompanyId: ID.nullable().optional(), toCompanyId: ID.nullable().optional(),
+    fromIndividualId: ID.nullable().optional(), toIndividualId: ID.nullable().optional(),
+    transferPurpose: z.enum(['internal', 'inter_company', 'personal']).optional(),
+    transferReason: z.enum(['business_growth', 'personal_use']).nullable().optional(),
+};
+const transferSchema = z.object(transferFields).strict();
+const createTransferSchema = transferSchema.extend({ idempotencyKey: createSchema.shape.idempotencyKey }).strict();
+const updateTransferSchema = updateSchema.extend({ changes: transferSchema.partial().refine(v => Object.keys(v).length > 0, 'Укажите поля для изменения.') }).strict();
+const deleteSchema = updateSchema.omit({ changes: true });
+const refModels = { projectId: 'Project', categoryId: 'Category', subcategoryId: 'Subcategory', accountId: 'Account', contractorId: 'Contractor', counterpartyIndividualId: 'Individual', individualId: 'Individual', companyId: 'Company', fromAccountId: 'Account', toAccountId: 'Account', fromCompanyId: 'Company', toCompanyId: 'Company', fromIndividualId: 'Individual', toIndividualId: 'Individual' };
 class OperationError extends Error {
     constructor(code, field, message, statusCode = 400) { super(message); Object.assign(this, { code, field, statusCode }); }
 }
@@ -45,7 +58,7 @@ function auditValue(value) {
 }
 function mcpAuditEntry(req, before, patch, version) {
     const changes = {};
-    for (const key of Object.keys(fields)) if (Object.hasOwn(patch, key)) {
+    for (const key of new Set([...Object.keys(fields), ...Object.keys(transferFields), 'isTransfer', 'isWithdrawal', 'destination'])) if (Object.hasOwn(patch, key)) {
         const from = auditValue(before?.[key]); const to = auditValue(patch[key]);
         if (from !== to) changes[key] = { before: from, after: to };
     }
@@ -54,6 +67,7 @@ function mcpAuditEntry(req, before, patch, version) {
 const serialize = (operation, req, originalRefs = {}) => {
     const raw = operation.toObject ? operation.toObject() : operation;
     const result = { id: String(raw._id), version: raw.syncVersion || 0, type: raw.type, amount: Math.abs(Number(raw.amount)).toFixed(2), date: eventDay(raw), projectScope: raw.projectScope || 'selected', description: raw.description || '' };
+    if (raw.type === 'transfer') Object.assign(result, { isTransfer: !!raw.isTransfer, isWithdrawal: !!raw.isWithdrawal, transferPurpose: raw.transferPurpose || 'internal', transferReason: raw.transferReason || null });
     const related = {};
     for (const key of Object.keys(refModels)) {
         const value = raw[key]; result[key] = value ? String(value._id || value) : originalRefs[key] ? String(originalRefs[key]) : null;
@@ -100,14 +114,16 @@ function registerMcpOperationRoutes(app, deps) {
         await ensureManagerCanAccessOperationAccounts(req, {}, operation);
         return operation;
     }
-    async function rejectComplex(req, operation) {
+    async function rejectComplex(req, operation, transfer = false) {
         operation = operation.toObject ? operation.toObject() : operation;
         if (operation.mcpRelationLocks > 0) fail('OPERATION_BUSY', 'id', 'Сохраняется связанная операция. Дождитесь завершения и прочитайте операцию заново.', 409);
-        if (!['income', 'expense'].includes(operation.type) || operation.isTransfer || operation.isWithdrawal || operation.transferGroupId || operation.relatedEventId || operation.offsetIncomeId || operation.linkedParentId || operation.isSplitParent || operation.isSplitChild || operation.parentOpId || operation.splitMeta?.length || operation.categoryIds?.length > 1 || operation.excludeFromTotals || operation.isClosed || operation.isSalary || operation.isWorkAct || operation.isWriteOff || operation.isRetailWriteOff || operation.retailWriteOff || operation.isDeleted) fail('UNSUPPORTED_OPERATION', 'id', 'Эта операция связана с распределением, взаимозачётом, переводом или специальным учётом. Измените её в форме INDEX12.');
+        const wrongKind = transfer ? operation.type !== 'transfer' : !['income', 'expense'].includes(operation.type) || operation.isTransfer || operation.isWithdrawal || operation.transferGroupId;
+        if (wrongKind || operation.relatedEventId || operation.offsetIncomeId || operation.linkedParentId || operation.isSplitParent || operation.isSplitChild || operation.parentOpId || operation.splitMeta?.length || operation.categoryIds?.length > 1 || operation.excludeFromTotals || operation.isClosed || operation.isSalary || operation.isWorkAct || operation.isWriteOff || operation.isRetailWriteOff || operation.retailWriteOff || operation.isDeleted) fail('UNSUPPORTED_OPERATION', 'id', 'Эта операция связана с распределением, взаимозачётом, старым парным переводом или специальным учётом. Измените её в форме INDEX12.');
+        if (transfer && operation.transferGroupId && await Event.collection.findOne({ ...req.mcpContext.scope, transferGroupId: operation.transferGroupId, _id: { $ne: operation._id } }, { projection: { _id: 1 } })) fail('UNSUPPORTED_OPERATION', 'id', 'Парный перевод требует миграции в единую операцию; отдельную половину менять нельзя.');
         const linked = await Event.collection.findOne({ ...req.mcpContext.scope, $and: [{ $or: [{ offsetIncomeId: operation._id }, { linkedParentId: operation._id }, { parentOpId: operation._id }, { relatedEventId: operation._id }] }] }, { projection: { _id: 1 } });
         if (linked) fail('UNSUPPORTED_OPERATION', 'id', 'У операции есть связанные записи. Измените её в форме INDEX12.');
     }
-    async function prepare(req, input, existing) {
+    async function prepare(req, input, existing, transfer = false) {
         const previous = existing?.toObject() || {};
         const data = { ...input };
         delete data.idempotencyKey;
@@ -141,9 +157,36 @@ function registerMcpOperationRoutes(app, deps) {
             if (String(subcategory.parentCategoryId) !== String(categoryId)) fail('VALIDATION_ERROR', 'subcategoryId', 'Подкатегория должна принадлежать выбранной категории. Укажите другую подкатегорию или явно очистите поле (null).');
         }
         const accountId = data.accountId || previous.accountId;
-        if (!accountId) fail('VALIDATION_ERROR', 'accountId', 'Укажите счёт операции.');
+        if (!transfer && !accountId) fail('VALIDATION_ERROR', 'accountId', 'Укажите счёт операции.');
         await ensureManagerCanAccessOperationAccounts(req, data, existing);
         return data;
+    }
+    async function prepareTransfer(req, input, existing) {
+        const previous = existing?.toObject() || {};
+        const effective = { ...previous, ...input };
+        if (!effective.fromAccountId || !effective.toAccountId || String(effective.fromAccountId) === String(effective.toAccountId)) fail('VALIDATION_ERROR', 'toAccountId', 'Укажите два разных счёта перевода.');
+        const purpose = effective.transferPurpose || 'internal';
+        const reason = effective.transferReason || null;
+        if (purpose === 'personal' ? !['business_growth', 'personal_use'].includes(reason) : reason !== null) fail('VALIDATION_ERROR', 'transferReason', 'Для личного перевода укажите business_growth или personal_use; для остальных — null.');
+        const owners = {};
+        for (const side of ['from', 'to']) {
+            const companyKey = `${side}CompanyId`, individualKey = `${side}IndividualId`;
+            // When the account changes, infer only its recorded owner, never the old account's owner.
+            const accountChanged = Object.hasOwn(input, `${side}AccountId`) && String(input[`${side}AccountId`]) !== String(previous[`${side}AccountId`]);
+            const account = await deps.Account.findOne({ _id: effective[`${side}AccountId`], ...req.mcpContext.scope });
+            if (!account) fail('ENTITY_NOT_FOUND', `${side}AccountId`, 'Счёт не найден в текущей рабочей области.');
+            for (const key of [companyKey, individualKey]) owners[key] = Object.hasOwn(input, key) ? input[key] : accountChanged || !existing ? account[key === companyKey ? 'companyId' : 'individualId'] || null : effective[key] || null;
+            if (owners[companyKey] && owners[individualKey]) fail('VALIDATION_ERROR', individualKey, 'Выберите одного владельца счёта.');
+            if ((!existing || accountChanged || Object.hasOwn(input, companyKey) || Object.hasOwn(input, individualKey)) && (account.companyId || account.individualId) && (String(owners[companyKey] || '') !== String(account.companyId || '') || String(owners[individualKey] || '') !== String(account.individualId || ''))) fail('VALIDATION_ERROR', companyKey, 'Владелец перевода должен соответствовать владельцу выбранного счёта.');
+        }
+        const withdrawal = purpose === 'personal' && reason === 'personal_use';
+        return prepare(req, { ...input, ...owners, type: 'transfer', isTransfer: true, isWithdrawal: withdrawal,
+            transferPurpose: purpose, transferReason: reason,
+            accountId: withdrawal ? effective.fromAccountId : null,
+            companyId: withdrawal ? owners.fromCompanyId : null, individualId: withdrawal ? owners.fromIndividualId : null,
+            destination: withdrawal ? 'Личные нужды' : null,
+            ...(!existing && !input.description ? { description: withdrawal ? 'Вывод на личные цели' : 'Перевод между счетами' } : {}),
+        }, existing, true);
     }
     async function invoke(handler, req) {
         const response = { statusCode: 200, status(n) { this.statusCode = n; return this; }, json(body) { this.body = body; return this; } };
@@ -156,23 +199,23 @@ function registerMcpOperationRoutes(app, deps) {
         const { grant, access } = req.mcpContext;
         const writer = access.role === 'admin' || access.role === 'manager' && access.accountIds.length > 0;
         const importer = ['admin','manager'].includes(access.role) && grant.scopes.includes('read') && grant.scopes.includes('imports:execute') && !!grant.planSigningKey;
-        res.json({ actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: false, bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense'], expiresAt: grant.expiresAt });
+        res.json({ apiVersion: '3.2.0', actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: writer && grant.scopes.includes('delete'), createTransfers: writer && grant.scopes.includes('create'), updateTransfers: writer && grant.scopes.includes('update'), deleteTransfers: writer && grant.scopes.includes('delete'), bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense','transfer'], expiresAt: grant.expiresAt });
     }));
     app.get('/api/mcp/operations/:id', authenticate, requireScope('read'), wrap(async (req, res) => {
         const operation = await readOperation(req, req.params.id);
         let editable = ['admin','manager'].includes(req.workspaceRole) && req.mcpContext.grant.scopes.includes('update') && (req.workspaceRole !== 'manager' || String(operation.createdBy) === String(req.user.id));
         let editError = null;
-        try { await rejectComplex(req, operation); await prepare(req, {}, operation); } catch (error) { editable = false; editError = { code: error.code || 'VALIDATION_ERROR', field: error.field || null, message: error.message }; }
+        try { await rejectComplex(req, operation, operation.type === 'transfer'); await (operation.type === 'transfer' ? prepareTransfer(req, {}, operation) : prepare(req, {}, operation)); } catch (error) { editable = false; editError = { code: error.code || 'VALIDATION_ERROR', field: error.field || null, message: error.message }; }
         const original = operation.toObject();
         await operation.populate(populate.map(spec => ({ ...spec, match: req.mcpContext.scope })));
-        res.json({ ...serialize(operation, req, original), editable, editError });
+        res.json({ ...serialize(operation, req, original), editable, deletable: !editError && ['admin','manager'].includes(req.workspaceRole) && req.mcpContext.grant.scopes.includes('delete') && (req.workspaceRole !== 'manager' || String(original.createdBy) === String(req.user.id)), editError });
     }));
-    async function createOperation(req, rawInput) {
-        const input = createSchema.parse(rawInput);
-        const data = await prepare(req, input);
+    async function createOperation(req, rawInput, transfer = false) {
+        const input = (transfer ? createTransferSchema : createSchema).parse(rawInput);
+        const data = await (transfer ? prepareTransfer(req, input) : prepare(req, input));
         const { grant } = req.mcpContext;
         const key = hashToken(JSON.stringify([grant.actorId, grant.workspaceId, input.idempotencyKey]));
-        const canonical = Object.fromEntries(Object.entries({ ...input, amount: parseMoney(input.amount).decimal }).sort(([a],[b])=>a.localeCompare(b)));
+        const canonical = Object.fromEntries(Object.entries({ ...input, ...(transfer ? { type: 'transfer' } : {}), amount: parseMoney(input.amount).decimal }).sort(([a],[b])=>a.localeCompare(b)));
         const requestHash = hashToken(JSON.stringify(canonical));
         const requests = db().collection('mcpOperationRequests');
         const operationId = new mongoose.Types.ObjectId();
@@ -198,6 +241,10 @@ function registerMcpOperationRoutes(app, deps) {
         const result = await createOperation(req, req.body);
         res.status(result.replayed ? 200 : 201).json(result);
     }));
+    app.post('/api/mcp/transfers', authenticate, requireScope('create'), checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
+        const result = await createOperation(req, req.body, true);
+        res.status(result.replayed ? 200 : 201).json(result);
+    }));
     const bindOperation = async (req, _res, next) => { try { req.mcpOperation = await readOperation(req, req.params.id); next(); } catch (error) { next(error); } };
     app.patch('/api/mcp/operations/:id', authenticate, requireScope('update'), checkWorkspacePermission(['admin','manager']), bindOperation, canEdit, wrap(async (req, res) => {
         const body = updateSchema.omit({ id: true }).parse(req.body);
@@ -210,10 +257,44 @@ function registerMcpOperationRoutes(app, deps) {
         const operation = await invoke(handlers.update, req);
         res.json(serialize(operation, req));
     }));
+    app.patch('/api/mcp/transfers/:id', authenticate, requireScope('update'), checkWorkspacePermission(['admin','manager']), bindOperation, canEdit, wrap(async (req, res) => {
+        const body = updateTransferSchema.omit({ id: true }).parse(req.body);
+        const existing = req.mcpOperation;
+        if ((existing.syncVersion || 0) !== body.expectedVersion) fail('VERSION_CONFLICT', 'expectedVersion', 'Операция изменена. Прочитайте её заново.', 409);
+        await rejectComplex(req, existing, true);
+        req.body = await prepareTransfer(req, body.changes, existing);
+        req.mcpContext.expectedVersion = body.expectedVersion;
+        res.json(serialize(await invoke(handlers.update, req), req));
+    }));
+    app.delete('/api/mcp/operations/:id', authenticate, requireScope('delete'), checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
+        const input = deleteSchema.parse({ ...req.body, id: req.params.id });
+        const auditId = hashToken(JSON.stringify([String(req.user.id), String(req.user.currentWorkspaceId), input.id, input.expectedVersion]));
+        const deletions = db().collection('mcpOperationDeletions');
+        const operation = await Event.findOne({ _id: input.id, ...req.mcpContext.scope });
+        if (!operation) {
+            const archive = await deletions.findOne({ _id: auditId });
+            if (!archive) fail('NOT_FOUND', 'id', 'Операция не найдена в текущей рабочей области.', 404);
+            // Re-check the live account policy even on a retry after deletion.
+            await ensureManagerCanAccessOperationAccounts(req, {}, archive.before);
+            if (req.workspaceRole === 'manager' && String(archive.before.createdBy) !== String(req.user.id)) fail('FORBIDDEN', 'id', 'Можно удалять только свои операции.', 403);
+            return res.json({ id: input.id, deleted: true, alreadyDeleted: true, version: input.expectedVersion, workspaceId: String(req.user.currentWorkspaceId) });
+        }
+        await ensureManagerCanAccessOperationAccounts(req, {}, operation);
+        if (req.workspaceRole === 'manager' && String(operation.createdBy) !== String(req.user.id)) fail('FORBIDDEN', 'id', 'Можно удалять только свои операции.', 403);
+        if ((operation.syncVersion || 0) !== input.expectedVersion) fail('VERSION_CONFLICT', 'expectedVersion', 'Операция изменена. Прочитайте её заново.', 409);
+        await rejectComplex(req, operation, operation.type === 'transfer');
+        // Preserve the before-image before the atomic delete, including uncertain interruptions.
+        await deletions.updateOne({ _id: auditId }, { $setOnInsert: { actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), source: 'mcp', action: 'delete', at: new Date(), expectedVersion: input.expectedVersion, before: operation.toObject() } }, { upsert: true });
+        req.mcpContext.expectedVersion = input.expectedVersion;
+        req.params.id = input.id;
+        await invoke(handlers.delete, req);
+        await deletions.updateOne({ _id: auditId }, { $set: { deletedAt: new Date() } });
+        res.json({ id: input.id, deleted: true, alreadyDeleted: false, version: input.expectedVersion, workspaceId: String(req.user.currentWorkspaceId) });
+    }));
     registerMcpImportRoutes(app, deps, { authenticate, requireScope, wrap, fail, createSchema, prepareOperation: prepare, createOperation, invoke });
     app.use('/api/mcp', (error, _req, res, _next) => {
         const structured = error instanceof OperationError ? { code: error.code, field: error.field, message: error.message, ...(error.details ? { details: error.details } : {}) } : error instanceof z.ZodError ? validationError(error) : { code: error.statusCode === 403 ? 'FORBIDDEN' : 'INTERNAL_ERROR', field: null, message: error.statusCode === 403 ? 'Нет доступа к выбранному счёту.' : 'Не удалось обработать операцию INDEX12.' };
         res.status(error.statusCode || (error instanceof z.ZodError ? 400 : 500)).json({ error: structured });
     });
 }
-module.exports = { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry, hashToken, createSchema, updateSchema, validationError };
+module.exports = { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry, hashToken, createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, validationError };

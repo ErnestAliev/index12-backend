@@ -2803,7 +2803,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
 }));
 
 // 🟢 UPDATED: Allow managers to delete their own operations
-app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canDelete, async (req, res) => {
+app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canDelete, captureMcpHandler('delete', async (req, res) => {
     try {
         const { id } = req.params;
         const userId = await getCompositeUserId(req); // 🔥 FIX: Use composite ID for shared workspaces
@@ -2850,7 +2850,12 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
             deletedOperationIds.push(...siblings.map(row => String(row._id)).filter(siblingId => siblingId !== String(id)));
             await Event.deleteMany({ transferGroupId: eventToDelete.transferGroupId, userId: userIdQuery });
         } else {
-            await Event.deleteOne({ _id: id, userId: userIdQuery });
+            if (req.mcpContext) {
+                const removed = await Event.findOneAndDelete({ _id: id, userId: userIdQuery, ...mcpVersionFilter(req.mcpContext.expectedVersion) });
+                if (!removed) return res.status(409).json({ message: 'Операция изменена. Прочитайте её заново.' });
+            } else {
+                await Event.deleteOne({ _id: id, userId: userIdQuery });
+            }
         }
 
         // Cascade delete split children if parent
@@ -2875,7 +2880,7 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
 
         res.status(200).json(eventToDelete);
     } catch (err) { res.status(500).json({ message: err.message }); }
-});
+}));
 
 app.post('/api/transfers', isAuthenticated, async (req, res) => {
     const {

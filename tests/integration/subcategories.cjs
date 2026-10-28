@@ -74,6 +74,7 @@ async function startFixture() {
     run("app.get('/api/events',", "app.post('/api/events',");
     run("app.post('/api/events',", '// 🟢 UPDATED: Use canEdit middleware');
     run("app.put('/api/events/:id'", '// 🟢 UPDATED: Allow managers');
+    run("app.delete('/api/events/:id'", "app.post('/api/transfers'");
     run("app.post('/api/transfers'", "app.post('/api/import/operations'");
     run("app.post('/api/import/operations'", 'const generateCRUD =');
     run("app.get('/api/snapshot'", '// --- EVENTS ROUTES ---');

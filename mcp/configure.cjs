@@ -36,7 +36,7 @@ const { hashToken } = require('../utils/mcpOperations');
         const workspace = await db.collection('workspaces').findOne({ _id: new ObjectId(config.workspaceId), userId: config.ownerId });
         const access = actor && workspace ? workspaceAccess(workspace, actorId) : null;
         if (!access) throw new Error('У пользователя нет доступа к рабочей области.');
-        const scopes = args.includes('--read-only') || access.role === 'analyst' ? ['read'] : ['read','create','update','entities:create','imports:execute'];
+        const scopes = args.includes('--read-only') || access.role === 'analyst' ? ['read'] : ['read','create','update','delete','entities:create','imports:execute'];
         const confirmationMode = scopes.includes('imports:execute') ? requestedMode : 'form';
         if (confirmationMode === 'direct') scopes.push('imports:direct');
         const token = `idx12_${crypto.randomBytes(32).toString('base64url')}`;

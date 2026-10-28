@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { parseMoney } = require('../utils/operationMoney');
 const { workspaceAccess } = require('../utils/operationAccess');
-const { createSchema, updateSchema, mcpVersionFilter } = require('../utils/mcpOperations');
+const { createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, mcpVersionFilter } = require('../utils/mcpOperations');
 const { withRelatedOperationGuard } = require('../utils/relatedOperationGuard');
 const id = '000000000000000000000001';
 test('MCP money parses exact decimal strings, conserves tiyn, rejects lossy inputs', () => {
@@ -33,4 +33,14 @@ test('reverse-link insertion advances parent version and locks it until completi
     const Event={findOneAndUpdate:async(_q,update)=>apply(update),updateOne:async(_q,update)=>apply(update)};
     await assert.rejects(withRelatedOperationGuard(Event,'owner',{offsetIncomeId:id},async()=>{assert.equal(state.mcpRelationLocks,1);assert.equal(state.syncVersion,1);throw new Error('Insert failed');}));
     assert.equal(state.mcpRelationLocks,0);assert.equal(state.syncVersion,2);
+});
+test('transfer and delete contracts require canonical accounts, exact versions, and reject internal flags', () => {
+    const input = { amount:'1.00', date:'2026-11-01', fromAccountId:id, toAccountId:'000000000000000000000002', idempotencyKey:'transfer-001' };
+    assert.ok(createTransferSchema.safeParse(input).success);
+    assert.ok(updateTransferSchema.safeParse({ id, expectedVersion:0, changes:{ date:'2026-11-02' } }).success);
+    assert.ok(deleteSchema.safeParse({ id, expectedVersion:0 }).success);
+    for (const patch of [{ syncVersion:9 }, { isTransfer:false }, { createdBy:id }, { transferGroupId:'pair' }, { transferPurpose:'unknown' }]) assert.equal(createTransferSchema.safeParse({ ...input, ...patch }).success, false);
+    assert.equal(updateTransferSchema.safeParse({ id, expectedVersion:0, changes:{} }).success, false);
+    assert.equal(deleteSchema.safeParse({ id }).success, false);
+    assert.equal(deleteSchema.safeParse({ id, expectedVersion:0, cascadeTransfer:true }).success, false);
 });
