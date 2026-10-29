@@ -1,3 +1,4 @@
+const { transferLabels } = require('../../utils/transferLabels');
 // backend/ai/modes/quickMode.js
 // Quick Mode: Fast deterministic responses for buttons and commands
 // NO LLM - pure data formatting
@@ -592,15 +593,7 @@ function handleTransfersQuery({ dbData, formatTenge, withdrawalsOnly = false }) 
     if (fact.length) {
         lines.push('Факт:');
         fact.slice(0, 10).forEach(t => {
-            const from = t.fromAccountName || t.fromCompanyName || t.fromIndividualName || '?';
-            const to = t.toAccountName || t.toCompanyName || t.toIndividualName || '?';
-            const amt = Math.abs(t.amount || 0);
-            if (isWithdrawalTransfer(t)) {
-                const toLabel = t.toAccountName || t.toIndividualName || 'Личные нужды';
-                lines.push(`• ${formatTenge(amt)}: ${from} → ${toLabel} (вывод средств)`);
-                return;
-            }
-            lines.push(`• ${formatTenge(amt)}: ${from} → ${to}`);
+            lines.push(`• ${formatTenge(Math.abs(t.amount || 0))}: ${transferLabels(t).routeLabel}`);
         });
     }
 
@@ -608,15 +601,7 @@ function handleTransfersQuery({ dbData, formatTenge, withdrawalsOnly = false }) 
         lines.push('');
         lines.push('Прогноз:');
         forecast.slice(0, 10).forEach(t => {
-            const from = t.fromAccountName || t.fromCompanyName || t.fromIndividualName || '?';
-            const to = t.toAccountName || t.toCompanyName || t.toIndividualName || '?';
-            const amt = Math.abs(t.amount || 0);
-            if (isWithdrawalTransfer(t)) {
-                const toLabel = t.toAccountName || t.toIndividualName || 'Личные нужды';
-                lines.push(`• ${formatTenge(amt)}: ${from} → ${toLabel} (вывод средств)`);
-                return;
-            }
-            lines.push(`• ${formatTenge(amt)}: ${from} → ${to}`);
+            lines.push(`• ${formatTenge(Math.abs(t.amount || 0))}: ${transferLabels(t).routeLabel}`);
         });
     }
 

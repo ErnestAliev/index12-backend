@@ -1,6 +1,7 @@
 'use strict';
 
 const { ObjectId } = require('mongoose').mongo;
+const { transferLabels } = require('../utils/transferLabels');
 const { workspaceAccess } = require('../utils/operationAccess');
 const ENTITY_COLLECTIONS = ['projects', 'categories', 'subcategories', 'contractors', 'accounts', 'companies', 'individuals'];
 const sid = value => value == null ? null : String(value._id || value);
@@ -73,7 +74,7 @@ async function loadSnapshot(db, config) {
   const entities = {};
   for (const collection of ENTITY_COLLECTIONS) {
     const projection = { _id: 1, name: 1, parentCategoryId: 1, type: 1 };
-    if (collection === 'accounts') Object.assign(projection, { initialBalance: 1, isExcluded: 1 });
+    if (collection === 'accounts') Object.assign(projection, { initialBalance: 1, isExcluded: 1, companyId: 1, individualId: 1 });
     const rows = await db.collection(collection).find(query, { projection, maxTimeMS: 30000 }).limit(MAX_ROWS + 1).toArray();
     if (rows.length > MAX_ROWS) throw new PublicError('Слишком большая выборка справочника; частичный результат не возвращается.');
     entities[collection] = new Map(rows.filter(row => collection !== 'accounts' || !access.accountIds || access.accountIds.includes(sid(row._id))).map(row => [sid(row._id), { ...row, _id: sid(row._id), parentCategoryId: sid(row.parentCategoryId) }]));
@@ -219,6 +220,7 @@ function operation(snapshot,e,asOf) {
     account:ref('accountId','accounts','Не указан'),fromAccount:ref('fromAccountId','accounts','Не указан'),toAccount:ref('toAccountId','accounts','Не указан'),
     company:ref('companyId','companies','Не указана'),individual:ref('individualId','individuals','Не указан'),
     fromCompany:ref('fromCompanyId','companies','Не указана'),toCompany:ref('toCompanyId','companies','Не указана'),fromIndividual:ref('fromIndividualId','individuals','Не указан'),toIndividual:ref('toIndividualId','individuals','Не указан'),
+    ...(e.kind === 'transfer' ? { transferRoute:transferLabels(e,snapshot.entities).routeLabel } : {}),
     transferPurpose:e.transferPurpose || null,transferReason:e.transferReason || null,isWithdrawal:!!e.isWithdrawal,isSplitChild:!!e.isSplitChild,incompleteTransfer:!!e.incompleteTransfer,
   };
 }

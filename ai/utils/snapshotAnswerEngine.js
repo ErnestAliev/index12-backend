@@ -1,3 +1,4 @@
+const { transferLabels } = require('../../utils/transferLabels');
 // backend/ai/utils/snapshotAnswerEngine.js
 // Snapshot-first deterministic answer engine for chat branch.
 
@@ -1064,9 +1065,7 @@ const fmtListOperation = (item, kind) => {
 
   if (kind === 'transfer') {
     const amount = fmtT(toNum(item.amount));
-    const from = String(item.fromAccName || '???');
-    const to = String(item.toAccName || (item.isOutOfSystemTransfer ? 'Вне системы' : '???'));
-    return `${amount}: ${from} → ${to}`;
+    return `${amount}: ${transferLabels(item).routeLabel}`;
   }
 
   const amountRaw = toNum(item.amount);

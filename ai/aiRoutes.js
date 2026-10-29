@@ -1,3 +1,4 @@
+const { transferLabels } = require('../utils/transferLabels');
 // backend/ai/aiRoutes.js
 // Hybrid AI routes:
 // - quick_button -> deterministic quick mode
@@ -678,10 +679,6 @@ module.exports = function createAiRouter(deps) {
       }
 
       const isOwnerDrawTransfer = _isOutOfSystemTransferRow(op);
-      const fromAccName = String(op?.fromAccountName || op?.accountName || 'Без счета');
-      const toAccName = isOwnerDrawTransfer
-        ? String(op?.toAccountName || 'Вне системы')
-        : String(op?.toAccountName || 'Без счета');
       const transferCategory = (() => {
         if (isOwnerDrawTransfer) {
           if (/вывод\s*средств/i.test(categoryName)) return categoryName;
@@ -693,8 +690,7 @@ module.exports = function createAiRouter(deps) {
       day.lists.transfer.push({
         id: opId || null,
         amount: amountAbs,
-        fromAccName,
-        toAccName,
+        ...transferLabels(op),
         isOutOfSystemTransfer: isOwnerDrawTransfer,
         catName: op?.subcategoryName ? `${transferCategory} → ${op.subcategoryName}` : transferCategory,
         subcategoryName: op?.subcategoryName || null
