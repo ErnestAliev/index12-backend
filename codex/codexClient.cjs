@@ -9,10 +9,9 @@ const fs = require('node:fs');
 const WebSocket = require('ws');
 const { attachmentInput, readAttachmentInput } = require('./files.cjs');
 const INDEX12_CONTEXT = fs.readFileSync(path.join(__dirname, 'context.md'), 'utf8').trim();
+const { scopedConfig } = require('./mcpPolicy.cjs');
+const { toolFailure, receipt, executionReport, McpExecutionError } = require('./toolResults.cjs');
 const defaultSocketPath = () => process.env.INDEX12_CODEX_SOCKET || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'app-server-control', 'app-server-control.sock');
-function scopedConfig() {
-  return Object.fromEntries(['onec_kz', 'bcc_uu', 'esf_uu', 'node_repl', 'computer-use'].map(name => [`mcp_servers.${name}.enabled`, false]));
-}
 
 // Official app-server JSON-RPC transport. No private desktop HTTP APIs or auth extraction.
 class CodexClient extends EventEmitter {
@@ -27,11 +26,8 @@ class CodexClient extends EventEmitter {
         const p = this.pending.get(item.id); if (!p) return;
         clearTimeout(p.timer); this.pending.delete(item.id);
         item.error ? p.reject(new Error(item.error.message || 'Codex отклонил запрос.')) : p.resolve(item.result);
-      } else if (item.id != null) {
-        // A web request cannot grant additional desktop permissions implicitly.
-        this.write({ id: item.id, error: { code: -32000, message: 'Требуется подтверждение в desktop-приложении.' } });
-        this.emit('permissionRequired', item.method);
-      } else if (item.method) this.emit('notification', item);
+      } else if (item.id != null) this.handleServerRequest(item);
+      else if (item.method) this.emit('notification', item);
     };
     const disconnected = () => {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Соединение с Codex прервано.')); }
@@ -55,6 +51,15 @@ class CodexClient extends EventEmitter {
     this.write({ method: 'initialized' });
     return this;
   }
+  handleServerRequest(item) {
+    // Unhandled requests are a client limitation, never a user refusal. No
+    // accept/decline decision is fabricated, including after automatic review.
+    const params = item.params || {};
+    const failure = { code: 'APPROVAL_UNAVAILABLE', message: 'Клиент INDEX12 не смог обработать дополнительный запрос разрешения. Решение пользователя не получено.', method: item.method };
+    this.emit('requestBlocked', { ...params, failure });
+    this.write({ id: item.id, error: { code: -32000, message: failure.message, data: { code: failure.code } } });
+    this.emit('permissionRequired', item.method);
+  }
   write(data) {
     if (this.socket) this.socket.send(JSON.stringify(data));
     else this.child.stdin.write(JSON.stringify(data) + '\n');
@@ -67,58 +72,95 @@ class CodexClient extends EventEmitter {
       try { this.write({ id, method, params }); } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
-  async createThread({ projectId, cwd }) {
-    const config = scopedConfig();
+  async createThread({ projectId, cwd, access, guardFile }) {
+    const config = scopedConfig(access, guardFile);
     const result = await this.call('thread/start', {
-      projectId, cwd, threadSource: 'cli', serviceName: 'index12', sandbox: 'read-only', approvalPolicy: 'on-request', config,
+      projectId, cwd, threadSource: 'cli', serviceName: 'index12', sandbox: 'read-only', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', config,
       developerInstructions: INDEX12_CONTEXT,
     });
     this.newThreads.add(result.thread.id);
     return result.thread;
   }
-  async send(threadId, text, { requestId, attachments = [], onProgress = () => {}, timeout = 300000 } = {}) {
+  async send(threadId, text, { requestId, attachments = [], access, guardFile, onToolFailure = () => {}, onProgress = () => {}, timeout = 300000 } = {}) {
     if (!this.newThreads.delete(threadId)) {
-      await this.call('thread/resume', { threadId, config: scopedConfig(), developerInstructions: INDEX12_CONTEXT });
+      await this.call('thread/resume', { threadId, approvalsReviewer: 'auto_review', config: scopedConfig(access, guardFile), developerInstructions: INDEX12_CONTEXT });
       const read = await this.call('thread/read', { threadId });
       if (read.thread?.status?.type === 'active') throw new Error('В этом чате уже выполняется запрос. Дождитесь ответа.');
     }
-    let listener, disconnected, timer;
+    let listener, disconnected, blocked, timer, activeTurn, failure, interrupt;
+    const completed = [];
+    const stop = detail => {
+      if (failure) return;
+      failure = detail;
+      try { onToolFailure(detail); } catch { /* An unavailable execution guard blocks subsequent writes. */ }
+      if (activeTurn) interrupt = this.call('turn/interrupt', { threadId, turnId: activeTurn }).catch(() => {});
+    };
     let finished = false;
     const completion = new Promise((resolve, reject) => {
       const replies = [];
       listener = item => {
         const p = item.params || {}; if (p.threadId !== threadId) return;
+        if (item.method === 'item/autoApprovalReview/completed' && p.action?.type === 'mcpToolCall' && p.action.server === 'index12' && p.review?.status !== 'approved') {
+          stop({ code: p.review?.status === 'denied' ? 'POLICY_BLOCKED' : p.review?.status === 'aborted' ? 'CANCELLED' : 'APPROVAL_UNAVAILABLE', message: p.review?.status === 'denied' ? 'Изменение заблокировано автоматической проверкой разрешений.' : 'Проверка разрешения не завершилась.', tool: p.action.toolName });
+        }
+        if (item.method === 'item/completed' && p.item?.type === 'mcpToolCall' && p.item.server === 'index12') {
+          const detail = toolFailure(p.item, failure);
+          if (detail) stop(detail);
+          else { const saved = receipt(p.item); if (saved) completed.push(saved); }
+        }
         if (item.method === 'item/agentMessage/delta') onProgress(p.delta || '');
         if (item.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) replies.push(p.item.text);
         if (item.method === 'turn/completed') {
           finished = true;
-          if (p.turn?.status !== 'completed') reject(new Error(p.turn?.error?.message || 'Codex не завершил ответ. Откройте чат в desktop-приложении.'));
+          if (failure) reject(new McpExecutionError(executionReport(failure, completed)));
+          else if (p.turn?.status === 'interrupted') reject(new McpExecutionError(executionReport({ code: 'CANCELLED', message: 'Выполнение отменено.' }, completed)));
+          else if (p.turn?.status !== 'completed') reject(new Error(p.turn?.error?.message || 'Codex не завершил ответ. Откройте чат в desktop-приложении.'));
           else resolve({ text: replies.join('\n\n'), turnId: p.turn.id });
         }
       };
       disconnected = () => reject(new Error('Соединение с Codex прервано. Проверьте чат перед повторной отправкой.'));
+      blocked = p => { if (p.threadId === threadId) stop(p.failure); };
       this.on('notification', listener); this.once('disconnected', disconnected);
-      timer = setTimeout(() => reject(new Error('Ответ ещё выполняется. Его можно открыть в desktop-приложении.')), timeout);
+      this.on('requestBlocked', blocked);
+      timer = setTimeout(() => reject(failure ? new McpExecutionError(executionReport(failure, completed)) : new Error('Ответ ещё выполняется. Его можно открыть в desktop-приложении.')), timeout);
     });
     // Attach rejection handling before starting generation.
     completion.catch(() => {});
     try {
       const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...attachmentInput(attachments.filter(file => file.fileId)), ...attachments.filter(file => !file.fileId).map(file => ({ type: 'image', url: file.url }))];
-      const started = await this.call('turn/start', { threadId, input, clientUserMessageId: requestId });
+      const started = await this.call('turn/start', { threadId, input, clientUserMessageId: requestId, approvalsReviewer: 'auto_review' });
+      activeTurn = started.turn?.id;
+      if (failure && !interrupt && activeTurn) interrupt = this.call('turn/interrupt', { threadId, turnId: activeTurn }).catch(() => {});
       this.emit('turnStarted', { threadId, turnId: started.turn?.id });
       return await completion;
     } finally {
-      clearTimeout(timer); this.off('notification', listener); this.off('disconnected', disconnected);
+      clearTimeout(timer); this.off('notification', listener); this.off('disconnected', disconnected); this.off('requestBlocked', blocked);
       if (!finished) this.emit('unfinished', threadId);
     }
   }
   async history(threadId, { cursor = null, limit = 50 } = {}) {
     const result = await this.call('thread/items/list', { threadId, sortDirection: 'desc', limit, cursor });
     const rows = result.items || result.data || [];
-    let imageBytes = 0;
-    const messages = rows.flatMap(row => {
+    const displayed = [];
+    let segment = [];
+    const flush = () => {
+      const calls = segment.filter(item => item.type === 'mcpToolCall' && item.server === 'index12');
+      const failed = calls.map(item => toolFailure(item)).find(Boolean);
+      if (failed) {
+        const report = executionReport(failed, calls.map(receipt).filter(Boolean));
+        displayed.push(...segment.filter(item => item.type === 'userMessage'), { type: 'agentMessage', id: `${calls.find(item => toolFailure(item)).id}-execution`, text: report.text, execution: report });
+      } else displayed.push(...segment);
+      segment = [];
+    };
+    for (const row of [...rows].reverse()) {
       const item = row.item || row;
-      if (item.type === 'agentMessage') return [{ id: item.id, role: 'assistant', content: item.text }];
+      if (item.type === 'userMessage') flush();
+      segment.push(item);
+    }
+    flush();
+    let imageBytes = 0;
+    const messages = displayed.flatMap(item => {
+      if (item.type === 'agentMessage') return [{ id: item.id, role: 'assistant', content: item.text, ...(item.execution ? { execution: item.execution } : {}) }];
       if (item.type === 'userMessage') {
         const parsed = readAttachmentInput(item.content);
         const content = parsed.content;
@@ -131,7 +173,7 @@ class CodexClient extends EventEmitter {
         return [{ id: item.id, role: 'user', content: content || (images.length ? '[Изображение]' : ''), ...((attachments.length || parsed.attachments.length) ? { attachments: [...parsed.attachments, ...attachments] } : {}) }];
       }
       return [];
-    }).reverse();
+    });
     return { messages, nextCursor: result.nextCursor || null };
   }
   close() { this.socket?.terminate(); this.child?.kill(); }

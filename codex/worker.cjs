@@ -8,6 +8,9 @@ const { stageAttachments } = require('./files.cjs');
 const { CodexClient } = require('./codexClient.cjs');
 const { workspaceAccess } = require('../utils/operationAccess');
 const { startSharedGateway } = require('./sharedGateway.cjs');
+const { readMcpAccess } = require('./mcpPolicy.cjs');
+const { ExecutionGuard } = require('../mcp/executionGuard.cjs');
+const { receipt, executionReport, McpExecutionError } = require('./toolResults.cjs');
 const root = path.resolve(__dirname, '..');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -23,6 +26,7 @@ async function run() {
   const transport = process.env.INDEX12_CODEX_TRANSPORT || 'shared';
   const codex = await new CodexClient({ transport }).connect().catch(async error => { await mongo.close(); throw error; });
   let running = true, disconnected = false, stopped = false, ownsLease = false, timer, gateway;
+  const executions = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'index12-executions-'));
   codex.on('disconnected', () => { disconnected = true; running = false; });
   const stop = () => { running = false; stopped = true; };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
@@ -59,18 +63,27 @@ async function run() {
       if (!await authorized()) throw new Error('Доступ к рабочей области отозван.');
       const job = await jobs.findOneAndUpdate({ ...scope, status: 'queued', active: true }, { $set: { status: 'running', startedAt: new Date(), workerId: instanceId } }, { sort: { createdAt: 1 }, returnDocument: 'after' });
       if (!job) { await wait(750); continue; }
+      const guardFile = path.join(executions, randomUUID() + '.jsonl');
+      fs.writeFileSync(guardFile, JSON.stringify({ type: 'start', requestId: job._id }) + '\n', { mode: 0o600 });
+      const execution = new ExecutionGuard(guardFile);
       try {
         const chat = await chats.findOne({ _id: job.chatId, ...scope, archived: false });
         if (!chat) throw new Error('Чат недоступен.');
         let result;
         if (job.kind === 'send') {
+          // Only the authenticated API can supply capabilities/direct mode. Neither
+          // user text, file contents nor tool arguments can grant these permissions.
+          const access = await readMcpAccess(binding);
           let threadId = chat.threadId;
           if (!threadId) {
-            const thread = await codex.createThread({ projectId: project.id, cwd }); threadId = thread.id;
+            const thread = await codex.createThread({ projectId: project.id, cwd, access, guardFile }); threadId = thread.id;
             await chats.updateOne({ _id: chat._id, ...scope }, { $set: { threadId, title: job.message.slice(0, 60) || 'Изображение', updatedAt: new Date() } });
           }
           const attachments = await stageAttachments(db.collection('desktopFiles'), job.attachments || [], scope, chat._id, cwd);
-          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments }), threadId };
+          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments, access, guardFile, onToolFailure: detail => execution.stop(detail) }), threadId };
+          const journal = execution.entries();
+          const failure = journal.find(entry => entry.type === 'failure');
+          if (failure) throw new McpExecutionError(executionReport(failure.error, journal.filter(entry => entry.type === 'completed').map(entry => receipt({ tool: entry.tool, result: { structuredContent: entry.result } })).filter(Boolean)));
           result.history = await codex.history(threadId).catch(() => null);
           if (!chat.threadId) await codex.call('thread/name/set', { threadId, name: `Index12 · ${job.message.slice(0, 50)}` }).catch(() => {});
           await chats.updateOne({ _id: chat._id, ...scope }, { $set: { updatedAt: new Date() } });
@@ -78,12 +91,24 @@ async function run() {
         else throw new Error('Неизвестный запрос.');
         await jobs.updateOne({ _id: job._id, workerId: instanceId }, { $set: { status: 'completed', active: false, result, expiresAt: new Date(Date.now() + 86400000) }, $unset: { message: '', attachments: '' } });
       } catch (error) {
-        await jobs.updateOne({ _id: job._id, workerId: instanceId }, { $set: { status: 'failed', active: false, error: error.message, expiresAt: new Date(Date.now() + 86400000) } });
+        let journal;
+        try { journal = execution.entries(); }
+        catch (guardError) { journal = [{ type: 'failure', error: guardError.detail }]; }
+        const recordedFailure = journal.find(entry => entry.type === 'failure');
+        const saved = journal.filter(entry => entry.type === 'completed').map(entry => receipt({ tool: entry.tool, result: { structuredContent: entry.result } })).filter(Boolean);
+        if (error.execution || recordedFailure || saved.length) {
+          const completed = [...new Map([...(error.execution?.completed || []), ...saved].map(item => [JSON.stringify(item), item])).values()];
+          error.execution = executionReport(error.execution?.error || recordedFailure?.error || { code: 'CONNECTION_ERROR', message: 'Выполнение прервалось. Неподтверждённые действия требуют проверки перед повтором.' }, completed);
+        }
+        await jobs.updateOne({ _id: job._id, workerId: instanceId }, { $set: { status: 'failed', active: false, error: error.message, ...(error.execution ? { result: { execution: error.execution } } : {}), expiresAt: new Date(Date.now() + 86400000) } });
+      } finally {
+        fs.rmSync(guardFile, { force: true });
       }
     }
     if (disconnected && !stopped) throw new Error('Codex отключился. Перезапустите связку.');
   } finally {
     clearInterval(timer); codex.close();
+    fs.rmSync(executions, { recursive: true, force: true });
     if (gateway) await gateway.close();
     if (ownsLease) await workers.updateOne({ _id: identity, instanceId }, { $set: { seenAt: new Date(0) } });
     await mongo.close(); process.off('SIGINT', stop); process.off('SIGTERM', stop);
