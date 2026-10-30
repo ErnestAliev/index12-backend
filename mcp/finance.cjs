@@ -1,5 +1,7 @@
 'use strict';
 
+const { isSystemWithdrawal } = require('../utils/transferSemantics');
+
 const { ObjectId } = require('mongoose').mongo;
 const { transferLabels } = require('../utils/transferLabels');
 const { workspaceAccess } = require('../utils/operationAccess');
@@ -136,8 +138,8 @@ const DEFINITIONS = {
   income: 'Номинальные доходы по внесённым операциям, включая взаимозачёт.',
   expense: 'Номинальные расходы, включая взаимозачёт; родители распределений исключены.',
   operatingResult: 'Доходы минус расходы по внесённым операциям. Это не подтверждённая бухгалтерская чистая прибыль: амортизация, начисления, кредиты и полнота учёта требуют отдельной проверки.',
-  cashNet: 'Фактический по датам денежный приток минус денежные расходы и вывод на личные нужды. Взаимозачёт уменьшает денежный доход и не вычитается повторно.',
-  transfers: 'Оборот переводов отдельно, не доход и не расход. Вывод на личные нужды — отдельно ownerDraw.',
+  cashNet: 'Фактический по датам денежный приток минус денежные расходы и вывод средств из системы. Взаимозачёт уменьшает денежный доход и не вычитается повторно.',
+  transfers: 'Оборот переводов отдельно, не доход и не расход. Вывод из системы — отдельно ownerDraw; назначение не указано, если его нет в комментарии.',
   state: 'fact: календарная дата <= asOf; plan: дата > asOf. Наличие даты не доказывает оплату; это правило INDEX12.',
   shared: 'Все проекты — единая общая статья, учтённая один раз. Не распределяется по отдельным проектам.',
   coverage: 'Месяц без операций означает отсутствие записей, а не доказательство отсутствия деятельности или пропуска ввода.',
@@ -162,7 +164,7 @@ function matches(e, f, allowShared = false) {
 const empty = () => ({ count: 0, income: 0, expense: 0, cashIncome: 0, cashExpense: 0, internalTransfers: 0, ownerDraw: 0, unclassified: 0 });
 function accumulate(t, e) {
   t.count++;
-  const field = e.kind === 'transfer' ? (e.isWithdrawal || e.transferPurpose === 'personal' && e.transferReason === 'personal_use' ? 'ownerDraw' : 'internalTransfers') : e.kind === 'unknown' ? 'unclassified' : e.kind;
+  const field = e.kind === 'transfer' ? (e.isWithdrawal || isSystemWithdrawal(e) ? 'ownerDraw' : 'internalTransfers') : e.kind === 'unknown' ? 'unclassified' : e.kind;
   t[field] = add(t[field], e.amountUnits);
   if (e.kind === 'income') t.cashIncome = add(t.cashIncome, e.cashUnits);
   if (e.kind === 'expense') t.cashExpense = add(t.cashExpense, e.cashUnits);
@@ -253,7 +255,7 @@ function balances(snapshot,{ asOf = today() } = {}) {
     else if (e.kind === 'transfer') {
       if (e.incompleteTransfer) { unresolved.add(e._id); continue; }
       change(e.fromAccountId || e.accountId,-e.amountUnits);
-      if (!(e.isWithdrawal || e.transferPurpose === 'personal' && e.transferReason === 'personal_use')) change(e.toAccountId,e.amountUnits);
+      if (!(e.isWithdrawal || isSystemWithdrawal(e))) change(e.toAccountId,e.amountUnits);
     }
   }
   const accounts=[...result.values()]; const sum=items => money(items.reduce((t,a) => add(t,a.balance),0));

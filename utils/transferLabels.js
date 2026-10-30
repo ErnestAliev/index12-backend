@@ -1,3 +1,4 @@
+const { isSystemWithdrawal } = require('./transferSemantics');
 // Keep the account and its recorded owner together wherever a transfer is shown.
 const entityId = value => {
   if (!value) return '';
@@ -14,7 +15,7 @@ const entityName = (value, list) => lookup(list, value)?.name || (typeof value =
 function transferLabels(operation = {}, directories = {}) {
   const op = operation || {};
   const { accounts = [], companies = [], individuals = [] } = directories;
-  const outside = op.isOutOfSystemTransfer === true || (op.transferPurpose === 'personal' && op.transferReason === 'personal_use');
+  const outside = op.isOutOfSystemTransfer === true || isSystemWithdrawal(op);
   const side = prefix => {
     const isFrom = prefix === 'from';
     const accountRef = op[`${prefix}AccountId`] || op[`${prefix}Account`] || (isFrom ? op.accountId : null);

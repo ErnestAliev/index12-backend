@@ -12,6 +12,7 @@ const { normalizeProjectScope, equalProjectShares } = require('../../utils/proje
 const { withDaySlotLock } = require('../../utils/daySlotLock');
 const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('../../utils/subcategories');
 const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require('../../utils/mcpOperations');
+const { isSystemWithdrawal, normalizeTransferData } = require('../../utils/transferSemantics');
 const { workspaceAccess } = require('../../utils/operationAccess');
 const { withRelatedOperationGuard } = require('../../utils/relatedOperationGuard');
 
@@ -41,7 +42,7 @@ async function startFixture() {
     const emitted = [];
     const handlers = {};
     const entityHandlers = {};
-    const context = { app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
+    const context = { isSystemWithdrawal, normalizeTransferData, app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
       captureMcpEntityHandler: (kind, handler) => (entityHandlers[kind] = handler),
       captureMcpHandler: (kind, handler) => (handlers[kind] = handler), mcpVersionFilter, mcpAuditEntry,
       withRelatedOperationGuard,
@@ -63,7 +64,7 @@ async function startFixture() {
       vm.runInNewContext(source.slice(a, b) + suffix, context);
     };
     // Schemas contain all references needed by production populate calls.
-    run('const accountSchema =', 'const chatHistorySchema =', '\nglobalThis.models = { Account, Company, Individual, Contractor, Project, Category, Subcategory, Event };');
+    run('const accountSchema =', '// --- CONFIG ---', '\nglobalThis.models = { Account, Company, Individual, Contractor, Project, Category, Subcategory, Event };');
     Object.assign(context, context.models);
     const models = context.models;
     await models.Subcategory.init();

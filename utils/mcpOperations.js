@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { z } = require('zod');
 const { workspaceAccess } = require('./operationAccess');
+const { isSystemWithdrawal } = require('./transferSemantics');
 const { parseMoney } = require('./operationMoney');
 const { scopeQuery, eventDay } = require('../mcp/finance.cjs');
 const { registerMcpImportRoutes, confirmationMode } = require('./mcpImports');
@@ -21,10 +22,10 @@ const updateSchema = z.object({ id: ID, expectedVersion: z.number().int().min(0)
 const transferFields = {
     amount: fields.amount, date: fields.date, projectScope: fields.projectScope, projectId: fields.projectId,
     categoryId: fields.categoryId, subcategoryId: fields.subcategoryId, description: fields.description,
-    fromAccountId: ID, toAccountId: ID,
+    fromAccountId: ID, toAccountId: ID.nullable().optional(),
     fromCompanyId: ID.nullable().optional(), toCompanyId: ID.nullable().optional(),
     fromIndividualId: ID.nullable().optional(), toIndividualId: ID.nullable().optional(),
-    transferPurpose: z.enum(['internal', 'inter_company', 'personal']).optional(),
+    transferPurpose: z.enum(['internal', 'inter_company', 'personal', 'withdrawal']).optional(),
     transferReason: z.enum(['business_growth', 'personal_use']).nullable().optional(),
 };
 const transferSchema = z.object(transferFields).strict();
@@ -164,12 +165,19 @@ function registerMcpOperationRoutes(app, deps) {
     async function prepareTransfer(req, input, existing) {
         const previous = existing?.toObject() || {};
         const effective = { ...previous, ...input };
-        if (!effective.fromAccountId || !effective.toAccountId || String(effective.fromAccountId) === String(effective.toAccountId)) fail('VALIDATION_ERROR', 'toAccountId', 'Укажите два разных счёта перевода.');
         const purpose = effective.transferPurpose || 'internal';
-        const reason = effective.transferReason || null;
+        const reason = input.transferPurpose === 'withdrawal' && !Object.hasOwn(input, 'transferReason') ? null : effective.transferReason || null;
+        const withdrawal = isSystemWithdrawal({ transferPurpose: purpose, transferReason: reason });
+        if (!effective.fromAccountId) fail('VALIDATION_ERROR', 'fromAccountId', 'Укажите счёт списания.');
+        if (!withdrawal && (!effective.toAccountId || String(effective.fromAccountId) === String(effective.toAccountId))) fail('VALIDATION_ERROR', 'toAccountId', 'Укажите другой счёт получателя.');
+        if (purpose === 'withdrawal' && (effective.toAccountId || effective.toCompanyId || effective.toIndividualId)) {
+            // Switching an existing transfer clears its old destination. New supplied destinations are mistakes.
+            if (['toAccountId','toCompanyId','toIndividualId'].some(key => input[key])) fail('VALIDATION_ERROR', 'toAccountId', 'Для вывода счёт получателя не нужен.');
+        }
         if (purpose === 'personal' ? !['business_growth', 'personal_use'].includes(reason) : reason !== null) fail('VALIDATION_ERROR', 'transferReason', 'Для личного перевода укажите business_growth или personal_use; для остальных — null.');
         const owners = {};
         for (const side of ['from', 'to']) {
+            if (side === 'to' && purpose === 'withdrawal') { owners.toCompanyId = null; owners.toIndividualId = null; continue; }
             const companyKey = `${side}CompanyId`, individualKey = `${side}IndividualId`;
             // When the account changes, infer only its recorded owner, never the old account's owner.
             const accountChanged = Object.hasOwn(input, `${side}AccountId`) && String(input[`${side}AccountId`]) !== String(previous[`${side}AccountId`]);
@@ -179,13 +187,13 @@ function registerMcpOperationRoutes(app, deps) {
             if (owners[companyKey] && owners[individualKey]) fail('VALIDATION_ERROR', individualKey, 'Выберите одного владельца счёта.');
             if ((!existing || accountChanged || Object.hasOwn(input, companyKey) || Object.hasOwn(input, individualKey)) && (account.companyId || account.individualId) && (String(owners[companyKey] || '') !== String(account.companyId || '') || String(owners[individualKey] || '') !== String(account.individualId || ''))) fail('VALIDATION_ERROR', companyKey, 'Владелец перевода должен соответствовать владельцу выбранного счёта.');
         }
-        const withdrawal = purpose === 'personal' && reason === 'personal_use';
         return prepare(req, { ...input, ...owners, type: 'transfer', isTransfer: true, isWithdrawal: withdrawal,
             transferPurpose: purpose, transferReason: reason,
+            ...(purpose === 'withdrawal' ? { toAccountId: null } : {}),
             accountId: withdrawal ? effective.fromAccountId : null,
             companyId: withdrawal ? owners.fromCompanyId : null, individualId: withdrawal ? owners.fromIndividualId : null,
-            destination: withdrawal ? 'Личные нужды' : null,
-            ...(!existing && !input.description ? { description: withdrawal ? 'Вывод на личные цели' : 'Перевод между счетами' } : {}),
+            destination: withdrawal ? 'Вне системы' : null,
+            ...(!existing && !input.description ? { description: withdrawal ? 'Вывод средств' : 'Перевод между счетами' } : {}),
         }, existing, true);
     }
     async function invoke(handler, req) {

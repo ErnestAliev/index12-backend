@@ -60,6 +60,31 @@ async function verifyTransfers({ fixture, client, configFile, owner, workspace, 
     const reverted = await call('index12_update_transfer', { id: personal.id, expectedVersion: 0, changes: { transferPurpose: 'internal', transferReason: null } });
     assert.equal(reverted.operation.isWithdrawal, false); assert.equal(reverted.operation.accountId, null); assert.equal((await totals()).totals.ownerDraw, before.totals.ownerDraw);
     await call('index12_delete_operation', { id: personal.id, expectedVersion: 1 });
+    // A reason-free draw needs no destination and changes only the source balance.
+    const drawInput = { amount:'500.25', date:'2026-11-05', fromAccountId:String(account), transferPurpose:'withdrawal', idempotencyKey:'reason-free-draw-001' };
+    const draw = await call('index12_create_transfer', drawInput);
+    assert.equal(draw.operation.isWithdrawal, true); assert.equal(draw.operation.transferReason, null);
+    assert.equal(draw.operation.toAccountId, null); assert.equal(draw.operation.toIndividualId, null);
+    assert.equal(draw.operation.description, 'Вывод средств');
+    assert.equal((await call('index12_get_operation', {id:draw.id})).editable, true);
+    assert.equal((await call('index12_create_transfer', drawInput)).id, draw.id);
+    const afterDraw = await totals();
+    assert.equal(afterDraw.totals.ownerDraw, '500.25');
+    assert.equal(afterDraw.totals.expense, before.totals.expense);
+    assert.equal(afterDraw.totals.operatingResult, before.totals.operatingResult);
+    assert.equal(Number((await balances()).total), Number(balanceBefore.total) - 500.25);
+    const editedDraw = await call('index12_update_transfer', {id:draw.id,expectedVersion:0,changes:{amount:'600.50',description:'Комментарий собственника'}});
+    assert.equal(editedDraw.operation.toAccountId, null); assert.equal(editedDraw.operation.description, 'Комментарий собственника');
+    await error('index12_update_transfer', {id:draw.id,expectedVersion:1,changes:{transferPurpose:'internal'}}, 'VALIDATION_ERROR');
+    await error('index12_create_transfer', {...drawInput,toAccountId:String(destination),idempotencyKey:'draw-invalid-to-001'}, 'VALIDATION_ERROR');
+    await error('index12_create_transfer', {...drawInput,transferReason:'business_growth',idempotencyKey:'draw-invalid-reason-001'}, 'VALIDATION_ERROR');
+    await call('index12_delete_operation', {id:draw.id,expectedVersion:1});
+    const conversion = await call('index12_create_transfer', {...base,idempotencyKey:'transfer-to-draw-001'});
+    const asDraw = await call('index12_update_transfer', {id:conversion.id,expectedVersion:0,changes:{transferPurpose:'withdrawal'}});
+    assert.equal(asDraw.operation.toAccountId, null); assert.equal(asDraw.operation.toIndividualId, null);
+    const asTransfer = await call('index12_update_transfer', {id:conversion.id,expectedVersion:1,changes:{transferPurpose:'internal',toAccountId:String(destination)}});
+    assert.equal(asTransfer.operation.isWithdrawal, false); assert.equal(asTransfer.operation.accountId, null);
+    await call('index12_delete_operation', {id:conversion.id,expectedVersion:2});
     // Reversing the endpoints derives the newly selected account owners, without modifying accounts.
     const reversed = await call('index12_create_transfer', { ...base, idempotencyKey: 'reversed-transfer-001' });
     const swapped = await call('index12_update_transfer', { id: reversed.id, expectedVersion: 0, changes: { fromAccountId: String(destination), toAccountId: String(account) } });

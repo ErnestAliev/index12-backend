@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const vm = require('node:vm');
+const { isSystemWithdrawal, normalizeTransferData } = require('../utils/transferSemantics');
 const { normalizeProjectScope, equalProjectShares } = require('../utils/projectScope');
 const { withDaySlotLock } = require('../utils/daySlotLock');
 const { withRelatedOperationGuard } = require('../utils/relatedOperationGuard');
@@ -19,6 +20,8 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
   const rebuilds = [];
   const app = { [method]: (_path, ...handlers) => { handler = handlers.at(-1); } };
   const context = {
+    isSystemWithdrawal, normalizeTransferData,
+    Account: { findOne: async () => ({ companyId: 'company' }) },
     app, Event, mongoose: { Types: { ObjectId: class {} } },
     captureMcpHandler: (_kind, handler) => handler,
     checkWorkspacePermission: () => (_req, _res, next) => next(),

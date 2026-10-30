@@ -1,3 +1,4 @@
+const { isSystemWithdrawal, normalizeTransferData } = require('./utils/transferSemantics');
 // backend/server.js
 const express = require('express');
 const { normalizeProjectScope, equalProjectShares } = require('./utils/projectScope');
@@ -2226,7 +2227,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
             {
                 $project: {
                     type: 1, amount: 1, isTransfer: 1,
-                    transferPurpose: 1, transferReason: 1,
+                    transferPurpose: 1, transferReason: 1, isWithdrawal: 1,
                     categoryId: 1, subcategoryId: 1, excludeFromTotals: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
                     companyId: 1, fromCompanyId: 1, toCompanyId: 1,
                     individualId: 1, fromIndividualId: 1, toIndividualId: 1, counterpartyIndividualId: 1,
@@ -2235,8 +2236,9 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                     isSystemWithdrawalTransfer: {
                         $and: [
                             { $or: ["$isTransfer", { $eq: ["$type", "transfer"] }] },
-                            { $eq: ["$transferPurpose", "personal"] },
-                            { $eq: ["$transferReason", "personal_use"] }
+                            { $or: ["$isWithdrawal", { $eq: ["$transferPurpose", "withdrawal"] }, { $and: [
+                                { $eq: ["$transferPurpose", "personal"] }, { $eq: ["$transferReason", "personal_use"] }
+                            ] }] }
                         ]
                     },
                     isWorkAct: { $ifNull: ["$isWorkAct", false] },
@@ -2488,7 +2490,11 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
 
 app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), captureMcpHandler('create', async (req, res) => {
     try {
-        const data = normalizeProjectScope(normalizeEventCategoryFields(req.body));
+        let data = normalizeProjectScope(normalizeEventCategoryFields(req.body));
+        if (data.type === 'transfer') {
+            const scopeId = await getCompositeUserId(req);
+            data = await normalizeTransferData(data, { findAccount: id => Account.findOne({ _id: id, ...(req.mcpContext?.scope || { userId: scopeId }) }) });
+        }
         delete data.changeHistory; delete data.createdVia; delete data.updatedVia; delete data.mcpRelationLocks;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
         await validateEventSubcategory(data, null, { Subcategory, userId: req.mcpContext?.scope?.userId || userId });
@@ -2606,6 +2612,11 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const existingEvent = await Event.findOne({ _id: id, userId: userIdQuery });
         if (!existingEvent) {
             return res.status(404).json({ message: 'Event not found' });
+        }
+        if (existingEvent.type === 'transfer' || updatedData.type === 'transfer') {
+            updatedData = await normalizeTransferData(updatedData, {
+                previous: existingEvent.toObject(), findAccount: id => Account.findOne({ _id: id, ...(req.mcpContext?.scope || { userId: userIdQuery }) })
+            });
         }
         updatedData = normalizeProjectScope(updatedData, existingEvent);
         const previousDate = existingEvent.date;
@@ -2839,7 +2850,12 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
     } catch (err) { res.status(500).json({ message: err.message }); }
 }));
 
-app.post('/api/transfers', isAuthenticated, async (req, res) => {
+app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
+    try {
+        const scopeId = await getCompositeUserId(req);
+        req.body = await normalizeTransferData(req.body, { findAccount: id => Account.findOne({ _id: id, ...(req.mcpContext?.scope || { userId: scopeId }) }) });
+        await ensureManagerCanAccessOperationAccounts(req, req.body);
+    } catch (error) { return res.status(error.statusCode || 400).json({ message: error.message }); }
     const {
         amount, date, dateKey,
         fromAccountId, toAccountId,
@@ -2873,7 +2889,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
         }
         else { return res.status(400).json({ message: 'Missing date' }); }
 
-        if (transferPurpose === 'personal' && transferReason === 'personal_use') {
+        if (isSystemWithdrawal(req.body)) {
             const withdrawalEvent = await withDaySlotLock(userId, finalDateKey, async () => {
                 const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex);
                 const withdrawalEvent = new Event({
@@ -2889,12 +2905,12 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
                     toCompanyId: safeId(toCompanyId),
                     fromIndividualId: safeId(fromIndividualId),
                     toIndividualId: safeId(toIndividualId),
-                    transferPurpose: 'personal',
-                    transferReason: 'personal_use',
+                    transferPurpose,
+                    transferReason: transferReason || null,
                     categoryId: classification.categoryId,
                     subcategoryId: classification.subcategoryId,
                     ...projectData,
-                    destination: 'Личные нужды', description: 'Вывод на личные цели',
+                    destination: 'Вне системы', description: req.body.description,
                     date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
                     createdBy: req.user.id,
                     createdByRole: getCurrentWorkspaceActorRole(req)
@@ -2923,12 +2939,7 @@ app.post('/api/transfers', isAuthenticated, async (req, res) => {
 
         const groupId = `tr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-        let desc = 'Внутренний перевод';
-        if (transferPurpose === 'personal') {
-            desc = 'Перевод на личную карту (Развитие бизнеса)';
-        } else if (transferPurpose === 'inter_company') {
-            desc = fromIndividualId ? 'Вложение средств (Личные -> Бизнес)' : 'Межкомпанийский перевод';
-        }
+        const desc = req.body.description;
 
         const transferEvent = await withDaySlotLock(userId, finalDateKey, async () => {
             const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex);
