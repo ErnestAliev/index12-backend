@@ -4,6 +4,7 @@ const WRITE_CAPABILITIES = {
   index12_create_operation: 'create', index12_update_operation: 'update', index12_delete_operation: 'delete',
   index12_create_transfer: 'createTransfers', index12_update_transfer: 'updateTransfers', index12_execute_import: 'executeImport',
 };
+const INDEX12_TOOLS = ['index12_status', 'index12_find_entities', 'index12_financial_summary', 'index12_list_operations', 'index12_account_balances', 'index12_get_operation', ...Object.keys(WRITE_CAPABILITIES), 'index12_prepare_import'];
 
 async function readMcpAccess(binding, request = fetch) {
   const base = new URL(binding.apiUrl);
@@ -20,6 +21,7 @@ async function readMcpAccess(binding, request = fetch) {
 
 function scopedConfig(access, guardFile) {
   const config = Object.fromEntries(['onec_kz', 'bcc_uu', 'esf_uu', 'node_repl', 'computer-use'].map(name => [`mcp_servers.${name}.enabled`, false]));
+  config['mcp_servers.index12.enabled_tools'] = INDEX12_TOOLS;
   // Automatic review still checks user intent and managed policy. Never auto-accept
   // a server request or use "approve"/"never" to bypass those checks.
   for (const [tool, capability] of Object.entries(WRITE_CAPABILITIES)) {
@@ -29,4 +31,4 @@ function scopedConfig(access, guardFile) {
   if (guardFile) config['mcp_servers.index12.env.INDEX12_MCP_EXECUTION_GUARD'] = guardFile;
   return config;
 }
-module.exports = { WRITE_CAPABILITIES, readMcpAccess, scopedConfig };
+module.exports = { WRITE_CAPABILITIES, INDEX12_TOOLS, readMcpAccess, scopedConfig };

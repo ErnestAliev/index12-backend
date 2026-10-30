@@ -17,6 +17,7 @@ const defaultSocketPath = () => process.env.INDEX12_CODEX_SOCKET || path.join(pr
 class CodexClient extends EventEmitter {
   constructor({ binary = process.env.INDEX12_CODEX_BIN || 'codex', timeout = 30000, transport = process.env.INDEX12_CODEX_TRANSPORT || 'standalone' } = {}) {
     super(); this.binary = binary; this.timeout = timeout; this.transport = transport; this.sequence = 0; this.pending = new Map(); this.newThreads = new Set();
+    this.requestHandlers = new Map(); this.serverRequests = new Map(); this.requestDetails = new Map();
     if (!['shared', 'standalone'].includes(transport)) throw new Error('Неизвестный транспорт Codex.');
   }
   async connect() {
@@ -27,11 +28,15 @@ class CodexClient extends EventEmitter {
         clearTimeout(p.timer); this.pending.delete(item.id);
         item.error ? p.reject(new Error(item.error.message || 'Codex отклонил запрос.')) : p.resolve(item.result);
       } else if (item.id != null) this.handleServerRequest(item);
-      else if (item.method) this.emit('notification', item);
+      else if (item.method) {
+        if (item.method === 'serverRequest/resolved') this.serverRequests.get(String(item.params?.requestId))?.controller.abort();
+        this.emit('notification', item);
+      }
     };
     const disconnected = () => {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Соединение с Codex прервано.')); }
       this.pending.clear(); this.emit('disconnected');
+      for (const request of this.serverRequests.values()) request.controller.abort();
     };
     if (this.transport === 'shared') {
       this.socket = new WebSocket('ws://localhost/rpc', { createConnection: () => net.createConnection(defaultSocketPath()), handshakeTimeout: this.timeout });
@@ -46,12 +51,14 @@ class CodexClient extends EventEmitter {
       this.lines.on('line', receive); this.child.on('error', disconnected); this.child.on('exit', disconnected);
     }
     try {
-      await this.call('initialize', { clientInfo: { name: 'index12_desktop_bridge', title: 'Index12', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+      await this.call('initialize', { clientInfo: { name: 'index12_desktop_bridge', title: 'Index12', version: '0.1.0' }, capabilities: { experimentalApi: true, mcpServerOpenaiFormElicitation: true } });
     } catch (error) { this.close(); throw error; }
     this.write({ method: 'initialized' });
     return this;
   }
   handleServerRequest(item) {
+    const handler = this.requestHandlers.get(item.params?.threadId);
+    if (handler) return this.forwardRequest(item, handler);
     // Unhandled requests are a client limitation, never a user refusal. No
     // accept/decline decision is fabricated, including after automatic review.
     const params = item.params || {};
@@ -59,6 +66,26 @@ class CodexClient extends EventEmitter {
     this.emit('requestBlocked', { ...params, failure });
     this.write({ id: item.id, error: { code: -32000, message: failure.message, data: { code: failure.code } } });
     this.emit('permissionRequired', item.method);
+  }
+  async forwardRequest(item, handler) {
+    const key = String(item.id), controller = new AbortController();
+    this.serverRequests.set(key, { controller, threadId: item.params.threadId });
+    handler.pause();
+    try {
+      const details = this.requestDetails.get(`${item.params.threadId}:${item.params.itemId}`);
+      const answer = await handler.onRequest(details ? { ...item, params: { ...item.params, changes: details.changes } } : item, controller.signal);
+      if (controller.signal.aborted) return;
+      this.write({ id: item.id, result: answer.result });
+      if (answer.failure) this.emit('requestBlocked', { ...item.params, failure: answer.failure });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const failure = { code: 'APPROVAL_UNAVAILABLE', message: error.message || 'Не удалось передать вопрос Codex в чат.', method: item.method };
+      this.emit('requestBlocked', { ...item.params, failure });
+      this.write({ id: item.id, error: { code: -32000, message: failure.message, data: { code: failure.code } } });
+    } finally {
+      this.serverRequests.delete(key);
+      if (![...this.serverRequests.values()].some(request => request.threadId === item.params.threadId)) handler.resume();
+    }
   }
   write(data) {
     if (this.socket) this.socket.send(JSON.stringify(data));
@@ -81,7 +108,7 @@ class CodexClient extends EventEmitter {
     this.newThreads.add(result.thread.id);
     return result.thread;
   }
-  async send(threadId, text, { requestId, attachments = [], access, guardFile, onToolFailure = () => {}, onProgress = () => {}, timeout = 300000 } = {}) {
+  async send(threadId, text, { requestId, attachments = [], access, guardFile, onRequest, onToolFailure = () => {}, onProgress = () => {}, timeout = 300000 } = {}) {
     if (!this.newThreads.delete(threadId)) {
       await this.call('thread/resume', { threadId, approvalsReviewer: 'auto_review', config: scopedConfig(access, guardFile), developerInstructions: INDEX12_CONTEXT });
       const read = await this.call('thread/read', { threadId });
@@ -95,11 +122,12 @@ class CodexClient extends EventEmitter {
       try { onToolFailure(detail); } catch { /* An unavailable execution guard blocks subsequent writes. */ }
       if (activeTurn) interrupt = this.call('turn/interrupt', { threadId, turnId: activeTurn }).catch(() => {});
     };
-    let finished = false;
+    let finished = false, alive = true;
     const completion = new Promise((resolve, reject) => {
       const replies = [];
       listener = item => {
         const p = item.params || {}; if (p.threadId !== threadId) return;
+        if (item.method === 'item/started' && p.item?.type === 'fileChange') this.requestDetails.set(`${threadId}:${p.item.id}`, p.item);
         if (item.method === 'item/autoApprovalReview/completed' && p.action?.type === 'mcpToolCall' && p.action.server === 'index12' && p.review?.status !== 'approved') {
           stop({ code: p.review?.status === 'denied' ? 'POLICY_BLOCKED' : p.review?.status === 'aborted' ? 'CANCELLED' : 'APPROVAL_UNAVAILABLE', message: p.review?.status === 'denied' ? 'Изменение заблокировано автоматической проверкой разрешений.' : 'Проверка разрешения не завершилась.', tool: p.action.toolName });
         }
@@ -122,7 +150,9 @@ class CodexClient extends EventEmitter {
       blocked = p => { if (p.threadId === threadId) stop(p.failure); };
       this.on('notification', listener); this.once('disconnected', disconnected);
       this.on('requestBlocked', blocked);
-      timer = setTimeout(() => reject(failure ? new McpExecutionError(executionReport(failure, completed)) : new Error('Ответ ещё выполняется. Его можно открыть в desktop-приложении.')), timeout);
+      const armTimer = () => { if (alive) timer = setTimeout(() => reject(failure ? new McpExecutionError(executionReport(failure, completed)) : new Error('Ответ ещё выполняется. Его можно открыть в desktop-приложении.')), timeout); };
+      if (onRequest) this.requestHandlers.set(threadId, { onRequest, pause: () => clearTimeout(timer), resume: armTimer });
+      armTimer();
     });
     // Attach rejection handling before starting generation.
     completion.catch(() => {});
@@ -134,6 +164,9 @@ class CodexClient extends EventEmitter {
       this.emit('turnStarted', { threadId, turnId: started.turn?.id });
       return await completion;
     } finally {
+      alive = false; this.requestHandlers.delete(threadId);
+      for (const key of this.requestDetails.keys()) if (key.startsWith(`${threadId}:`)) this.requestDetails.delete(key);
+      for (const request of this.serverRequests.values()) if (request.threadId === threadId) request.controller.abort();
       clearTimeout(timer); this.off('notification', listener); this.off('disconnected', disconnected); this.off('requestBlocked', blocked);
       if (!finished) this.emit('unfinished', threadId);
     }
@@ -176,6 +209,6 @@ class CodexClient extends EventEmitter {
     });
     return { messages, nextCursor: result.nextCursor || null };
   }
-  close() { this.socket?.terminate(); this.child?.kill(); }
+  close() { for (const request of this.serverRequests.values()) request.controller.abort(); this.socket?.terminate(); this.child?.kill(); }
 }
 module.exports = { CodexClient, defaultSocketPath };

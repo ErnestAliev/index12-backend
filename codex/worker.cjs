@@ -11,6 +11,7 @@ const { startSharedGateway } = require('./sharedGateway.cjs');
 const { readMcpAccess } = require('./mcpPolicy.cjs');
 const { ExecutionGuard } = require('../mcp/executionGuard.cjs');
 const { receipt, executionReport, McpExecutionError } = require('./toolResults.cjs');
+const { RequestBroker } = require('./requests.cjs');
 const root = path.resolve(__dirname, '..');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -23,6 +24,7 @@ async function run() {
   await mongo.connect().catch(async error => { await mongo.close(); throw error; });
   const db = mongo.db(), chats = db.collection('desktopChats'), jobs = db.collection('desktopJobs'), workers = db.collection('desktopWorkers');
   const identity = `${scope.actorId}:${scope.workspaceId}`, instanceId = randomUUID();
+  const broker = new RequestBroker({ requests: db.collection('desktopRequests'), scope, workerId: instanceId });
   const transport = process.env.INDEX12_CODEX_TRANSPORT || 'shared';
   const codex = await new CodexClient({ transport }).connect().catch(async error => { await mongo.close(); throw error; });
   let running = true, disconnected = false, stopped = false, ownsLease = false, timer, gateway;
@@ -80,7 +82,7 @@ async function run() {
             await chats.updateOne({ _id: chat._id, ...scope }, { $set: { threadId, title: job.message.slice(0, 60) || 'Изображение', updatedAt: new Date() } });
           }
           const attachments = await stageAttachments(db.collection('desktopFiles'), job.attachments || [], scope, chat._id, cwd);
-          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments, access, guardFile, onToolFailure: detail => execution.stop(detail) }), threadId };
+          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments, access, guardFile, onRequest: (item, signal) => broker.ask(item, job, signal), onToolFailure: detail => execution.stop(detail) }), threadId };
           const journal = execution.entries();
           const failure = journal.find(entry => entry.type === 'failure');
           if (failure) throw new McpExecutionError(executionReport(failure.error, journal.filter(entry => entry.type === 'completed').map(entry => receipt({ tool: entry.tool, result: { structuredContent: entry.result } })).filter(Boolean)));

@@ -4,6 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const { workspaceAccess } = require('../utils/operationAccess');
 const { validateAttachments } = require('./attachments.cjs');
 const { FILE_LIMIT, safeName, validFileId, imageMime, fileMeta, fileBuffer, resolveAttachments } = require('./files.cjs');
+const { answerRequest, publicRequest } = require('./requests.cjs');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
 const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000;
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
@@ -18,7 +19,9 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       collection('Chats').createIndex({ actorId: 1, workspaceId: 1, updatedAt: -1 }),
       collection('Jobs').createIndex({ chatId: 1 }, { unique: true, partialFilterExpression: { active: true } }),
       collection('Jobs').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
-      collection('Files').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
+      collection('Files').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      collection('Requests').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      collection('Requests').createIndex({ jobId: 1, state: 1 })
     ]).catch(error => { indexes = null; throw error; });
     return indexes;
   }
@@ -40,6 +43,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   });
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
   const workerFor = scope => collection('Workers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` });
+  const jobForClient = async job => job && ({ ...publicJob(job), ...(job.active ? { pendingRequests: (await collection('Requests').find({ jobId: job._id, actorId: job.actorId, workspaceId: job.workspaceId, state: 'pending', expiresAt: { $gt: new Date() } }).sort({ expiresAt: 1 }).limit(20).toArray()).map(publicRequest) } : {}) });
   router.get('/status', wrap(async (req, res) => {
     const worker = await workerFor(req.desktopScope);
     const connected = online(worker);
@@ -62,7 +66,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const recent = await collection('Jobs').find({ chatId: chat._id, ...req.desktopScope, status: 'completed',
       $or: [{ kind: 'history', cursor: null }, { kind: 'send', 'result.history': { $exists: true } }] }).sort({ createdAt: -1 }).limit(1).toArray();
     const cachedHistory = recent[0]?.kind === 'send' ? recent[0].result?.history : recent[0]?.result;
-    res.json({ chat: { id: chat._id, title: chat.title, threadId: chat.threadId || null }, pendingJob: publicJob(pending), cachedHistory: cachedHistory || null });
+    res.json({ chat: { id: chat._id, title: chat.title, threadId: chat.threadId || null }, pendingJob: await jobForClient(pending), cachedHistory: cachedHistory || null });
   }));
   router.post('/chats/:id/files', express.raw({ type: 'application/octet-stream', limit: FILE_LIMIT }), wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
@@ -103,7 +107,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     if (existing) {
       if (existing.requestHash !== requestHash) return res.status(409).json({ error: 'Этот идентификатор уже использован для другого запроса.' });
       await retainFiles();
-      return res.json({ job: publicJob(existing) });
+      return res.json({ job: await jobForClient(existing) });
     }
     if (!online(await workerFor(scope))) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
     if (kind === 'history' && !chat.threadId) return res.json({ job: { status: 'completed', result: { messages: [], nextCursor: null } } });
@@ -116,10 +120,23 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     await retainFiles();
     res.status(202).json({ job: publicJob(job) });
   }));
+  router.post('/jobs/:id/requests/:requestId/answer', wrap(async (req, res) => {
+    const scope = req.desktopScope;
+    const job = await collection('Jobs').findOne({ _id: req.params.id, ...scope, active: true, status: 'running' });
+    const request = job && await collection('Requests').findOne({ _id: req.params.requestId, jobId: job._id, chatId: job.chatId, ...scope });
+    if (!request) return res.status(404).json({ error: 'Вопрос Codex не найден или уже завершён.' });
+    const worker = await workerFor(scope);
+    if (!online(worker) || worker.instanceId !== request.workerId || job.workerId !== request.workerId || new Date(request.expiresAt) <= new Date()) return res.status(409).json({ error: 'Время ответа истекло или связка была перезапущена. Ответ не передан.' });
+    try { answerRequest(request.spec, req.body); } catch (error) { return res.status(400).json({ error: error.message }); }
+    const answer = { action: req.body.action, ...(req.body.values ? { values: req.body.values } : {}) };
+    const saved = await collection('Requests').updateOne({ _id: request._id, ...scope, state: 'pending', expiresAt: { $gt: new Date() } }, { $set: { state: 'answered', answer, answeredAt: new Date() } });
+    if (!saved.modifiedCount) return res.status(409).json({ error: 'На этот вопрос уже ответили. Повторный ответ не передан.' });
+    res.json({ received: true });
+  }));
   router.get('/jobs/:id', wrap(async (req, res) => {
     const job = await collection('Jobs').findOne({ _id: req.params.id, ...req.desktopScope });
     if (!job) return res.status(404).json({ error: 'Запрос не найден.' });
-    res.json({ job: publicJob(job) });
+    res.json({ job: await jobForClient(job) });
   }));
   router.use((error, _req, res, _next) => {
     console.error('[Desktop assistant]', error.name);

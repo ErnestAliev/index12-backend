@@ -132,7 +132,7 @@ test('www requests work, offline history stays scoped, and repeated sends are id
       if (name === 'desktopChats') return q._id === 'owned' && q.actorId === actor ? { _id: 'owned', ...scope, title: 'Чат', threadId: 'thread' } : null;
       return jobs.find(j => j._id === q._id) || null;
     },
-    find: q => { queries.push({ name, q }); return { sort: () => ({ limit: () => ({ toArray: async () => [{ kind: 'history', result: history }] }) }) }; },
+    find: q => { queries.push({ name, q }); return { sort: () => ({ limit: () => ({ toArray: async () => name === 'desktopRequests' ? [] : [{ kind: 'history', result: history }] }) }) }; },
     insertOne: async row => { jobs.push(row); }
   }) };
   const app = require('express')(); app.use(require('express').json());
