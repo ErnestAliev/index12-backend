@@ -17,6 +17,8 @@ async function normalizeTransferData(input, { previous = {}, findAccount }) {
     if (!effective.fromAccountId) reject('Выберите счёт списания.');
     if (!withdrawal && (!effective.toAccountId || String(effective.fromAccountId) === String(effective.toAccountId))) reject('Выберите другой счёт получателя.');
     if (purpose === 'withdrawal' && ['toAccountId', 'toCompanyId', 'toIndividualId'].some(key => input[key])) reject('Для вывода счёт получателя не нужен.');
+    const recipient = typeof effective.withdrawalRecipient === 'string' ? effective.withdrawalRecipient.trim() : '';
+    if (purpose === 'withdrawal' && ((!isSystemWithdrawal(previous) || Object.hasOwn(input, 'withdrawalRecipient')) && !recipient || recipient.length > 300)) reject('Укажите получателя средств.');
     const amount = Math.abs(Number(effective.amount));
     if (!Number.isFinite(amount) || amount <= 0) reject('Введите корректную сумму.');
     const result = { ...input, type: 'transfer', isTransfer: true, isWithdrawal: withdrawal, amount,
@@ -33,7 +35,8 @@ async function normalizeTransferData(input, { previous = {}, findAccount }) {
         accountId: withdrawal ? result.fromAccountId : null,
         companyId: withdrawal ? result.fromCompanyId : null,
         individualId: withdrawal ? result.fromIndividualId : null,
-        destination: withdrawal ? 'Вне системы' : null,
+        withdrawalRecipient: withdrawal ? recipient || null : null,
+        destination: withdrawal ? recipient || 'Вне системы' : null,
         description: input.description ?? previous.description ?? (withdrawal ? 'Вывод средств' : 'Перевод между счетами'),
     });
     return result;

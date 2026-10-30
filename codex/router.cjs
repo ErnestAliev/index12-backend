@@ -3,6 +3,7 @@ const express = require('express');
 const { randomUUID, createHash } = require('node:crypto');
 const { workspaceAccess } = require('../utils/operationAccess');
 const { validateAttachments } = require('./attachments.cjs');
+const { FILE_LIMIT, safeName, validFileId, imageMime, fileMeta, fileBuffer, resolveAttachments } = require('./files.cjs');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
 const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000;
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
@@ -16,7 +17,8 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     if (!indexes) indexes = Promise.all([
       collection('Chats').createIndex({ actorId: 1, workspaceId: 1, updatedAt: -1 }),
       collection('Jobs').createIndex({ chatId: 1 }, { unique: true, partialFilterExpression: { active: true } }),
-      collection('Jobs').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
+      collection('Jobs').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      collection('Files').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
     ]).catch(error => { indexes = null; throw error; });
     return indexes;
   }
@@ -26,7 +28,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       if (!validId(scope.actorId) || !validId(scope.workspaceId)) return res.status(403).json({ error: 'Выберите рабочую область.' });
       const workspace = await Workspace.findById(scope.workspaceId).lean();
       if (!workspace || !workspaceAccess(workspace, scope.actorId)) return res.status(403).json({ error: 'Нет доступа к рабочей области.' });
-      if (req.method !== 'GET' && req.headers.origin) {
+      if ((req.method !== 'GET' || req.path.startsWith('/files/')) && req.headers.origin) {
         const frontend = frontendUrl && new URL(frontendUrl);
         const alternate = frontend && new URL(frontend.origin);
         if (alternate && !['localhost', '127.0.0.1'].includes(alternate.hostname)) alternate.hostname = alternate.hostname.startsWith('www.') ? alternate.hostname.slice(4) : `www.${alternate.hostname}`;
@@ -62,20 +64,45 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const cachedHistory = recent[0]?.kind === 'send' ? recent[0].result?.history : recent[0]?.result;
     res.json({ chat: { id: chat._id, title: chat.title, threadId: chat.threadId || null }, pendingJob: publicJob(pending), cachedHistory: cachedHistory || null });
   }));
+  router.post('/chats/:id/files', express.raw({ type: 'application/octet-stream', limit: FILE_LIMIT }), wrap(async (req, res) => {
+    const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
+    if (!chat) return res.status(404).json({ error: 'Чат не найден.' });
+    let name; try { name = safeName(decodeURIComponent(req.headers['x-file-name'] || '')); } catch { /* Invalid encoded name. */ }
+    if (!name || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Выберите непустой файл с корректным именем.' });
+    const requestedType = req.headers['x-file-type'];
+    const mimeType = imageMime(req.body) || (typeof requestedType === 'string' && /^[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+$/.test(requestedType) && !requestedType.startsWith('image/') ? requestedType : 'application/octet-stream');
+    const row = { _id: randomUUID(), ...req.desktopScope, chatId: chat._id, name, mimeType, size: req.body.length, data: req.body, createdAt: new Date(), expiresAt: new Date(Date.now() + 86400000) };
+    await collection('Files').insertOne(row);
+    res.status(201).json({ file: fileMeta(row) });
+  }));
+  router.get('/files/:id', wrap(async (req, res) => {
+    if (!validFileId(req.params.id)) return res.status(404).json({ error: 'Файл не найден.' });
+    const row = await collection('Files').findOne({ _id: req.params.id, ...req.desktopScope });
+    const chat = row && await collection('Chats').findOne({ _id: row.chatId, ...req.desktopScope, archived: false });
+    if (!row || !chat) return res.status(404).json({ error: 'Файл не найден.' });
+    const inline = /^image\/(png|jpeg|webp|gif)$/.test(row.mimeType);
+    res.set({ 'Content-Type': inline ? row.mimeType : 'application/octet-stream', 'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(row.name).replace(/['()*]/g, c => '%' + c.charCodeAt(0).toString(16))}`, 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store' });
+    res.send(fileBuffer(row));
+  }));
   router.post('/chats/:id/jobs', wrap(async (req, res) => {
     const scope = req.desktopScope;
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...scope, archived: false });
     if (!chat) return res.status(404).json({ error: 'Чат не найден.' });
     const { kind, requestId, message = '', cursor } = req.body || {};
     let attachments;
-    try { attachments = validateAttachments(req.body?.attachments); } catch (e) { return res.status(400).json({ error: e.message }); }
+    try {
+      const files = req.body?.attachments || [];
+      attachments = files.some?.(file => file?.fileId) ? await resolveAttachments(collection('Files'), files, scope, chat._id) : validateAttachments(files);
+    } catch (e) { return res.status(400).json({ error: e.message }); }
     if (!['send', 'history'].includes(kind) || !/^[\da-f-]{36}$/i.test(requestId || '') || (kind === 'send' && (typeof message !== 'string' || (!message.trim() && !attachments.length) || message.length > 16000))) return res.status(400).json({ error: 'Проверьте сообщение и идентификатор запроса.' });
     if (cursor != null && (typeof cursor !== 'string' || cursor.length > 4000)) return res.status(400).json({ error: 'Некорректный курсор истории.' });
     const id = `${scope.actorId}:${scope.workspaceId}:${requestId}`;
     const requestHash = createHash('sha256').update(JSON.stringify([chat._id, kind, kind === 'send' ? [message.trim(), attachments] : cursor || null])).digest('hex');
+    const retainFiles = async () => { if (attachments.some(file => file.fileId)) await collection('Files').updateMany({ _id: { $in: attachments.map(file => file.fileId) }, ...scope, chatId: chat._id }, { $unset: { expiresAt: '' } }); };
     const existing = await collection('Jobs').findOne({ _id: id, ...scope });
     if (existing) {
       if (existing.requestHash !== requestHash) return res.status(409).json({ error: 'Этот идентификатор уже использован для другого запроса.' });
+      await retainFiles();
       return res.json({ job: publicJob(existing) });
     }
     if (!online(await workerFor(scope))) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
@@ -86,6 +113,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       if (error.code === 11000) return res.status(409).json({ error: 'В этом чате уже выполняется запрос.' });
       throw error;
     }
+    await retainFiles();
     res.status(202).json({ job: publicJob(job) });
   }));
   router.get('/jobs/:id', wrap(async (req, res) => {
@@ -95,7 +123,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   }));
   router.use((error, _req, res, _next) => {
     console.error('[Desktop assistant]', error.name);
-    res.status(500).json({ error: 'Не удалось обработать запрос к desktop-помощнику.' });
+    res.status(error.type === 'entity.too.large' ? 413 : 500).json({ error: error.type === 'entity.too.large' ? 'Размер файла должен быть не больше 10 МБ.' : 'Не удалось обработать запрос к desktop-помощнику.' });
   });
   return router;
 }

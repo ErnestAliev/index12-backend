@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { MongoClient, ObjectId } = require('mongoose').mongo;
+const { stageAttachments } = require('./files.cjs');
 const { CodexClient } = require('./codexClient.cjs');
 const { workspaceAccess } = require('../utils/operationAccess');
 const { startSharedGateway } = require('./sharedGateway.cjs');
@@ -68,7 +69,8 @@ async function run() {
             const thread = await codex.createThread({ projectId: project.id, cwd }); threadId = thread.id;
             await chats.updateOne({ _id: chat._id, ...scope }, { $set: { threadId, title: job.message.slice(0, 60) || 'Изображение', updatedAt: new Date() } });
           }
-          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments: job.attachments || [] }), threadId };
+          const attachments = await stageAttachments(db.collection('desktopFiles'), job.attachments || [], scope, chat._id, cwd);
+          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments }), threadId };
           result.history = await codex.history(threadId).catch(() => null);
           if (!chat.threadId) await codex.call('thread/name/set', { threadId, name: `Index12 · ${job.message.slice(0, 50)}` }).catch(() => {});
           await chats.updateOne({ _id: chat._id, ...scope }, { $set: { updatedAt: new Date() } });

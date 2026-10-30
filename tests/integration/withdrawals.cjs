@@ -12,7 +12,7 @@ const { startFixture } = require('./subcategories.cjs');
     const destination = await Account.create({ userId, name: 'Личная карта в учёте', individualId: person._id, initialBalance: 0 });
     await Category.create({ userId, name: 'Перевод' });
     const date = new Date(); date.setHours(12, 0, 0, 0);
-    const input = { amount: 500.25, date: date.toISOString(), fromAccountId: String(source._id), transferPurpose: 'withdrawal' };
+    const input = { amount: 500.25, date: date.toISOString(), fromAccountId: String(source._id), transferPurpose: 'withdrawal', withdrawalRecipient: 'Собственник' };
     const snapshot = async () => (await fixture.request('/snapshot')).data;
     const draw = await fixture.request('/transfers', 'POST', input);
     assert.equal(draw.status, 201, JSON.stringify(draw));
@@ -28,11 +28,11 @@ const { startFixture } = require('./subcategories.cjs');
     const converted = await fixture.request(`/events/${draw.data._id}`, 'PUT', { transferPurpose: 'internal', transferReason: null, toAccountId: String(destination._id) });
     assert.equal(converted.status, 200); assert.equal(converted.data.isWithdrawal, false);
     assert.equal((await snapshot()).accountBalances[destination._id], 600.50);
-    const back = await fixture.request(`/events/${draw.data._id}`, 'PUT', { transferPurpose: 'withdrawal' });
+    const back = await fixture.request(`/events/${draw.data._id}`, 'PUT', { transferPurpose: 'withdrawal', withdrawalRecipient: 'Собственник' });
     assert.equal(back.status, 200, JSON.stringify(back));
     assert.equal(back.data.toAccountId, null); assert.equal(back.data.toIndividualId, null);
     assert.equal((await snapshot()).accountBalances[destination._id], undefined);
-    for (const patch of [{ fromAccountId: null }, { toAccountId: String(destination._id) }, { amount: 0 }, { transferReason: 'business_growth' }, { transferPurpose: 'internal' }]) {
+    for (const patch of [{ withdrawalRecipient: '' }, { fromAccountId: null }, { toAccountId: String(destination._id) }, { amount: 0 }, { transferReason: 'business_growth' }, { transferPurpose: 'internal' }]) {
       const invalid = await fixture.request('/transfers', 'POST', { ...input, ...patch });
       assert.equal(invalid.status, 400, JSON.stringify(invalid));
     }

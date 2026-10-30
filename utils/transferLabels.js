@@ -28,7 +28,7 @@ function transferLabels(operation = {}, directories = {}) {
       || op[`${prefix}OwnerName`] || op[`${prefix}CompanyName`] || op[`${prefix}IndividualName`]
       || (!hasExplicitOwner ? entityName(account?.companyId, companies) || entityName(account?.individualId, individuals) : '') || '';
     const isOutside = !isFrom && outside;
-    const name = accountName || (isOutside ? op.destination || 'Вне системы' : 'Счет не указан');
+    const name = accountName || (isOutside ? op.withdrawalRecipient || op.destination || 'Вне системы' : 'Счет не указан');
     const label = `${name}${ownerName ? ` (${ownerName})` : isOutside ? '' : ' (владелец не указан)'}${isOutside && name !== 'Вне системы' ? ' · вне системы' : ''}`;
     return { accountName: name, ownerName, label };
   };

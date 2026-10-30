@@ -9,7 +9,7 @@ const ENTITY_COLLECTIONS = ['projects', 'categories', 'subcategories', 'contract
 const sid = value => value == null ? null : String(value._id || value);
 const ALL_PROJECTS = '__all_projects__';
 const MAX_ROWS = 250000;
-const FIELDS = Object.fromEntries(('_id date dateKey type amount description categoryId subcategoryId accountId companyId individualId contractorId counterpartyIndividualId projectId projectScope isTransfer isWithdrawal transferGroupId transferPurpose transferReason fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId excludeFromTotals offsetIncomeId linkedParentId isSplitParent isSplitChild parentOpId isDeleted isWriteOff isWorkAct isRetailWriteOff retailWriteOff').split(' ').map(k => [k, 1]));
+const FIELDS = Object.fromEntries(('_id date dateKey type amount description withdrawalRecipient categoryId subcategoryId accountId companyId individualId contractorId counterpartyIndividualId projectId projectScope isTransfer isWithdrawal transferGroupId transferPurpose transferReason fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId excludeFromTotals offsetIncomeId linkedParentId isSplitParent isSplitChild parentOpId isDeleted isWriteOff isWorkAct isRetailWriteOff retailWriteOff').split(' ').map(k => [k, 1]));
 
 class PublicError extends Error {}
 function day(value) {
@@ -223,7 +223,7 @@ function operation(snapshot,e,asOf) {
     company:ref('companyId','companies','Не указана'),individual:ref('individualId','individuals','Не указан'),
     fromCompany:ref('fromCompanyId','companies','Не указана'),toCompany:ref('toCompanyId','companies','Не указана'),fromIndividual:ref('fromIndividualId','individuals','Не указан'),toIndividual:ref('toIndividualId','individuals','Не указан'),
     ...(e.kind === 'transfer' ? { transferRoute:transferLabels(e,snapshot.entities).routeLabel } : {}),
-    transferPurpose:e.transferPurpose || null,transferReason:e.transferReason || null,isWithdrawal:!!e.isWithdrawal,isSplitChild:!!e.isSplitChild,incompleteTransfer:!!e.incompleteTransfer,
+    transferPurpose:e.transferPurpose || null,transferReason:e.transferReason || null,withdrawalRecipient:e.withdrawalRecipient || null,isWithdrawal:!!e.isWithdrawal,isSplitChild:!!e.isSplitChild,incompleteTransfer:!!e.incompleteTransfer,
   };
 }
 function listOperations(snapshot,input = {}) {

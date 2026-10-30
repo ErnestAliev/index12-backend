@@ -7,6 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const fs = require('node:fs');
 const WebSocket = require('ws');
+const { attachmentInput, readAttachmentInput } = require('./files.cjs');
 const INDEX12_CONTEXT = fs.readFileSync(path.join(__dirname, 'context.md'), 'utf8').trim();
 const defaultSocketPath = () => process.env.INDEX12_CODEX_SOCKET || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'app-server-control', 'app-server-control.sock');
 function scopedConfig() {
@@ -102,7 +103,7 @@ class CodexClient extends EventEmitter {
     // Attach rejection handling before starting generation.
     completion.catch(() => {});
     try {
-      const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...attachments.map(file => ({ type: 'image', url: file.url }))];
+      const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...attachmentInput(attachments.filter(file => file.fileId)), ...attachments.filter(file => !file.fileId).map(file => ({ type: 'image', url: file.url }))];
       const started = await this.call('turn/start', { threadId, input, clientUserMessageId: requestId });
       this.emit('turnStarted', { threadId, turnId: started.turn?.id });
       return await completion;
@@ -119,14 +120,15 @@ class CodexClient extends EventEmitter {
       const item = row.item || row;
       if (item.type === 'agentMessage') return [{ id: item.id, role: 'assistant', content: item.text }];
       if (item.type === 'userMessage') {
-        const content = (item.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+        const parsed = readAttachmentInput(item.content);
+        const content = parsed.content;
         const images = (item.content || []).filter(c => c.type === 'image' || c.type === 'localImage');
-        const attachments = images.flatMap(c => {
+        const attachments = (parsed.attachments.some(file => /^image\//.test(file.mimeType)) ? [] : images).flatMap(c => {
           if (typeof c.url !== 'string' || !/^data:image\/(png|jpeg|webp|gif);base64,/.test(c.url) || imageBytes + c.url.length > 3 * 1024 * 1024) return [];
           imageBytes += c.url.length;
           return [{ name: 'Изображение', url: c.url }];
         });
-        return [{ id: item.id, role: 'user', content: content || (images.length ? '[Изображение]' : ''), ...(attachments.length ? { attachments } : {}) }];
+        return [{ id: item.id, role: 'user', content: content || (images.length ? '[Изображение]' : ''), ...((attachments.length || parsed.attachments.length) ? { attachments: [...parsed.attachments, ...attachments] } : {}) }];
       }
       return [];
     }).reverse();

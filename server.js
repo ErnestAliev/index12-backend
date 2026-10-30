@@ -364,6 +364,7 @@ const eventSchema = new mongoose.Schema({
     isClosed: { type: Boolean, default: false },
     relatedEventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
     destination: String,
+    withdrawalRecipient: String,
     transferGroupId: String,
     transferPurpose: { type: String, default: null },
     transferReason: { type: String, default: null },
@@ -2910,7 +2911,8 @@ app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', '
                     categoryId: classification.categoryId,
                     subcategoryId: classification.subcategoryId,
                     ...projectData,
-                    destination: 'Вне системы', description: req.body.description,
+                    withdrawalRecipient: req.body.withdrawalRecipient,
+                    destination: req.body.destination, description: req.body.description,
                     date: finalDate, dateKey: finalDateKey, dayOfYear: finalDayOfYear, cellIndex, userId,
                     createdBy: req.user.id,
                     createdByRole: getCurrentWorkspaceActorRole(req)

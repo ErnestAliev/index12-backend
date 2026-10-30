@@ -22,6 +22,7 @@ const updateSchema = z.object({ id: ID, expectedVersion: z.number().int().min(0)
 const transferFields = {
     amount: fields.amount, date: fields.date, projectScope: fields.projectScope, projectId: fields.projectId,
     categoryId: fields.categoryId, subcategoryId: fields.subcategoryId, description: fields.description,
+    withdrawalRecipient: z.string().trim().max(300).nullable().optional(),
     fromAccountId: ID, toAccountId: ID.nullable().optional(),
     fromCompanyId: ID.nullable().optional(), toCompanyId: ID.nullable().optional(),
     fromIndividualId: ID.nullable().optional(), toIndividualId: ID.nullable().optional(),
@@ -68,7 +69,7 @@ function mcpAuditEntry(req, before, patch, version) {
 const serialize = (operation, req, originalRefs = {}) => {
     const raw = operation.toObject ? operation.toObject() : operation;
     const result = { id: String(raw._id), version: raw.syncVersion || 0, type: raw.type, amount: Math.abs(Number(raw.amount)).toFixed(2), date: eventDay(raw), projectScope: raw.projectScope || 'selected', description: raw.description || '' };
-    if (raw.type === 'transfer') Object.assign(result, { isTransfer: !!raw.isTransfer, isWithdrawal: !!raw.isWithdrawal, transferPurpose: raw.transferPurpose || 'internal', transferReason: raw.transferReason || null });
+    if (raw.type === 'transfer') Object.assign(result, { isTransfer: !!raw.isTransfer, isWithdrawal: !!raw.isWithdrawal, transferPurpose: raw.transferPurpose || 'internal', transferReason: raw.transferReason || null, withdrawalRecipient: raw.withdrawalRecipient || null });
     const related = {};
     for (const key of Object.keys(refModels)) {
         const value = raw[key]; result[key] = value ? String(value._id || value) : originalRefs[key] ? String(originalRefs[key]) : null;
@@ -167,6 +168,8 @@ function registerMcpOperationRoutes(app, deps) {
         const effective = { ...previous, ...input };
         const purpose = effective.transferPurpose || 'internal';
         const reason = input.transferPurpose === 'withdrawal' && !Object.hasOwn(input, 'transferReason') ? null : effective.transferReason || null;
+        const recipient = typeof effective.withdrawalRecipient === 'string' ? effective.withdrawalRecipient.trim() : '';
+        if (purpose === 'withdrawal' && (!isSystemWithdrawal(previous) || Object.hasOwn(input, 'withdrawalRecipient')) && !recipient) fail('VALIDATION_ERROR', 'withdrawalRecipient', 'Укажите получателя средств.');
         const withdrawal = isSystemWithdrawal({ transferPurpose: purpose, transferReason: reason });
         if (!effective.fromAccountId) fail('VALIDATION_ERROR', 'fromAccountId', 'Укажите счёт списания.');
         if (!withdrawal && (!effective.toAccountId || String(effective.fromAccountId) === String(effective.toAccountId))) fail('VALIDATION_ERROR', 'toAccountId', 'Укажите другой счёт получателя.');
@@ -192,7 +195,8 @@ function registerMcpOperationRoutes(app, deps) {
             ...(purpose === 'withdrawal' ? { toAccountId: null } : {}),
             accountId: withdrawal ? effective.fromAccountId : null,
             companyId: withdrawal ? owners.fromCompanyId : null, individualId: withdrawal ? owners.fromIndividualId : null,
-            destination: withdrawal ? 'Вне системы' : null,
+            withdrawalRecipient: withdrawal ? recipient || null : null,
+            destination: withdrawal ? recipient || 'Вне системы' : null,
             ...(!existing && !input.description ? { description: withdrawal ? 'Вывод средств' : 'Перевод между счетами' } : {}),
         }, existing, true);
     }
