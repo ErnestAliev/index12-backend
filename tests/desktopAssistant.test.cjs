@@ -47,6 +47,33 @@ test('a running desktop conversation does not receive an accidental extra turn',
   assert.deepEqual(calls, ['thread/resume', 'thread/read']);
 });
 
+test('INDEX12 source context is applied to new and resumed chats without altering user input', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const expected = fs.readFileSync(path.join(__dirname, '../codex/context.md'), 'utf8').trim();
+  const client = new CodexClient();
+  const calls = [];
+  client.call = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/start') return { thread: { id: 'new-chat' } };
+    if (method === 'thread/read') return { thread: { status: { type: 'idle' } } };
+    if (method === 'turn/start') {
+      setImmediate(() => client.emit('notification', { method: 'turn/completed', params: { threadId: params.threadId, turn: { id: 'turn', status: 'completed' } } }));
+      return { turn: { id: 'turn' } };
+    }
+    return {};
+  };
+  await client.createThread({ projectId: 'project', cwd: '/workspace' });
+  await client.send('new-chat', 'что у нас там по зарплатам?');
+  await client.send('existing-chat', 'что у нас там по зарплатам?');
+  for (const method of ['thread/start', 'thread/resume']) {
+    assert.equal(calls.find(c => c.method === method).params.developerInstructions, expected);
+  }
+  for (const call of calls.filter(c => c.method === 'turn/start')) {
+    assert.deepEqual(call.params.input, [{ type: 'text', text: 'что у нас там по зарплатам?', text_elements: [] }]);
+  }
+});
+
 test('HTTP access rejects anonymous users, other workspace members, foreign chat IDs and cross-origin writes', async t => {
   const express = require('express');
   const actor = 'a'.repeat(24), workspaceId = 'b'.repeat(24);

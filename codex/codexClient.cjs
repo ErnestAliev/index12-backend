@@ -5,7 +5,9 @@ const { EventEmitter } = require('node:events');
 const net = require('node:net');
 const path = require('node:path');
 const os = require('node:os');
+const fs = require('node:fs');
 const WebSocket = require('ws');
+const INDEX12_CONTEXT = fs.readFileSync(path.join(__dirname, 'context.md'), 'utf8').trim();
 const defaultSocketPath = () => process.env.INDEX12_CODEX_SOCKET || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'app-server-control', 'app-server-control.sock');
 function scopedConfig() {
   return Object.fromEntries(['onec_kz', 'bcc_uu', 'esf_uu', 'node_repl', 'computer-use'].map(name => [`mcp_servers.${name}.enabled`, false]));
@@ -68,13 +70,14 @@ class CodexClient extends EventEmitter {
     const config = scopedConfig();
     const result = await this.call('thread/start', {
       projectId, cwd, threadSource: 'cli', serviceName: 'index12', sandbox: 'read-only', approvalPolicy: 'on-request', config,
+      developerInstructions: INDEX12_CONTEXT,
     });
     this.newThreads.add(result.thread.id);
     return result.thread;
   }
   async send(threadId, text, { requestId, attachments = [], onProgress = () => {}, timeout = 300000 } = {}) {
     if (!this.newThreads.delete(threadId)) {
-      await this.call('thread/resume', { threadId, config: scopedConfig() });
+      await this.call('thread/resume', { threadId, config: scopedConfig(), developerInstructions: INDEX12_CONTEXT });
       const read = await this.call('thread/read', { threadId });
       if (read.thread?.status?.type === 'active') throw new Error('В этом чате уже выполняется запрос. Дождитесь ответа.');
     }
