@@ -2210,6 +2210,9 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 //   GET  /api/ai/ping
 //   POST /api/ai/query
 // =================================================================
+app.use('/api/ai/desktop', require('./ai/desktop/router.cjs').createDesktopRouter({
+    db: () => mongoose.connection.db, Workspace, isAuthenticated, frontendUrl: FRONTEND_URL,
+}));
 app.use('/api/ai', createAiRouter({
     mongoose,
     models: { Event, Account, Company, Contractor, Individual, Project, Category, Subcategory, ChatHistory },
