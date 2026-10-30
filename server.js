@@ -244,6 +244,8 @@ const Invitation = mongoose.model('Invitation', invitationSchema);
 
 const accountSchema = new mongoose.Schema({
     name: String,
+    syncVersion: { type: Number, default: 0 },
+    changeHistory: [mongoose.Schema.Types.Mixed],
     order: { type: Number, default: 0 },
     initialBalance: { type: Number, default: 0 },
     isExcluded: { type: Boolean, default: false },
@@ -3132,6 +3134,8 @@ const generateCRUD = (model, path, emitEventName = null) => {
             // 🟢 Account-specific fields (including companyId/individualId for linking)
             if (path === 'accounts') {
                 createData.initialBalance = req.body.initialBalance || 0;
+                createData.syncVersion = 0;
+                createData.changeHistory = [];
                 createData.companyId = req.body.companyId || null;
                 createData.individualId = req.body.individualId || null;
                 createData.isExcluded = req.body.isExcluded || false; // 🟢 Added isExcluded
@@ -3213,6 +3217,11 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
             const items = req.body; const userId = await getCompositeUserId(req);
             const updatePromises = items.map(item => {
                 const updateData = { ...item }; delete updateData._id; delete updateData.userId;
+                if (model === Account) {
+                    delete updateData.syncVersion; delete updateData.changeHistory; delete updateData.__v;
+                    delete updateData.workspaceId;
+                    return model.findOneAndUpdate({ _id: item._id, userId }, { $set: updateData, $inc: { syncVersion: 1 } }, { new: true });
+                }
                 return model.findOneAndUpdate({ _id: item._id, userId: userId }, updateData, { new: true });
             });
             await Promise.all(updatePromises);
@@ -3325,7 +3334,7 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
-registerMcpOperationRoutes(app, { mongoose, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
+registerMcpOperationRoutes(app, { mongoose, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
 
 
 

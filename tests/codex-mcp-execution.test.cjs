@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { scopedConfig, readMcpAccess } = require('../codex/mcpPolicy.cjs');
 const { ExecutionGuard } = require('../mcp/executionGuard.cjs');
-const { toolFailure, executionReport } = require('../codex/toolResults.cjs');
+const { toolFailure, executionReport, receipt } = require('../codex/toolResults.cjs');
 const { CodexClient } = require('../codex/codexClient.cjs');
 const direct = { confirmationMode: 'direct', confirmation: 'direct_on_user_request', capabilities: { update: true } };
 const updated = { type: 'mcpToolCall', server: 'index12', tool: 'index12_update_operation', id: 'call-1', status: 'completed', result: { structuredContent: { id: 'test-operation', version: 1, operation: { amount: '42.00' } } } };
@@ -110,4 +110,12 @@ test('reopened history replaces unsupported success claims with verified executi
   assert.equal(messages[1].execution.error.code, 'APPROVAL_UNRESOLVED');
   assert.doesNotMatch(messages[1].content, /Все 6 операций исправлены/);
   assert.match(executionReport({ code: 'API_ERROR', message: 'Ошибка API' }).text, /действий: \*\*0\*\*/);
+});
+
+test('confirmed account receipts name the initial balance; failed account tools never become completed actions', () => {
+  const item = { tool: 'index12_update_account_initial_balance', status: 'completed', result: { structuredContent: { id: 'test-account', version: 3, account: { initialBalance: '100.36' } } } };
+  const confirmed = receipt(item);
+  assert.equal(confirmed.initialBalance, '100.36');
+  assert.match(executionReport({ message: 'Остановлено' }, [confirmed]).text, /начальный остаток 100.36/);
+  assert.equal(receipt({ ...item, result: { isError: true, structuredContent: { error: { code: 'VERSION_CONFLICT' } } } }), null);
 });

@@ -1,10 +1,11 @@
 'use strict';
 
 const WRITE_CAPABILITIES = {
+  index12_update_account_initial_balance: 'updateAccountInitialBalance',
   index12_create_operation: 'create', index12_update_operation: 'update', index12_delete_operation: 'delete',
   index12_create_transfer: 'createTransfers', index12_update_transfer: 'updateTransfers', index12_execute_import: 'executeImport',
 };
-const INDEX12_TOOLS = ['index12_status', 'index12_find_entities', 'index12_financial_summary', 'index12_list_operations', 'index12_account_balances', 'index12_get_operation', ...Object.keys(WRITE_CAPABILITIES), 'index12_prepare_import'];
+const INDEX12_TOOLS = ['index12_status', 'index12_find_entities', 'index12_financial_summary', 'index12_list_operations', 'index12_account_balances', 'index12_get_operation', 'index12_get_account', ...Object.keys(WRITE_CAPABILITIES), 'index12_prepare_import'];
 
 async function readMcpAccess(binding, request = fetch) {
   const base = new URL(binding.apiUrl);

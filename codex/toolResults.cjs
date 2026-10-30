@@ -27,7 +27,7 @@ function toolFailure(item, requestFailure) {
     USER_DECLINED: 'Пользователь отклонил изменение.', CANCELLED: 'Выполнение отменено.',
     APPROVAL_UNRESOLVED: 'Клиент не получил решение о разрешении. Отказ пользователя не подтверждён.',
     APPROVAL_UNAVAILABLE: 'Клиент не смог обработать запрос разрешения.', POLICY_BLOCKED: 'Изменение заблокировано политикой разрешений.',
-    FORBIDDEN: 'Нет права на это изменение в текущей рабочей области.', VERSION_CONFLICT: 'Версия операции изменилась. Перезапись и автоматическая подстановка новой версии не выполнялись.',
+    FORBIDDEN: 'Нет права на это изменение в текущей рабочей области.', VERSION_CONFLICT: 'Версия записи изменилась. Перезапись и автоматическая подстановка новой версии не выполнялись.',
   };
   return { code, message: labels[code] || message || 'Ошибка инструмента INDEX12. Выполнение остановлено.', tool: item.tool };
 }
@@ -36,11 +36,11 @@ function receipt(item) {
   const data = resultData(item);
   if (!data || !data.id && !data.completed) return null;
   return { tool: item.tool, id: data.id || data.operation?.id || null, version: data.version ?? data.operation?.version ?? null,
-    amount: data.operation?.amount ?? null, date: data.operation?.date ?? null };
+    amount: data.operation?.amount ?? null, date: data.operation?.date ?? null, initialBalance: data.account?.initialBalance ?? null };
 }
 function executionReport(error, completed = []) {
-  const lines = completed.map(item => `- ${item.id || item.tool}${item.version != null ? ` · версия ${item.version}` : ''}${item.amount != null ? ` · сумма ${item.amount}` : ''}${item.date ? ` · дата ${item.date}` : ''}`);
-  return { error, completed, text: `${error.message}\n\nЦепочка изменений остановлена. Подтверждено выполненных действий: **${completed.length}**.${lines.length ? '\n\n' + lines.join('\n') : ''}\n\nПовторное исправление требует нового запроса и свежего чтения операций.` };
+  const lines = completed.map(item => `- ${item.id || item.tool}${item.version != null ? ` · версия ${item.version}` : ''}${item.amount != null ? ` · сумма ${item.amount}` : ''}${item.date ? ` · дата ${item.date}` : ''}${item.initialBalance != null ? ` · начальный остаток ${item.initialBalance}` : ''}`);
+  return { error, completed, text: `${error.message}\n\nЦепочка изменений остановлена. Подтверждено выполненных действий: **${completed.length}**.${lines.length ? '\n\n' + lines.join('\n') : ''}\n\nПовторное исправление требует нового запроса и свежего чтения записей.` };
 }
 class McpExecutionError extends Error {
   constructor(report) { super(report.error.message); this.name = 'McpExecutionError'; this.execution = report; }

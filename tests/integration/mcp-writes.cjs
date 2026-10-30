@@ -18,7 +18,7 @@ async function verifyWrites({ fixture, client, configFile, owner, workspace, oth
     const invoke = async (name,args={}) => client.callTool({name,arguments:args});
     const call = async(name,args={}) => {const r=await invoke(name,args);assert.ok(!r.isError,JSON.stringify(r));return r.structuredContent;};
     const error = async(name,args,code,field) => {const r=await invoke(name,args);assert.equal(r.isError,true,JSON.stringify(r));assert.equal(r.structuredContent.error.code,code,JSON.stringify(r));if(field!==undefined)assert.equal(r.structuredContent.error.field,field);return r;};
-    const status = await call('index12_status');assert.deepEqual(status.capabilities,{read:true,create:true,update:true,delete:true,createTransfers:true,updateTransfers:true,deleteTransfers:true,bankPayments:false,createContractors:true,createCategories:true,createSubcategories:true,prepareImport:true,executeImport:true});
+    const status = await call('index12_status');assert.deepEqual(status.capabilities,{read:true,updateAccountInitialBalance:true,create:true,update:true,delete:true,createTransfers:true,updateTransfers:true,deleteTransfers:true,bankPayments:false,createContractors:true,createCategories:true,createSubcategories:true,prepareImport:true,executeImport:true});
     await error('index12_create_operation',{type:'transfer'},'VALIDATION_ERROR');
     await error('index12_update_operation',{id:'broken',expectedVersion:0,changes:{description:'x'}},'VALIDATION_ERROR','id');
     await fs.writeFile(configFile,JSON.stringify({...configured,workspaceId:String(otherWorkspace)}));

@@ -9,4 +9,11 @@ function parseMoney(value) {
     if (number.toFixed(2) !== `${BigInt(whole)}.${fraction.padEnd(2, '0')}` || BigInt(Math.round(number * 100)) !== minor) throw new Error('Сумма превышает точность денежной модели INDEX12.');
     return { minor: String(minor), decimal: number.toFixed(2), number };
 }
-module.exports = { parseMoney };
+function parseBalance(value) {
+    if (typeof value !== 'string' || !/^-?\d{1,14}(\.\d{1,2})?$/.test(value)) throw new Error('Укажите начальный остаток строкой, например "1250.50" или "-1250.50", максимум два знака после точки.');
+    if (/^-?0+(\.0{1,2})?$/.test(value)) return { minor: '0', decimal: '0.00', number: 0 };
+    const negative = value.startsWith('-');
+    const parsed = parseMoney(negative ? value.slice(1) : value);
+    return negative ? { minor: `-${parsed.minor}`, decimal: `-${parsed.decimal}`, number: -parsed.number } : parsed;
+}
+module.exports = { parseMoney, parseBalance };

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { z } = require('zod');
 const { workspaceAccess } = require('./operationAccess');
 const { isSystemWithdrawal } = require('./transferSemantics');
-const { parseMoney } = require('./operationMoney');
+const { parseMoney, parseBalance } = require('./operationMoney');
 const { scopeQuery, eventDay } = require('../mcp/finance.cjs');
 const { registerMcpImportRoutes, confirmationMode } = require('./mcpImports');
 
@@ -33,6 +33,7 @@ const transferSchema = z.object(transferFields).strict();
 const createTransferSchema = transferSchema.extend({ idempotencyKey: createSchema.shape.idempotencyKey }).strict();
 const updateTransferSchema = updateSchema.extend({ changes: transferSchema.partial().refine(v => Object.keys(v).length > 0, 'Укажите поля для изменения.') }).strict();
 const deleteSchema = updateSchema.omit({ changes: true });
+const updateAccountBalanceSchema = z.object({ id: ID, expectedVersion: updateSchema.shape.expectedVersion, initialBalance: z.string().max(40), reason: z.string().trim().min(1).max(2000) }).strict();
 const refModels = { projectId: 'Project', categoryId: 'Category', subcategoryId: 'Subcategory', accountId: 'Account', contractorId: 'Contractor', counterpartyIndividualId: 'Individual', individualId: 'Individual', companyId: 'Company', fromAccountId: 'Account', toAccountId: 'Account', fromCompanyId: 'Company', toCompanyId: 'Company', fromIndividualId: 'Individual', toIndividualId: 'Individual' };
 class OperationError extends Error {
     constructor(code, field, message, statusCode = 400) { super(message); Object.assign(this, { code, field, statusCode }); }
@@ -116,6 +117,14 @@ function registerMcpOperationRoutes(app, deps) {
         await ensureManagerCanAccessOperationAccounts(req, {}, operation);
         return operation;
     }
+    async function readAccount(req, id) {
+        if (!ID.safeParse(id).success) fail('VALIDATION_ERROR', 'id', 'Некорректный ID счёта.');
+        if (req.workspaceRole === 'manager' && !req.mcpContext.access.accountIds.includes(id)) fail('FORBIDDEN', 'id', 'Нет доступа к выбранному счёту.', 403);
+        const account = await deps.Account.findOne({ _id: id, ...req.mcpContext.scope });
+        if (!account) fail('NOT_FOUND', 'id', 'Счёт не найден в текущей рабочей области.', 404);
+        return account;
+    }
+    const accountResult = (account, req) => ({ id: String(account._id), version: account.syncVersion || 0, account: { id: String(account._id), name: account.name, initialBalance: Number(account.initialBalance || 0).toFixed(2) }, editable: req.workspaceRole === 'admin' && req.mcpContext.grant.scopes.includes('update'), workspaceId: String(req.user.currentWorkspaceId) });
     async function rejectComplex(req, operation, transfer = false) {
         operation = operation.toObject ? operation.toObject() : operation;
         if (operation.mcpRelationLocks > 0) fail('OPERATION_BUSY', 'id', 'Сохраняется связанная операция. Дождитесь завершения и прочитайте операцию заново.', 409);
@@ -211,7 +220,27 @@ function registerMcpOperationRoutes(app, deps) {
         const { grant, access } = req.mcpContext;
         const writer = access.role === 'admin' || access.role === 'manager' && access.accountIds.length > 0;
         const importer = ['admin','manager'].includes(access.role) && grant.scopes.includes('read') && grant.scopes.includes('imports:execute') && !!grant.planSigningKey;
-        res.json({ apiVersion: '3.2.0', actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: writer && grant.scopes.includes('delete'), createTransfers: writer && grant.scopes.includes('create'), updateTransfers: writer && grant.scopes.includes('update'), deleteTransfers: writer && grant.scopes.includes('delete'), bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense','transfer'], expiresAt: grant.expiresAt });
+        res.json({ apiVersion: '3.3.0', actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, updateAccountInitialBalance: access.role === 'admin' && grant.scopes.includes('update'), create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: writer && grant.scopes.includes('delete'), createTransfers: writer && grant.scopes.includes('create'), updateTransfers: writer && grant.scopes.includes('update'), deleteTransfers: writer && grant.scopes.includes('delete'), bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense','transfer'], expiresAt: grant.expiresAt });
+    }));
+    app.get('/api/mcp/accounts/:id', authenticate, requireScope('read'), wrap(async (req, res) => {
+        res.json(accountResult(await readAccount(req, req.params.id), req));
+    }));
+    app.patch('/api/mcp/accounts/:id/initial-balance', authenticate, requireScope('update'), checkWorkspacePermission(['admin']), wrap(async (req, res) => {
+        const body = updateAccountBalanceSchema.omit({ id: true }).parse(req.body);
+        const existing = await readAccount(req, req.params.id);
+        if ((existing.syncVersion || 0) !== body.expectedVersion) fail('VERSION_CONFLICT', 'expectedVersion', 'Счёт изменён. Прочитайте его заново; автоматическая перезапись не выполняется.', 409);
+        let balance;
+        try { balance = parseBalance(body.initialBalance); } catch (error) { fail('VALIDATION_ERROR', 'initialBalance', error.message); }
+        const revision = body.expectedVersion === 0 ? { $or: [{ syncVersion: 0 }, { syncVersion: { $exists: false } }] } : { syncVersion: body.expectedVersion };
+        // The before-value also detects writes from older clients that do not increment the revision.
+        const beforeBalance = existing.toObject().initialBalance;
+        const account = await deps.Account.findOneAndUpdate({ _id: existing._id, ...req.mcpContext.scope, ...revision, initialBalance: beforeBalance == null || beforeBalance === 0 ? { $in: [0, null] } : beforeBalance }, {
+            $set: { initialBalance: balance.number }, $inc: { syncVersion: 1 },
+            $push: { changeHistory: { source: 'mcp', action: 'update_initial_balance', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version: body.expectedVersion + 1, reason: body.reason, changes: { initialBalance: { before: Number(beforeBalance || 0).toFixed(2), after: balance.decimal } } } },
+        }, { new: true, runValidators: true });
+        if (!account) fail('VERSION_CONFLICT', 'expectedVersion', 'Счёт изменён. Правка не применена; автоматическая перезапись не выполняется.', 409);
+        deps.emitEntityEvent(req, account.userId, 'account_list_updated', await deps.Account.find({ ...req.mcpContext.scope }).sort({ order: 1 }));
+        res.json(accountResult(account, req));
     }));
     app.get('/api/mcp/operations/:id', authenticate, requireScope('read'), wrap(async (req, res) => {
         const operation = await readOperation(req, req.params.id);
@@ -309,4 +338,4 @@ function registerMcpOperationRoutes(app, deps) {
         res.status(error.statusCode || (error instanceof z.ZodError ? 400 : 500)).json({ error: structured });
     });
 }
-module.exports = { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry, hashToken, createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, validationError };
+module.exports = { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry, hashToken, createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, updateAccountBalanceSchema, validationError };

@@ -87,7 +87,7 @@ async function startFixture() {
     run('const checkWorkspacePermission =', '// GET /api/workspaces', '\nglobalThis.mcpPermissions = checkWorkspacePermission;');
     run('async function canEdit(', '// 🟢 NEW: Get effective userId', '\nglobalThis.mcpCanEdit = canEdit;');
     run('const normalizeEntityId =', '// QUICK-only mode', '\nglobalThis.mcpAccounts = ensureManagerCanAccessOperationAccounts;');
-    registerMcpOperationRoutes(app, { mongoose, ...context.identityModels, ...models, handlers, entityHandlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
+    registerMcpOperationRoutes(app, { mongoose, ...context.identityModels, ...models, emitEntityEvent: (...args) => emitted.push(args), handlers, entityHandlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
     registerSubcategoryRoutes(app, { ...models, captureCreateHandler: context.captureMcpEntityHandler, getCompositeUserId: context.getCompositeUserId, isAuthenticated: context.isAuthenticated, checkWorkspacePermission: context.checkWorkspacePermission, emitEntityEvent: (...args) => emitted.push(args) });
     app.get('/api/auth/me', (req, res) => res.json({ _id: req.user.id, id: req.user.id, role: 'admin', workspaceRole: 'admin', createdAt: '2026-01-01' }));
     const entityRegistrations = [['Account', 'accounts'], ['Company', 'companies'], ['Individual', 'individuals'], ['Contractor', 'contractors'], ['Project', 'projects'], ['Category', 'categories']];

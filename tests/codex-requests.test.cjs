@@ -32,7 +32,7 @@ test('permission replies grant exactly the reviewed request for this turn, never
   assert.deepEqual(answerRequest(spec, { action: 'accept' }).result, { permissions: { fileSystem: { read: ['/tmp/test'] } }, scope: 'turn' });
   assert.deepEqual(answerRequest(spec, { action: 'decline' }).result.permissions, {});
   assert.throws(() => answerRequest(spec, { action: 'accept', permissions: { network: true } }));
-  assert.equal(INDEX12_TOOLS.length, 13);
+  assert.equal(INDEX12_TOOLS.length, 15);
   assert.ok(scopedConfig()['mcp_servers.index12.enabled_tools'].includes('index12_delete_operation'));
   assert.equal(scopedConfig()['mcp_servers.index12.tools.index12_delete_operation.approval_mode'], 'prompt', 'tool visibility does not invent server permission');
 });
@@ -109,4 +109,22 @@ test('HTTP answers require the owning actor, workspace, live worker and unexpire
   assert.equal(row.state, 'answered'); assert.equal(row.answer.values.approve, true);
   assert.equal((await send({ action: 'decline' })).status, 409);
   assert.equal(row.answer.values.approve, true);
+});
+
+test('computer-use consent is Russian and explicitly labelled as approval, including stored pending questions', () => {
+  const native = { method: 'mcpServer/elicitation/request', params: { mode: 'form', serverName: 'cua_repl', message: 'Allow Computer Use to use "Google Chrome"?', requestedSchema: { type: 'object', properties: {}, additionalProperties: false } } };
+  const spec = describeRequest(native);
+  assert.equal(spec.view.kind, 'approval');
+  assert.equal(spec.view.message, 'Разрешить Codex управлять приложением «Google Chrome»?');
+  assert.equal(spec.view.source, 'Управление компьютером');
+  assert.deepEqual(answerRequest(spec, { action: 'accept' }).result, { action: 'accept', content: {}, _meta: null });
+  assert.equal(answerRequest(spec, { action: 'decline' }).result.action, 'decline');
+  assert.equal(answerRequest(spec, { action: 'cancel' }).result.action, 'cancel');
+  const old = { ...spec, view: { kind: 'form', source: 'cua_repl', message: native.params.message, fields: [] } };
+  assert.equal(publicRequest({ _id: 'pending', spec: old }).prompt.kind, 'approval');
+  assert.equal(describeRequest({ ...native, params: { ...native.params, serverName: 'untrusted' } }).view.message, native.params.message);
+  assert.equal(scopedConfig()['mcp_servers.cua_repl.enabled'], undefined, 'virtual CUA tool namespaces are not MCP server configurations');
+  const key = 'mcp_servers.index12.tools.index12_update_account_initial_balance.approval_mode';
+  assert.equal(scopedConfig({ confirmationMode: 'direct', confirmation: 'direct_on_user_request', capabilities: { updateAccountInitialBalance: true } })[key], 'auto');
+  assert.equal(scopedConfig({ confirmationMode: 'direct', confirmation: 'direct_on_user_request', capabilities: { updateAccountInitialBalance: false } })[key], 'prompt');
 });

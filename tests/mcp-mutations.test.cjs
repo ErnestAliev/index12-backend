@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseMoney } = require('../utils/operationMoney');
+const { parseMoney, parseBalance } = require('../utils/operationMoney');
 const { workspaceAccess } = require('../utils/operationAccess');
 const { createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, mcpVersionFilter } = require('../utils/mcpOperations');
 const { withRelatedOperationGuard } = require('../utils/relatedOperationGuard');
@@ -43,4 +43,14 @@ test('transfer and delete contracts require canonical accounts, exact versions, 
     assert.equal(updateTransferSchema.safeParse({ id, expectedVersion:0, changes:{} }).success, false);
     assert.equal(deleteSchema.safeParse({ id }).success, false);
     assert.equal(deleteSchema.safeParse({ id, expectedVersion:0, cascadeTransfer:true }).success, false);
+});
+
+test('initial balances support exact signed tiyn and zero without weakening operation amount validation', () => {
+    for (const [input, decimal] of [['0','0.00'],['-0.00','0.00'],['-1250.5','-1250.50'],['0.01','0.01'],['-0.01','-0.01']]) {
+        const parsed = parseBalance(input);
+        assert.equal(parsed.decimal, decimal);
+        assert.equal(BigInt(Math.round(parsed.number * 100)), BigInt(parsed.minor));
+    }
+    for (const input of [null, 1, '', '1.001', '-1.001', '1e3', 'NaN', '-90071992547409.93', '70368744177664.01']) assert.throws(() => parseBalance(input));
+    assert.throws(() => parseMoney('0')); assert.throws(() => parseMoney('-1'));
 });

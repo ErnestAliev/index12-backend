@@ -4,6 +4,13 @@ const { AjvJsonSchemaValidator } = require('@modelcontextprotocol/sdk/validation
 const validator = new AjvJsonSchemaValidator();
 const invalid = message => { throw new Error(message); };
 const safeUrl = value => { try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname); } catch { return false; } };
+function localizedPrompt(view) {
+  const app = /^Allow Computer Use to use "([^"\r\n]{1,200})"\?$/.exec(view.message || '');
+  if (view.kind === 'form' && !view.fields?.length && app && ['cua_repl', 'computer-use'].includes(view.source)) {
+    return { ...view, kind: 'approval', source: 'Управление компьютером', message: `Разрешить Codex управлять приложением «${app[1]}»?` };
+  }
+  return view;
+}
 
 function describeRequest(item) {
   const p = item.params || {};
@@ -30,7 +37,7 @@ function describeRequest(item) {
     view = { kind: 'approval', message: p.reason || 'Codex запрашивает разрешение', details: JSON.stringify(item.method === 'item/permissions/requestApproval' ? p.permissions : { command: p.command, cwd: p.cwd, changes: p.changes, grantRoot: p.grantRoot, network: p.networkApprovalContext, permissions: p.additionalPermissions }, null, 2) };
   } else invalid(`Неподдерживаемый запрос Codex: ${item.method}`);
   if (JSON.stringify(view).length > 100000 || view.fields?.length > 40) invalid('Запрос Codex слишком большой для формы чата.');
-  return { method: item.method, view, schema, permissions: p.permissions, availableDecisions: p.availableDecisions };
+  return { method: item.method, view: localizedPrompt(view), schema, permissions: p.permissions, availableDecisions: p.availableDecisions };
 }
 
 function answerRequest(spec, body) {
@@ -59,7 +66,7 @@ function answerRequest(spec, body) {
   return { result, ...(action !== 'accept' ? { failure: { code: action === 'decline' ? 'USER_DECLINED' : 'CANCELLED', message: action === 'decline' ? 'Пользователь отклонил запрос.' : 'Пользователь отменил запрос.' } } : {}) };
 }
 
-const publicRequest = row => ({ id: row._id, prompt: row.spec.view, expiresAt: row.expiresAt });
+const publicRequest = row => ({ id: row._id, prompt: localizedPrompt(row.spec.view), expiresAt: row.expiresAt });
 class RequestBroker {
   constructor({ requests, scope, workerId, pollMs = 400, timeout = 600000 }) { Object.assign(this, { requests, scope, workerId, pollMs, timeout }); }
   async ask(item, job, signal) {
