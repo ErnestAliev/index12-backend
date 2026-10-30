@@ -53,10 +53,9 @@ async function run() {
   }
   await jobs.updateMany({ ...scope, status: 'running' }, { $set: { status: 'interrupted', active: false, error: 'Связь прервалась. Проверьте историю чата перед повтором.', expiresAt: new Date(Date.now() + 86400000) } });
   timer = setInterval(() => heartbeat().catch(() => { running = false; }), 10000);
-  console.log(JSON.stringify({ connected: transport === 'standalone', waitingForDesktop: transport === 'shared', project: 'Index12', projectId: project.id }));
+  console.log(JSON.stringify({ connected: true, transport, desktopConnected: !!gateway?.isDesktopConnected(), project: 'Index12', projectId: project.id }));
     while (running) {
       if (!await authorized()) throw new Error('Доступ к рабочей области отозван.');
-      if (transport === 'shared' && !gateway.isDesktopConnected()) { await wait(750); continue; }
       const job = await jobs.findOneAndUpdate({ ...scope, status: 'queued', active: true }, { $set: { status: 'running', startedAt: new Date(), workerId: instanceId } }, { sort: { createdAt: 1 }, returnDocument: 'after' });
       if (!job) { await wait(750); continue; }
       try {
@@ -67,14 +66,15 @@ async function run() {
           let threadId = chat.threadId;
           if (!threadId) {
             const thread = await codex.createThread({ projectId: project.id, cwd }); threadId = thread.id;
-            await chats.updateOne({ _id: chat._id, ...scope }, { $set: { threadId, title: job.message.slice(0, 60), updatedAt: new Date() } });
+            await chats.updateOne({ _id: chat._id, ...scope }, { $set: { threadId, title: job.message.slice(0, 60) || 'Изображение', updatedAt: new Date() } });
           }
-          result = { ...await codex.send(threadId, job.message, { requestId: job._id }), threadId };
+          result = { ...await codex.send(threadId, job.message, { requestId: job._id, attachments: job.attachments || [] }), threadId };
+          result.history = await codex.history(threadId).catch(() => null);
           if (!chat.threadId) await codex.call('thread/name/set', { threadId, name: `Index12 · ${job.message.slice(0, 50)}` }).catch(() => {});
           await chats.updateOne({ _id: chat._id, ...scope }, { $set: { updatedAt: new Date() } });
         } else if (job.kind === 'history') result = await codex.history(chat.threadId, { cursor: job.cursor });
         else throw new Error('Неизвестный запрос.');
-        await jobs.updateOne({ _id: job._id, workerId: instanceId }, { $set: { status: 'completed', active: false, result, expiresAt: new Date(Date.now() + 86400000) }, $unset: { message: '' } });
+        await jobs.updateOne({ _id: job._id, workerId: instanceId }, { $set: { status: 'completed', active: false, result, expiresAt: new Date(Date.now() + 86400000) }, $unset: { message: '', attachments: '' } });
       } catch (error) {
         await jobs.updateOne({ _id: job._id, workerId: instanceId }, { $set: { status: 'failed', active: false, error: error.message, expiresAt: new Date(Date.now() + 86400000) } });
       }

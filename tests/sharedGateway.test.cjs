@@ -8,9 +8,10 @@ const WebSocket = require('ws');
 const { startSharedGateway } = require('../ai/desktop/sharedGateway.cjs');
 const { online } = require('../ai/desktop/router.cjs');
 
-test('shared mode stays offline until a desktop client is attached', () => {
-  assert.equal(online({ transport: 'shared', seenAt: new Date(), desktopConnected: false }), false);
+test('a live shared worker handles website requests independently of the desktop window', () => {
+  assert.equal(online({ transport: 'shared', seenAt: new Date(), desktopConnected: false }), true);
   assert.equal(online({ transport: 'shared', seenAt: new Date(), desktopConnected: true }), true);
+  assert.equal(online({ transport: 'shared', seenAt: new Date(Date.now() - 46000), desktopConnected: true }), false);
 });
 
 test('gateway requires its private URL, rejects browser origins and forwards protocol frames', async () => {

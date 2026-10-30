@@ -2211,7 +2211,7 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 //   POST /api/ai/query
 // =================================================================
 app.use('/api/ai/desktop', require('./ai/desktop/router.cjs').createDesktopRouter({
-    db: () => mongoose.connection.db, Workspace, isAuthenticated, frontendUrl: FRONTEND_URL,
+    db: () => mongoose.connection.db, Workspace, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
 }));
 app.use('/api/ai', createAiRouter({
     mongoose,

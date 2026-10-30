@@ -73,7 +73,7 @@ class CodexClient extends EventEmitter {
     this.newThreads.add(result.thread.id);
     return result.thread;
   }
-  async send(threadId, text, { requestId, onProgress = () => {}, timeout = 300000 } = {}) {
+  async send(threadId, text, { requestId, attachments = [], onProgress = () => {}, timeout = 300000 } = {}) {
     if (!this.newThreads.delete(threadId)) {
       await this.call('thread/resume', { threadId, config: scopedConfig() });
       const read = await this.call('thread/read', { threadId });
@@ -100,7 +100,8 @@ class CodexClient extends EventEmitter {
     // Attach rejection handling before starting generation.
     completion.catch(() => {});
     try {
-      const started = await this.call('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: requestId });
+      const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...attachments.map(file => ({ type: 'image', url: file.url }))];
+      const started = await this.call('turn/start', { threadId, input, clientUserMessageId: requestId });
       this.emit('turnStarted', { threadId, turnId: started.turn?.id });
       return await completion;
     } finally {
@@ -111,10 +112,20 @@ class CodexClient extends EventEmitter {
   async history(threadId, { cursor = null, limit = 50 } = {}) {
     const result = await this.call('thread/items/list', { threadId, sortDirection: 'desc', limit, cursor });
     const rows = result.items || result.data || [];
+    let imageBytes = 0;
     const messages = rows.flatMap(row => {
       const item = row.item || row;
       if (item.type === 'agentMessage') return [{ id: item.id, role: 'assistant', content: item.text }];
-      if (item.type === 'userMessage') return [{ id: item.id, role: 'user', content: (item.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n') }];
+      if (item.type === 'userMessage') {
+        const content = (item.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+        const images = (item.content || []).filter(c => c.type === 'image' || c.type === 'localImage');
+        const attachments = images.flatMap(c => {
+          if (typeof c.url !== 'string' || !/^data:image\/(png|jpeg|webp|gif);base64,/.test(c.url) || imageBytes + c.url.length > 3 * 1024 * 1024) return [];
+          imageBytes += c.url.length;
+          return [{ name: 'Изображение', url: c.url }];
+        });
+        return [{ id: item.id, role: 'user', content: content || (images.length ? '[Изображение]' : ''), ...(attachments.length ? { attachments } : {}) }];
+      }
       return [];
     }).reverse();
     return { messages, nextCursor: result.nextCursor || null };

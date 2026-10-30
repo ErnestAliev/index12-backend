@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "desktop:bridge": "node ai/desktop/worker.cjs",
+    "desktop:bridge": "node ai/desktop/start.cjs",
+    "desktop:worker": "node ai/desktop/worker.cjs",
     "mcp": "node mcp/server.cjs",
     "mcp:configure": "node mcp/configure.cjs",
     "test:mcp": "node tests/integration/mcp.cjs",
