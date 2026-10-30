@@ -1,16 +1,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { transferLabels } = require('../utils/transferLabels');
-const { handleQuickQuery } = require('../ai/modes/quickMode');
 const { buildSnapshot, listOperations } = require('../mcp/finance.cjs');
 const expected = 'Касса Пушкина (TOO UU) → Kaspi Gold Шерхан (Шерхан)';
 const op = { kind:'transfer', isFact:true, amount:100000, fromAccountName:'Касса Пушкина', fromCompanyName:'TOO UU', toAccountName:'Kaspi Gold Шерхан', toIndividualName:'Шерхан' };
 
-test('text reports preserve both accounts and owners for fact and planned transfers', () => {
-  const text = handleQuickQuery({ action:'transfers', query:'', dbData:{ operations:[op,{ ...op, isFact:false }] }, formatTenge:n=>`${n} т` });
-  assert.equal(text.split(expected).length - 1, 2);
-  assert.equal(transferLabels({ fromAccountName:'BCC Шерхан', toAccountName:'Kaspi Gold Шерхан', fromIndividualName:'Шерхан', toIndividualName:'Шерхан' }).routeLabel, 'BCC Шерхан (Шерхан) → Kaspi Gold Шерхан (Шерхан)');
-});
 test('MCP exposes the same transfer route without changing its accounting', () => {
   const entities = Object.fromEntries(['projects','categories','subcategories','contractors','accounts','companies','individuals'].map(k=>[k,new Map()]));
   entities.accounts.set('cash',{ _id:'cash', name:'Касса Пушкина', companyId:'uu' });

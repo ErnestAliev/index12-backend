@@ -8,7 +8,7 @@ if pgrep -x ChatGPT >/dev/null; then
 fi
 
 index12_script_dir="$(cd "$(dirname "$0")" && pwd)"
-index12_backend_dir="$(cd "$index12_script_dir/../.." && pwd)"
+index12_backend_dir="$(cd "$index12_script_dir/.." && pwd)"
 index12_node_path="$(command -v node)"
 index12_codex_path="$(command -v codex)"
 "$index12_codex_path" app-server daemon start
@@ -25,7 +25,7 @@ JS
 }
 
 if ! index12_is_ready; then
-  (cd "$index12_backend_dir" && INDEX12_CODEX_TRANSPORT=shared nohup "$index12_node_path" ai/desktop/worker.cjs >>.desktop-bridge.log 2>&1 </dev/null &)
+  (cd "$index12_backend_dir" && INDEX12_CODEX_TRANSPORT=shared nohup "$index12_node_path" codex/worker.cjs >>.desktop-bridge.log 2>&1 </dev/null &)
   for index12_attempt in {1..30}; do
     if index12_is_ready; then break; fi
     sleep 1

@@ -5,9 +5,9 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { MongoClient, ObjectId } = require('mongoose').mongo;
 const { CodexClient } = require('./codexClient.cjs');
-const { workspaceAccess } = require('../../utils/operationAccess');
+const { workspaceAccess } = require('../utils/operationAccess');
 const { startSharedGateway } = require('./sharedGateway.cjs');
-const root = path.resolve(__dirname, '../..');
+const root = path.resolve(__dirname, '..');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function run() {

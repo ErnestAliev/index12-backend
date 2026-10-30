@@ -1,7 +1,7 @@
 'use strict';
 const express = require('express');
 const { randomUUID, createHash } = require('node:crypto');
-const { workspaceAccess } = require('../../utils/operationAccess');
+const { workspaceAccess } = require('../utils/operationAccess');
 const { validateAttachments } = require('./attachments.cjs');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
 const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000;

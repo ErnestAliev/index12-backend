@@ -10,7 +10,6 @@ const path = require('path');
 const MongoStore = require('connect-mongo');
 const http = require('http'); // 🟢 Native Node.js HTTP module
 const socketIo = require('socket.io'); // 🟢 Socket.io
-const createAiRouter = require('./ai/aiRoutes'); // 🟣 AI assistant routes (extracted)
 const crypto = require('crypto'); // 🟢 For invitation tokens
 const { withDaySlotLock } = require('./utils/daySlotLock');
 const { workspaceAccess } = require('./utils/operationAccess');
@@ -393,32 +392,8 @@ eventSchema.index({ userId: 1, subcategoryId: 1, date: 1 });
 
 const Event = mongoose.model('Event', eventSchema);
 
-// 🟢 NEW: ChatHistory Schema for Conversational AI
-const chatHistorySchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true }, // Support both ObjectId and composite String
-    timelineDate: { type: String, required: true, index: true }, // Format: "2026-02-16"
-    messages: [{
-        role: { type: String, enum: ['user', 'assistant'], required: true },
-        content: { type: String, required: true },
-        timestamp: { type: Date, default: Date.now },
-        metadata: {
-            intent: { type: Object, default: null },     // Parsed intent (for debugging)
-            metrics: { type: Object, default: null }     // Computed metrics (for debugging)
-        }
-    }],
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now }
-});
 
-// 🟢 Unique index: one chat history per user per timeline date
-chatHistorySchema.index({ userId: 1, timelineDate: 1 }, { unique: true });
 
-// 🟢 TTL index: auto-delete entries older than 2 days (safety margin)
-chatHistorySchema.index({ createdAt: 1 }, { expireAfterSeconds: 172800 }); // 2 days = 48h
-
-const ChatHistory = mongoose.model('ChatHistory', chatHistorySchema);
-
-// AI deep/chat/context-packet models removed: QUICK-only mode
 
 // --- CONFIG ---
 app.use(session({
@@ -2204,31 +2179,10 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 
 // =================================================================
 // END INVITATION ROUTES
-// =================================================================
-// 🟣 AI ASSISTANT (READ-ONLY) — routes extracted to backend/ai/aiRoutes.js
-// Mounted here to keep endpoints the same:
-//   GET  /api/ai/ping
-//   POST /api/ai/query
-// =================================================================
-app.use('/api/ai/desktop', require('./ai/desktop/router.cjs').createDesktopRouter({
+// Codex chat transport; all data access is provided by the scoped INDEX12 MCP.
+app.use('/api/codex', require('./codex/router.cjs').createDesktopRouter({
     db: () => mongoose.connection.db, Workspace, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
 }));
-app.use('/api/ai', createAiRouter({
-    mongoose,
-    models: { Event, Account, Company, Contractor, Individual, Project, Category, Subcategory, ChatHistory },
-    FRONTEND_URL,
-    isAuthenticated,
-    getCompositeUserId, // 🔥 NEW: For database queries with correct workspace isolation
-}));
-
-
-// =================================================================
-// 🟣 AI QUERY (READ-ONLY)
-// Frontend expects: POST { message } -> { text }
-// =================================================================
-
-
-
 
 // Сохранение порядка виджетов
 app.put('/api/user/layout', isAuthenticated, async (req, res) => {

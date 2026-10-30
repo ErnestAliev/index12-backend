@@ -1,7 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { normalizeProjectScope, equalProjectShares } = require('../utils/projectScope');
-const { calculateAggregates } = require('../ai/utils/financialCalculator');
 
 test('shared scope clears individual routing; old records and offset exclusions stay valid', () => {
   const data = normalizeProjectScope({ projectScope: 'all', projectId: 'old', projectIds: ['one', 'two'] });
@@ -21,15 +20,4 @@ test('equal allocation conserves every cent and distributes remainder without fr
     const units = shares.map(share => Math.round(Math.abs(share.amount) * 100));
     assert.ok(Math.max(...units) - Math.min(...units) <= 1);
   }
-});
-
-test('project report groups shared expenses once, separately from direct project profit and transfers', () => {
-  const result = calculateAggregates([
-    { type: 'income', amount: 2000000, project: 'Север', statusCode: 'fact' },
-    { type: 'expense', amount: 1000000, projectScope: 'all', statusCode: 'fact' },
-    { type: 'transfer', amount: 900, projectScope: 'all', statusCode: 'fact' }
-  ]);
-  assert.equal(result.total.net, 1000000);
-  assert.equal(result.byProject['Все проекты'].fact.net, -1000000);
-  assert.equal(result.byProject['Север'].fact.net, 2000000);
 });

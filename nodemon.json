@@ -1,7 +1,7 @@
 {
     "watch": [
         "*.js",
-        "ai/*.js",
+        "codex/*.cjs",
         "routes/*.js",
         "models/*.js",
         "middleware/*.js"
@@ -10,6 +10,6 @@
         "node_modules",
         "*.test.js"
     ],
-    "ext": "js,json",
+    "ext": "js,cjs,json",
     "delay": "1000"
 }

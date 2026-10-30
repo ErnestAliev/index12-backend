@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
-const root = path.resolve(__dirname, '../..');
+const root = path.resolve(__dirname, '..');
 async function ready() {
   try {
     const config = JSON.parse(fs.readFileSync(path.join(root, '.desktop-bridge.local.json'), 'utf8'));

@@ -93,7 +93,6 @@ async function startFixture() {
     run('const generateCRUD =', 'const generateBatchUpdate =', '\n' + entityRegistrations.map(([model, endpoint]) => `generateCRUD(${model}, '${endpoint}');`).join('\n'));
     run('const generateBatchUpdate =', 'const generateDeleteWithCascade =', '\n' + entityRegistrations.map(([model, endpoint]) => `generateBatchUpdate(${model}, '${endpoint}');`).join('\n'));
     app.get('/api/deals/all', (_req, res) => res.json([]));
-    app.get('/api/ai/history', (_req, res) => res.json([]));
     app.use('/api', (req, res) => { if (req.method === 'GET') res.json([]); else res.json(req.body); });
     http = app.listen(0, '127.0.0.1'); await once(http, 'listening');
     const apiUrl = `http://127.0.0.1:${http.address().port}/api`;

@@ -5,8 +5,8 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const WebSocket = require('ws');
-const { startSharedGateway } = require('../ai/desktop/sharedGateway.cjs');
-const { online } = require('../ai/desktop/router.cjs');
+const { startSharedGateway } = require('../codex/sharedGateway.cjs');
+const { online } = require('../codex/router.cjs');
 
 test('a live shared worker handles website requests independently of the desktop window', () => {
   assert.equal(online({ transport: 'shared', seenAt: new Date(), desktopConnected: false }), true);

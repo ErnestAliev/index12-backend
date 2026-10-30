@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { createDesktopRouter, scopeFor, online, publicJob } = require('../ai/desktop/router.cjs');
-const { CodexClient } = require('../ai/desktop/codexClient.cjs');
+const { createDesktopRouter, scopeFor, online, publicJob } = require('../codex/router.cjs');
+const { CodexClient } = require('../codex/codexClient.cjs');
 
 test('desktop requests are scoped to both the actor and selected workspace', () => {
   assert.deepEqual(scopeFor({ id: 'actor-A', currentWorkspaceId: 'workspace-A' }), { actorId: 'actor-A', workspaceId: 'workspace-A' });
@@ -76,7 +76,7 @@ test('HTTP access rejects anonymous users, other workspace members, foreign chat
 });
 
 test('images are validated and sent as image inputs rather than prompt text', async () => {
-  const { validateAttachments } = require('../ai/desktop/attachments.cjs');
+  const { validateAttachments } = require('../codex/attachments.cjs');
   const image = { name: 'sample.png', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/5l8AAAAASUVORK5CYII=' };
   assert.deepEqual(validateAttachments([image]), [image]);
   assert.throws(() => validateAttachments([{ ...image, url: 'https://private.example/image.png' }]), /Поддерживаются/);
