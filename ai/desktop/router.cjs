@@ -3,7 +3,7 @@ const express = require('express');
 const { randomUUID, createHash } = require('node:crypto');
 const { workspaceAccess } = require('../../utils/operationAccess');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
-const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000;
+const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000 && (worker.transport !== 'shared' || worker.desktopConnected === true);
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
 const scopeFor = user => ({ actorId: String(user?._id || user?.id || ''), workspaceId: String(user?.currentWorkspaceId || '') });
 

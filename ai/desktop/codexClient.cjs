@@ -2,20 +2,23 @@
 const { spawn } = require('node:child_process');
 const { createInterface } = require('node:readline');
 const { EventEmitter } = require('node:events');
+const net = require('node:net');
+const path = require('node:path');
+const os = require('node:os');
+const WebSocket = require('ws');
+const defaultSocketPath = () => process.env.INDEX12_CODEX_SOCKET || path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'app-server-control', 'app-server-control.sock');
 function scopedConfig() {
   return Object.fromEntries(['onec_kz', 'bcc_uu', 'esf_uu', 'node_repl', 'computer-use'].map(name => [`mcp_servers.${name}.enabled`, false]));
 }
 
 // Official app-server JSON-RPC transport. No private desktop HTTP APIs or auth extraction.
 class CodexClient extends EventEmitter {
-  constructor({ binary = process.env.INDEX12_CODEX_BIN || 'codex', timeout = 30000 } = {}) {
-    super(); this.binary = binary; this.timeout = timeout; this.sequence = 0; this.pending = new Map(); this.newThreads = new Set();
+  constructor({ binary = process.env.INDEX12_CODEX_BIN || 'codex', timeout = 30000, transport = process.env.INDEX12_CODEX_TRANSPORT || 'standalone' } = {}) {
+    super(); this.binary = binary; this.timeout = timeout; this.transport = transport; this.sequence = 0; this.pending = new Map(); this.newThreads = new Set();
+    if (!['shared', 'standalone'].includes(transport)) throw new Error('Неизвестный транспорт Codex.');
   }
   async connect() {
-    this.child = spawn(this.binary, ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    this.child.stderr.resume();
-    this.lines = createInterface({ input: this.child.stdout });
-    this.lines.on('line', line => {
+    const receive = line => {
       let item; try { item = JSON.parse(line); } catch { return; }
       if (item.id != null && (item.result !== undefined || item.error)) {
         const p = this.pending.get(item.id); if (!p) return;
@@ -26,19 +29,33 @@ class CodexClient extends EventEmitter {
         this.write({ id: item.id, error: { code: -32000, message: 'Требуется подтверждение в desktop-приложении.' } });
         this.emit('permissionRequired', item.method);
       } else if (item.method) this.emit('notification', item);
-    });
+    };
     const disconnected = () => {
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Соединение с Codex прервано.')); }
       this.pending.clear(); this.emit('disconnected');
     };
-    this.child.on('error', disconnected); this.child.on('exit', disconnected);
+    if (this.transport === 'shared') {
+      this.socket = new WebSocket('ws://localhost/rpc', { createConnection: () => net.createConnection(defaultSocketPath()), handshakeTimeout: this.timeout });
+      this.socket.on('message', data => receive(data.toString()));
+      this.socket.on('error', disconnected); this.socket.on('close', disconnected);
+      try {
+        await new Promise((resolve, reject) => { this.socket.once('open', resolve); this.socket.once('error', reject); });
+      } catch { this.close(); throw new Error('Общий сервер Codex недоступен. Запустите codex app-server daemon start.'); }
+    } else {
+      this.child = spawn(this.binary, ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      this.child.stderr.resume(); this.lines = createInterface({ input: this.child.stdout });
+      this.lines.on('line', receive); this.child.on('error', disconnected); this.child.on('exit', disconnected);
+    }
     try {
       await this.call('initialize', { clientInfo: { name: 'index12_desktop_bridge', title: 'Index12', version: '0.1.0' }, capabilities: { experimentalApi: true } });
     } catch (error) { this.close(); throw error; }
     this.write({ method: 'initialized' });
     return this;
   }
-  write(data) { this.child.stdin.write(JSON.stringify(data) + '\n'); }
+  write(data) {
+    if (this.socket) this.socket.send(JSON.stringify(data));
+    else this.child.stdin.write(JSON.stringify(data) + '\n');
+  }
   call(method, params = {}) {
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
@@ -102,6 +119,6 @@ class CodexClient extends EventEmitter {
     }).reverse();
     return { messages, nextCursor: result.nextCursor || null };
   }
-  close() { this.child?.kill(); }
+  close() { this.socket?.terminate(); this.child?.kill(); }
 }
-module.exports = { CodexClient };
+module.exports = { CodexClient, defaultSocketPath };

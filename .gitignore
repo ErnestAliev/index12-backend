@@ -37,3 +37,5 @@ Thumbs.db
 
 # Local MCP workspace binding
 .mcp.local.json*
+.desktop-bridge.local.json*
+.desktop-bridge.log

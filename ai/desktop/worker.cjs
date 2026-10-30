@@ -6,6 +6,7 @@ const { randomUUID } = require('node:crypto');
 const { MongoClient, ObjectId } = require('mongoose').mongo;
 const { CodexClient } = require('./codexClient.cjs');
 const { workspaceAccess } = require('../../utils/operationAccess');
+const { startSharedGateway } = require('./sharedGateway.cjs');
 const root = path.resolve(__dirname, '../..');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -18,8 +19,9 @@ async function run() {
   await mongo.connect().catch(async error => { await mongo.close(); throw error; });
   const db = mongo.db(), chats = db.collection('desktopChats'), jobs = db.collection('desktopJobs'), workers = db.collection('desktopWorkers');
   const identity = `${scope.actorId}:${scope.workspaceId}`, instanceId = randomUUID();
-  const codex = await new CodexClient().connect().catch(async error => { await mongo.close(); throw error; });
-  let running = true, disconnected = false, stopped = false, ownsLease = false, timer;
+  const transport = process.env.INDEX12_CODEX_TRANSPORT || 'shared';
+  const codex = await new CodexClient({ transport }).connect().catch(async error => { await mongo.close(); throw error; });
+  let running = true, disconnected = false, stopped = false, ownsLease = false, timer, gateway;
   codex.on('disconnected', () => { disconnected = true; running = false; });
   const stop = () => { running = false; stopped = true; };
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
@@ -39,17 +41,22 @@ async function run() {
   const heartbeat = async () => {
     const now = new Date();
     try {
-      const row = await workers.findOneAndUpdate({ _id: identity, $or: [{ instanceId }, { seenAt: { $lt: new Date(Date.now() - 45000) } }] }, { $set: { ...scope, instanceId, seenAt: now, projectName: 'Index12', projectId: project.id } }, { upsert: true, returnDocument: 'after' });
+      const row = await workers.findOneAndUpdate({ _id: identity, $or: [{ instanceId }, { seenAt: { $lt: new Date(Date.now() - 45000) } }] }, { $set: { ...scope, instanceId, seenAt: now, projectName: 'Index12', projectId: project.id, transport, desktopConnected: !!gateway?.isDesktopConnected() } }, { upsert: true, returnDocument: 'after' });
       if (!row) throw new Error('Связка Index12 уже запущена.');
     } catch (error) { if (error.code === 11000) throw new Error('Связка Index12 уже запущена.'); throw error; }
   };
   await heartbeat();
   ownsLease = true;
+  if (transport === 'shared') {
+    gateway = await startSharedGateway({ stateFile: path.join(root, '.desktop-bridge.local.json'), onChange: () => heartbeat().catch(() => { running = false; }) });
+    await heartbeat();
+  }
   await jobs.updateMany({ ...scope, status: 'running' }, { $set: { status: 'interrupted', active: false, error: 'Связь прервалась. Проверьте историю чата перед повтором.', expiresAt: new Date(Date.now() + 86400000) } });
   timer = setInterval(() => heartbeat().catch(() => { running = false; }), 10000);
-  console.log(JSON.stringify({ connected: true, project: 'Index12', projectId: project.id }));
+  console.log(JSON.stringify({ connected: transport === 'standalone', waitingForDesktop: transport === 'shared', project: 'Index12', projectId: project.id }));
     while (running) {
       if (!await authorized()) throw new Error('Доступ к рабочей области отозван.');
+      if (transport === 'shared' && !gateway.isDesktopConnected()) { await wait(750); continue; }
       const job = await jobs.findOneAndUpdate({ ...scope, status: 'queued', active: true }, { $set: { status: 'running', startedAt: new Date(), workerId: instanceId } }, { sort: { createdAt: 1 }, returnDocument: 'after' });
       if (!job) { await wait(750); continue; }
       try {
@@ -75,6 +82,7 @@ async function run() {
     if (disconnected && !stopped) throw new Error('Codex отключился. Перезапустите связку.');
   } finally {
     clearInterval(timer); codex.close();
+    if (gateway) await gateway.close();
     if (ownsLease) await workers.updateOne({ _id: identity, instanceId }, { $set: { seenAt: new Date(0) } });
     await mongo.close(); process.off('SIGINT', stop); process.off('SIGTERM', stop);
   }
