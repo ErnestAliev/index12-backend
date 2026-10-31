@@ -2188,6 +2188,10 @@ app.use('/api/codex', require('./codex/router.cjs').createDesktopRouter({
     db: () => mongoose.connection.db, Workspace, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
 }));
 
+app.use('/api/user/appearance-themes', require('./appearance/router.cjs').createAppearanceRouter({
+    db: () => mongoose.connection.db, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
+}));
+
 // Сохранение порядка виджетов
 app.put('/api/user/layout', isAuthenticated, async (req, res) => {
     try {
