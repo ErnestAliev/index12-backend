@@ -2192,6 +2192,10 @@ app.use('/api/user/appearance-themes', require('./appearance/router.cjs').create
     db: () => mongoose.connection.db, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
 }));
 
+app.use('/api/user/appearance-templates', require('./appearance/templates.cjs').createTemplateRouter({
+    db: () => mongoose.connection.db, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
+}));
+
 // Сохранение порядка виджетов
 app.put('/api/user/layout', isAuthenticated, async (req, res) => {
     try {

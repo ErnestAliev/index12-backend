@@ -75,4 +75,4 @@ function createAppearanceRouter({ db, isAuthenticated, frontendUrl, allowedOrigi
   router.use((error,req,res,next) => { if (res.headersSent) return next(error); console.error('Appearance library:',error.message); res.status(500).json({error:'Не удалось сохранить темы. Попробуйте ещё раз.'}); });
   return router;
 }
-module.exports = {createAppearanceRouter};
+module.exports = {createAppearanceRouter, themeSchema};
