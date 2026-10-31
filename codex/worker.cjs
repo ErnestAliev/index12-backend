@@ -20,14 +20,14 @@ async function run() {
   const scope = { actorId: binding.actorId || binding.ownerId, workspaceId: binding.workspaceId };
   if (!Object.values(scope).every(v => /^[a-f\d]{24}$/i.test(v || ''))) throw new Error('Настройте локальную привязку MCP Index12.');
   const env = require('dotenv').parse(fs.readFileSync(path.join(root, '.env')));
-  const mongo = new MongoClient(process.env.INDEX12_MCP_DB_URL || env.DB_URL, { serverSelectionTimeoutMS: 15000 });
+  const mongo = new MongoClient(process.env.INDEX12_MCP_DB_URL || env.DB_URL, { serverSelectionTimeoutMS: 15000, connectTimeoutMS: 10000, socketTimeoutMS: 20000, waitQueueTimeoutMS: 15000 });
   await mongo.connect().catch(async error => { await mongo.close(); throw error; });
   const db = mongo.db(), chats = db.collection('desktopChats'), jobs = db.collection('desktopJobs'), workers = db.collection('desktopWorkers');
   const identity = `${scope.actorId}:${scope.workspaceId}`, instanceId = randomUUID();
   const broker = new RequestBroker({ requests: db.collection('desktopRequests'), scope, workerId: instanceId });
   const transport = process.env.INDEX12_CODEX_TRANSPORT || 'shared';
   const codex = await new CodexClient({ transport }).connect().catch(async error => { await mongo.close(); throw error; });
-  let running = true, disconnected = false, stopped = false, ownsLease = false, timer, gateway;
+  let running = true, disconnected = false, stopped = false, ownsLease = false, timer, gateway, lastHeartbeat = 0;
   const executions = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'index12-executions-'));
   codex.on('disconnected', () => { disconnected = true; running = false; });
   const stop = () => { running = false; stopped = true; };
@@ -50,12 +50,13 @@ async function run() {
     try {
       const row = await workers.findOneAndUpdate({ _id: identity, $or: [{ instanceId }, { seenAt: { $lt: new Date(Date.now() - 45000) } }] }, { $set: { ...scope, instanceId, seenAt: now, projectName: 'Index12', projectId: project.id, transport, desktopConnected: !!gateway?.isDesktopConnected() } }, { upsert: true, returnDocument: 'after' });
       if (!row) throw new Error('Связка Index12 уже запущена.');
+      lastHeartbeat = Date.now();
     } catch (error) { if (error.code === 11000) throw new Error('Связка Index12 уже запущена.'); throw error; }
   };
   await heartbeat();
   ownsLease = true;
   if (transport === 'shared') {
-    gateway = await startSharedGateway({ stateFile: path.join(root, '.desktop-bridge.local.json'), onChange: () => heartbeat().catch(() => { running = false; }) });
+    gateway = await startSharedGateway({ stateFile: path.join(root, '.desktop-bridge.local.json'), isReady: () => running && !disconnected && Date.now() - lastHeartbeat < 30000, onChange: () => heartbeat().catch(() => { running = false; }) });
     await heartbeat();
   }
   await jobs.updateMany({ ...scope, status: 'running' }, { $set: { status: 'interrupted', active: false, error: 'Связь прервалась. Проверьте историю чата перед повтором.', expiresAt: new Date(Date.now() + 86400000) } });
@@ -110,10 +111,15 @@ async function run() {
     if (disconnected && !stopped) throw new Error('Codex отключился. Перезапустите связку.');
   } finally {
     clearInterval(timer); codex.close();
-    fs.rmSync(executions, { recursive: true, force: true });
-    if (gateway) await gateway.close();
-    if (ownsLease) await workers.updateOne({ _id: identity, instanceId }, { $set: { seenAt: new Date(0) } });
-    await mongo.close(); process.off('SIGINT', stop); process.off('SIGTERM', stop);
+    try {
+      fs.rmSync(executions, { recursive: true, force: true });
+      if (gateway) await gateway.close();
+    } finally {
+      // A database outage must not leave an orphaned worker alive during cleanup.
+      if (ownsLease) await workers.updateOne({ _id: identity, instanceId }, { $set: { seenAt: new Date(0) } }).catch(() => {});
+      try { await mongo.close(); }
+      finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); }
+    }
   }
 }
 if (require.main === module) run().catch(error => { console.error(/mongo|querySrv|ENOTFOUND/i.test(error.message) ? 'Не удалось подключиться к базе Index12.' : error.message); process.exitCode = 1; });

@@ -15,9 +15,10 @@ const defaultSocketPath = () => process.env.INDEX12_CODEX_SOCKET || path.join(pr
 
 // Official app-server JSON-RPC transport. No private desktop HTTP APIs or auth extraction.
 class CodexClient extends EventEmitter {
-  constructor({ binary = process.env.INDEX12_CODEX_BIN || 'codex', timeout = 30000, transport = process.env.INDEX12_CODEX_TRANSPORT || 'standalone' } = {}) {
+  constructor({ binary = process.env.INDEX12_CODEX_BIN || 'codex', timeout = 30000, transport = process.env.INDEX12_CODEX_TRANSPORT || 'standalone', heartbeatInterval = 15000, heartbeatTimeout = 10000 } = {}) {
     super(); this.binary = binary; this.timeout = timeout; this.transport = transport; this.sequence = 0; this.pending = new Map(); this.newThreads = new Set();
     this.requestHandlers = new Map(); this.serverRequests = new Map(); this.requestDetails = new Map();
+    this.heartbeatInterval = heartbeatInterval; this.heartbeatTimeout = heartbeatTimeout;
     if (!['shared', 'standalone'].includes(transport)) throw new Error('Неизвестный транспорт Codex.');
   }
   async connect() {
@@ -33,7 +34,11 @@ class CodexClient extends EventEmitter {
         this.emit('notification', item);
       }
     };
+    let didDisconnect = false;
     const disconnected = () => {
+      if (didDisconnect) return;
+      didDisconnect = true;
+      clearInterval(this.transportHeartbeat); clearTimeout(this.pongTimeout);
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error('Соединение с Codex прервано.')); }
       this.pending.clear(); this.emit('disconnected');
       for (const request of this.serverRequests.values()) request.controller.abort();
@@ -45,6 +50,13 @@ class CodexClient extends EventEmitter {
       try {
         await new Promise((resolve, reject) => { this.socket.once('open', resolve); this.socket.once('error', reject); });
       } catch { this.close(); throw new Error('Общий сервер Codex недоступен. Запустите codex app-server daemon start.'); }
+      this.socket.on('pong', () => { clearTimeout(this.pongTimeout); this.pongTimeout = null; });
+      this.transportHeartbeat = setInterval(() => {
+        if (this.socket.readyState !== WebSocket.OPEN || this.pongTimeout) return;
+        this.pongTimeout = setTimeout(() => this.socket.terminate(), this.heartbeatTimeout);
+        this.socket.ping();
+      }, this.heartbeatInterval);
+      this.transportHeartbeat.unref();
     } else {
       this.child = spawn(this.binary, ['app-server', '--stdio'], { stdio: ['pipe', 'pipe', 'pipe'] });
       this.child.stderr.resume(); this.lines = createInterface({ input: this.child.stdout });
@@ -209,6 +221,6 @@ class CodexClient extends EventEmitter {
     });
     return { messages, nextCursor: result.nextCursor || null };
   }
-  close() { for (const request of this.serverRequests.values()) request.controller.abort(); this.socket?.terminate(); this.child?.kill(); }
+  close() { clearInterval(this.transportHeartbeat); clearTimeout(this.pongTimeout); for (const request of this.serverRequests.values()) request.controller.abort(); this.socket?.terminate(); this.child?.kill(); }
 }
 module.exports = { CodexClient, defaultSocketPath };

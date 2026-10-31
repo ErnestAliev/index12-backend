@@ -23,12 +23,19 @@ test('gateway requires its private URL, rejects browser origins and forwards pro
   peers.on('connection', ws => ws.on('message', data => ws.send(data)));
   await new Promise(resolve => daemon.listen(unixPath, resolve));
   let gateway;
+  let healthy = true;
   try {
-    gateway = await startSharedGateway({ stateFile: path.join(folder, 'connection.json') });
+    gateway = await startSharedGateway({ stateFile: path.join(folder, 'connection.json'), isReady: () => healthy });
     const cfg = JSON.parse(await fs.readFile(path.join(folder, 'connection.json'), 'utf8'));
     assert.equal((await fs.stat(path.join(folder, 'connection.json'))).mode & 0o777, 0o600);
     assert.equal((await fetch(`http://127.0.0.1:${cfg.port}/ready`)).status, 403);
     assert.equal((await fetch(cfg.readyUrl, { headers: { origin: 'https://unrelated.example' } })).status, 403);
+    healthy = false;
+    const unhealthy = await fetch(cfg.readyUrl);
+    assert.equal(unhealthy.status, 503);
+    assert.equal((await unhealthy.json()).ready, false);
+    healthy = true;
+    assert.equal((await fetch(cfg.readyUrl)).status, 200);
     const rejection = (url, options) => new Promise(resolve => {
       const ws = new WebSocket(url, options);
       ws.on('unexpected-response', (_req, res) => { res.resume(); resolve(res.statusCode); ws.terminate(); });

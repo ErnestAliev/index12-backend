@@ -9,7 +9,7 @@ const { defaultSocketPath } = require('./codexClient.cjs');
 
 // The desktop supports a WebSocket endpoint; the shared daemon uses a private Unix socket.
 // This local adapter forwards frames without interpreting or logging chat content.
-async function startSharedGateway({ stateFile, onChange = () => {} }) {
+async function startSharedGateway({ stateFile, onChange = () => {}, isReady = () => true }) {
   let previous;
   try { previous = JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { /* First launch. */ }
   const token = /^[a-f\d]{64}$/.test(previous?.token || '') ? previous.token : randomBytes(32).toString('hex');
@@ -21,8 +21,9 @@ async function startSharedGateway({ stateFile, onChange = () => {} }) {
   const validPath = (actual, expected) => typeof actual === 'string' && Buffer.byteLength(actual) === Buffer.byteLength(expected) && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
   const server = http.createServer((req, res) => {
     if (req.headers.origin || !validPath(req.url, `${rpcPath}/ready`)) { res.writeHead(403); res.end(); return; }
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ ready: true, desktopConnected: sockets.size > 0 }));
+    const ready = !closing && isReady();
+    res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ ready, desktopConnected: sockets.size > 0 }));
   });
   const wss = new WebSocket.WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 });
   server.on('upgrade', (req, socket, head) => {

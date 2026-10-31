@@ -24,13 +24,7 @@ const fs = require('node:fs');
 JS
 }
 
-if ! index12_is_ready; then
-  (cd "$index12_backend_dir" && INDEX12_CODEX_TRANSPORT=shared nohup "$index12_node_path" codex/worker.cjs >>.desktop-bridge.log 2>&1 </dev/null &)
-  for index12_attempt in {1..30}; do
-    if index12_is_ready; then break; fi
-    sleep 1
-  done
-fi
+(cd "$index12_backend_dir" && INDEX12_CODEX_TRANSPORT=shared "$index12_node_path" codex/start.cjs)
 if ! index12_is_ready; then
   echo 'Связка Index12 не запустилась. Desktop-приложение не было переключено.'
   read -r '?Нажмите Enter, чтобы закрыть это окно.'

@@ -5,6 +5,8 @@
   "scripts": {
     "desktop:bridge": "node codex/start.cjs",
     "desktop:worker": "node codex/worker.cjs",
+    "desktop:status": "node codex/start.cjs status",
+    "desktop:stop": "node codex/start.cjs stop",
     "mcp": "node mcp/server.cjs",
     "mcp:configure": "node mcp/configure.cjs",
     "test:mcp": "node tests/integration/mcp.cjs",
