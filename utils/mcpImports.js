@@ -43,7 +43,7 @@ function approvalProof(credentialHash, planToken) {
 
 function registerMcpImportRoutes(app, deps, context) {
     const { mongoose, Contractor, Category, Subcategory, entityHandlers } = deps;
-    const { authenticate, requireScope, wrap, fail, createSchema, prepareOperation, createOperation, invoke } = context;
+    const { authenticate, requireScope, wrap, fail, createSchema, prepareOperation, createOperation, invoke, execution } = context;
     const schema = makeImportSchema(createSchema);
     const models = { contractor: Contractor, category: Category, subcategory: Subcategory };
     const paths = { contractor: 'contractors', category: 'categories', subcategory: 'subcategories' };
@@ -205,6 +205,7 @@ function registerMcpImportRoutes(app, deps, context) {
         return { ...actual, id: String(saved._id), name: saved.name, created: true };
     }
     app.post('/api/mcp/imports/execute', authenticate, requireScope('imports:execute'), deps.checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
+        const executionIdentity = await execution.guard(req);
         const { planToken, approval, requestText } = executeSchema.extend({ approval: z.string().regex(/^[a-f\d]{64}$/).optional() }).strict().parse(req.body);
         const state = await inspect(req, planToken);
         if (state.completed) return res.json({ ...state.saved.result, replayed: true });
@@ -235,12 +236,14 @@ function registerMcpImportRoutes(app, deps, context) {
             const claim = await requests().updateOne({ _id: state.key, $or: [{ state: 'failed' }, { leaseUntil: { $lt: new Date() } }] }, { $set: { state: 'running', attempt, leaseUntil: new Date(Date.now()+120000) } });
             if (!claim.modifiedCount) fail('IMPORT_IN_PROGRESS', 'planToken', 'Этот план уже выполняется. Повторите тот же запрос после завершения.', 409);
         }
+        if (executionIdentity) await requests().updateOne({ _id: state.key }, { $addToSet: { executionIds: executionIdentity.executionId } });
         const steps = { ...(state.saved?.steps || {}) };
         req.mcpContext.importId = state.key;
         req.mcpContext.documentFingerprint = state.payload.input.documentFingerprint || null;
         req.mcpContext.importConfirmation = state.saved?.confirmation || { channel: mode, ...(mode === 'direct' ? { authorization: 'operator_grant' } : {}), ...(requestText ? { requestText } : {}) };
         try {
             for (const item of refreshed.items) {
+                await execution.guard(req);
                 if (steps[item.kind]) {
                     const existing = await models[item.kind].findOne({ _id: steps[item.kind].id, ...scope(req) }).lean();
                     if (!existing || !sameEntity(existing, steps[item.kind])) fail('PLAN_STALE', item.kind, 'Ранее созданная запись удалена или изменена. Автоматически воссоздавать её нельзя.', 409);

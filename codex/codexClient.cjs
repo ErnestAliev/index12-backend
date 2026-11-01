@@ -111,8 +111,8 @@ class CodexClient extends EventEmitter {
       try { this.write({ id, method, params }); } catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
   }
-  async createThread({ projectId, cwd, access, guardFile }) {
-    const config = scopedConfig(access, guardFile);
+  async createThread({ projectId, cwd, access, durable = false }) {
+    const config = scopedConfig(access, { durable });
     const result = await this.call('thread/start', {
       projectId, cwd, threadSource: 'cli', serviceName: 'index12', sandbox: 'read-only', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', config,
       developerInstructions: INDEX12_CONTEXT,
@@ -120,18 +120,30 @@ class CodexClient extends EventEmitter {
     this.newThreads.add(result.thread.id);
     return result.thread;
   }
-  async send(threadId, text, { requestId, attachments = [], access, guardFile, onRequest, onToolFailure = () => {}, onProgress = () => {}, timeout = 300000 } = {}) {
+  async migrateThread(threadId, { cwd, access }) {
+    const current = await this.call('thread/read', { threadId });
+    if (current.thread?.status?.type === 'active') throw new Error('В этом чате уже выполняется запрос. Дождитесь ответа.');
+    // App Server has no per-thread immediate MCP reload. A one-time attached
+    // fork preserves completed history and starts a fresh, correctly scoped
+    // runtime without restarting other chats or duplicating sidebar entries.
+    const result = await this.call('thread/fork', { threadId, cwd, attachToSource: true,
+      threadSource: 'cli', sandbox: 'read-only', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review',
+      config: scopedConfig(access, { durable: true }), developerInstructions: INDEX12_CONTEXT });
+    this.newThreads.add(result.thread.id);
+    return result.thread;
+  }
+  async send(threadId, text, { requestId, attachments = [], access, durable = false, onTurnStarted = async () => {}, onRequest, onToolFailure = () => {}, onProgress = () => {}, timeout = 300000 } = {}) {
     if (!this.newThreads.delete(threadId)) {
-      await this.call('thread/resume', { threadId, approvalsReviewer: 'auto_review', config: scopedConfig(access, guardFile), developerInstructions: INDEX12_CONTEXT });
+      await this.call('thread/resume', { threadId, approvalsReviewer: 'auto_review', config: scopedConfig(access, { durable }), developerInstructions: INDEX12_CONTEXT });
       const read = await this.call('thread/read', { threadId });
       if (read.thread?.status?.type === 'active') throw new Error('В этом чате уже выполняется запрос. Дождитесь ответа.');
     }
-    let listener, disconnected, blocked, timer, activeTurn, failure, interrupt;
+    let listener, disconnected, blocked, timer, activeTurn, failure, interrupt, failureSaved;
     const completed = [];
     const stop = detail => {
       if (failure) return;
       failure = detail;
-      try { onToolFailure(detail); } catch { /* An unavailable execution guard blocks subsequent writes. */ }
+      try { failureSaved = Promise.resolve(onToolFailure(detail)).catch(() => {}); } catch { /* API also fences stopped executions. */ }
       if (activeTurn) interrupt = this.call('turn/interrupt', { threadId, turnId: activeTurn }).catch(() => {});
     };
     let finished = false, alive = true;
@@ -139,6 +151,7 @@ class CodexClient extends EventEmitter {
       const replies = [];
       listener = item => {
         const p = item.params || {}; if (p.threadId !== threadId) return;
+        if (activeTurn && p.turnId && p.turnId !== activeTurn) return;
         if (item.method === 'item/started' && p.item?.type === 'fileChange') this.requestDetails.set(`${threadId}:${p.item.id}`, p.item);
         if (item.method === 'item/autoApprovalReview/completed' && p.action?.type === 'mcpToolCall' && p.action.server === 'index12' && p.review?.status !== 'approved') {
           stop({ code: p.review?.status === 'denied' ? 'POLICY_BLOCKED' : p.review?.status === 'aborted' ? 'CANCELLED' : 'APPROVAL_UNAVAILABLE', message: p.review?.status === 'denied' ? 'Изменение заблокировано автоматической проверкой разрешений.' : 'Проверка разрешения не завершилась.', tool: p.action.toolName });
@@ -151,6 +164,7 @@ class CodexClient extends EventEmitter {
         if (item.method === 'item/agentMessage/delta') onProgress(p.delta || '');
         if (item.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) replies.push(p.item.text);
         if (item.method === 'turn/completed') {
+          if (activeTurn && p.turn?.id !== activeTurn) return;
           finished = true;
           if (failure) reject(new McpExecutionError(executionReport(failure, completed)));
           else if (p.turn?.status === 'interrupted') reject(new McpExecutionError(executionReport({ code: 'CANCELLED', message: 'Выполнение отменено.' }, completed)));
@@ -158,11 +172,14 @@ class CodexClient extends EventEmitter {
           else resolve({ text: replies.join('\n\n'), turnId: p.turn.id });
         }
       };
-      disconnected = () => reject(new Error('Соединение с Codex прервано. Проверьте чат перед повторной отправкой.'));
+      disconnected = () => { stop({ code: 'CONNECTION_ERROR', message: 'Соединение с Codex прервано. Проверьте сохранённые действия перед продолжением.' }); reject(new Error('Соединение с Codex прервано. Проверьте чат перед повторной отправкой.')); };
       blocked = p => { if (p.threadId === threadId) stop(p.failure); };
       this.on('notification', listener); this.once('disconnected', disconnected);
       this.on('requestBlocked', blocked);
-      const armTimer = () => { if (alive) timer = setTimeout(() => reject(failure ? new McpExecutionError(executionReport(failure, completed)) : new Error('Ответ ещё выполняется. Его можно открыть в desktop-приложении.')), timeout); };
+      const armTimer = () => { if (alive) timer = setTimeout(() => {
+        stop({ code: 'EXECUTION_TIMEOUT', message: 'Истекло время выполнения. Новые изменения остановлены; сохранённые действия доступны в журнале.' });
+        reject(new McpExecutionError(executionReport(failure, completed)));
+      }, timeout); };
       if (onRequest) this.requestHandlers.set(threadId, { onRequest, pause: () => clearTimeout(timer), resume: armTimer });
       armTimer();
     });
@@ -172,10 +189,19 @@ class CodexClient extends EventEmitter {
       const input = [...(text ? [{ type: 'text', text, text_elements: [] }] : []), ...attachmentInput(attachments.filter(file => file.fileId)), ...attachments.filter(file => !file.fileId).map(file => ({ type: 'image', url: file.url }))];
       const started = await this.call('turn/start', { threadId, input, clientUserMessageId: requestId, approvalsReviewer: 'auto_review' });
       activeTurn = started.turn?.id;
+      await onTurnStarted({ threadId, turnId: activeTurn });
       if (failure && !interrupt && activeTurn) interrupt = this.call('turn/interrupt', { threadId, turnId: activeTurn }).catch(() => {});
       this.emit('turnStarted', { threadId, turnId: started.turn?.id });
       return await completion;
+    } catch (error) {
+      if (!finished && !failure) stop(error.execution?.error || { code: 'CONNECTION_ERROR', message: 'Выполнение прервалось. Новые изменения остановлены.' });
+      throw error;
     } finally {
+      await failureSaved;
+      // A timed-out/disconnected turn must not keep generating new mutations
+      // after its worker has returned control to the queue.
+      if (!finished && activeTurn && !interrupt) interrupt = this.call('turn/interrupt', { threadId, turnId: activeTurn }).catch(() => {});
+      await interrupt;
       alive = false; this.requestHandlers.delete(threadId);
       for (const key of this.requestDetails.keys()) if (key.startsWith(`${threadId}:`)) this.requestDetails.delete(key);
       for (const request of this.serverRequests.values()) if (request.threadId === threadId) request.controller.abort();

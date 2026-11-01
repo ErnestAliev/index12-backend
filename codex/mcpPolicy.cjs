@@ -20,7 +20,7 @@ async function readMcpAccess(binding, request = fetch) {
   return access;
 }
 
-function scopedConfig(access, guardFile) {
+function scopedConfig(access, { durable = false } = {}) {
   const config = Object.fromEntries(['onec_kz', 'bcc_uu', 'esf_uu', 'node_repl', 'computer-use'].map(name => [`mcp_servers.${name}.enabled`, false]));
   config['mcp_servers.index12.enabled_tools'] = INDEX12_TOOLS;
   // Automatic review still checks user intent and managed policy. Never auto-accept
@@ -29,7 +29,8 @@ function scopedConfig(access, guardFile) {
     config[`mcp_servers.index12.tools.${tool}.approval_mode`] = access?.confirmationMode === 'direct'
       && access?.confirmation === 'direct_on_user_request' && access.capabilities?.[capability] === true ? 'auto' : 'prompt';
   }
-  if (guardFile) config['mcp_servers.index12.env.INDEX12_MCP_EXECUTION_GUARD'] = guardFile;
+  config['mcp_servers.index12.env.INDEX12_MCP_EXECUTION_MODE'] = durable ? 'durable' : 'standalone';
+  config['mcp_servers.index12.env.INDEX12_MCP_EXECUTION_GUARD'] = '';
   return config;
 }
 module.exports = { WRITE_CAPABILITIES, INDEX12_TOOLS, readMcpAccess, scopedConfig };

@@ -5,6 +5,8 @@ const { workspaceAccess } = require('../utils/operationAccess');
 const { validateAttachments } = require('./attachments.cjs');
 const { FILE_LIMIT, safeName, validFileId, imageMime, fileMeta, fileBuffer, resolveAttachments } = require('./files.cjs');
 const { answerRequest, publicRequest } = require('./requests.cjs');
+const { ExecutionStore } = require('./executionStore.cjs');
+const { receipt, executionReport } = require('./toolResults.cjs');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
 const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000;
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
@@ -44,6 +46,13 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
   const workerFor = scope => collection('Workers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` });
   const jobForClient = async job => job && ({ ...publicJob(job), ...(job.active ? { pendingRequests: (await collection('Requests').find({ jobId: job._id, actorId: job.actorId, workspaceId: job.workspaceId, state: 'pending', expiresAt: { $gt: new Date() } }).sort({ expiresAt: 1 }).limit(20).toArray()).map(publicRequest) } : {}) });
+  const executionForClient = async (id, scope) => {
+    const { run, events } = await new ExecutionStore(db()).report(id, scope);
+    if (!run) return null;
+    const completed = events.map(event => receipt({ tool: event.tool, result: { structuredContent: event.result } })).filter(Boolean);
+    return { id: run._id, status: run.state, createdAt: run.createdAt, finishedAt: run.finishedAt || null, completed,
+      ...(run.error ? { execution: executionReport(run.error, completed) } : {}) };
+  };
   router.get('/status', wrap(async (req, res) => {
     const worker = await workerFor(req.desktopScope);
     const connected = online(worker);
@@ -67,6 +76,24 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       $or: [{ kind: 'history', cursor: null }, { kind: 'send', 'result.history': { $exists: true } }] }).sort({ createdAt: -1 }).limit(1).toArray();
     const cachedHistory = recent[0]?.kind === 'send' ? recent[0].result?.history : recent[0]?.result;
     res.json({ chat: { id: chat._id, title: chat.title, threadId: chat.threadId || null }, pendingJob: await jobForClient(pending), cachedHistory: cachedHistory || null });
+  }));
+  router.get('/chats/:id/executions', wrap(async (req, res) => {
+    const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
+    if (!chat) return res.status(404).json({ error: 'Чат не найден.' });
+    let page = {};
+    if (req.query.cursor) {
+      try {
+        if (typeof req.query.cursor !== 'string' || req.query.cursor.length > 1000) throw new Error();
+        const cursor = JSON.parse(Buffer.from(req.query.cursor, 'base64url').toString('utf8'));
+        const createdAt = new Date(cursor.createdAt);
+        if (!Number.isFinite(createdAt.getTime()) || typeof cursor.id !== 'string' || cursor.id.length > 200) throw new Error();
+        page = { $or: [{ createdAt: { $lt: createdAt } }, { createdAt, _id: { $lt: cursor.id } }] };
+      } catch { return res.status(400).json({ error: 'Некорректный курсор журнала.' }); }
+    }
+    const runs = await db().collection('mcpExecutions').find({ ...req.desktopScope, chatId: chat._id, ...page }).sort({ createdAt: -1, _id: -1 }).limit(21).toArray();
+    const executions = [];
+    for (const run of runs.slice(0, 20)) executions.push(await executionForClient(run._id, req.desktopScope));
+    res.json({ executions, nextCursor: runs.length > 20 ? Buffer.from(JSON.stringify({ createdAt: runs[19].createdAt, id: runs[19]._id })).toString('base64url') : null });
   }));
   router.post('/chats/:id/files', express.raw({ type: 'application/octet-stream', limit: FILE_LIMIT }), wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
@@ -109,6 +136,15 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       await retainFiles();
       return res.json({ job: await jobForClient(existing) });
     }
+    if (kind === 'send') {
+      const durable = await db().collection('mcpExecutions').findOne({ _id: id, ...scope });
+      if (durable) {
+        if (durable.chatId !== chat._id || durable.requestHash !== requestHash) return res.status(409).json({ error: 'Этот идентификатор уже использован для другого запроса.' });
+        const saved = await executionForClient(id, scope);
+        return res.json({ job: { id, kind: 'send', status: saved.status === 'completed' ? 'completed' : saved.status === 'running' ? 'running' : 'failed',
+          result: { text: `Ранее выполнено: ${saved.completed.length} действий.`, completed: saved.completed, ...(saved.execution ? { execution: saved.execution } : {}) }, error: saved.execution?.error?.message || null } });
+      }
+    }
     if (!online(await workerFor(scope))) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
     if (kind === 'history' && !chat.threadId) return res.json({ job: { status: 'completed', result: { messages: [], nextCursor: null } } });
     const job = { _id: id, ...scope, requestHash, chatId: chat._id, kind, message: kind === 'send' ? message.trim() : null, attachments: kind === 'send' ? attachments : [], cursor: cursor || null, status: 'queued', active: true, createdAt: new Date() };
@@ -135,6 +171,12 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   }));
   router.get('/jobs/:id', wrap(async (req, res) => {
     const job = await collection('Jobs').findOne({ _id: req.params.id, ...req.desktopScope });
+    // Job TTL is transport cleanup, not deletion of the financial execution.
+    if (!job || job.status === 'interrupted') {
+      const saved = await executionForClient(req.params.id, req.desktopScope);
+      if (saved) return res.json({ job: { id: saved.id, kind: 'send', status: saved.status === 'completed' ? 'completed' : saved.status === 'running' ? 'running' : 'failed',
+        result: { ...(saved.execution ? { execution: saved.execution } : {}), completed: saved.completed }, error: saved.execution?.error?.message || null } });
+    }
     if (!job) return res.status(404).json({ error: 'Запрос не найден.' });
     res.json({ job: await jobForClient(job) });
   }));

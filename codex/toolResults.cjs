@@ -35,11 +35,13 @@ function receipt(item) {
   if (!WRITE_CAPABILITIES[item.tool] || toolFailure(item)) return null;
   const data = resultData(item);
   if (!data || !data.id && !data.completed) return null;
-  return { tool: item.tool, id: data.id || data.operation?.id || null, version: data.version ?? data.operation?.version ?? null,
-    amount: data.operation?.amount ?? null, date: data.operation?.date ?? null, initialBalance: data.account?.initialBalance ?? null };
+  const operation = data.operation?.operation || data.operation;
+  return { tool: item.tool, id: data.id || data.operation?.id || data.importId || null, version: data.version ?? data.operation?.version ?? null,
+    amount: operation?.amount ?? null, date: operation?.date ?? null, initialBalance: data.account?.initialBalance ?? null,
+    ...(data.partial ? { partial: true, entities: data.entities } : {}) };
 }
 function executionReport(error, completed = []) {
-  const lines = completed.map(item => `- ${item.id || item.tool}${item.version != null ? ` · версия ${item.version}` : ''}${item.amount != null ? ` · сумма ${item.amount}` : ''}${item.date ? ` · дата ${item.date}` : ''}${item.initialBalance != null ? ` · начальный остаток ${item.initialBalance}` : ''}`);
+  const lines = completed.map(item => `- ${item.id || item.tool}${item.version != null ? ` · версия ${item.version}` : ''}${item.amount != null ? ` · сумма ${item.amount}` : ''}${item.date ? ` · дата ${item.date}` : ''}${item.initialBalance != null ? ` · начальный остаток ${item.initialBalance}` : ''}${item.partial ? ` · импорт выполнен частично: ${Object.values(item.entities || {}).map(entity => entity.name || entity.id).join(', ')}` : ''}`);
   return { error, completed, text: `${error.message}\n\nЦепочка изменений остановлена. Подтверждено выполненных действий: **${completed.length}**.${lines.length ? '\n\n' + lines.join('\n') : ''}\n\nПовторное исправление требует нового запроса и свежего чтения записей.` };
 }
 class McpExecutionError extends Error {

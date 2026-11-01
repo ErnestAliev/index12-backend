@@ -15,11 +15,12 @@ const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require(
 const { isSystemWithdrawal, normalizeTransferData } = require('../../utils/transferSemantics');
 const { workspaceAccess } = require('../../utils/operationAccess');
 const { withRelatedOperationGuard } = require('../../utils/relatedOperationGuard');
+const { createHistoryEngine } = require('../../history/engine.cjs');
 
 async function startFixture() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'index12-subcategories-'));
   const mongoPort = 27028;
-  const mongo = spawn(process.env.MONGOD_BIN || 'mongod', ['--dbpath', directory, '--bind_ip', '127.0.0.1', '--port', String(mongoPort), '--logpath', path.join(directory, 'mongo.log')], { stdio: 'ignore' });
+  const mongo = spawn(process.env.MONGOD_BIN || 'mongod', ['--dbpath', directory, '--bind_ip', '127.0.0.1', '--port', String(mongoPort), '--replSet', 'index12_test', '--logpath', path.join(directory, 'mongo.log')], { stdio: 'ignore' });
   let http;
   async function close() {
     if (http) { http.closeAllConnections(); await new Promise(resolve => http.close(resolve)); }
@@ -30,21 +31,37 @@ async function startFixture() {
   try {
     let connected = false;
     for (let i = 0; i < 50 && mongo.exitCode === null; i++) {
-      try { await mongoose.connect(`mongodb://127.0.0.1:${mongoPort}/subcategory_test`, { serverSelectionTimeoutMS: 200 }); connected = true; break; }
+      try { await mongoose.connect(`mongodb://127.0.0.1:${mongoPort}/subcategory_test?directConnection=true`, { serverSelectionTimeoutMS: 200 }); connected = true; break; }
       catch { await new Promise(resolve => setTimeout(resolve, 100)); }
     }
     if (!connected) throw new Error('Could not start isolated MongoDB; check MONGOD_BIN and port 27028');
+    await mongoose.connection.db.admin().command({ replSetInitiate: { _id: 'index12_test', members: [{ _id: 0, host: `127.0.0.1:${mongoPort}` }] } });
+    for (let i = 0; i < 100; i++) {
+      if ((await mongoose.connection.db.admin().command({ hello: 1 })).isWritablePrimary) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    mongoose.set('transactionAsyncLocalStorage', true);
+    const changeHistory = createHistoryEngine({ mongoose });
     const source = await fs.readFile(path.join(__dirname, '../../server.js'), 'utf8');
     const app = express(); app.use(require('cors')({ origin: true, credentials: true })); app.use(express.json());
+    let dropResponse = false;
+    app.use((req, res, next) => {
+      const json = res.json.bind(res);
+      res.json = body => {
+        if (dropResponse && req.path.startsWith('/api/mcp/') && body?.actionId) { dropResponse = false; res.destroy(); return res; }
+        return json(body);
+      };
+      next();
+    });
     const userId = 'subcategory-test-owner';
     let browserActor = userId;
     app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, workspaceRole: 'admin', role: 'admin' }; req.workspaceRole = 'admin'; next(); });
     const emitted = [];
     const handlers = {};
     const entityHandlers = {};
-    const context = { isSystemWithdrawal, normalizeTransferData, app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
+    const context = { changeHistory, isSystemWithdrawal, normalizeTransferData, app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
       captureMcpEntityHandler: (kind, handler) => (entityHandlers[kind] = handler),
-      captureMcpHandler: (kind, handler) => (handlers[kind] = handler), mcpVersionFilter, mcpAuditEntry,
+      captureMcpHandler: (kind, handler) => (handlers[kind] = changeHistory.wrapHandler(handler)), mcpVersionFilter, mcpAuditEntry,
       withRelatedOperationGuard,
       createSubcategoryModel, validateEventSubcategory, subcategorySnapshotFacet, withDaySlotLock, normalizeProjectScope, equalProjectShares,
       getCompositeUserId: async req => req.mcpContext ? (req.cachedWorkspace.isDefault ? String(req.cachedWorkspace.userId) : `${req.cachedWorkspace.userId}_ws_${req.cachedWorkspace._id}`) : req.user.id,
@@ -54,8 +71,8 @@ async function startFixture() {
       canEdit: (_req, _res, next) => next(), canDelete: (_req, _res, next) => next(),
       ensureManagerCanAccessOperationAccounts: async () => {},
       triggerContextPacketRebuildByDates: () => {},
-      emitToWorkspace: (...args) => emitted.push(args),
-      emitEntityEvent: (...args) => emitted.push(args),
+      emitToWorkspace: (...args) => { const emit = () => emitted.push(args); if (!changeHistory.defer(emit)) emit(); },
+      emitEntityEvent: (...args) => { const emit = () => emitted.push(args); if (!changeHistory.defer(emit)) emit(); },
       console: { log() {}, error() {} }
     };
     const run = (start, end, suffix = '') => {
@@ -87,7 +104,7 @@ async function startFixture() {
     run('const checkWorkspacePermission =', '// GET /api/workspaces', '\nglobalThis.mcpPermissions = checkWorkspacePermission;');
     run('async function canEdit(', '// 🟢 NEW: Get effective userId', '\nglobalThis.mcpCanEdit = canEdit;');
     run('const normalizeEntityId =', '// QUICK-only mode', '\nglobalThis.mcpAccounts = ensureManagerCanAccessOperationAccounts;');
-    registerMcpOperationRoutes(app, { mongoose, ...context.identityModels, ...models, emitEntityEvent: (...args) => emitted.push(args), handlers, entityHandlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
+    registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, ...context.identityModels, ...models, emitEntityEvent: context.emitEntityEvent, handlers, entityHandlers, checkWorkspacePermission: context.mcpPermissions, canEdit: context.mcpCanEdit, ensureManagerCanAccessOperationAccounts: context.mcpAccounts });
     registerSubcategoryRoutes(app, { ...models, captureCreateHandler: context.captureMcpEntityHandler, getCompositeUserId: context.getCompositeUserId, isAuthenticated: context.isAuthenticated, checkWorkspacePermission: context.checkWorkspacePermission, emitEntityEvent: (...args) => emitted.push(args) });
     app.get('/api/auth/me', (req, res) => res.json({ _id: req.user.id, id: req.user.id, role: 'admin', workspaceRole: 'admin', createdAt: '2026-01-01' }));
     const entityRegistrations = [['Account', 'accounts'], ['Company', 'companies'], ['Individual', 'individuals'], ['Contractor', 'contractors'], ['Project', 'projects'], ['Category', 'categories']];
@@ -101,7 +118,7 @@ async function startFixture() {
       const response = await fetch(`${apiUrl}${endpoint}`, { method, headers: { 'Content-Type': 'application/json', ...(owner ? { 'x-test-owner': owner } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, data: await response.json() };
     }
-    return { close, apiUrl, models, entityHandlers, userId, request, emitted, identityModels: context.identityModels, setBrowserActor: id => { browserActor = id; } };
+    return { close, app, apiUrl, models, audit: changeHistory, entityHandlers, userId, request, emitted, identityModels: context.identityModels, dropNextMcpResponse: () => { dropResponse = true; }, setBrowserActor: id => { browserActor = id; } };
   } catch (error) { await close(); throw error; }
 }
 

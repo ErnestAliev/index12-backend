@@ -1,11 +1,8 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 const { scopedConfig, readMcpAccess } = require('../codex/mcpPolicy.cjs');
-const { ExecutionGuard } = require('../mcp/executionGuard.cjs');
+const { withExecution } = require('../mcp/executionContext.cjs');
 const { toolFailure, executionReport, receipt } = require('../codex/toolResults.cjs');
 const { CodexClient } = require('../codex/codexClient.cjs');
 const direct = { confirmationMode: 'direct', confirmation: 'direct_on_user_request', capabilities: { update: true } };
@@ -23,17 +20,12 @@ test('only authenticated direct capabilities select automatic review; all other 
   await assert.rejects(readMcpAccess(binding, async () => ({ ok: false })), /проверить разрешения/);
 });
 
-test('first error closes the sequential write chain without overwriting completed receipts', t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'index12-guard-test-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const file = path.join(directory, 'turn.jsonl'); fs.writeFileSync(file, '{"type":"start"}\n');
-  const guard = new ExecutionGuard(file); let writes = 0;
-  guard.beforeWrite(); writes++; guard.completed('index12_update_operation', { id: 'test', version: 1 });
-  guard.stop({ code: 'VERSION_CONFLICT' });
-  assert.throws(() => { new ExecutionGuard(file).beforeWrite(); writes++; }, error => error.detail.code === 'EXECUTION_STOPPED');
-  assert.equal(writes, 1); assert.equal(guard.entries().filter(e => e.type === 'completed').length, 1);
-  fs.rmSync(file);
-  assert.throws(() => new ExecutionGuard(file).beforeWrite(), error => error.detail.code === 'EXECUTION_GUARD_UNAVAILABLE');
+test('web configuration binds a durable protocol, never a per-message file', () => {
+  const first = scopedConfig(direct, { durable: true });
+  const next = scopedConfig(direct, { durable: true });
+  assert.deepEqual(first, next);
+  assert.equal(first['mcp_servers.index12.env.INDEX12_MCP_EXECUTION_MODE'], 'durable');
+  assert.equal(first['mcp_servers.index12.env.INDEX12_MCP_EXECUTION_GUARD'], '');
 });
 
 test('user decline, policy block, cancellation, API errors and version conflicts have distinct codes', () => {
@@ -49,16 +41,65 @@ test('user decline, policy block, cancellation, API errors and version conflicts
   for (const [item, code] of cases) assert.equal(toolFailure(item).code, code);
 });
 
-test('parallel mutation requests are serialized and cannot slip past an earlier failure', async t => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'index12-guard-parallel-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const file = path.join(directory, 'turn.jsonl'); fs.writeFileSync(file, '{"type":"start"}\n');
-  const guard = new ExecutionGuard(file); let attempts = 0;
+test('parallel mutations remain sequential even without a file journal', async () => {
+  const options = { db: {}, binding: { actorId: 'actor', workspaceId: 'workspace' }, durable: false, write: true };
+  const order = [];
   const results = await Promise.allSettled([
-    guard.serializeWrite(async () => { guard.beforeWrite(); attempts++; await new Promise(resolve => setImmediate(resolve)); guard.stop({ code: 'API_ERROR' }); }),
-    guard.serializeWrite(async () => { guard.beforeWrite(); attempts++; }),
+    withExecution(options, async () => { order.push('first-start'); await new Promise(resolve => setImmediate(resolve)); order.push('first-end'); throw new Error('test'); }),
+    withExecution(options, async () => { order.push('second'); }),
   ]);
-  assert.equal(attempts, 1); assert.equal(results[1].reason.detail.code, 'EXECUTION_STOPPED');
+  assert.deepEqual(order, ['first-start', 'first-end', 'second']);
+  assert.equal(results[0].status, 'rejected'); assert.equal(results[1].status, 'fulfilled');
+});
+
+test('host turn binding and persisted failure finish before the caller receives a result', async () => {
+  const client = new CodexClient(); client.newThreads.add('thread');
+  let bound = false, persisted = false;
+  client.call = async method => {
+    if (method === 'turn/start') setImmediate(() => {
+      assert.equal(bound, true);
+      client.emit('notification', { method: 'item/completed', params: { threadId: 'thread', turnId: 'turn', item: { ...updated, result: { isError: true, structuredContent: { error: { code: 'VERSION_CONFLICT' } } } } } });
+      client.emit('notification', { method: 'turn/completed', params: { threadId: 'thread', turn: { id: 'turn', status: 'interrupted' } } });
+    });
+    return { turn: { id: 'turn' } };
+  };
+  await assert.rejects(client.send('thread', 'test', {
+    onTurnStarted: async ({ threadId, turnId }) => { assert.equal(threadId, 'thread'); assert.equal(turnId, 'turn'); bound = true; },
+    onToolFailure: async () => { await new Promise(resolve => setImmediate(resolve)); persisted = true; },
+  }));
+  assert.equal(persisted, true);
+});
+
+test('late notifications from an old turn cannot fail the current execution', async () => {
+  const client = new CodexClient(); client.newThreads.add('thread');
+  client.call = async () => {
+    setImmediate(() => {
+      client.emit('notification', { method: 'item/completed', params: { threadId: 'thread', turnId: 'old-turn', item: { ...updated, result: { isError: true } } } });
+      client.emit('notification', { method: 'turn/completed', params: { threadId: 'thread', turn: { id: 'old-turn', status: 'interrupted' } } });
+      client.emit('notification', { method: 'turn/completed', params: { threadId: 'thread', turn: { id: 'new-turn', status: 'completed' } } });
+    });
+    return { turn: { id: 'new-turn' } };
+  };
+  assert.equal((await client.send('thread', 'test')).turnId, 'new-turn');
+});
+
+test('timeout fences mutations before returning the failed execution to the queue', async () => {
+  const client = new CodexClient(); client.newThreads.add('thread');
+  let stopped = false, interrupts = 0;
+  client.call = async method => {
+    if (method === 'turn/interrupt') { assert.equal(stopped, true); interrupts++; }
+    return { turn: { id: 'turn' } };
+  };
+  await assert.rejects(client.send('thread', 'test', { timeout: 10, onToolFailure: async detail => { assert.equal(detail.code, 'EXECUTION_TIMEOUT'); stopped = true; } }), error => error.execution?.error.code === 'EXECUTION_TIMEOUT');
+  assert.equal(interrupts, 1); assert.equal(stopped, true);
+});
+
+test('migration refuses to fork a chat with an active user turn', async () => {
+  const client = new CodexClient();
+  const calls = [];
+  client.call = async method => { calls.push(method); return { thread: { status: { type: 'active' } } }; };
+  await assert.rejects(client.migrateThread('thread', { cwd: '/tmp', access: direct }), /уже выполняется/);
+  assert.deepEqual(calls, ['thread/read']);
 });
 
 test('tool failure interrupts the turn; even a later success claim never becomes a successful job', async () => {

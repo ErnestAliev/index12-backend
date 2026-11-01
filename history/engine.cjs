@@ -146,6 +146,8 @@ function createHistoryEngine({ mongoose }) {
       createdAt,
       batchId,
       undoneAt: null,
+      ...(req.mcpContext?.actionId ? { actionId: req.mcpContext.actionId } : {}),
+      ...(req.mcpContext?.execution?.executionId ? { executionId: req.mcpContext.execution.executionId } : {}),
     };
     const rows = [],
       changes = [...ctx.operations.values()],
@@ -313,6 +315,7 @@ function createHistoryEngine({ mongoose }) {
               return this;
             };
             await storage.run(ctx, async () => {
+              if (req.mcpContext?.beforeMutation) await req.mcpContext.beforeMutation(session);
               await handler(req, buffered, next);
               if (code >= 400)
                 throw Object.assign(new Error("History transaction rejected"), {
