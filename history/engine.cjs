@@ -57,7 +57,7 @@ function createHistoryEngine({ mongoose }) {
   }
   function capture(before, after) {
     const ctx = current();
-    if (!ctx || ctx.undo) return;
+    if (!ctx) return;
     const id = String(after?._id || before?._id);
     const previous = ctx.operations.get(id);
     ctx.operations.set(id, {

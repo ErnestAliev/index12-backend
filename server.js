@@ -143,6 +143,7 @@ const emitToAll = (req, userId, event, data) => {
 
 // 🟢 NEW: Emit to workspace room (all members receive update)
 const emitToWorkspace = (req, workspaceId, event, data, extraMeta = {}) => {
+    if (changeHistory.current?.()?.undo && /^operation_(added|updated|deleted)$/.test(event)) extraMeta = { ...extraMeta, historyReceipt: true };
     if (changeHistory.defer(() => emitToWorkspace(req, workspaceId, event, data, extraMeta))) return;
     if (!req.io || !workspaceId) return;
 
@@ -2732,8 +2733,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const audit = req.mcpContext && !req.historyUndo ? { $push: { changeHistory: mcpAuditEntry(req, existingEvent, updatedData, req.mcpContext.expectedVersion + 1) } } : {};
         if (req.mcpContext) updatedData.updatedVia = req.historyUndo ? 'history' : 'mcp';
         const persistUpdate = async () => {
-            if (req.mcpContext && updatedData.dateKey && updatedData.dateKey !== existingEvent.dateKey) {
-                updatedData.cellIndex = await getFirstFreeCellIndex(updatedData.dateKey, userId);
+            if (req.mcpContext && updatedData.dateKey && !req.historyPositionResolved && (updatedData.dateKey !== existingEvent.dateKey || (req.historyUndo && Number.isInteger(updatedData.cellIndex) && updatedData.cellIndex !== existingEvent.cellIndex))) {
+                updatedData.cellIndex = await getFirstFreeCellIndex(updatedData.dateKey, userId, req.historyUndo ? updatedData.cellIndex : 0);
             }
             return Event.findOneAndUpdate(
                 { _id: id, userId: userIdQuery, ...versionGuard },

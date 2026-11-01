@@ -139,6 +139,19 @@ function fixture() {
       hooks["post:save"].call(this, this);
       return this;
     }
+    static find(q) {
+      return {
+        limit(n) {
+          this.n = n;
+          return this;
+        },
+        lean: async function () {
+          return clone(
+            data.events.filter((row) => matches(row, q)).slice(0, this.n),
+          );
+        },
+      };
+    }
     static findOne(q) {
       return {
         lean: async () => clone(data.events.find((r) => matches(r, q)) || null),
@@ -174,15 +187,18 @@ function fixture() {
       invoked.push(clone(req.body));
       const row = data.events.find((r) => r._id === req.params.id);
       assert.equal(req.mcpContext.expectedVersion, row.syncVersion || 0);
-      await new Event({
+      const saved = await new Event({
         ...row,
         ...req.body,
         syncVersion: (row.syncVersion || 0) + 1,
       }).save();
-      res.json({ ok: true });
+      res.json(saved.toObject());
     },
     delete: async (req, res) => {
+      const query = { model: Event, getFilter: () => ({ _id: req.params.id }) };
+      await hooks["pre:deleteOne"].call(query);
       data.events = data.events.filter((r) => r._id !== req.params.id);
+      await hooks["post:deleteOne"].call(query, { deletedCount: 1 });
       res.json({ ok: true });
     },
   };
@@ -216,6 +232,11 @@ function fixture() {
         return i;
       },
       emitToWorkspace: (...args) => {
+        if (
+          engine.current()?.undo &&
+          /^operation_(added|updated|deleted)$/.test(args[2])
+        )
+          args[4] = { ...args[4], historyReceipt: true };
         if (!engine.defer(() => emitted.push(args))) emitted.push(args);
       },
       frontendUrl: "https://index12.com",
@@ -399,7 +420,11 @@ test("HTTP undo requires confirmation, changes only the amount, rejects stale an
   const request = await serve(t, f);
   assert.equal((await request("/entry/undo", {})).status, 400);
   assert.equal(f.invoked.length, 0);
-  assert.equal((await request("/entry/undo", { confirm: true })).status, 200);
+  const undone = await request("/entry/undo", { confirm: true });
+  assert.equal(undone.status, 200);
+  assert.equal(undone.body.changes.length, 1);
+  assert.equal(undone.body.changes[0].before.amount, 1400000);
+  assert.equal(undone.body.changes[0].after.amount, 1200000);
   assert.equal(f.data.events[0].amount, 1200000);
   assert.equal(f.data.events[0].description, "Новая заметка");
   assert.equal(f.data.events[0].dateKey, "2026-285");
@@ -483,7 +508,10 @@ test("deleted split operation restores original IDs, amounts and free cells on e
   for (const id of ["operation", "child-a", "child-b"])
     assert.equal(f.data.events.find((r) => r._id === id).cellIndex, 1);
   assert.equal(f.data.events.find((r) => r._id === "child-b").amount, 800000);
-  assert.equal(f.emitted.length, 3);
+  assert.equal(f.emitted.length, 4);
+  assert.ok(f.emitted.slice(0, 3).every((args) => args[4].historyReceipt));
+  const batch = f.emitted.find((args) => args[2] === "operations_reverted");
+  assert.equal(batch[3].changes.length, 3);
   assert.equal((await request("/entry/undo", { confirm: true })).status, 409);
   assert.equal(f.data.events.length, 5);
 });
@@ -609,7 +637,7 @@ test("date undo preserves a newer amount and asks the normal handler to allocate
   assert.equal((await request("/entry/undo", { confirm: true })).status, 200);
   assert.equal(f.data.events[0].amount, 1700000);
   assert.equal(f.data.events[0].dateKey, "2026-284");
-  assert.equal(Object.hasOwn(f.invoked[0], "cellIndex"), false);
+  assert.equal(f.invoked[0].cellIndex, 5);
 });
 test("undoing creation never deletes a split child edited later", async (t) => {
   const f = fixture(),
@@ -654,4 +682,166 @@ test("failed restoration rolls back every earlier restored split child and sends
   assert.equal(f.data.events[0]._id, "child");
   assert.equal(f.emitted.length, 0);
   assert.equal(f.data.changeHistory[0].undoneAt, null);
+});
+
+test("date undo returns the parent and only its shares in one committed receipt", async (t) => {
+  const f = fixture(),
+    parent = operation({ isSplitParent: true }),
+    before = {
+      ...parent,
+      date: "2026-10-11T07:00:00.000Z",
+      dateKey: "2026-284",
+      dayOfYear: 284,
+      cellIndex: 5,
+    };
+  const a = operation({
+      _id: "share-a",
+      parentOpId: "operation",
+      isSplitChild: true,
+      amount: 600000,
+    }),
+    b = operation({
+      _id: "share-b",
+      parentOpId: "operation",
+      isSplitChild: true,
+      amount: 800000,
+      description: "Более поздняя заметка",
+    }),
+    unrelated = operation({ _id: "unrelated", amount: 42 });
+  f.data.events.push(parent, a, b, unrelated);
+  f.data.changeHistory.push(
+    entry({
+      snapshot: parent,
+      change: operationChanges(before, parent).find((c) => c.field === "date"),
+    }),
+  );
+  const request = await serve(t, f),
+    result = await request("/entry/undo", { confirm: true });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.changes.length, 3);
+  assert.equal(f.data.changeHistory.length, 1);
+  assert.equal(f.emitted.length, 1);
+  assert.deepEqual(f.emitted[0][3].changes, result.body.changes);
+  for (const id of ["operation", "share-a", "share-b"]) {
+    const op = f.data.events.find((r) => r._id === id);
+    assert.equal(op.dateKey, before.dateKey);
+    assert.equal(op.cellIndex, 5);
+  }
+  assert.equal(f.data.events.find((r) => r._id === "share-a").amount, 600000);
+  assert.equal(
+    f.data.events.find((r) => r._id === "share-b").description,
+    b.description,
+  );
+  assert.deepEqual(
+    f.data.events.find((r) => r._id === "unrelated"),
+    unrelated,
+  );
+});
+test("newer movement of a share blocks date undo without touching parent or another operation", async (t) => {
+  const f = fixture(),
+    parent = operation({ isSplitParent: true }),
+    child = operation({
+      _id: "share",
+      parentOpId: "operation",
+      isSplitChild: true,
+      dateKey: "2026-286",
+    }),
+    before = { ...parent, dateKey: "2026-284" };
+  f.data.events.push(parent, child);
+  f.data.changeHistory.push(
+    entry({
+      snapshot: parent,
+      change: operationChanges(before, parent).find((c) => c.field === "date"),
+    }),
+  );
+  const original = clone(f.data.events),
+    request = await serve(t, f);
+  assert.equal((await request("/entry/undo", { confirm: true })).status, 409);
+  assert.deepEqual(f.data.events, original);
+  assert.equal(f.emitted.length, 0);
+  assert.equal(f.data.changeHistory[0].undoneAt, null);
+});
+for (const field of ["date", "amount"])
+  test(`legacy transfer ${field} undo keeps both halves consistent and excludes unrelated records`, async (t) => {
+    const f = fixture(),
+      positive = operation({ isTransfer: true, transferGroupId: "legacy" }),
+      negative = operation({
+        _id: "out",
+        type: "expense",
+        isTransfer: true,
+        transferGroupId: "legacy",
+        amount: -1400000,
+      }),
+      unrelated = operation({ _id: "other" });
+    const before =
+      field === "date"
+        ? {
+            ...positive,
+            date: "2026-10-11T07:00:00.000Z",
+            dateKey: "2026-284",
+            dayOfYear: 284,
+            cellIndex: 5,
+          }
+        : { ...positive, amount: 1200000 };
+    f.data.events.push(positive, negative, unrelated);
+    f.data.changeHistory.push(
+      entry({
+        snapshot: positive,
+        change: operationChanges(before, positive).find(
+          (c) => c.field === field,
+        ),
+      }),
+    );
+    const request = await serve(t, f),
+      result = await request("/entry/undo", { confirm: true });
+    assert.equal(result.status, 200);
+    assert.equal(result.body.changes.length, 2);
+    assert.equal(f.emitted.length, 1);
+    assert.equal(f.data.changeHistory.length, 1);
+    const restored = f.data.events.find((r) => r._id === "operation"),
+      other = f.data.events.find((r) => r._id === "out");
+    assert.equal(restored.amount, -other.amount);
+    assert.equal(restored.dateKey, other.dateKey);
+    assert.equal(restored.cellIndex, other.cellIndex);
+    assert.deepEqual(
+      f.data.events.find((r) => r._id === "other"),
+      unrelated,
+    );
+  });
+test("undo creation responds with the deleted operation receipt after the transaction commits", async (t) => {
+  const f = fixture(),
+    op = operation();
+  f.data.events.push(op);
+  f.data.changeHistory.push(
+    entry({ action: "created", snapshots: [{ before: null, after: op }] }),
+  );
+  const request = await serve(t, f),
+    result = await request("/entry/undo", { confirm: true });
+  assert.equal(result.status, 200);
+  assert.equal(f.data.events.length, 0);
+  assert.deepEqual(result.body.changes, [{ before: op, after: null }]);
+  assert.equal(f.emitted.length, 1);
+  assert.equal(f.emitted[0][2], "operations_reverted");
+});
+
+test("a share cannot be restored while its parent operation is still deleted", async (t) => {
+  const f = fixture(),
+    child = operation({
+      _id: "share",
+      isSplitChild: true,
+      parentOpId: "missing-parent",
+    });
+  f.data.changeHistory.push(
+    entry({
+      action: "deleted",
+      operationId: child._id,
+      snapshot: child,
+      snapshots: [{ before: child, after: null }],
+    }),
+  );
+  const request = await serve(t, f);
+  assert.equal((await request("/entry/undo", { confirm: true })).status, 409);
+  assert.equal(f.data.events.length, 0);
+  assert.equal(f.data.changeHistory[0].undoneAt, null);
+  assert.equal(f.emitted.length, 0);
 });

@@ -4,7 +4,13 @@ const { randomUUID } = require("node:crypto");
 const { isDeepStrictEqual } = require("node:util");
 const { workspaceAccess } = require("../utils/operationAccess");
 const { scopeQuery } = require("../mcp/finance.cjs");
-const { clone, diff, revert, EDIT_KEYS } = require("./changes.cjs");
+const {
+  clone,
+  diff,
+  revert,
+  EDIT_KEYS,
+  operationChanges,
+} = require("./changes.cjs");
 const PREFERENCES = new Set([
   "appearance",
   "theme",
@@ -56,6 +62,10 @@ function createHistoryRouter({
       allowed.add(u.origin);
     }
   }
+  router.use((req, res, next) => {
+    res.set("X-Index12-History-Protocol", "2");
+    next();
+  });
   router.use(isAuthenticated, async (req, res, next) => {
     try {
       res.set("Cache-Control", "private, no-store");
@@ -304,7 +314,14 @@ function createHistoryRouter({
       res.status(201).json({ ok: true });
     }),
   );
-  async function invoke(kind, req, body, id, current) {
+  async function invoke(
+    kind,
+    req,
+    body,
+    id,
+    current,
+    positionResolved = false,
+  ) {
     const inner = Object.create(req);
     inner.body = body;
     inner.params = { id };
@@ -312,6 +329,7 @@ function createHistoryRouter({
       value: { cascadeTransfer: "true" },
     });
     inner.historyUndo = true;
+    inner.historyPositionResolved = positionResolved;
     inner.mcpContext = {
       scope: scopeQuery(
         String(current.userId),
@@ -405,9 +423,64 @@ function createHistoryRouter({
       let patch = clone(row.change.before);
       if (row.change.field === "project" && patch.splitMeta?.length)
         patch.projectIds = patch.splitMeta.map((s) => s.projectId);
-      if (row.change.field === "date") delete patch.cellIndex;
+      const related = [];
+      if (row.change.field === "date" && current.isSplitParent)
+        related.push(
+          ...(await Event.find({
+            ...scope,
+            parentOpId: current._id,
+            isSplitChild: true,
+          }).lean()),
+        );
+      if (
+        current.transferGroupId &&
+        ["date", "amount"].includes(row.change.field)
+      )
+        related.push(
+          ...(await Event.find({
+            ...scope,
+            transferGroupId: current.transferGroupId,
+            _id: { $ne: current._id },
+          }).lean()),
+        );
+      for (const sibling of related) {
+        if (
+          row.change.field === "date" &&
+          (sibling.dateKey !== current.dateKey ||
+            sibling.cellIndex !== current.cellIndex)
+        )
+          fail(
+            "Положение связанной части операции уже изменено. Отмена не выполнена.",
+          );
+        if (
+          row.change.field === "amount" &&
+          Math.abs(sibling.amount) !== Math.abs(current.amount)
+        )
+          fail(
+            "Сумма связанной части перевода уже изменена. Отмена не выполнена.",
+          );
+        await ensureManagerCanAccessOperationAccounts(req, {}, sibling);
+      }
       await validateReferences(req, { ...current, ...patch });
-      await invoke("update", req, patch, row.operationId, current);
+      const restored = await invoke(
+        "update",
+        req,
+        patch,
+        row.operationId,
+        current,
+      );
+      for (const sibling of related) {
+        const siblingPatch =
+          row.change.field === "date"
+            ? {
+                date: restored.date,
+                dateKey: restored.dateKey,
+                dayOfYear: restored.dayOfYear,
+                cellIndex: restored.cellIndex,
+              }
+            : { amount: Math.sign(sibling.amount) * Math.abs(patch.amount) };
+        await invoke("update", req, siblingPatch, sibling._id, sibling, true);
+      }
     } else if (row.action === "created") {
       if (!current) fail("Операция уже удалена.");
       if (
@@ -463,7 +536,7 @@ function createHistoryRouter({
         if (await Event.exists({ _id: snapshot._id }))
           fail("Одна из удалённых записей уже восстановлена.");
         await validateReferences(req, snapshot);
-        for (const field of ["offsetIncomeId", "relatedEventId"])
+        for (const field of ["offsetIncomeId", "relatedEventId", "parentOpId"])
           if (
             snapshot[field] &&
             !snapshots.some((s) => String(s._id) === String(snapshot[field])) &&
@@ -626,7 +699,33 @@ function createHistoryRouter({
           $unset: { pending: "" },
         },
       );
-      res.json({ ok: true, kind: row.kind });
+      const changes =
+        row.kind === "operation"
+          ? [...ctx.operations.values()].filter(
+              (change) =>
+                !change.before ||
+                !change.after ||
+                operationChanges(change.before, change.after).length,
+            )
+          : [];
+      if (row.kind === "operation") {
+        // New clients apply the committed batch once; flagged per-operation broadcasts support older clients.
+        engine.defer(() =>
+          emitToWorkspace(
+            req,
+            req.user.currentWorkspaceId,
+            "operations_reverted",
+            { changes, workspaceId: String(req.user.currentWorkspaceId) },
+          ),
+        );
+      }
+      res.json({
+        ok: true,
+        kind: row.kind,
+        ...(row.kind === "operation"
+          ? { changes, workspaceId: String(req.user.currentWorkspaceId) }
+          : {}),
+      });
     }),
   );
   router.post(

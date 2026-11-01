@@ -7,6 +7,7 @@ const { isSystemWithdrawal, normalizeTransferData } = require('../utils/transfer
 const { normalizeProjectScope, equalProjectShares } = require('../utils/projectScope');
 const { withDaySlotLock } = require('../utils/daySlotLock');
 const { withRelatedOperationGuard } = require('../utils/relatedOperationGuard');
+const {mcpVersionFilter}=require('../utils/mcpOperations');
 
 // Exercise the actual HTTP handlers with controlled database completion. Loading
 // server.js itself would connect to the configured database and start a listener.
@@ -28,7 +29,7 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
     canEdit: () => {}, canDelete: () => {},
     isAuthenticated: () => {},
     console: { log: () => {} },
-    withDaySlotLock, normalizeProjectScope, equalProjectShares,
+    withDaySlotLock, normalizeProjectScope, equalProjectShares, mcpVersionFilter,
     withRelatedOperationGuard,
     normalizeOptionalIdArray: values => [...new Set(values.filter(Boolean))],
     getCompositeUserId: async () => 'owner',
@@ -278,4 +279,25 @@ test('a failed creation releases the day lock so the next copy can be saved', as
   assert.equal(next.res.statusCode, 201);
   assert.equal(next.res.body.cellIndex, 1);
   assert.deepEqual(rows.map(row => row.cellIndex), [0, 1]);
+});
+
+for(const sameDay of [false,true])test(`history ${sameDay?'cell':'date'} undo prefers the original slot and leaves occupied chips in place`,async()=>{
+ const before={_id:'operation',userId:'owner',type:'income',date:new Date('2026-10-30T12:00:00Z'),dateKey:'2026-10-30',cellIndex:0,amount:1000,syncVersion:2,projectScope:'selected',toObject(){return {...this};}};
+ let mutation;const occupied=[{_id:'unrelated',cellIndex:5},{_id:'unrelated-2',cellIndex:6}];
+ const Event={findOne:async()=>before,find:async()=>occupied,findOneAndUpdate:async(filter,update)=>{mutation=update;return {...before,...update.$set,syncVersion:3,populate:async()=>{}};}};
+ const {handler,req,res}=loadHandler('put','// 🟢 UPDATED: Allow managers',Event);
+ req.historyUndo=true;req.mcpContext={expectedVersion:2};req.body={date:new Date(sameDay?before.date:'2026-10-29T12:00:00Z'),dateKey:sameDay?before.dateKey:'2026-10-29',cellIndex:5};await handler(req,res);
+ assert.equal(res.statusCode,200);assert.equal(mutation.$set.cellIndex,7);assert.equal(occupied[0].cellIndex,5);assert.equal(occupied[1].cellIndex,6);assert.equal(mutation.$set.amount,undefined);
+});
+test('history keeps split shares in the parent-resolved slot instead of allocating separate cells',async()=>{
+ const before={_id:'operation',date:new Date('2026-10-30T12:00:00Z'),dateKey:'2026-10-30',cellIndex:0,amount:-500,syncVersion:2,isSplitChild:true,projectScope:'selected',toObject(){return {...this};}};
+ let mutation;const Event={findOne:async()=>before,find:async()=>{throw Error('Parent already reserved the slot');},findOneAndUpdate:async(filter,update)=>{mutation=update;return {...before,...update.$set,syncVersion:3,populate:async()=>{}};}};
+ const {handler,req,res}=loadHandler('put','// 🟢 UPDATED: Allow managers',Event);req.historyUndo=true;req.historyPositionResolved=true;req.mcpContext={expectedVersion:2};req.body={date:new Date('2026-10-29T12:00:00Z'),dateKey:'2026-10-29',cellIndex:7};await handler(req,res);
+ assert.equal(res.statusCode,200);assert.equal(mutation.$set.cellIndex,7);assert.equal(mutation.$set.amount,undefined);
+});
+
+test('undo of time within the same day retains its existing cell',async()=>{
+ const before={_id:'operation',date:new Date('2026-10-30T12:00:00Z'),dateKey:'2026-10-30',cellIndex:5,amount:100,syncVersion:2,projectScope:'selected',toObject(){return {...this};}};
+ let mutation;const Event={findOne:async()=>before,find:async()=>{throw Error('The current cell is already occupied by this operation');},findOneAndUpdate:async(filter,update)=>{mutation=update;return {...before,...update.$set,syncVersion:3,populate:async()=>{}};}};
+ const {handler,req,res}=loadHandler('put','// 🟢 UPDATED: Allow managers',Event);req.historyUndo=true;req.mcpContext={expectedVersion:2};req.body={date:new Date('2026-10-30T10:00:00Z'),dateKey:before.dateKey,cellIndex:5};await handler(req,res);assert.equal(res.statusCode,200);assert.equal(mutation.$set.cellIndex,5);
 });
