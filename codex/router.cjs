@@ -7,15 +7,17 @@ const { FILE_LIMIT, safeName, validFileId, imageMime, fileMeta, fileBuffer, reso
 const { answerRequest, publicRequest } = require('./requests.cjs');
 const { ExecutionStore } = require('./executionStore.cjs');
 const { receipt, executionReport } = require('./toolResults.cjs');
+const { VoiceService, registerVoiceRoutes } = require('./voice.cjs');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
 const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTime() < 45000;
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
 const scopeFor = user => ({ actorId: String(user?._id || user?.id || ''), workspaceId: String(user?.currentWorkspaceId || '') });
 
-function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = process.env.FRONTEND_URL, allowedOrigins = [] }) {
+function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = process.env.FRONTEND_URL, allowedOrigins = [], voiceService }) {
   const router = express.Router();
   let indexes;
   const collection = name => db().collection(`desktop${name}`);
+  const voice = voiceService || new VoiceService({ db, Workspace });
   async function ensureIndexes() {
     if (!indexes) indexes = Promise.all([
       collection('Chats').createIndex({ actorId: 1, workspaceId: 1, updatedAt: -1 }),
@@ -56,9 +58,10 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   router.get('/status', wrap(async (req, res) => {
     const worker = await workerFor(req.desktopScope);
     const connected = online(worker);
-    res.json({ connected, configured: !!worker, desktopConnected: worker?.desktopConnected === true,
+    res.json({ connected, configured: !!worker, voiceAvailable: voice.configured && connected, desktopConnected: worker?.desktopConnected === true,
       projectName: worker?.projectName || 'Index12', reason: connected ? null : 'Нет связи с Codex на Mac. Запустите npm run desktop:bridge.' });
   }));
+  registerVoiceRoutes(router, { service: voice, collection, wrap });
   router.get('/chats', wrap(async (req, res) => {
     const chats = await collection('Chats').find({ ...req.desktopScope, archived: false }).sort({ updatedAt: -1 }).limit(100).toArray();
     res.json({ chats: chats.map(({ _id, title, threadId, updatedAt }) => ({ id: _id, title, threadId: threadId || null, updatedAt })) });
