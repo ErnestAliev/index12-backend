@@ -4,6 +4,8 @@ const express = require('express');
 const { normalizeProjectScope, equalProjectShares } = require('./utils/projectScope');
 const cors = require('cors');
 const mongoose = require('mongoose');
+mongoose.set('transactionAsyncLocalStorage', true);
+const changeHistory = require('./history/engine.cjs').createHistoryEngine({ mongoose });
 const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
@@ -19,7 +21,7 @@ const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require(
 const mcpEventHandlers = {};
 const mcpEntityHandlers = {};
 const captureMcpEntityHandler = (kind, handler) => (mcpEntityHandlers[kind] = handler);
-const captureMcpHandler = (kind, handler) => (mcpEventHandlers[kind] = handler);
+const captureMcpHandler = (kind, handler) => (mcpEventHandlers[kind] = changeHistory.wrapHandler(handler));
 const { createSubcategoryModel, validateEventSubcategory, registerSubcategoryRoutes, subcategorySnapshotFacet } = require('./utils/subcategories');
 
 // 🟢 Загрузка .env
@@ -141,6 +143,7 @@ const emitToAll = (req, userId, event, data) => {
 
 // 🟢 NEW: Emit to workspace room (all members receive update)
 const emitToWorkspace = (req, workspaceId, event, data, extraMeta = {}) => {
+    if (changeHistory.defer(() => emitToWorkspace(req, workspaceId, event, data, extraMeta))) return;
     if (!req.io || !workspaceId) return;
 
     const socketId = req.headers['x-socket-id'];
@@ -394,6 +397,7 @@ eventSchema.index({ userId: 1, date: 1 });
 eventSchema.index({ userId: 1, dateKey: 1 });
 eventSchema.index({ userId: 1, subcategoryId: 1, date: 1 });
 
+eventSchema.plugin(changeHistory.plugin);
 const Event = mongoose.model('Event', eventSchema);
 
 
@@ -2193,7 +2197,7 @@ app.use('/api/user/appearance-themes', require('./appearance/router.cjs').create
 }));
 
 app.use('/api/user/appearance-templates', require('./appearance/templates.cjs').createTemplateRouter({
-    db: () => mongoose.connection.db, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
+    db: () => mongoose.connection.db, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS, audit: changeHistory,
 }));
 
 // Сохранение порядка виджетов
@@ -2673,7 +2677,14 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
                 ? normalizeOptionalIdArray(updatedData.projectIds)
                 : existingEvent.isSplitParent && !projectSelectionChanged ? existingEvent.splitMeta.map(share => String(share.projectId)) : [updatedData.projectId].filter(Boolean);
             if (ids.length > 1) {
-                updatedData.splitMeta = equalProjectShares(ids, updatedData.amount ?? existingEvent.amount);
+                if (req.historyUndo && Array.isArray(rawUpdatedData.splitMeta)) {
+                    const shares = rawUpdatedData.splitMeta;
+                    const sum = shares.reduce((total, share) => total + Math.round(Number(share.amount) * 100), 0);
+                    if (shares.length !== ids.length || shares.some((share, index) => String(share.projectId) !== String(ids[index]) || !Number.isFinite(Number(share.amount))) || sum !== Math.round(Number(updatedData.amount ?? existingEvent.amount) * 100)) {
+                        return res.status(409).json({ message: 'Распределение уже изменено. Отмена не выполнена.' });
+                    }
+                    updatedData.splitMeta = shares;
+                } else updatedData.splitMeta = equalProjectShares(ids, updatedData.amount ?? existingEvent.amount);
                 updatedData.projectId = null;
                 updatedData.isSplitParent = true;
                 updatedData.excludeFromTotals = true;
@@ -2718,8 +2729,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         delete updatedData.syncVersion;
         delete updatedData.changeHistory; delete updatedData.createdVia; delete updatedData.updatedVia; delete updatedData.mcpRelationLocks;
         const versionGuard = req.mcpContext ? mcpVersionFilter(req.mcpContext.expectedVersion) : {};
-        const audit = req.mcpContext ? { $push: { changeHistory: mcpAuditEntry(req, existingEvent, updatedData, req.mcpContext.expectedVersion + 1) } } : {};
-        if (req.mcpContext) updatedData.updatedVia = 'mcp';
+        const audit = req.mcpContext && !req.historyUndo ? { $push: { changeHistory: mcpAuditEntry(req, existingEvent, updatedData, req.mcpContext.expectedVersion + 1) } } : {};
+        if (req.mcpContext) updatedData.updatedVia = req.historyUndo ? 'history' : 'mcp';
         const persistUpdate = async () => {
             if (req.mcpContext && updatedData.dateKey && updatedData.dateKey !== existingEvent.dateKey) {
                 updatedData.cellIndex = await getFirstFreeCellIndex(updatedData.dateKey, userId);
@@ -2861,7 +2872,7 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
     } catch (err) { res.status(500).json({ message: err.message }); }
 }));
 
-app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), async (req, res) => {
+app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), captureMcpHandler('transfer', async (req, res) => {
     try {
         const scopeId = await getCompositeUserId(req);
         req.body = await normalizeTransferData(req.body, { findAccount: id => Account.findOne({ _id: id, ...(req.mcpContext?.scope || { userId: scopeId }) }) });
@@ -2996,9 +3007,9 @@ app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', '
         console.error('[SERVER ERROR] Transfer failed:', err);
         res.status(400).json({ message: err.message });
     }
-});
+}));
 
-app.post('/api/import/operations', isAuthenticated, async (req, res) => {
+app.post('/api/import/operations', isAuthenticated, captureMcpHandler('import', async (req, res) => {
     const { operations, selectedRows } = req.body;
     const userId = await getCompositeUserId(req);
     if (!Array.isArray(operations)) { return res.status(400).json({ message: 'Invalid data' }); }
@@ -3063,7 +3074,7 @@ app.post('/api/import/operations', isAuthenticated, async (req, res) => {
         }
         else { res.status(200).json([]); }
     } catch (err) { res.status(500).json({ message: 'Import error', details: err.message }); }
-});
+}));
 
 const generateCRUD = (model, path, emitEventName = null) => {
     if (!emitEventName) {
@@ -3343,6 +3354,7 @@ generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
 registerMcpOperationRoutes(app, { mongoose, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
+app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 
 
 

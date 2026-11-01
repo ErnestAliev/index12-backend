@@ -67,6 +67,7 @@ function createTemplateRouter({
   isAuthenticated,
   frontendUrl,
   allowedOrigins = [],
+  audit,
 }) {
   const router = express.Router(),
     origins = new Set(
@@ -90,7 +91,10 @@ function createTemplateRouter({
       origins.add(other.origin);
     }
   }
-  const col = () => db().collection("appearanceTemplateLibraries"),
+  const col = () =>
+      audit
+        ? audit.collection(db().collection("appearanceTemplateLibraries"))
+        : db().collection("appearanceTemplateLibraries"),
     actor = (req) => String(req.user._id || req.user.id);
   router.use(isAuthenticated, (req, res, next) => {
     res.set("Cache-Control", "private, no-store");
@@ -102,8 +106,10 @@ function createTemplateRouter({
       return res.status(403).json({ error: "Недопустимый источник запроса." });
     next();
   });
-  const wrap = (fn) => (req, res, next) =>
-    Promise.resolve(fn(req, res)).catch(next);
+  const wrap = (fn) =>
+    audit
+      ? audit.wrapHandler(fn)
+      : (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
   const empty = () => ({
     version: 0,
     themes: [],
@@ -129,7 +135,10 @@ function createTemplateRouter({
         { _id: actorId, version: state.version },
         { $set: result.state, $inc: { version: 1 } },
       );
-      if (changed.modifiedCount) return result;
+      if (changed.modifiedCount) {
+        audit?.captureTemplate(state, result.state);
+        return result;
+      }
     }
     return {
       status: 409,

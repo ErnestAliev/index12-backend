@@ -167,6 +167,7 @@ test('workspace broadcasts preserve anti-echo metadata alongside deleted IDs', (
     emit(...args) { broadcast = args; },
   };
   const context = {
+    changeHistory: { defer: () => false },
     console: { log: () => {}, warn: () => {} },
     buildSocketMeta: req => ({ sourceSocketId: req.headers['x-socket-id'], sourceClientInstanceId: req.headers['x-client-instance-id'] }),
   };
