@@ -5,34 +5,10 @@ const { randomUUID, createHash } = require('node:crypto');
 const { fail, identifier, lookupRegistry, fetchTaxDebt, encryptToken, decryptToken } = require('./providers.cjs');
 const { profileInput } = require('./company-profile.cjs');
 const { lookupProfile, listCandidates } = require('./onec/profile.cjs');
-const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Almaty' }).format(new Date());
-function dateOnly(value) {
-  if (value === null || value === '') return null;
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) fail('Укажите действительную дату');
-  return value;
-}
-function taskInput(body, partial = false) {
-  const result = {};
-  if (!partial || Object.hasOwn(body, 'title')) {
-    if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 300) fail('Укажите название задачи до 300 символов');
-    result.title = body.title.trim();
-  }
-  if (Object.hasOwn(body, 'dueDate')) result.dueDate = dateOnly(body.dueDate);
-  if (Object.hasOwn(body, 'status')) {
-    if (!['open', 'done'].includes(body.status)) fail('Некорректный статус задачи');
-    result.status = body.status;
-  }
-  if (Object.hasOwn(body, 'companyId')) {
-    if (body.companyId !== null && !/^[a-f\d]{24}$/i.test(body.companyId || '')) fail('Некорректная компания');
-    result.companyId = body.companyId;
-  }
-  if (Object.hasOwn(body, 'description')) {
-    if (typeof body.description !== 'string' || body.description.length > 10000) fail('Описание задачи слишком длинное');
-    result.description = body.description;
-  }
-  return result;
-}
-function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
+const { today, dateOnly, taskInput } = require('./task-domain.cjs');
+const { registerTaskRoutes } = require('./task-routes.cjs');
+const { registerReminderRoutes } = require('./reminders.cjs');
+function createBusinessRouter({ db, Company, Contractor, Individual, taskMutation, taskSession, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
   const router = express.Router();
   const coll = name => db().collection(`business${name}`);
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -41,6 +17,8 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     coll('Connections').createIndex({ scope: 1, companyId: 1 }, { unique: true }),
     coll('Tasks').createIndex({ scope: 1, sourceKey: 1 }, { unique: true, partialFilterExpression: { sourceKey: { $type: 'string' } } }),
     coll('Tasks').createIndex({ scope: 1, dueDate: 1 }),
+    coll('Tasks').createIndex({ scope: 1, creationKey: 1 }, { unique: true, partialFilterExpression: { creationKey: { $type: 'string' } } }),
+    coll('TaskFiles').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     coll('Registry').createIndex({ scope: 1, bin: 1 }, { unique: true }),
     coll('Registry').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     Company.init(), ...(Contractor ? [Contractor.init()] : [])
@@ -89,10 +67,10 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
         const sourceKey = `kgd-debt:${lease.companyId}:${lease.bin}`;
         const previous = await coll('Tasks').findOne({ scope: lease.scope, sourceKey });
         const reopen = previous && (!previous.evidence?.hasDebt || previous.evidence.totalArrear !== snapshot.totalArrear);
-        await coll('Tasks').updateOne({ scope: lease.scope, sourceKey }, { $set: { title: `Проверить задолженность КГД: ${company.name}`, description: `КГД: ${snapshot.totalArrear} ₸. Проверено ${snapshot.checkedAt}. Срок уплаты источником не предоставлен.`, sourceUrl: snapshot.source, evidence: snapshot, updatedAt: new Date(), ...(reopen ? { status: 'open' } : {}) }, $setOnInsert: { _id: randomUUID(), scope: lease.scope, sourceKey, source: 'kgd', companyId: lease.companyId, ...(!reopen ? { status: 'open' } : {}), dueDate: null, createdAt: new Date() } }, { upsert: true });
+        await coll('Tasks').updateOne({ scope: lease.scope, sourceKey }, { $set: { title: `Проверить задолженность КГД: ${company.name}`, description: `КГД: ${snapshot.totalArrear} ₸. Проверено ${snapshot.checkedAt}. Срок уплаты источником не предоставлен.`, sourceUrl: snapshot.source, evidence: snapshot, updatedAt: new Date(), ...(reopen ? { status: 'open' } : {}) }, $inc: { version: 1 }, $setOnInsert: { _id: randomUUID(), workspaceId: lease.workspaceId, scope: lease.scope, sourceKey, source: 'kgd', companyId: lease.companyId, ...(!reopen ? { status: 'open' } : {}), dueDate: null, createdAt: new Date() } }, { upsert: true });
       } else {
         // Keep the task history and user's completion state; zero debt is not a bank payment receipt.
-        await coll('Tasks').updateOne({ scope: lease.scope, sourceKey: `kgd-debt:${lease.companyId}:${lease.bin}` }, { $set: { description: `Последний ответ КГД: ${snapshot.totalArrear} ₸. Проверено ${snapshot.checkedAt}.`, evidence: snapshot, updatedAt: new Date() } });
+        await coll('Tasks').updateOne({ scope: lease.scope, sourceKey: `kgd-debt:${lease.companyId}:${lease.bin}` }, { $set: { description: `Последний ответ КГД: ${snapshot.totalArrear} ₸. Проверено ${snapshot.checkedAt}.`, evidence: snapshot, updatedAt: new Date() }, $inc: { version: 1 } });
       }
     } catch (error) {
       await coll('Connections').updateOne(filter, { $set: { status: 'error', error: error.status ? error.message : 'Не удалось проверить КГД. Проверьте подключение', leaseUntil: null } });
@@ -216,27 +194,8 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     res.status(202).json({ accepted: true });
     setImmediate(() => sync(scope).catch(() => {}));
   }));
-  router.get('/tasks', wrap(async (req, res) => {
-    const tasks = await coll('Tasks').find({ scope: req.businessScope }).sort({ createdAt: -1 }).limit(2001).toArray();
-    res.json({ workspaceId: String(req.user.currentWorkspaceId || req.cachedWorkspace._id), actorId: String(req.user.id), tasks: tasks.slice(0, 2000), truncated: tasks.length > 2000 });
-  }));
-  const validateCompany = async (scope, data) => { if (data.companyId) await companyFor(scope, data.companyId); };
-  router.post('/tasks', wrap(async (req, res) => {
-    const data = taskInput(req.body); await validateCompany(req.businessScope, data);
-    const task = { _id: randomUUID(), scope: req.businessScope, companyId: null, dueDate: null, description: '', status: 'open', ...data, source: 'manual', createdAt: new Date(), updatedAt: new Date() };
-    await coll('Tasks').insertOne(task); res.status(201).json(task);
-  }));
-  router.patch('/tasks/:id', wrap(async (req, res) => {
-    const data = taskInput(req.body, true); await validateCompany(req.businessScope, data);
-    const task = await coll('Tasks').findOneAndUpdate({ _id: req.params.id, scope: req.businessScope }, { $set: { ...data, updatedAt: new Date() } }, { returnDocument: 'after' });
-    if (!task) fail('Задача не найдена', 404);
-    res.json(task);
-  }));
-  router.delete('/tasks/:id', wrap(async (req, res) => {
-    const result = await coll('Tasks').deleteOne({ _id: req.params.id, scope: req.businessScope, source: 'manual' });
-    if (!result.deletedCount) fail('Ручная задача не найдена', 404);
-    res.json({ deleted: true });
-  }));
+  registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession });
+  registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {
     if (error.code === 11000 && error.keyPattern?.['onecSync.ref']) return res.status(409).json({ message: 'Эта запись 1С уже связана с другой карточкой' });
     if (!error.status) reportError(error);

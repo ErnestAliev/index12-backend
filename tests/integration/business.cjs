@@ -13,7 +13,7 @@ async function until(fn) { for (let i = 0; i < 100; i++) { if (await fn()) retur
 async function run() {
   const fixture = await startFixture(); let http;
   try {
-    const { Company, Contractor } = fixture.models;
+    const { Company, Contractor, Individual } = fixture.models;
     const { Workspace } = fixture.identityModels;
     const workspace = await Workspace.create({ name: 'Business test', userId: fixture.userId, isDefault: true, sharedWith: [{ userId: 'analyst', role: 'analyst' }, { userId: 'manager', role: 'manager' }, { userId: 'shared-admin', role: 'admin' }] });
     const other = await Workspace.create({ name: 'Other', userId: 'other-owner', isDefault: true });
@@ -37,7 +37,7 @@ async function run() {
       req.cachedWorkspace = row; next();
     };
     const getWorkspaceStorageUserId = row => row.isDefault ? String(row.userId) : `${row.userId}_ws_${row._id}`;
-    app.use('/api/business', createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, isAuthenticated, checkWorkspacePermission, getWorkspaceStorageUserId, env, reportError: console.error,
+    app.use('/api/business', createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, isAuthenticated, checkWorkspacePermission, getWorkspaceStorageUserId, env, reportError: console.error,
       onecCandidates: async (kind, { search, skip = 0 }) => {
         const all = kind === 'companies' ? [{ ref: '11111111-1111-4111-8111-111111111111', name: 'ТОО Тест из 1С', identificationNumber: bin }] : Array.from({ length: 90 }, (_, i) => i === 82
           ? { ref: '22222222-2222-4222-8222-222222222222', name: 'ТОО "YBB GROUP"', legalName: 'Товарищество с ограниченной ответственностью "YBB GROUP"', identificationNumber: bin }
@@ -104,7 +104,7 @@ async function run() {
     await until(async () => (await request('/tasks')).data.tasks.length === 1);
     const taxTask = (await request('/tasks')).data.tasks[0];
     assert.equal(taxTask.dueDate, null, 'source has no payment deadline'); assert.equal(taxTask.evidence.totalArrear, '1500.25');
-    await request(`/tasks/${taxTask._id}`, 'PATCH', { status: 'done' });
+    await request(`/tasks/${taxTask._id}`, 'PATCH', { status: 'done', expectedVersion: taxTask.version });
     const runAgain = async () => {
       const count = debtCalls;
       await mongoose.connection.db.collection('businessConnections').updateOne({ scope: fixture.userId }, { $set: { nextAttemptAt: null } });
@@ -115,7 +115,7 @@ async function run() {
     total = '0'; await runAgain(); await until(async () => (await request('/tasks')).data.tasks[0].evidence.totalArrear === '0');
     total = '100.50'; await runAgain(); await until(async () => (await request('/tasks')).data.tasks[0].status === 'open');
     const created = await request('/tasks', 'POST', { title: 'Проверить уведомления', companyId: company._id, dueDate: '2026-11-03', scope: 'stolen', source: 'kgd' });
-    assert.equal(created.status, 201); assert.equal(created.data.scope, fixture.userId); assert.equal(created.data.source, 'manual');
+    assert.equal(created.status, 201); assert.equal(created.data.task.scope, undefined); assert.equal(created.data.task.source, 'manual');
     assert.equal((await request('/tasks', 'POST', { title: 'Bad', dueDate: '2026-02-30' })).status, 400);
     assert.equal((await request('/tasks', 'POST', { title: 'Foreign', companyId: String(otherCompany._id) })).status, 404);
     assert.equal((await request('/tasks', 'GET', undefined, 'other-owner', other._id)).data.tasks.length, 0);
@@ -146,12 +146,52 @@ async function run() {
     assert.equal(mcpRead.status, 200); const mcpResult = await mcpRead.json();
     assert.equal(mcpResult.workspaceId, String(mcpWorkspace._id)); assert.equal(mcpResult.tasks[0].title, 'Задача для помощника');
     assert.equal((await fetch(`${fixture.apiUrl}/mcp/business/tasks`, { method: 'POST', headers: mcpHeaders })).status, 403);
+    await mongoose.connection.db.collection('mcpCredentials').updateOne({ _id: require('../../utils/mcpOperations').hashToken(mcpToken) }, { $set: { scopes: ['read', 'create', 'update', 'delete'] } });
+    const taskWrite = async (path, method, body) => { const response = await fetch(`${fixture.apiUrl}/mcp/business${path}`, { method, headers: { ...mcpHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); return { status: response.status, data: await response.json() }; };
+    const calendarInput = { title: 'Подготовить договор', startsAt: '2026-11-03T06:00:00Z', endsAt: '2026-11-03T07:00:00Z', party: null, reminderOffsets: [20, 30, 60], links: [{ title: 'Документы', url: 'https://drive.google.com/drive/folders/calendar-test' }], idempotencyKey: 'calendar-mcp-create-1' };
+    const added = await taskWrite('/tasks', 'POST', calendarInput);
+    assert.equal(added.status, 201, JSON.stringify(added.data)); assert.equal(added.data.task.title, calendarInput.title); assert.ok(added.data.actionId);
+    const retry = await taskWrite('/tasks', 'POST', calendarInput); assert.equal(retry.data.id, added.data.id); assert.equal(retry.data.replayed, true);
+    const changedTask = await taskWrite(`/tasks/${added.data.id}`, 'PATCH', { expectedVersion: 0, changes: { dueDate: '2026-11-05', description: 'Новая редакция' } });
+    assert.equal(changedTask.status, 200, JSON.stringify(changedTask.data)); assert.equal(changedTask.data.task.startsAt, '2026-11-05T06:00:00.000Z'); assert.equal(changedTask.data.version, 1);
+    assert.equal((await taskWrite(`/tasks/${added.data.id}`, 'PATCH', { expectedVersion: 0, changes: { title: 'Устаревшая версия' } })).status, 409);
+    const receipt = await mongoose.connection.db.collection('mcpActions').findOne({ _id: changedTask.data.actionId }); assert.equal(receipt.tool, 'index12_update_task');
+    assert.equal((await taskWrite('/companies/not-allowed', 'PATCH', {})).status, 403);
+    const deletedTask = await taskWrite(`/tasks/${added.data.id}`, 'DELETE', { expectedVersion: 1 }); assert.equal(deletedTask.status, 200); assert.equal(deletedTask.data.deleted, true);
+    assert.equal((await fetch(`${fixture.apiUrl}/mcp/business/tasks/${added.data.id}`, { headers: mcpHeaders })).status, 404);
+    // Uploaded bytes remain private to this workspace and are readable through the task's MCP attachment endpoint.
+    const upload = await fetch(apiUrl + '/business/task-files', { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-file-name': encodeURIComponent('Договор.txt'), 'x-file-type': 'text/plain', 'x-test-actor': fixture.userId, 'x-test-workspace': String(workspace._id) }, body: Buffer.from('Тест договора') });
+    assert.equal(upload.status, 201); const file = (await upload.json()).file;
+    const attached = await request('/tasks', 'POST', { title: 'Задача с документом', party: { kind: 'contractors', id: String(contractor._id) }, attachmentIds: [file.fileId] });
+    assert.equal(attached.status, 201); assert.equal(attached.data.task.partyName, contractor.name);
+    const bytes = await fetch(apiUrl + `/business/tasks/${attached.data.id}/files/${file.fileId}`, { headers: { 'x-test-actor': fixture.userId, 'x-test-workspace': String(workspace._id) } });
+    assert.equal(await bytes.text(), 'Тест договора');
+    assert.equal((await request('/tasks', 'POST', { title: 'Чужой файл', attachmentIds: [file.fileId] }, 'other-owner', other._id)).status, 404);
+    assert.equal((await request('/tasks', 'POST', { title: 'Чужой контрагент', party: { kind: 'companies', id: String(otherCompany._id) } })).status, 404);
+    assert.equal((await request(`/tasks/${attached.data.id}`, 'PATCH', { expectedVersion: 0, changes: { status: 'done' } })).data.version, 1);
+    assert.equal((await request(`/tasks/${attached.data.id}`, 'PATCH', { expectedVersion: 0, changes: { status: 'open' } })).status, 409);
+    // Server dispatch survives closed tabs, deduplicates deliveries, repeats configured overdue reminders, stops on completion/revocation.
+    const { deliverReminders } = require('../../business/reminders.cjs');
+    const push = require('web-push').generateVAPIDKeys(), sent = [];
+    const pushOptions = { db: mongoose.connection.db, Workspace, env: { CALENDAR_VAPID_PUBLIC_KEY: push.publicKey, CALENDAR_VAPID_PRIVATE_KEY: push.privateKey }, send: async (_subscription, payload) => sent.push(JSON.parse(payload)) };
+    const reminderTask = await request('/tasks', 'POST', { title: 'Напоминание', startsAt: '2026-11-03T06:00:00Z', endsAt: '2026-11-03T07:00:00Z', reminderOffsets: [30], overdueReminders: 2, overdueRepeatMinutes: 20 }, String(mcpUser._id), mcpWorkspace._id);
+    await mongoose.connection.db.collection('businessPushSubscriptions').insertOne({ _id: 'test-push', scope: String(mcpUser._id), actorId: String(mcpUser._id), workspaceId: String(mcpWorkspace._id), subscription: {} });
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T05:30Z') }); await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T05:31Z') });
+    assert.equal(sent.filter(row => row.taskId === reminderTask.data.id).length, 1);
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:00Z') }); await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:20Z') });
+    assert.equal(sent.filter(row => row.taskId === reminderTask.data.id).length, 3);
+    await request(`/tasks/${reminderTask.data.id}`, 'PATCH', { expectedVersion: 0, status: 'done' }, String(mcpUser._id), mcpWorkspace._id);
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:30Z') }); assert.equal(sent.filter(row => row.taskId === reminderTask.data.id).length, 3);
+    await Workspace.updateOne({ _id: mcpWorkspace._id }, { $set: { userId: 'new-owner' } });
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:31Z') }); assert.equal(await mongoose.connection.db.collection('businessPushSubscriptions').countDocuments({ _id: 'test-push' }), 0);
+    await Workspace.updateOne({ _id: mcpWorkspace._id }, { $set: { userId: String(mcpUser._id) } });
     const taxRead = await fetch(`${fixture.apiUrl}/mcp/business/status`, { headers: mcpHeaders }); assert.equal(taxRead.status, 200);
     const mcpCompany = await Company.create({ name: 'MCP company', userId: String(mcpUser._id), externalLinks: [{ title: 'Документы', url: 'https://drive.google.com/drive/folders/mcp-test', purpose: 'documents' }] });
     const profileRead = await fetch(`${fixture.apiUrl}/mcp/business/companies/${mcpCompany._id}`, { headers: mcpHeaders });
     assert.equal(profileRead.status, 200); const profileResult = await profileRead.json();
     assert.equal(profileResult.workspaceId, String(mcpWorkspace._id)); assert.equal(profileResult.actorId, String(mcpUser._id));
     assert.equal(profileResult.company.externalLinks[0].purpose, 'documents');
+    await require('./calendar-mcp.cjs').verifyCalendarMcp({ apiUrl: fixture.apiUrl, uploadApiUrl: apiUrl, actorId: String(mcpUser._id), workspaceId: String(mcpWorkspace._id), token: mcpToken, companyId: String(mcpCompany._id) });
     console.log('PASS: isolated company profiles, explicit 1C binding without BIN, manual companies remain untouched, duplicate binding prevention, edits/links/version conflicts, calendar and KGD regression');
     if (process.argv.includes('--browser')) {
       await Company.updateOne({ _id: company._id }, { $unset: { onecSync: '' }, $set: { identificationNumber: null } });

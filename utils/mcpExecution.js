@@ -1,7 +1,7 @@
 'use strict';
 const { ExecutionStore, digest, executionError } = require('../codex/executionStore.cjs');
 const routePath = req => req.originalUrl.split('?')[0];
-const isMutation = req => req.method !== 'GET' && /^\/api\/mcp\/(operations|transfers)(\/[^/]+)?$|^\/api\/mcp\/accounts\/[^/]+\/initial-balance$/.test(routePath(req));
+const isMutation = req => req.method !== 'GET' && /^\/api\/mcp\/(operations|transfers)(\/[^/]+)?$|^\/api\/mcp\/accounts\/[^/]+\/initial-balance$|^\/api\/mcp\/business\/tasks(\/[^/]+)?$/.test(routePath(req));
 function requestExecution(req) {
   const executionId = req.headers['x-index12-execution-id'], threadId = req.headers['x-index12-thread-id'], turnId = req.headers['x-index12-turn-id'];
   if (![executionId, threadId, turnId].some(Boolean)) return null;
@@ -11,6 +11,7 @@ function requestExecution(req) {
 const requestScope = req => ({ actorId: String(req.user.id || req.user._id), workspaceId: String(req.user.currentWorkspaceId) });
 function toolName(req) {
   const p = routePath(req);
+  if (p.includes('/business/tasks')) return `index12_${req.method === 'POST' ? 'create' : req.method === 'DELETE' ? 'delete' : 'update'}_task`;
   if (p.includes('/initial-balance')) return 'index12_update_account_initial_balance';
   if (req.method === 'DELETE') return 'index12_delete_operation';
   return `index12_${req.method === 'POST' ? 'create' : 'update'}_${p.includes('/transfers') ? 'transfer' : 'operation'}`;

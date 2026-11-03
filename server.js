@@ -3382,7 +3382,7 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
-app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
+app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 
@@ -3413,6 +3413,7 @@ mongoose.connect(DB_URL, {
 })
     .then(async () => {
         console.log('✅ MongoDB подключена.');
+        require('./business/reminders.cjs').startReminders({ db: mongoose.connection.db, Workspace });
         server.listen(PORT, () => {
             console.log(`✅ Сервер запущен на порту ${PORT}`);
         });
