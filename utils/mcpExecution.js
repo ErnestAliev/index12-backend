@@ -17,7 +17,9 @@ function toolName(req) {
   return `index12_${req.method === 'POST' ? 'create' : 'update'}_${p.includes('/transfers') ? 'transfer' : 'operation'}`;
 }
 function createMcpExecution({ mongoose, audit, ensureManagerCanAccessOperationAccounts }) {
-  const store = new ExecutionStore(mongoose.connection.db);
+  // Routes are registered before mongoose.connect completes in production.
+  // Resolve the live connection when a request runs, never capture undefined.
+  const store = new ExecutionStore(() => mongoose.connection.db);
   async function guard(req, session, touch = false) {
     const identity = requestExecution(req);
     if (identity) await store.assertRunning(identity, requestScope(req), { session, touch });

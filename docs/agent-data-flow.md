@@ -53,6 +53,11 @@ the same server chat as the desktop site.
 Validation: `node tests/integration/remote-mcp.cjs`,
 `node tests/integration/cloud-chat.cjs`, and existing MCP/execution integration
 tests use isolated MongoDB fixtures, never production financial records.
+`node tests/integration/mcp-server-startup.cjs` boots the actual backend before
+its database connection is ready, then verifies durable create, date move,
+edit and delete/archive through real permissions and handlers. ExecutionStore
+in HTTP route registration must resolve the live database lazily; capturing
+`mongoose.connection.db` before connect breaks every mutation after startup.
 Set `INDEX12_MCP_BROWSER_TEST=1` for the real Chromium OAuth form check
 (requires the frontend's Playwright and Chrome). It verifies the browser's
 Origin header and the CSP-permitted return navigation as well as the token

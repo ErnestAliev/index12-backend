@@ -10,7 +10,12 @@ function executionError(code, message, statusCode = 409) {
 // Durable execution state is independent of the lifetime of a worker, MCP
 // process, temporary job or desktop window. Financial receipts have no TTL.
 class ExecutionStore {
-  constructor(db) { this.db = db; }
+  constructor(db) { this.database = db; }
+  get db() {
+    const db = typeof this.database === 'function' ? this.database() : this.database;
+    if (!db) throw executionError('EXECUTION_UNAVAILABLE', 'База INDEX12 ещё не подключена. Повторите запрос после восстановления связи.', 503);
+    return db;
+  }
   runs() { return this.db.collection('mcpExecutions'); }
   events() { return this.db.collection('mcpExecutionEvents'); }
   actions() { return this.db.collection('mcpActions'); }
