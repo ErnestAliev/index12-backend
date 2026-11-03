@@ -17,8 +17,8 @@ async function verifyCalendarMcp({ apiUrl, uploadApiUrl, actorId, workspaceId, t
     const call = async (name, args) => { const result = await client.callTool({ name: `index12_${name}`, arguments: args }); assert.ok(!result.isError, JSON.stringify(result)); return result.structuredContent; };
     const upload = await fetch(`${uploadApiUrl}/business/task-files`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'x-file-name': 'mcp.txt', 'x-file-type': 'text/plain', 'x-test-actor': actorId, 'x-test-workspace': workspaceId }, body: Buffer.from('MCP attachment') });
     assert.equal(upload.status, 201); const fileId = (await upload.json()).file.fileId;
-    const input = { title: 'Договор через MCP', dueDate: '2026-11-05', startsAt: '2026-11-05T06:00:00+00:00', endsAt: '2026-11-05T07:00:00+00:00', party: { kind: 'companies', id: companyId }, attachmentIds: [fileId], idempotencyKey: 'calendar-stdio-test-1' };
-    const created = await call('create_task', input); assert.equal(created.task.partyName, 'MCP company');
+    const input = { title: 'Договор через MCP', dueDate: '2026-11-05', startsAt: '2026-11-05T06:00:00+00:00', endsAt: '2026-11-05T07:00:00+00:00', party: { kind: 'companies', id: companyId }, attachmentIds: [fileId], reminderDates: ['2026-11-05T10:20:00+05:00'], links: [{ url: 'https://drive.google.com/file/d/mcp-task' }], idempotencyKey: 'calendar-stdio-test-1' };
+    const created = await call('create_task', input); assert.equal(created.task.partyName, 'MCP company'); assert.deepEqual(created.task.reminderDates, ['2026-11-05T05:20:00.000Z']); assert.deepEqual(created.task.reminderOffsets, [10, 30, 60]); assert.equal(created.task.links[0].title, '');
     assert.equal((await call('create_task', input)).id, created.id);
     const listed = await call('list_tasks', { from: '2026-11-05', to: '2026-11-05' }); assert.ok(listed.tasks.some(task => task._id === created.id));
     const read = await call('get_task', { id: created.id }); assert.equal(read.version, 0);

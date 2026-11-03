@@ -34,7 +34,7 @@ async function deliverReminders({ db, Workspace, env = process.env, now = Date.n
   for await (const target of subscriptions.find({})) {
     const workspace = await Workspace.findById(target.workspaceId).lean();
     if (!workspace || workspaceAccess(workspace, target.actorId)?.role !== 'admin') { await subscriptions.deleteOne({ _id: target._id }); continue; }
-    for await (const task of tasks.find({ scope: target.scope, status: 'open', deletedAt: { $exists: false }, $or: [{ startsAt: { $type: 'string' } }, { dueDate: { $type: 'string' } }] })) {
+    for await (const task of tasks.find({ scope: target.scope, status: 'open', deletedAt: { $exists: false }, $or: [{ startsAt: { $type: 'string' } }, { dueDate: { $type: 'string' } }, { 'reminderDates.0': { $exists: true } }] })) {
       const event = reminderEvent(task, now); if (!event) continue;
       const _id = hash(`${target._id}:${task._id}:${task.reminderRevision || 0}:${event.key}`), lease = randomUUID();
       try { await deliveries.updateOne({ _id, sentAt: { $exists: false }, $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: new Date(now) } }] }, { $set: { lease, leaseUntil: new Date(now + 300000), expiresAt: new Date(now + 90 * 86400000) } }, { upsert: true }); } catch (error) { if (error.code === 11000) continue; throw error; }

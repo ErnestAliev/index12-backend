@@ -39,3 +39,17 @@ test('task inputs reject foreign kinds and unsafe resource URLs; push cannot tar
   for (const method of ['POST', 'PATCH', 'DELETE']) assert.equal(isMutation({ method, originalUrl: '/api/mcp/business/tasks/abc' }), true);
   assert.equal(isMutation({ method: 'POST', originalUrl: '/api/mcp/business/reminders/subscriptions' }), false);
 });
+
+test('absolute reminders normalize offsets, survive undated tasks and stop after completion', () => {
+  const input = taskInput({ title: 'Точное напоминание', reminderDates: ['2026-11-05T11:20:00+05:00', '2026-11-05T06:20:00Z'], links: [{ url: 'https://drive.google.com/file/d/test' }] });
+  assert.deepEqual(input.reminderDates, ['2026-11-05T06:20:00.000Z']); assert.equal(input.links[0].title, '');
+  assert.equal(reminderEvent(input, Date.parse('2026-11-05T06:19:59Z')), null);
+  assert.equal(reminderEvent(input, Date.parse('2026-11-05T06:20Z')).key, 'custom:2026-11-05T06:20:00.000Z');
+  assert.equal(reminderEvent({ ...input, status: 'done' }, Date.parse('2026-11-05T06:20Z')), null);
+  assert.throws(() => taskInput({ title: 'Bad', reminderDates: [null] }), /напоминания/);
+  assert.throws(() => taskInput({ title: 'Bad', reminderDates: ['2026-11-05T11:20'] }), /часовой пояс/);
+  assert.throws(() => taskInput({ title: 'Bad', links: [null] }), /ссылку/);
+  const previous = { startsAt: '2026-11-05T05:00:00.000Z', endsAt: '2026-11-05T08:00:00.000Z' };
+  const changed = scheduleInput({ startsAt: '2026-11-05T06:00:00.000Z' }, previous); assert.equal(changed.endsAt, '2026-11-05T07:00:00.000Z');
+  assert.equal(scheduleInput({ startsAt: changed.startsAt, endsAt: '2026-11-05T10:00:00Z' }, previous).endsAt, '2026-11-05T10:00:00Z');
+});

@@ -92,7 +92,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
       if (existing) { if (existing.requestHash !== requestHash) fail('Ключ создания уже использован для другой задачи', 409); return res.json({ ...await result(req, existing), replayed: true }); }
     }
     const data = scheduleInput(input, null); await validateReferences(req, data);
-    const task = { _id: randomUUID(), scope: req.businessScope, workspaceId: identity(req).workspaceId, createdBy: identity(req).actorId, companyId: null, party: null, dueDate: null, description: '', status: 'open', reminderOffsets: [30], overdueReminders: 1, overdueRepeatMinutes: 60, links: [], attachments: [], version: 0, reminderRevision: 0, ...data, source: 'manual', ...(creationKey ? { creationKey, requestHash } : {}), createdAt: new Date(), updatedAt: new Date() };
+    const task = { _id: randomUUID(), scope: req.businessScope, workspaceId: identity(req).workspaceId, createdBy: identity(req).actorId, companyId: null, party: null, dueDate: null, description: '', status: 'open', reminderOffsets: [10, 30, 60], reminderDates: [], overdueReminders: 1, overdueRepeatMinutes: 60, links: [], attachments: [], version: 0, reminderRevision: 0, ...data, source: 'manual', ...(creationKey ? { creationKey, requestHash } : {}), createdAt: new Date(), updatedAt: new Date() };
     await coll('Tasks').insertOne(task, opts()); await retainFiles(req, task);
     res.status(201).json({ ...await result(req, task), _id: task._id });
   }));
@@ -100,7 +100,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
     const existing = await taskFor(req), version = revision(existing, req.body.expectedVersion);
     const data = scheduleInput(taskInput(req.body.changes || req.body, true), existing); await validateReferences(req, data, existing._id);
     if (!Object.keys(data).length) fail('Нет изменений задачи');
-    const scheduleChanged = ['dueDate', 'startsAt', 'endsAt', 'allDay', 'reminderOffsets', 'overdueReminders', 'overdueRepeatMinutes', 'status'].some(key => Object.hasOwn(data, key) && canonical(data[key]) !== canonical(existing[key]));
+    const scheduleChanged = ['dueDate', 'startsAt', 'endsAt', 'allDay', 'reminderOffsets', 'reminderDates', 'overdueReminders', 'overdueRepeatMinutes', 'status'].some(key => Object.hasOwn(data, key) && canonical(data[key]) !== canonical(existing[key]));
     const task = await coll('Tasks').findOneAndUpdate({ _id: existing._id, ...active(req), ...version }, { $set: { ...data, updatedAt: new Date() }, $inc: { version: 1, ...(scheduleChanged ? { reminderRevision: 1 } : {}) } }, { ...opts(), returnDocument: 'after' });
     if (!task) fail('Задача изменена. Обновите карточку перед сохранением', 409);
     await retainFiles(req, task); res.json(await result(req, task));

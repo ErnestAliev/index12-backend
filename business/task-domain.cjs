@@ -43,12 +43,16 @@ function taskInput(body, partial = false) {
     if (!Array.isArray(body.reminderOffsets) || body.reminderOffsets.length > 10 || body.reminderOffsets.some(v => !Number.isInteger(v) || v < 0 || v > 43200)) fail('Укажите до 10 напоминаний, от 0 до 43200 минут');
     out.reminderOffsets = [...new Set(body.reminderOffsets)].sort((a, b) => b - a);
   }
+  if (Object.hasOwn(body, 'reminderDates')) {
+    if (!Array.isArray(body.reminderDates) || body.reminderDates.length > 10) fail('Можно добавить до 10 точных напоминаний');
+    out.reminderDates = [...new Set(body.reminderDates.map(value => { const at = instant(value); if (!at) fail('Укажите дату и время напоминания'); return at; }))].sort();
+  }
   for (const [key, min, max] of [['overdueReminders', 0, 10], ['overdueRepeatMinutes', 5, 10080]]) if (Object.hasOwn(body, key)) {
     if (!Number.isInteger(body[key]) || body[key] < min || body[key] > max) fail('Проверьте число и интервал напоминаний о просрочке'); out[key] = body[key];
   }
   if (Object.hasOwn(body, 'links')) {
     if (!Array.isArray(body.links) || body.links.length > 20) fail('Можно добавить до 20 ссылок');
-    out.links = body.links.map(link => { if (typeof link?.title !== 'string' || link.title.length > 300) fail('Проверьте название ссылки'); return { title: link.title.trim(), url: externalUrl(link.url) }; });
+    out.links = body.links.map(link => { if (!link || typeof link !== 'object' || Array.isArray(link)) fail('Проверьте ссылку'); if (link?.title !== undefined && (typeof link.title !== 'string' || link.title.length > 300)) fail('Проверьте название ссылки'); return { title: (link.title || '').trim(), url: externalUrl(link.url) }; });
   }
   if (Object.hasOwn(body, 'attachmentIds')) {
     if (!Array.isArray(body.attachmentIds) || body.attachmentIds.length > 5 || body.attachmentIds.some(id => !/^[a-f\d-]{36}$/i.test(id || ''))) fail('Можно прикрепить до пяти файлов');
@@ -74,7 +78,7 @@ function scheduleInput(data, previous, now = Date.now()) {
     out.startsAt = localInstant(date, `${p.hour}:00`); out.endsAt = new Date(Date.parse(out.startsAt) + 3600000).toISOString();
   } else {
     out.startsAt = effective.startsAt;
-    out.endsAt = effective.endsAt || new Date(Date.parse(out.startsAt) + 3600000).toISOString();
+    out.endsAt = Object.hasOwn(data, 'startsAt') && !Object.hasOwn(data, 'endsAt') ? new Date(Date.parse(out.startsAt) + 3600000).toISOString() : effective.endsAt || new Date(Date.parse(out.startsAt) + 3600000).toISOString();
   }
   if (Date.parse(out.endsAt) <= Date.parse(out.startsAt)) fail('Окончание задачи должно быть позже начала');
   out.dueDate = dayAt(out.startsAt); out.allDay = false; return out;
@@ -88,7 +92,7 @@ function taskState(task, now = Date.now()) {
 }
 function publicTask(task, now = Date.now()) {
   const { scope, requestHash, creationKey, ...value } = task;
-  return { ...value, version: task.version || 0, allDay: task.allDay ?? !task.startsAt, reminderOffsets: task.reminderOffsets || [], links: task.links || [], attachments: task.attachments || [], displayStatus: taskState(task, now), timezone: TZ };
+  return { ...value, version: task.version || 0, allDay: task.allDay ?? !task.startsAt, reminderOffsets: task.reminderOffsets || [], reminderDates: task.reminderDates || [], links: task.links || [], attachments: task.attachments || [], displayStatus: taskState(task, now), timezone: TZ };
 }
 function reminderEvent(task, now = Date.now()) {
   if (task.status === 'done' || task.deletedAt) return null;
@@ -96,6 +100,7 @@ function reminderEvent(task, now = Date.now()) {
   const end = task.endsAt ? Date.parse(task.endsAt) : task.dueDate ? Date.parse(localInstant(task.dueDate, '23:59')) + 60000 : null;
   const due = [];
   if (start && now <= start) for (const minutes of task.reminderOffsets || []) { const at = start - minutes * 60000; if (at <= now) due.push({ key: `before:${minutes}`, at, kind: 'reminder' }); }
+  for (const value of task.reminderDates || []) { const at = Date.parse(value); if (at <= now) due.push({ key: `custom:${value}`, at, kind: 'reminder' }); }
   if (end && now >= end) for (let i = 0; i < (task.overdueReminders ?? 1); i++) { const at = end + i * (task.overdueRepeatMinutes || 60) * 60000; if (at <= now) due.push({ key: `overdue:${i}`, at, kind: 'overdue' }); }
   return due.sort((a, b) => b.at - a.at)[0] || null;
 }

@@ -182,6 +182,15 @@ async function run() {
     assert.equal(sent.filter(row => row.taskId === reminderTask.data.id).length, 3);
     await request(`/tasks/${reminderTask.data.id}`, 'PATCH', { expectedVersion: 0, status: 'done' }, String(mcpUser._id), mcpWorkspace._id);
     await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:30Z') }); assert.equal(sent.filter(row => row.taskId === reminderTask.data.id).length, 3);
+    const exact = await request('/tasks', 'POST', { title: 'Точное напоминание без срока', allDay: true, dueDate: '2026-11-10', reminderOffsets: [], reminderDates: ['2026-11-03T12:40:00+05:00'] }, String(mcpUser._id), mcpWorkspace._id);
+    const exactChange = await request(`/tasks/${exact.data.id}`, 'PATCH', { expectedVersion: 0, changes: { dueDate: null, allDay: true } }, String(mcpUser._id), mcpWorkspace._id);
+    assert.equal(exactChange.data.task.dueDate, null);
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:39Z') }); assert.equal(sent.filter(row => row.taskId === exact.data.id).length, 0);
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:40Z') }); await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:41Z') }); assert.equal(sent.filter(row => row.taskId === exact.data.id).length, 1);
+    const exactRevision = await request(`/tasks/${exact.data.id}`, 'PATCH', { expectedVersion: exactChange.data.version, changes: { reminderDates: ['2026-11-03T07:45:00Z'] } }, String(mcpUser._id), mcpWorkspace._id);
+    assert.ok(exactRevision.data.task.reminderRevision > exactChange.data.task.reminderRevision);
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:44Z') }); assert.equal(sent.filter(row => row.taskId === exact.data.id).length, 1);
+    await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:45Z') }); assert.equal(sent.filter(row => row.taskId === exact.data.id).length, 2);
     await Workspace.updateOne({ _id: mcpWorkspace._id }, { $set: { userId: 'new-owner' } });
     await deliverReminders({ ...pushOptions, now: Date.parse('2026-11-03T07:31Z') }); assert.equal(await mongoose.connection.db.collection('businessPushSubscriptions').countDocuments({ _id: 'test-push' }), 0);
     await Workspace.updateOne({ _id: mcpWorkspace._id }, { $set: { userId: String(mcpUser._id) } });
