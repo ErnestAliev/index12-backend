@@ -72,6 +72,8 @@ const { ExecutionStore } = require('../../codex/executionStore.cjs');
         assert.equal((await copyApi({}, headers, String(foreignId))).status, 404);
         const readerToken = 'idx12_' + randomBytes(32).toString('base64url'); await db.collection('mcpCredentials').insertOne({ _id: createHash('sha256').update(readerToken).digest('hex'), ...scope, ownerId: scope.actorId, scopes: ['read'], expiresAt: new Date(Date.now() + 600000), revokedAt: null });
         assert.equal((await copyApi({}, { ...headers, Authorization: 'Bearer ' + readerToken })).status, 403);
+        await db.collection('mcpCredentials').updateOne({ _id: createHash('sha256').update(readerToken).digest('hex') }, { $set: { scopes: ['create'] } });
+        assert.equal((await copyApi({}, { ...headers, Authorization: 'Bearer ' + readerToken })).status, 403, 'Copy also needs permission to read its source');
         assert.equal(await db.collection('events').countDocuments(), count + 1, 'Only the deliberately seeded foreign fixture was added');
       }
       for (const item of [copy, source]) assert.equal((await call('index12_delete_operation', { id: item.id, expectedVersion: item.version })).deleted, true);
