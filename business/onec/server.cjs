@@ -13,6 +13,6 @@ function tool(name, shape, fn) {
 }
 tool('onec_status', {}, async () => ({ connected: true, collectionCount: (await client.metadata()).length }));
 tool('onec_schema', { collection: z.string().optional() }, async ({ collection }) => collection ? { schema: await client.schema(collection) } : { collections: await client.metadata() });
-tool('onec_query', { collection: z.string(), filter: z.string(), top: z.number().int().min(1).max(100).default(2), skip: z.number().int().min(0).default(0) }, args => client.query(args));
+tool('onec_query', { collection: z.string(), filter: z.string(), top: z.number().int().min(1).max(100).default(2), skip: z.number().int().min(0).default(0), select: z.string().max(3000).optional(), orderBy: z.string().max(1000).optional() }, args => client.query(args));
 tool('onec_get_object', { collection: z.string(), id: z.string().uuid() }, args => client.get(args));
 server.connect(new StdioServerTransport()).catch(() => { process.exitCode = 1; });

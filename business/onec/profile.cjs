@@ -29,9 +29,10 @@ async function listCandidates(kind, { search = '', skip = 0 } = {}, invoke = cal
   const names = new Set(schema.properties.map(p => p.name));
   const filters = [names.has('DeletionMark') ? 'DeletionMark eq false' : '', names.has('IsFolder') ? 'IsFolder eq false' : ''].filter(Boolean);
   const query = String(search).trim().slice(0, 120).replace(/'/g, "''");
-  if (query) filters.push(`substringof('${query}', Description)`);
-  const result = await invoke('onec_query', { collection, filter: filters.join(' and '), top: 50, skip });
+  if (query) filters.push(names.has('НаименованиеПолное') ? `(substringof('${query}', Description) or substringof('${query}', НаименованиеПолное))` : `substringof('${query}', Description)`);
   const binField = kind === 'contractors' ? 'ИдентификационныйКодЛичности' : 'ИдентификационныйНомер';
+  const select = ['Ref_Key', 'Description', ...['НаименованиеПолное', binField].filter(name => names.has(name))].join(',');
+  const result = await invoke('onec_query', { collection, filter: filters.join(' and '), top: 50, skip, select, orderBy: 'Ref_Key asc' });
   return { candidates: result.rows.map(row => ({ ref: row.Ref_Key, name: row.Description || row.НаименованиеПолное || '', legalName: row.НаименованиеПолное || '', identificationNumber: row[binField] || '' })), hasMore: result.hasMore, nextSkip: result.hasMore ? skip + result.rows.length : null };
 }
 async function lookupProfile(bin, kind, invoke = call, ref) {

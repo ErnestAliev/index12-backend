@@ -51,9 +51,9 @@ class ReadClient {
     if (!set) fail('NOT_PUBLISHED', `В 1С не опубликован объект ${collection}`);
     return set;
   }
-  async query({ collection, filter, top = 2, skip = 0 }) {
+  async query({ collection, filter, top = 2, skip = 0, select, orderBy }) {
     await this.schema(collection);
-    const data = await this.request(encodeURIComponent(collection), { $format: 'json', $filter: filter, $top: top, $skip: skip });
+    const data = await this.request(encodeURIComponent(collection), { $format: 'json', $filter: filter, $top: top, $skip: skip, $select: select, $orderby: orderBy });
     const rows = data?.value ?? data?.d?.results;
     if (!Array.isArray(rows)) fail('INVALID_RESPONSE', 'Некорректный список 1С');
     return { rows, hasMore: !!(data['odata.nextLink'] || data['@odata.nextLink'] || data.d?.__next) || rows.length === top };

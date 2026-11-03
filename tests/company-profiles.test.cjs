@@ -36,6 +36,18 @@ test('1C name search quotes user input and separates organizations from counterp
   await listCandidates('contractors', { search: "O'Neil" }, invoke);
   assert.equal(query.collection, 'Catalog_Контрагенты'); assert.ok(query.filter.includes("substringof('O''Neil', Description)"));
   assert.ok(!query.filter.includes('tolower'));
+  assert.equal(query.orderBy, 'Ref_Key asc');
+});
+test('1C search also covers full legal names and selects only fields used by the candidate list', async () => {
+  let query;
+  const invoke = async (name, args) => {
+    if (name === 'onec_schema') return { schema: { properties: [{ name: 'НаименованиеПолное' }, { name: 'ИдентификационныйКодЛичности' }] } };
+    if (name === 'onec_query') { query = args; return { rows: [], hasMore: false }; }
+    return {};
+  };
+  await listCandidates('contractors', { search: 'YBB', skip: 50 }, invoke);
+  assert.ok(query.filter.includes("substringof('YBB', НаименованиеПолное)")); assert.equal(query.skip, 50);
+  assert.equal(query.select, 'Ref_Key,Description,НаименованиеПолное,ИдентификационныйКодЛичности');
 });
 
 test('a missing identifier never authorizes selecting the sole company', async () => {

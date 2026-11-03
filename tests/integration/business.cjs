@@ -38,7 +38,14 @@ async function run() {
     };
     const getWorkspaceStorageUserId = row => row.isDefault ? String(row.userId) : `${row.userId}_ws_${row._id}`;
     app.use('/api/business', createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, isAuthenticated, checkWorkspacePermission, getWorkspaceStorageUserId, env, reportError: console.error,
-      onecCandidates: async (kind, { search, skip }) => ({ candidates: [{ ref: kind === 'companies' ? '11111111-1111-4111-8111-111111111111' : '22222222-2222-4222-8222-222222222222', name: kind === 'companies' ? 'ТОО Тест из 1С' : 'Контрагент из 1С', identificationNumber: bin }], hasMore: false, nextSkip: null }),
+      onecCandidates: async (kind, { search, skip = 0 }) => {
+        const all = kind === 'companies' ? [{ ref: '11111111-1111-4111-8111-111111111111', name: 'ТОО Тест из 1С', identificationNumber: bin }] : Array.from({ length: 90 }, (_, i) => i === 82
+          ? { ref: '22222222-2222-4222-8222-222222222222', name: 'ТОО "YBB GROUP"', legalName: 'Товарищество с ограниченной ответственностью "YBB GROUP"', identificationNumber: bin }
+          : { ref: `33333333-3333-4333-8333-${String(i).padStart(12, '0')}`, name: `${i % 2 ? 'ТОО' : 'ИП'} Тест ${i + 1}`, identificationNumber: '' });
+        const filtered = search ? all.filter(row => `${row.name} ${row.legalName || ''}`.toLowerCase().includes(search.toLowerCase())) : all;
+        const candidates = filtered.slice(skip, skip + 50), hasMore = skip + candidates.length < filtered.length;
+        return { candidates, hasMore, nextSkip: hasMore ? skip + candidates.length : null };
+      },
       onecLookup: async (number, kind, _invoke, ref) => ({ fields: { ...profile, legalName: 'Полное название из 1С', identificationNumber: bin, bankAccounts: [{ iban: 'KZTESTACCOUNT', bankName: 'Тестовый банк', bic: 'TESTKZ', currency: 'KZT' }] }, sync: { source: '1С', ref, collection: kind === 'companies' ? 'Catalog_Организации' : 'Catalog_Контрагенты', checkedAt: new Date().toISOString(), missing: [] } }),
       registryLookup: async () => { lookupCalls++; return { profile, source: REGISTRY_URL, checkedAt: new Date().toISOString(), checks: { restrictions: 'not_checked' } }; },
       debtLookup: async (id, token) => {
