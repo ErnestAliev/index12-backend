@@ -10,6 +10,13 @@ Use `https://api.index12.com/mcp` in ChatGPT. The issuer, resource audience,
 browser session and registered Google callback must use the same canonical
 API domain; the technical Render hostname has a separate browser session.
 
+`index12_copy_operation` creates a separate operation on a requested date,
+preserving its amount, description, references and (for transfers) route.
+It requires a fresh source version and a stable idempotency key, records the
+source ID in the audit trail, and leaves the source unchanged. Copy creation
+uses its own idempotency namespace and the normal permission/transaction/
+timeline allocation handlers. Copy and move are distinct operations.
+
 OAuth discovery is at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`. ChatGPT can use its trusted client
 metadata document or dynamic registration. Registration accepts only ChatGPT

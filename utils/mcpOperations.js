@@ -34,6 +34,7 @@ const transferSchema = z.object(transferFields).strict();
 const createTransferSchema = transferSchema.extend({ idempotencyKey: createSchema.shape.idempotencyKey }).strict();
 const updateTransferSchema = updateSchema.extend({ changes: transferSchema.partial().refine(v => Object.keys(v).length > 0, 'Укажите поля для изменения.') }).strict();
 const deleteSchema = updateSchema.omit({ changes: true });
+const copySchema = deleteSchema.extend({ date: fields.date, idempotencyKey: createSchema.shape.idempotencyKey }).strict();
 const updateAccountBalanceSchema = z.object({ id: ID, expectedVersion: updateSchema.shape.expectedVersion, initialBalance: z.string().max(40), reason: z.string().trim().min(1).max(2000) }).strict();
 const refModels = { projectId: 'Project', categoryId: 'Category', subcategoryId: 'Subcategory', accountId: 'Account', contractorId: 'Contractor', counterpartyIndividualId: 'Individual', individualId: 'Individual', companyId: 'Company', fromAccountId: 'Account', toAccountId: 'Account', fromCompanyId: 'Company', toCompanyId: 'Company', fromIndividualId: 'Individual', toIndividualId: 'Individual' };
 class OperationError extends Error {
@@ -66,7 +67,7 @@ function mcpAuditEntry(req, before, patch, version) {
         const from = auditValue(before?.[key]); const to = auditValue(patch[key]);
         if (from !== to) changes[key] = { before: from, after: to };
     }
-    return { source: 'mcp', ...(req.mcpContext?.actionId ? { actionId: req.mcpContext.actionId, executionId: req.mcpContext.execution?.executionId || null } : {}), ...(req.mcpContext?.importId ? { importId: req.mcpContext.importId, documentFingerprint: req.mcpContext.documentFingerprint || null, ...(req.mcpContext.importConfirmation ? { confirmation: req.mcpContext.importConfirmation } : {}) } : {}), action: before ? 'update' : 'create', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version, changes };
+    return { source: 'mcp', ...(req.mcpContext?.copiedFromId ? { copiedFromId: req.mcpContext.copiedFromId } : {}), ...(req.mcpContext?.actionId ? { actionId: req.mcpContext.actionId, executionId: req.mcpContext.execution?.executionId || null } : {}), ...(req.mcpContext?.importId ? { importId: req.mcpContext.importId, documentFingerprint: req.mcpContext.documentFingerprint || null, ...(req.mcpContext.importConfirmation ? { confirmation: req.mcpContext.importConfirmation } : {}) } : {}), action: before ? 'update' : 'create', actorId: String(req.user.id), actorRole: req.workspaceRole, at: new Date(), version, changes };
 }
 const serialize = (operation, req, originalRefs = {}) => {
     const raw = operation.toObject ? operation.toObject() : operation;
@@ -226,7 +227,7 @@ function registerMcpOperationRoutes(app, deps) {
         const { grant, access } = req.mcpContext;
         const writer = access.role === 'admin' || access.role === 'manager' && access.accountIds.length > 0;
         const importer = ['admin','manager'].includes(access.role) && grant.scopes.includes('read') && grant.scopes.includes('imports:execute') && !!grant.planSigningKey;
-        res.json({ apiVersion: '3.4.0', executionProtocol: 2, voiceConfigured: !!process.env.OPENAI_API_KEY, actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, createTasks: access.role === 'admin' && grant.scopes.includes('create'), updateTasks: access.role === 'admin' && grant.scopes.includes('update'), deleteTasks: access.role === 'admin' && grant.scopes.includes('delete'), updateAccountInitialBalance: access.role === 'admin' && grant.scopes.includes('update'), create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: writer && grant.scopes.includes('delete'), createTransfers: writer && grant.scopes.includes('create'), updateTransfers: writer && grant.scopes.includes('update'), deleteTransfers: writer && grant.scopes.includes('delete'), bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense','transfer'], expiresAt: grant.expiresAt });
+        res.json({ apiVersion: '3.4.0', executionProtocol: 2, voiceConfigured: !!process.env.OPENAI_API_KEY, actorId: String(req.user.id), workspaceId: String(req.user.currentWorkspaceId), role: access.role, capabilities: { read: true, copy: writer && grant.scopes.includes('create'), createTasks: access.role === 'admin' && grant.scopes.includes('create'), updateTasks: access.role === 'admin' && grant.scopes.includes('update'), deleteTasks: access.role === 'admin' && grant.scopes.includes('delete'), updateAccountInitialBalance: access.role === 'admin' && grant.scopes.includes('update'), create: writer && grant.scopes.includes('create'), update: writer && grant.scopes.includes('update'), delete: writer && grant.scopes.includes('delete'), createTransfers: writer && grant.scopes.includes('create'), updateTransfers: writer && grant.scopes.includes('update'), deleteTransfers: writer && grant.scopes.includes('delete'), bankPayments: false, createContractors: importer && grant.scopes.includes('entities:create'), createCategories: importer && grant.scopes.includes('entities:create'), createSubcategories: importer && grant.scopes.includes('entities:create'), prepareImport: importer, executeImport: importer }, confirmationMode: confirmationMode(grant), confirmation: confirmationMode(grant) === 'direct' ? 'direct_on_user_request' : 'mcp_form_before_import_writes', updatePolicy: access.role === 'manager' ? 'own_operations_and_allowed_accounts' : 'workspace_operations', supportedKinds: ['income','expense','transfer'], expiresAt: grant.expiresAt });
     }));
     app.get('/api/mcp/accounts/:id', authenticate, requireScope('read'), wrap(async (req, res) => {
         res.json(accountResult(await readAccount(req, req.params.id), req));
@@ -303,6 +304,19 @@ function registerMcpOperationRoutes(app, deps) {
         const response = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { fail('FORBIDDEN', null, body.message || 'Нет права изменять операцию.', this.statusCode); } };
         await canEdit(req, response, error => { if (error) throw error; });
     };
+    app.post('/api/mcp/operations/:id/copy', authenticate, requireScope('create'), checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
+        const input = copySchema.parse({ ...req.body, id: req.params.id });
+        const source = await readOperation(req, input.id);
+        if ((source.syncVersion || 0) !== input.expectedVersion) fail('VERSION_CONFLICT', 'expectedVersion', 'Исходная операция изменилась. Прочитайте её заново перед копированием.', 409);
+        const transfer = source.type === 'transfer';
+        await rejectComplex(req, source, transfer);
+        const original = serialize(source, req).operation;
+        const selected = Object.fromEntries(Object.keys(transfer ? transferFields : fields).filter(key => original[key] !== undefined).map(key => [key, original[key]]));
+        req.mcpContext.copiedFromId = String(source._id);
+        const copyKey = `copy:${hashToken(JSON.stringify([String(source._id), input.idempotencyKey]))}`;
+        const result = await createOperation(req, { ...selected, date: input.date, idempotencyKey: copyKey }, transfer);
+        res.status(result.replayed ? 200 : 201).json({ ...result, copiedFromId: String(source._id) });
+    }));
     app.patch('/api/mcp/operations/:id', authenticate, requireScope('update'), checkWorkspacePermission(['admin','manager']), wrap(async (req, res) => {
         await bindOperation(req);
         const body = updateSchema.omit({ id: true }).parse(req.body);
@@ -367,4 +381,4 @@ function registerMcpOperationRoutes(app, deps) {
         res.status(error.statusCode || (error instanceof z.ZodError ? 400 : 500)).json({ error: structured });
     });
 }
-module.exports = { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry, hashToken, createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, updateAccountBalanceSchema, validationError };
+module.exports = { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry, hashToken, createSchema, updateSchema, createTransferSchema, updateTransferSchema, deleteSchema, copySchema, updateAccountBalanceSchema, validationError };
