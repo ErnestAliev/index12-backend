@@ -137,6 +137,7 @@ async function run() {
     const taxRead = await fetch(`${fixture.apiUrl}/mcp/business/status`, { headers: mcpHeaders }); assert.equal(taxRead.status, 200);
     console.log('PASS: real HTTP + MongoDB, scoped tasks, encrypted credentials, KGD deduplication/reopening, non-blocking sync, disconnect fencing and shared workspace isolation');
     if (process.argv.includes('--browser')) {
+      await Company.updateOne({ _id: company._id }, { $unset: { legalAddress: '', director: '', registrationDate: '', activity: '', registrationStatus: '' } });
       const { verifyBusinessUi } = await import('../../../index12-frontend/tests/browser/business.mjs');
       await verifyBusinessUi({ apiUrl, entitiesApiUrl: fixture.apiUrl, actor: fixture.userId, workspaceId: String(workspace._id), company, profile });
     }
