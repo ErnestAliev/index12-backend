@@ -58,6 +58,22 @@ async function run() {
     const found = await request(`/registry/${bin}`); assert.equal(found.status, 200, JSON.stringify(found.data));
     await request(`/registry/${bin}`); assert.equal(lookupCalls, 1);
     assert.equal((await request('/registry/123')).status, 400);
+    assert.equal((await request(`/companies/${company._id}/refresh`, 'POST', {})).status, 409);
+    const localPath = '/Users/test/company.p12', localPassword = ' local password with spaces ';
+    const savedEds = await request(`/companies/${company._id}/eds`, 'PUT', { storagePath: localPath, password: localPassword });
+    assert.equal(savedEds.status, 200); assert.equal(savedEds.data.eds.enabled, true); assert.equal(savedEds.data.eds.passwordStored, true);
+    const storedEds = await mongoose.connection.db.collection('businessEds').findOne({ scope: fixture.userId, companyId: company._id });
+    assert.notEqual(storedEds.passwordSecret, localPassword);
+    const card = await request(`/companies/${company._id}`);
+    assert.equal(card.status, 200); assert.equal(card.data.eds.storagePath, localPath);
+    assert.ok(!JSON.stringify(card.data).includes(localPassword)); assert.ok(!JSON.stringify(card.data).includes(storedEds.passwordSecret));
+    assert.equal((await request(`/companies/${company._id}/eds`, 'PUT', { storagePath: localPath })).status, 200, 'unchanged saved password is retained');
+    assert.equal((await request(`/companies/${company._id}/eds`, 'PUT', { storagePath: '/Users/test/other.p12' })).status, 400);
+    assert.equal((await request(`/companies/${otherCompany._id}/eds`, 'PUT', { storagePath: localPath, password: localPassword })).status, 404);
+    assert.equal((await request(`/companies/${company._id}`, 'GET', undefined, 'other-owner', other._id)).status, 404);
+    assert.equal((await request(`/companies/${company._id}`, 'GET', undefined, fixture.userId, workspace._id, { 'x-index12-workspace-id': String(other._id) })).status, 409);
+    const refreshed = await request(`/companies/${company._id}/refresh`, 'POST', {});
+    assert.equal(refreshed.status, 200); assert.equal(refreshed.data.company.legalAddress, profile.legalAddress);
     assert.equal((await request(`/companies/${otherCompany._id}/connection`, 'PUT', { personalAccountToken: 'personal-account-test-token' })).status, 404);
     assert.equal((await request(`/companies/${company._id}/connection`, 'PUT', { personalAccountToken: 'personal-account-test-token' })).status, 200);
     await until(() => debtCalls === 1);
@@ -101,6 +117,11 @@ async function run() {
     releaseDebt(); block = false;
     await new Promise(resolve => setTimeout(resolve, 80));
     assert.equal((await request('/status')).data.connections.length, 0);
+    assert.equal((await request(`/companies/${company._id}/eds`, 'DELETE')).status, 200);
+    assert.equal((await request(`/companies/${company._id}`)).data.eds, null);
+    assert.equal((await request(`/companies/${company._id}/refresh`, 'POST', {})).status, 409);
+    // Seed an existing account so the browser opens the company through the real editor row.
+    await fixture.request('/accounts', 'POST', { name: 'Счёт компании', companyId: company._id, initialBalance: 0 });
     // The assistant uses the same calendar through an authenticated read-only MCP route.
     const mcpUser = await fixture.identityModels.User.create({ email: 'business-test@example.invalid', name: 'MCP test' });
     const mcpWorkspace = await Workspace.create({ name: 'MCP business', userId: String(mcpUser._id), isDefault: true });

@@ -64,10 +64,13 @@ function encryptionKey(encoded) {
 }
 function encryptToken(token, encoded, context) {
   if (typeof token !== 'string' || token.length < 8 || token.length > 4096 || /\s/.test(token)) fail('Укажите токен лицевого счёта КГД');
+  return encryptSecret(token, encoded, context);
+}
+function encryptSecret(value, encoded, context) {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', encryptionKey(encoded), iv);
   cipher.setAAD(Buffer.from(context));
-  const ciphertext = Buffer.concat([cipher.update(token, 'utf8'), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
   return [iv, cipher.getAuthTag(), ciphertext].map(part => part.toString('base64url')).join('.');
 }
 function decryptToken(value, encoded, context) {
@@ -76,4 +79,4 @@ function decryptToken(value, encoded, context) {
   cipher.setAAD(Buffer.from(context)); cipher.setAuthTag(tag);
   return Buffer.concat([cipher.update(body), cipher.final()]).toString('utf8');
 }
-module.exports = { fail, identifier, registryProfile, lookupRegistry, money, fetchTaxDebt, encryptToken, decryptToken, REGISTRY_URL, TAX_URL };
+module.exports = { fail, identifier, registryProfile, lookupRegistry, money, fetchTaxDebt, encryptToken, encryptSecret, decryptToken, REGISTRY_URL, TAX_URL };

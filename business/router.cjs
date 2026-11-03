@@ -3,6 +3,7 @@ const express = require('express');
 const { Types } = require('mongoose');
 const { randomUUID } = require('node:crypto');
 const { fail, identifier, lookupRegistry, fetchTaxDebt, encryptToken, decryptToken } = require('./providers.cjs');
+const { localStoragePath, passwordSecret, publicEds } = require('./eds.cjs');
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Almaty' }).format(new Date());
 function dateOnly(value) {
   if (value === null || value === '') return null;
@@ -40,12 +41,15 @@ function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthen
     coll('Tasks').createIndex({ scope: 1, sourceKey: 1 }, { unique: true, partialFilterExpression: { sourceKey: { $type: 'string' } } }),
     coll('Tasks').createIndex({ scope: 1, dueDate: 1 }),
     coll('Registry').createIndex({ scope: 1, bin: 1 }, { unique: true }),
-    coll('Registry').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })
+    coll('Registry').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+    coll('Eds').createIndex({ scope: 1, companyId: 1 }, { unique: true })
   ]).catch(error => { indexes = null; throw error; });
   // Tax data and tokens are available to workspace administrators only.
   router.use(isAuthenticated, checkWorkspacePermission(['admin']), wrap(async (req, _res, next) => {
     req.businessScope = String(getWorkspaceStorageUserId(req.cachedWorkspace));
     if (!req.businessScope || req.businessScope === 'null') fail('Рабочая область недоступна', 403);
+    const requestedWorkspace = req.headers['x-index12-workspace-id'];
+    if (requestedWorkspace && requestedWorkspace !== String(req.cachedWorkspace._id)) fail('Рабочая область изменилась. Откройте карточку компании из редактора счетов заново', 409);
     if (req.method !== 'GET' && req.headers.origin) {
       const origins = new Set(['http://localhost:5173', 'http://127.0.0.1:5173']);
       if (env.FRONTEND_URL) {
@@ -109,6 +113,49 @@ function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthen
     const result = await registryLookup(bin, { apiKey: env.EGOV_API_KEY });
     await coll('Registry').updateOne(filter, { $set: { result, expiresAt: new Date(Date.now() + 15 * 60000) } }, { upsert: true });
     res.json({ ...result, cached: false });
+  }));
+  router.get('/companies/:id', wrap(async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
+    const company = await companyFor(req.businessScope, req.params.id);
+    const eds = await coll('Eds').findOne({ scope: req.businessScope, companyId: req.params.id });
+    const connection = await coll('Connections').findOne({ scope: req.businessScope, companyId: req.params.id });
+    res.json({ company, eds: publicEds(eds, company.identificationNumber), connection: connection ? publicConnection(connection) : null });
+  }));
+  router.put('/companies/:id/eds', wrap(async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
+    const company = await companyFor(req.businessScope, req.params.id);
+    const bin = identifier(company.identificationNumber);
+    const storagePath = localStoragePath(req.body.storagePath);
+    const filter = { scope: req.businessScope, companyId: req.params.id };
+    const previous = await coll('Eds').findOne(filter);
+    const row = { ...filter, bin, storagePath, enabled: true, updatedAt: new Date() };
+    if (req.body.password != null && req.body.password !== '') row.passwordSecret = passwordSecret(req.body.password, row, env);
+    else if (previous?.storagePath === storagePath && previous.bin === bin && previous.passwordSecret) row.passwordSecret = previous.passwordSecret;
+    else fail('Укажите пароль ЭЦП');
+    await coll('Eds').updateOne(filter, { $set: row }, { upsert: true });
+    res.json({ eds: publicEds(row, bin) });
+  }));
+  router.delete('/companies/:id/eds', wrap(async (req, res) => {
+    await companyFor(req.businessScope, req.params.id);
+    await coll('Eds').deleteOne({ scope: req.businessScope, companyId: req.params.id });
+    res.json({ disconnected: true });
+  }));
+  router.post('/companies/:id/refresh', wrap(async (req, res) => {
+    const company = await companyFor(req.businessScope, req.params.id);
+    const bin = identifier(company.identificationNumber);
+    const filter = { scope: req.businessScope, companyId: req.params.id, bin, enabled: true };
+    const eds = await coll('Eds').findOne(filter);
+    if (!eds) fail('Сначала подключите ЭЦП компании', 409);
+    const result = await registryLookup(bin, { apiKey: env.EGOV_API_KEY });
+    if (!result.profile) fail('Юридическое лицо не найдено в eGov', 404);
+    if (result.profile.identificationNumber !== bin) fail('БИН в ответе eGov не соответствует компании', 502);
+    const current = await companyFor(req.businessScope, req.params.id);
+    if (current.identificationNumber !== bin || !await coll('Eds').findOne({ ...filter, passwordSecret: eds.passwordSecret })) fail('Настройки компании изменились. Повторите обновление', 409);
+    const fields = Object.fromEntries(['legalAddress', 'director', 'registrationDate', 'activity', 'registrationStatus'].map(field => [field, result.profile[field] || null]));
+    const updated = await Company.findOneAndUpdate({ _id: company._id, userId: current.userId, identificationNumber: bin }, { $set: fields }, { new: true }).lean();
+    if (!updated) fail('Настройки компании изменились. Повторите обновление', 409);
+    res.json({ company: updated, source: result.source, checkedAt: result.checkedAt });
+    setImmediate(() => sync(req.businessScope).catch(() => {}));
   }));
   router.put('/companies/:id/connection', wrap(async (req, res) => {
     if (!env.KGD_PORTAL_TOKEN) fail('На сервере не настроен токен API КГД', 503);
