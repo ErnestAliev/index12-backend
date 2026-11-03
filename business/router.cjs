@@ -116,6 +116,7 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     res.json({ ...result, cached: false });
   }));
   const entityModel = kind => kind === 'companies' ? Company : kind === 'contractors' ? Contractor : null;
+  const identityFor = req => ({ workspaceId: String(req.cachedWorkspace._id), actorId: String(req.user.id) });
   router.param('kind', (_req, _res, next, kind) => next(entityModel(kind) ? undefined : 'route'));
   const entityFor = async (req) => {
     const model = entityModel(req.params.kind);
@@ -133,7 +134,7 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
   };
   router.get('/:kind/:id', wrap(async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
-    const { entity } = await entityFor(req); res.json({ company: entity });
+    const { entity } = await entityFor(req); res.json({ ...identityFor(req), company: entity });
   }));
   router.patch('/:kind/:id', wrap(async (req, res) => {
     const { model, entity } = await entityFor(req);
@@ -143,7 +144,7 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, ...filter }, { $set: fields, $inc: { profileVersion: 1 } }, { new: true, runValidators: true }).lean();
     if (!company) fail('Карточка изменена. Откройте её заново', 409);
     emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);
-    res.json({ company });
+    res.json({ ...identityFor(req), company });
   }));
   const requireOnec = req => {
     if (env.ONEC_WORKSPACE_ID !== String(req.cachedWorkspace._id) || !env.ONEC_BASE_URL || !env.ONEC_USERNAME || !env.ONEC_PASSWORD) fail('MCP-подключение 1С для этой рабочей области не настроено', 503);
@@ -153,7 +154,7 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     const search = typeof req.query.search === 'string' ? req.query.search.slice(0, 120) : '';
     const skip = Number(req.query.skip || 0);
     if (!Number.isInteger(skip) || skip < 0 || skip > 100000) fail('Некорректная страница списка');
-    res.json(await onecCandidates(req.params.kind, { search, skip }));
+    res.json({ ...identityFor(req), ...await onecCandidates(req.params.kind, { search, skip }) });
   }));
   router.post('/:kind/:id/sync-onec', wrap(async (req, res) => {
     const { model, entity } = await entityFor(req);
@@ -177,7 +178,7 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, identificationNumber: entity.identificationNumber ?? null, ...filter }, { $set: { ...fields, onecSync: { ...result.sync, connectionKey } }, $inc: { profileVersion: 1 } }, { new: true, runValidators: true }).lean();
     if (!company) fail('Карточка изменена во время загрузки. Повторите синхронизацию', 409);
     emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);
-    res.json({ company, sync: result.sync });
+    res.json({ ...identityFor(req), company, sync: result.sync });
   }));
   router.post('/:kind/:id/unlink-onec', wrap(async (req, res) => {
     const { model, entity } = await entityFor(req);
@@ -185,7 +186,7 @@ function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUser
     const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, ...filter }, { $unset: { onecSync: '' }, $inc: { profileVersion: 1 } }, { new: true }).lean();
     if (!company) fail('Карточка изменена. Откройте её заново', 409);
     emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);
-    res.json({ company });
+    res.json({ ...identityFor(req), company });
   }));
   router.put('/companies/:id/connection', wrap(async (req, res) => {
     if (!env.KGD_PORTAL_TOKEN) fail('На сервере не настроен токен API КГД', 503);

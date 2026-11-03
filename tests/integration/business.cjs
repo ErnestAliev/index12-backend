@@ -140,6 +140,11 @@ async function run() {
     assert.equal(mcpResult.workspaceId, String(mcpWorkspace._id)); assert.equal(mcpResult.tasks[0].title, 'Задача для помощника');
     assert.equal((await fetch(`${fixture.apiUrl}/mcp/business/tasks`, { method: 'POST', headers: mcpHeaders })).status, 403);
     const taxRead = await fetch(`${fixture.apiUrl}/mcp/business/status`, { headers: mcpHeaders }); assert.equal(taxRead.status, 200);
+    const mcpCompany = await Company.create({ name: 'MCP company', userId: String(mcpUser._id), externalLinks: [{ title: 'Документы', url: 'https://drive.google.com/drive/folders/mcp-test', purpose: 'documents' }] });
+    const profileRead = await fetch(`${fixture.apiUrl}/mcp/business/companies/${mcpCompany._id}`, { headers: mcpHeaders });
+    assert.equal(profileRead.status, 200); const profileResult = await profileRead.json();
+    assert.equal(profileResult.workspaceId, String(mcpWorkspace._id)); assert.equal(profileResult.actorId, String(mcpUser._id));
+    assert.equal(profileResult.company.externalLinks[0].purpose, 'documents');
     console.log('PASS: isolated company profiles, explicit 1C binding without BIN, manual companies remain untouched, duplicate binding prevention, edits/links/version conflicts, calendar and KGD regression');
     if (process.argv.includes('--browser')) {
       await Company.updateOne({ _id: company._id }, { $unset: { onecSync: '' }, $set: { identificationNumber: null } });
