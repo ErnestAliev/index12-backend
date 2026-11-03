@@ -8,7 +8,11 @@ function createRemoteMcp({ db, User, Workspace, env = process.env, origin = env.
   const router = express.Router();
   router.use(auth.router);
   const guard = requireBearerAuth({ verifier: auth.provider, requiredScopes: ['index12:read'], resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource/mcp', auth.issuer).href });
-  router.post('/mcp', guard, async (req, res) => {
+  const discover = (req, res, next) => {
+    if (req.headers.authorization) return next();
+    return res.status(401).set('WWW-Authenticate', `Bearer error="invalid_token", error_description="Connect INDEX12 to continue", scope="index12:read index12:write", resource_metadata="${new URL('/.well-known/oauth-protected-resource/mcp', auth.issuer).href}"`).json({ error: 'invalid_token' });
+  };
+  router.post('/mcp', discover, guard, async (req, res) => {
     let runtime, transport;
     try {
       const { grant } = req.auth.extra;
@@ -16,6 +20,8 @@ function createRemoteMcp({ db, User, Workspace, env = process.env, origin = env.
       runtime = require('./runtime.cjs').createMcpRuntime({
         config: { actorId: grant.actorId, ownerId: grant.ownerId, workspaceId: grant.workspaceId, apiUrl: auth.issuer.origin, apiToken: req.auth.token },
         database: async () => db(), request,
+        authScopes: grant.oauthScopes,
+        resourceMetadataUrl: new URL('/.well-known/oauth-protected-resource/mcp', auth.issuer).href,
         runtimeEnv: cloud ? { INDEX12_MCP_EXECUTION_MODE: 'durable' } : {},
         executionMeta: cloud ? { 'x-codex-turn-metadata': { thread_id: grant.execution?.threadId, turn_id: grant.execution?.turnId } } : undefined,
       });
@@ -25,7 +31,7 @@ function createRemoteMcp({ db, User, Workspace, env = process.env, origin = env.
       await transport.handleRequest(req, res, req.body);
     } catch { if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', id: req.body?.id ?? null, error: { code: -32603, message: 'Не удалось обработать запрос INDEX12' } }); else res.end(); await transport?.close(); await runtime?.close(); }
   });
-  router.get('/mcp', guard, (_req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Используйте Streamable HTTP POST' } }));
+  router.get('/mcp', discover, guard, (_req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Используйте Streamable HTTP POST' } }));
   router.delete('/mcp', guard, (_req, res) => res.sendStatus(405));
   return { ...auth, router };
 }

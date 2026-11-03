@@ -53,3 +53,7 @@ the same server chat as the desktop site.
 Validation: `node tests/integration/remote-mcp.cjs`,
 `node tests/integration/cloud-chat.cjs`, and existing MCP/execution integration
 tests use isolated MongoDB fixtures, never production financial records.
+Set `INDEX12_MCP_BROWSER_TEST=1` for the real Chromium OAuth form check
+(requires the frontend's Playwright and Chrome). It verifies the browser's
+Origin header and the CSP-permitted return navigation as well as the token
+exchange; HTTP-only tests cannot establish those browser behaviors.

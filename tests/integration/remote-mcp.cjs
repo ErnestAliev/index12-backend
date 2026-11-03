@@ -24,7 +24,7 @@ const mongoose = require('mongoose');
     const request = async (path, method = 'GET', body, user = actor._id, json = false, headers = {}) => {
       const response = await fetch(origin + path, { method, redirect: 'manual', headers: { ...(body ? { 'content-type': json ? 'application/json' : 'application/x-www-form-urlencoded' } : {}), ...(user ? { 'x-test-user': String(user) } : {}), ...headers }, ...(body ? { body: json ? JSON.stringify(body) : new URLSearchParams(body) } : {}) }); return response;
     };
-    assert.equal((await request('/mcp', 'POST', { jsonrpc: '2.0', method: 'initialize', id: 1 }, null, true)).status, 401);
+    const discovery = await request('/mcp', 'POST', { jsonrpc: '2.0', method: 'initialize', id: 1 }, null, true); assert.equal(discovery.status, 401); assert.match(discovery.headers.get('www-authenticate'), /scope="index12:read index12:write"/);
     const metadata = await (await request('/.well-known/oauth-protected-resource/mcp')).json(); assert.equal(metadata.resource, origin + '/mcp');
     const oauth = await (await request('/.well-known/oauth-authorization-server')).json(); assert.deepEqual(oauth.code_challenge_methods_supported, ['S256']);
     const bad = await request('/register', 'POST', { redirect_uris: ['https://evil.invalid/callback'], token_endpoint_auth_method: 'none' }, null, true); assert.equal(bad.status, 400);
@@ -55,10 +55,28 @@ const mongoose = require('mongoose');
     assert.equal(readTokens.scope, 'index12:read');
     client = new Client({ name: 'remote-read-test', version: '1' }); await client.connect(new StreamableHTTPClientTransport(new URL(metadata.resource), { requestInit: { headers: { Authorization: `Bearer ${readTokens.access_token}` } } }));
     assert.ok(!(await client.callTool({ name: 'index12_list_tasks', arguments: {} })).isError);
-    const denied = await client.callTool({ name: 'index12_create_task', arguments: { title: 'Forbidden', idempotencyKey: 'read-only-forbidden-task' } }); assert.equal(denied.isError, true);
+    const denied = await client.callTool({ name: 'index12_create_task', arguments: { title: 'Forbidden', idempotencyKey: 'read-only-forbidden-task' } }); assert.equal(denied.isError, true); assert.match(denied._meta['mcp/www_authenticate'][0], /insufficient_scope/);
     const refreshed = await request('/token', 'POST', { grant_type: 'refresh_token', client_id: registered.client_id, refresh_token: tokens.refresh_token, resource: metadata.resource }); assert.equal(refreshed.status, 200);
     assert.equal((await request('/token', 'POST', { grant_type: 'refresh_token', client_id: registered.client_id, refresh_token: tokens.refresh_token, resource: metadata.resource })).status, 400);
     assert.equal((await request('/mcp', 'POST', { jsonrpc: '2.0', id: 2, method: 'tools/list' }, null, true, { authorization: `Bearer ${tokens.access_token}` })).status, 401);
+    // Real navigation submits Origin according to Referrer-Policy. A no-referrer
+    // policy would turn Chrome's form Origin into null and incorrectly deny it.
+    if (process.env.INDEX12_MCP_BROWSER_TEST === '1') {
+    const { chromium } = require('../../../index12-frontend/node_modules/playwright-core');
+    const browser = await chromium.launch({ executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+    try {
+      const page = await browser.newPage({ extraHTTPHeaders: { 'x-test-user': String(actor._id) } });
+      await page.route('http://127.0.0.1:5555/callback?**', route => route.fulfill({ body: '<html>Connected</html>', contentType: 'text/html' }));
+      await page.goto(origin + '/authorize?' + params);
+      await page.getByLabel('Разрешения').selectOption('write');
+      const submitted = page.waitForRequest(req => req.url() === origin + '/mcp/connect' && req.method() === 'POST');
+      await page.getByRole('button', { name: 'Подключить', exact: true }).click();
+      assert.equal((await submitted).headers().origin, origin);
+      await page.waitForURL('http://127.0.0.1:5555/callback?**');
+      const code = new URL(page.url()).searchParams.get('code'); assert.ok(code);
+      const browserTokens = await (await request('/token', 'POST', { ...tokenBody, code })).json(); assert.equal(browserTokens.scope, 'index12:read index12:write');
+    } finally { await browser.close(); }
+    }
     console.log('PASS: remote MCP OAuth discovery, redirect validation, login/consent, tenant isolation, PKCE, one-time code, HTTP tools, task write, refresh rotation/replay revocation');
   } finally { await client?.close(); if (http) { http.closeAllConnections(); await new Promise(resolve => http.close(resolve)); } await fixture.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

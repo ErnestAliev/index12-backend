@@ -16,7 +16,7 @@ const INSTRUCTIONS = `INDEX12: создавай записи по ясному �
 Всегда указывай период и asOf. fact/plan определяются календарной датой, не подтверждением оплаты. Месяцы без записей — только отсутствие записей; не утверждай, что автор забыл внести данные. Сокращение числа платящих контрагентов не доказывает уход арендатора. Потолок аренды и решение закрыть объект требуют площадей, договоров и загрузки.
 Создавай и изменяй только явно запрошенные пользователем операции. Перед записью разреши названия в канонические ID и уточни неоднозначные реквизиты. Для правки сначала get_operation и его версия. При сетевом повторе создания используй прежний idempotencyKey; новый ключ создаёт новую операцию. При конфликте версии не перезаписывай изменения автоматически. Для переводов используй create_transfer/update_transfer; перенос даты — update_transfer. Перед удалением прочитай get_operation и передай expectedVersion в delete_operation. Удаляй только по ясному запросу пользователя. Начальный остаток счёта меняй через get_account/update_account_initial_balance с expectedVersion и основанием только по ясной команде; текущий остаток банка не является начальным остатком. Не используй управление компьютером или браузером для обхода отсутствующего инструмента MCP: сообщи конкретное ограничение. Банковские платежи недоступны.\nИспользуй серверные полные итоги. Страницы операций — доказательства, не выборка для самостоятельного подсчёта всего бизнеса. Проверяй diagnostics/reliable. Обновляй данные при новом вопросе, не обещай постоянное наблюдение или долговременную память: этот коннектор их не предоставляет.`;
 
-function createMcpRuntime({ config, database, runtimeEnv = {}, request = fetch, executionMeta, elicit }) {
+function createMcpRuntime({ config, database, runtimeEnv = {}, request = fetch, executionMeta, elicit, authScopes, resourceMetadataUrl }) {
 const readConfig = () => ({ config: typeof config === 'function' ? config() : config });
 async function snapshot() {
   return finance.loadSnapshot(await database(), readConfig().config);
@@ -47,6 +47,10 @@ function register(name,description,shape,run,options={}) {
   };
   const handler=async(input,extra)=>{
     try {
+      if (options.write && authScopes && !authScopes.includes('index12:write')) {
+        const detail = { code: 'INSUFFICIENT_SCOPE', message: 'Подключите INDEX12 с разрешением на создание, редактирование и удаление.' };
+        return { isError: true, content: [{ type: 'text', text: detail.message }], structuredContent: { error: detail }, _meta: { 'mcp/www_authenticate': [`Bearer error="insufficient_scope", error_description="INDEX12 write permission required", scope="index12:read index12:write", resource_metadata="${resourceMetadataUrl}"`] } };
+      }
       if (runtimeEnv.INDEX12_MCP_EXECUTION_GUARD && runtimeEnv.INDEX12_MCP_EXECUTION_MODE !== 'durable') {
         const error=new Error(); error.detail={code:'EXECUTION_PROTOCOL_MISMATCH',message:'Связка INDEX12 требует обновления протокола выполнения. Новые изменения остановлены.'}; throw error;
       }
