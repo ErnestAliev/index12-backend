@@ -4,6 +4,12 @@
 the backend. It uses the same runtime and tools as `npm run mcp` (stdio).
 No local worker, tunnel or Mac is involved in remote requests.
 
+Production uses `MCP_PUBLIC_ORIGIN=https://api.index12.com` and
+`GOOGLE_CALLBACK_URL=https://api.index12.com/auth/google/callback`.
+Use `https://api.index12.com/mcp` in ChatGPT. The issuer, resource audience,
+browser session and registered Google callback must use the same canonical
+API domain; the technical Render hostname has a separate browser session.
+
 OAuth discovery is at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`. ChatGPT can use its trusted client
 metadata document or dynamic registration. Registration accepts only ChatGPT
