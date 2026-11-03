@@ -915,7 +915,7 @@ app.get('/auth/google', (req, res, next) => {
     passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
 });
 
-app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed` }), (req, res) => { res.redirect(FRONTEND_URL); });
+app.get('/auth/google/callback', (req, res, next) => passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed`, keepSessionInfo: !!req.session.mcpOAuth })(req, res, next), (req, res) => { res.redirect(req.session.mcpOAuth?.id ? `/mcp/connect?request=${encodeURIComponent(req.session.mcpOAuth.id)}` : FRONTEND_URL); });
 app.get('/api/auth/me', async (req, res) => {
     try {
         console.log('🔐 [GET /api/auth/me] Authentication check started');
@@ -2202,9 +2202,10 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 
 // =================================================================
 // END INVITATION ROUTES
-// Codex chat transport; all data access is provided by the scoped INDEX12 MCP.
+// Cloud and desktop chat share scoped MCP authorization and durable execution.
+const cloudChat = new (require('./codex/cloud.cjs').CloudChat)({ db: () => mongoose.connection.db, User, Workspace });
 app.use('/api/codex', require('./codex/router.cjs').createDesktopRouter({
-    db: () => mongoose.connection.db, Workspace, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
+    db: () => mongoose.connection.db, Workspace, isAuthenticated, cloudService: cloudChat, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
 }));
 
 app.use('/api/user/appearance-themes', require('./appearance/router.cjs').createAppearanceRouter({
@@ -3382,6 +3383,8 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
+const remoteMcp = require('./mcp/remote.cjs').createRemoteMcp({ db: () => mongoose.connection.db, User, Workspace });
+app.use(remoteMcp.router);
 app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
@@ -3416,6 +3419,7 @@ mongoose.connect(DB_URL, {
         require('./business/reminders.cjs').startReminders({ db: mongoose.connection.db, Workspace });
         server.listen(PORT, () => {
             console.log(`✅ Сервер запущен на порту ${PORT}`);
+            cloudChat.start();
         });
     })
     .catch(err => {

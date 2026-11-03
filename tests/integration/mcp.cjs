@@ -32,7 +32,7 @@ const {startFixture}=require('./subcategories.cjs');
     let stderr='';transport.stderr.on('data',chunk=>{stderr+=chunk;});
     client=new Client({name:'index12-integration',version:'1.0.0'});await client.connect(transport);
     assert.match(client.getInstructions(),/по-русски/);
-    const tools=await client.listTools();assert.equal(tools.tools.length,15);assert.equal(tools.tools.filter(t=>t.annotations.readOnlyHint).length,8);assert.equal(tools.tools.filter(t=>t.annotations.destructiveHint).length,7);
+    const tools=await client.listTools();assert.equal(tools.tools.length,23);assert.equal(tools.tools.filter(t=>t.annotations.readOnlyHint).length,13);assert.equal(tools.tools.filter(t=>t.annotations.destructiveHint).length,10);
     const call=async(name,args={})=>{const r=await client.callTool({name,arguments:args});assert.ok(!r.isError,JSON.stringify(r));return r.structuredContent;};
     const status=await call('index12_status');assert.equal(status.operationCount,402);assert.equal(status.workspaceName,'Test');
     const found=await call('index12_find_entities',{query:'pushkina',type:'projects'});assert.equal(found.candidates[0].id,String(project));assert.equal(found.totalCandidates,1);

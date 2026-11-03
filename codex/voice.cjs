@@ -21,8 +21,8 @@ function spokenText(value) {
 }
 
 class VoiceService {
-  constructor({ db, Workspace, apiKey = () => process.env.OPENAI_API_KEY, model = () => process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1', request = fetch, connect = (url, options) => new WebSocket(url, options), pollMs = 500 }) {
-    Object.assign(this, { db, Workspace, apiKey, model, request, connect, pollMs });
+  constructor({ db, Workspace, apiKey = () => process.env.OPENAI_API_KEY, model = () => process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime-2.1', request = fetch, connect = (url, options) => new WebSocket(url, options), pollMs = 500, cloudService }) {
+    Object.assign(this, { db, Workspace, apiKey, model, request, connect, pollMs, cloudService });
     this.sessions = new Map();
   }
   get configured() { return !!this.apiKey(); }
@@ -39,7 +39,7 @@ class VoiceService {
     const chat = await this.db().collection('desktopChats').findOne({ _id: session.chatId, ...session.scope, archived: false });
     if (!chat) fail('Чат недоступен.', 404);
     if (session.claimed && !await this.db().collection('desktopVoiceSessions').findOne({ _id: session.key, active: true, leaseUntil: { $gt: new Date() } })) fail('Голосовой диалог завершён. Подключитесь снова.', 409);
-    if (!online(await this.db().collection('desktopWorkers').findOne({ _id: scopeKey(session.scope) }))) fail('Нет связи с Codex на Mac.', 503);
+    if (!(this.cloudService?.configured && await this.cloudService.allowed(session.scope)) && !online(await this.db().collection('desktopWorkers').findOne({ _id: scopeKey(session.scope) }))) fail('Нет связи с Codex на Mac.', 503);
     return chat;
   }
   async start(scope, chatId, { requestId, sdp }) {
@@ -145,10 +145,11 @@ class VoiceService {
         const busy = await jobs.findOne({ ...session.scope, chatId: session.chatId, active: true });
         if (busy && busy._id !== id) { await new Promise(resolve => setTimeout(resolve, this.pollMs)); continue; }
         const requestHash = createHash('sha256').update(JSON.stringify([session.chatId, 'send', [text, []]])).digest('hex');
-        const job = { _id: id, ...session.scope, chatId: session.chatId, kind: 'send', message: text, attachments: [], cursor: null, requestHash,
+        const cloud = this.cloudService?.configured && await this.cloudService.allowed(session.scope);
+        const job = { _id: id, ...session.scope, ...(cloud ? { backend: 'cloud' } : {}), chatId: session.chatId, kind: 'send', message: text, attachments: [], cursor: null, requestHash,
           source: 'voice', voiceSessionId: session.id, voiceItemId: itemId, status: 'queued', active: true, createdAt: new Date() };
         try { await jobs.insertOne(job); } catch (error) { if (error.code !== 11000 || !await jobs.findOne({ _id: id, ...session.scope })) throw error; }
-        accepted = true; session.jobId = id;
+        accepted = true; session.jobId = id; if (cloud) this.cloudService.kick();
         await this.db().collection('desktopChats').updateOne({ _id: chat._id, ...session.scope }, { $set: { updatedAt: new Date() } });
       }
       const job = await jobs.findOne({ _id: id, ...session.scope });

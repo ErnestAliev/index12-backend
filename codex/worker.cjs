@@ -61,12 +61,12 @@ async function run() {
     gateway = await startSharedGateway({ stateFile: path.join(root, '.desktop-bridge.local.json'), isReady: () => running && !disconnected && Date.now() - lastHeartbeat < 30000, onChange: () => heartbeat().catch(() => { running = false; }) });
     await heartbeat();
   }
-  await jobs.updateMany({ ...scope, status: 'running' }, { $set: { status: 'interrupted', active: false, error: 'Связь прервалась. Проверьте историю чата перед повтором.', expiresAt: new Date(Date.now() + 86400000) } });
+  await jobs.updateMany({ ...scope, backend: { $ne: 'cloud' }, status: 'running' }, { $set: { status: 'interrupted', active: false, error: 'Связь прервалась. Проверьте историю чата перед повтором.', expiresAt: new Date(Date.now() + 86400000) } });
   timer = setInterval(() => heartbeat().catch(() => { running = false; }), 10000);
   console.log(JSON.stringify({ connected: true, transport, desktopConnected: !!gateway?.isDesktopConnected(), project: 'Index12', projectId: project.id }));
     while (running) {
       if (!await authorized()) throw new Error('Доступ к рабочей области отозван.');
-      const job = await jobs.findOneAndUpdate({ ...scope, status: 'queued', active: true }, { $set: { status: 'running', startedAt: new Date(), workerId: instanceId } }, { sort: { createdAt: 1 }, returnDocument: 'after' });
+      const job = await jobs.findOneAndUpdate({ ...scope, backend: { $ne: 'cloud' }, status: 'queued', active: true }, { $set: { status: 'running', startedAt: new Date(), workerId: instanceId } }, { sort: { createdAt: 1 }, returnDocument: 'after' });
       if (!job) { await wait(750); continue; }
       let execution;
       try {

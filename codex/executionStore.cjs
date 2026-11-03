@@ -27,7 +27,7 @@ class ExecutionStore {
   async open(job, workerId) {
     await this.ready();
     const row = { _id: job._id, actorId: job.actorId, workspaceId: job.workspaceId, chatId: job.chatId,
-      workerId, requestHash: job.requestHash || null, state: 'running', active: true, revision: 0, createdAt: new Date(), threadId: null, turnId: null };
+      workerId, ...(job.backend === 'cloud' ? { workerBackend: 'cloud' } : {}), requestHash: job.requestHash || null, state: 'running', active: true, revision: 0, createdAt: new Date(), threadId: null, turnId: null };
     await this.runs().insertOne(row);
     return row;
   }
@@ -41,12 +41,13 @@ class ExecutionStore {
     const run = await this.runs().findOne(query, { session });
     if (!run) throw executionError('EXECUTION_STOPPED', 'Это выполнение завершено или остановлено. Новые изменения не разрешены.');
     const workerQuery = { _id: `${scope.actorId}:${scope.workspaceId}`, instanceId: run.workerId, seenAt: { $gt: new Date(Date.now() - 45000) } };
-    const worker = await this.db.collection('desktopWorkers').findOne(workerQuery, { session });
+    const workers = this.db.collection(run.workerBackend === 'cloud' ? 'cloudWorkers' : 'desktopWorkers');
+    const worker = await workers.findOne(workerQuery, { session });
     if (!worker) throw executionError('EXECUTION_LEASE_LOST', 'Связка INDEX12 потеряла право выполнять это сообщение.');
     // Touch the same document as stop/finish. Concurrent cancellation conflicts
     // with a mutation transaction, so a stale worker cannot commit afterwards.
     if (touch) {
-      if (!(await this.db.collection('desktopWorkers').updateOne(workerQuery, { $inc: { executionRevision: 1 } }, { session })).matchedCount) throw executionError('EXECUTION_LEASE_LOST', 'Связка потеряла право выполнять это сообщение.');
+      if (!(await workers.updateOne(workerQuery, { $inc: { executionRevision: 1 } }, { session })).matchedCount) throw executionError('EXECUTION_LEASE_LOST', 'Связка потеряла право выполнять это сообщение.');
       if (!(await this.runs().updateOne(query, { $inc: { revision: 1 } }, { session })).matchedCount) throw executionError('EXECUTION_STOPPED', 'Выполнение остановлено.');
     }
     return run;
@@ -77,7 +78,7 @@ class ExecutionStore {
     await this.runs().updateOne({ _id: id, workerId, state: 'running' }, { $set: { state, active: false, finishedAt: new Date(), ...(error ? { error } : {}) } });
   }
   async interrupt(scope, workerId) {
-    await this.runs().updateMany({ ...scope, ...(workerId ? { workerId } : {}), active: true }, { $set: { active: false, state: 'interrupted', finishedAt: new Date(), error: { code: 'CONNECTION_ERROR', message: 'Связка была перезапущена. Проверьте сохранённые результаты перед продолжением.' } } });
+    await this.runs().updateMany({ ...scope, ...(workerId ? { workerId } : { workerBackend: { $ne: 'cloud' } }), active: true }, { $set: { active: false, state: 'interrupted', finishedAt: new Date(), error: { code: 'CONNECTION_ERROR', message: 'Связка была перезапущена. Проверьте сохранённые результаты перед продолжением.' } } });
   }
   async completed(identity, scope, action, session) {
     if (!identity) return;

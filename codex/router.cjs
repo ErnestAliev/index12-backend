@@ -13,11 +13,12 @@ const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTim
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
 const scopeFor = user => ({ actorId: String(user?._id || user?.id || ''), workspaceId: String(user?.currentWorkspaceId || '') });
 
-function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = process.env.FRONTEND_URL, allowedOrigins = [], voiceService }) {
+function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = process.env.FRONTEND_URL, allowedOrigins = [], voiceService, cloudService }) {
   const router = express.Router();
   let indexes;
   const collection = name => db().collection(`desktop${name}`);
-  const voice = voiceService || new VoiceService({ db, Workspace });
+  const cloudAllowed = scope => cloudService?.configured ? cloudService.allowed(scope) : Promise.resolve(false);
+  const voice = voiceService || new VoiceService({ db, Workspace, cloudService });
   async function ensureIndexes() {
     if (!indexes) indexes = Promise.all([
       collection('Chats').createIndex({ actorId: 1, workspaceId: 1, updatedAt: -1 }),
@@ -46,7 +47,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     } catch (error) { next(error); }
   });
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
-  const workerFor = scope => collection('Workers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` });
+  const workerFor = async scope => await cloudAllowed(scope) ? await db().collection('cloudWorkers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` }) || cloudService.worker(scope) : collection('Workers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` });
   const jobForClient = async job => job && ({ ...publicJob(job), ...(job.active ? { pendingRequests: (await collection('Requests').find({ jobId: job._id, actorId: job.actorId, workspaceId: job.workspaceId, state: 'pending', expiresAt: { $gt: new Date() } }).sort({ expiresAt: 1 }).limit(20).toArray()).map(publicRequest) } : {}) });
   const executionForClient = async (id, scope) => {
     const { run, events } = await new ExecutionStore(db()).report(id, scope);
@@ -57,14 +58,16 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   };
   router.get('/status', wrap(async (req, res) => {
     const worker = await workerFor(req.desktopScope);
-    const connected = online(worker);
-    res.json({ connected, configured: !!worker, voiceAvailable: voice.configured && connected, desktopConnected: worker?.desktopConnected === true,
+    const cloud = await cloudAllowed(req.desktopScope);
+    const connected = cloud || online(worker);
+    res.json({ connected, provider: cloud ? 'cloud' : 'desktop', configured: cloud || !!worker, voiceAvailable: voice.configured && connected, desktopConnected: worker?.desktopConnected === true,
       projectName: worker?.projectName || 'Index12', reason: connected ? null : 'Нет связи с Codex на Mac. Запустите npm run desktop:bridge.' });
   }));
   registerVoiceRoutes(router, { service: voice, collection, wrap });
   router.get('/chats', wrap(async (req, res) => {
+    const cloud = await cloudAllowed(req.desktopScope);
     const chats = await collection('Chats').find({ ...req.desktopScope, archived: false }).sort({ updatedAt: -1 }).limit(100).toArray();
-    res.json({ chats: chats.map(({ _id, title, threadId, updatedAt }) => ({ id: _id, title, threadId: threadId || null, updatedAt })) });
+    res.json({ chats: chats.map(({ _id, title, threadId, updatedAt }) => ({ id: _id, title, threadId: cloud ? null : threadId || null, updatedAt })) });
   }));
   router.post('/chats', wrap(async (req, res) => {
     if (!await workerFor(req.desktopScope)) return res.status(403).json({ error: 'Desktop-помощник не настроен для этого пользователя и рабочей области.' });
@@ -78,7 +81,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const recent = await collection('Jobs').find({ chatId: chat._id, ...req.desktopScope, status: 'completed',
       $or: [{ kind: 'history', cursor: null }, { kind: 'send', 'result.history': { $exists: true } }] }).sort({ createdAt: -1 }).limit(1).toArray();
     const cachedHistory = recent[0]?.kind === 'send' ? recent[0].result?.history : recent[0]?.result;
-    res.json({ chat: { id: chat._id, title: chat.title, threadId: chat.threadId || null }, pendingJob: await jobForClient(pending), cachedHistory: cachedHistory || null });
+    res.json({ chat: { id: chat._id, title: chat.title, threadId: await cloudAllowed(req.desktopScope) ? null : chat.threadId || null }, pendingJob: await jobForClient(pending), cachedHistory: cachedHistory || null });
   }));
   router.get('/chats/:id/executions', wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
@@ -148,9 +151,10 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
           result: { text: `Ранее выполнено: ${saved.completed.length} действий.`, completed: saved.completed, ...(saved.execution ? { execution: saved.execution } : {}) }, error: saved.execution?.error?.message || null } });
       }
     }
-    if (!online(await workerFor(scope))) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
-    if (kind === 'history' && !chat.threadId) return res.json({ job: { status: 'completed', result: { messages: [], nextCursor: null } } });
-    const job = { _id: id, ...scope, requestHash, chatId: chat._id, kind, message: kind === 'send' ? message.trim() : null, attachments: kind === 'send' ? attachments : [], cursor: cursor || null, status: 'queued', active: true, createdAt: new Date() };
+    const cloud = await cloudAllowed(scope);
+    if (!cloud && !online(await workerFor(scope))) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
+    if (!cloud && kind === 'history' && !chat.threadId) return res.json({ job: { status: 'completed', result: { messages: [], nextCursor: null } } });
+    const job = { _id: id, ...scope, ...(cloud ? { backend: 'cloud' } : {}), requestHash, chatId: chat._id, kind, message: kind === 'send' ? message.trim() : null, attachments: kind === 'send' ? attachments : [], cursor: cursor || null, status: 'queued', active: true, createdAt: new Date() };
     try { await collection('Jobs').insertOne(job); }
     catch (error) {
       if (error.code === 11000) return res.status(409).json({ error: 'В этом чате уже выполняется запрос.' });
@@ -158,6 +162,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     }
     await retainFiles();
     res.status(202).json({ job: publicJob(job) });
+    if (cloud) cloudService.kick();
   }));
   router.post('/jobs/:id/requests/:requestId/answer', wrap(async (req, res) => {
     const scope = req.desktopScope;
