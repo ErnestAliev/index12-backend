@@ -59,7 +59,7 @@ async function startFixture() {
     const emitted = [];
     const handlers = {};
     const entityHandlers = {};
-    const context = { changeHistory, isSystemWithdrawal, normalizeTransferData, app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
+    const context = { require: require('node:module').createRequire(path.join(__dirname, '../../server.js')), changeHistory, isSystemWithdrawal, normalizeTransferData, app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
       captureMcpEntityHandler: (kind, handler) => (entityHandlers[kind] = handler),
       captureMcpHandler: (kind, handler) => (handlers[kind] = changeHistory.wrapHandler(handler)), mcpVersionFilter, mcpAuditEntry,
       withRelatedOperationGuard,

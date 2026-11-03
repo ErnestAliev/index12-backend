@@ -32,7 +32,8 @@ test('permission replies grant exactly the reviewed request for this turn, never
   assert.deepEqual(answerRequest(spec, { action: 'accept' }).result, { permissions: { fileSystem: { read: ['/tmp/test'] } }, scope: 'turn' });
   assert.deepEqual(answerRequest(spec, { action: 'decline' }).result.permissions, {});
   assert.throws(() => answerRequest(spec, { action: 'accept', permissions: { network: true } }));
-  assert.equal(INDEX12_TOOLS.length, 15);
+  assert.equal(INDEX12_TOOLS.length, 16);
+  assert.ok(INDEX12_TOOLS.includes('index12_company_profile'));
   assert.ok(scopedConfig()['mcp_servers.index12.enabled_tools'].includes('index12_delete_operation'));
   assert.equal(scopedConfig()['mcp_servers.index12.tools.index12_delete_operation.approval_mode'], 'prompt', 'tool visibility does not invent server permission');
 });

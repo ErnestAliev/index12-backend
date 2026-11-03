@@ -13,7 +13,7 @@ async function until(fn) { for (let i = 0; i < 100; i++) { if (await fn()) retur
 async function run() {
   const fixture = await startFixture(); let http;
   try {
-    const { Company } = fixture.models;
+    const { Company, Contractor } = fixture.models;
     const { Workspace } = fixture.identityModels;
     const workspace = await Workspace.create({ name: 'Business test', userId: fixture.userId, isDefault: true, sharedWith: [{ userId: 'analyst', role: 'analyst' }, { userId: 'manager', role: 'manager' }, { userId: 'shared-admin', role: 'admin' }] });
     const other = await Workspace.create({ name: 'Other', userId: 'other-owner', isDefault: true });
@@ -24,7 +24,7 @@ async function run() {
     const otherCompany = await Company.create({ name: 'Другая компания', identificationNumber: bin, userId: 'other-owner', workspaceId: other._id });
     const sharedCompany = await Company.create({ name: 'Отдельная область', identificationNumber: bin, userId: scope2, workspaceId: nonDefault._id });
     const app = express(); app.use(express.json()); app.use(require('cors')({ origin: true, credentials: true }));
-    const env = { EGOV_API_KEY: 'egov-test', KGD_PORTAL_TOKEN: 'portal-test', INTEGRATIONS_ENCRYPTION_KEY: 'ab'.repeat(32), FRONTEND_URL: 'http://127.0.0.1:5192' };
+    const env = { EGOV_API_KEY: 'egov-test', KGD_PORTAL_TOKEN: 'portal-test', INTEGRATIONS_ENCRYPTION_KEY: 'ab'.repeat(32), FRONTEND_URL: 'http://127.0.0.1:5192', ONEC_WORKSPACE_ID: String(workspace._id), ONEC_BASE_URL: 'https://onec.example.invalid/', ONEC_USERNAME: 'test', ONEC_PASSWORD: 'test' };
     let lookupCalls = 0, debtCalls = 0, releaseDebt, block = true, total = '1500.25';
     const isAuthenticated = (req, res, next) => {
       if (!req.headers['x-test-actor']) return res.sendStatus(401);
@@ -37,7 +37,9 @@ async function run() {
       req.cachedWorkspace = row; next();
     };
     const getWorkspaceStorageUserId = row => row.isDefault ? String(row.userId) : `${row.userId}_ws_${row._id}`;
-    app.use('/api/business', createBusinessRouter({ db: () => mongoose.connection.db, Company, isAuthenticated, checkWorkspacePermission, getWorkspaceStorageUserId, env, reportError: console.error,
+    app.use('/api/business', createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, isAuthenticated, checkWorkspacePermission, getWorkspaceStorageUserId, env, reportError: console.error,
+      onecCandidates: async (kind, { search, skip }) => ({ candidates: [{ ref: kind === 'companies' ? '11111111-1111-4111-8111-111111111111' : '22222222-2222-4222-8222-222222222222', name: kind === 'companies' ? 'ТОО Тест из 1С' : 'Контрагент из 1С', identificationNumber: bin }], hasMore: false, nextSkip: null }),
+      onecLookup: async (number, kind, _invoke, ref) => ({ fields: { ...profile, legalName: 'Полное название из 1С', identificationNumber: bin, bankAccounts: [{ iban: 'KZTESTACCOUNT', bankName: 'Тестовый банк', bic: 'TESTKZ', currency: 'KZT' }] }, sync: { source: '1С', ref, collection: kind === 'companies' ? 'Catalog_Организации' : 'Catalog_Контрагенты', checkedAt: new Date().toISOString(), missing: [] } }),
       registryLookup: async () => { lookupCalls++; return { profile, source: REGISTRY_URL, checkedAt: new Date().toISOString(), checks: { restrictions: 'not_checked' } }; },
       debtLookup: async (id, token) => {
         debtCalls++; assert.equal(token, 'personal-account-test-token');
@@ -58,22 +60,28 @@ async function run() {
     const found = await request(`/registry/${bin}`); assert.equal(found.status, 200, JSON.stringify(found.data));
     await request(`/registry/${bin}`); assert.equal(lookupCalls, 1);
     assert.equal((await request('/registry/123')).status, 400);
-    assert.equal((await request(`/companies/${company._id}/refresh`, 'POST', {})).status, 409);
-    const localPath = '/Users/test/company.p12', localPassword = ' local password with spaces ';
-    const savedEds = await request(`/companies/${company._id}/eds`, 'PUT', { storagePath: localPath, password: localPassword });
-    assert.equal(savedEds.status, 200); assert.equal(savedEds.data.eds.enabled, true); assert.equal(savedEds.data.eds.passwordStored, true);
-    const storedEds = await mongoose.connection.db.collection('businessEds').findOne({ scope: fixture.userId, companyId: company._id });
-    assert.notEqual(storedEds.passwordSecret, localPassword);
-    const card = await request(`/companies/${company._id}`);
-    assert.equal(card.status, 200); assert.equal(card.data.eds.storagePath, localPath);
-    assert.ok(!JSON.stringify(card.data).includes(localPassword)); assert.ok(!JSON.stringify(card.data).includes(storedEds.passwordSecret));
-    assert.equal((await request(`/companies/${company._id}/eds`, 'PUT', { storagePath: localPath })).status, 200, 'unchanged saved password is retained');
-    assert.equal((await request(`/companies/${company._id}/eds`, 'PUT', { storagePath: '/Users/test/other.p12' })).status, 400);
-    assert.equal((await request(`/companies/${otherCompany._id}/eds`, 'PUT', { storagePath: localPath, password: localPassword })).status, 404);
-    assert.equal((await request(`/companies/${company._id}`, 'GET', undefined, 'other-owner', other._id)).status, 404);
+    const ref = '11111111-1111-4111-8111-111111111111';
+    const manualCompanies = await Company.create(Array.from({ length: 6 }, (_, i) => ({ name: `Управляемая ${i}`, userId: fixture.userId })));
+    assert.equal((await request(`/companies/${manualCompanies[0]._id}/sync-onec`, 'POST', { expectedVersion: 0 })).status, 409, 'one organization must never auto-bind unrelated companies');
+    assert.equal((await request(`/companies/${company._id}/eds`, 'PUT', {})).status, 404, 'removed credential endpoint');
+    assert.equal((await request(`/companies/${otherCompany._id}`)).status, 404);
     assert.equal((await request(`/companies/${company._id}`, 'GET', undefined, fixture.userId, workspace._id, { 'x-index12-workspace-id': String(other._id) })).status, 409);
-    const refreshed = await request(`/companies/${company._id}/refresh`, 'POST', {});
-    assert.equal(refreshed.status, 200); assert.equal(refreshed.data.company.legalAddress, profile.legalAddress);
+    const foundOnec = await request(`/companies/${company._id}/onec-candidates`);
+    assert.equal(foundOnec.status, 200); assert.equal(foundOnec.data.candidates[0].ref, ref);
+    const refreshed = await request(`/companies/${company._id}/sync-onec`, 'POST', { ref, expectedVersion: 0 });
+    assert.equal(refreshed.status, 200, JSON.stringify(refreshed.data));
+    assert.equal(refreshed.data.company.legalAddress, profile.legalAddress);
+    assert.equal(refreshed.data.company.name, company.name, 'sync keeps display names and ledger links');
+    for (const row of manualCompanies) { const unchanged = (await request(`/companies/${row._id}`)).data.company; assert.equal(unchanged.identificationNumber ?? null, null); assert.equal(unchanged.onecSync, undefined); }
+    assert.equal((await request(`/companies/${manualCompanies[0]._id}/sync-onec`, 'POST', { ref, expectedVersion: 0 })).status, 409, 'source record cannot silently bind a second company');
+    assert.equal((await request(`/companies/${company._id}`, 'PATCH', { expectedVersion: 0, changes: { director: 'Stale' } })).status, 409);
+    const savedProfile = await request(`/companies/${company._id}`, 'PATCH', { expectedVersion: refreshed.data.company.profileVersion, changes: { director: 'Ручная правка', externalLinks: [{ title: 'Документы', url: 'https://drive.google.com/drive/folders/test', purpose: 'documents' }] } });
+    assert.equal(savedProfile.status, 200); assert.equal(savedProfile.data.company.director, 'Ручная правка');
+    assert.equal((await request(`/companies/${company._id}`, 'PATCH', { expectedVersion: savedProfile.data.company.profileVersion, changes: { externalLinks: [{ url: 'javascript:alert(1)' }] } })).status, 400);
+    const contractor = await Contractor.create({ name: 'Поставщик без БИН', userId: fixture.userId });
+    const linkedContractor = await request(`/contractors/${contractor._id}/sync-onec`, 'POST', { ref: '22222222-2222-4222-8222-222222222222', expectedVersion: 0 });
+    assert.equal(linkedContractor.status, 200); assert.equal(linkedContractor.data.company.identificationNumber, bin);
+    assert.equal(linkedContractor.data.company.name, 'Поставщик без БИН');
     assert.equal((await request(`/companies/${otherCompany._id}/connection`, 'PUT', { personalAccountToken: 'personal-account-test-token' })).status, 404);
     assert.equal((await request(`/companies/${company._id}/connection`, 'PUT', { personalAccountToken: 'personal-account-test-token' })).status, 200);
     await until(() => debtCalls === 1);
@@ -117,9 +125,6 @@ async function run() {
     releaseDebt(); block = false;
     await new Promise(resolve => setTimeout(resolve, 80));
     assert.equal((await request('/status')).data.connections.length, 0);
-    assert.equal((await request(`/companies/${company._id}/eds`, 'DELETE')).status, 200);
-    assert.equal((await request(`/companies/${company._id}`)).data.eds, null);
-    assert.equal((await request(`/companies/${company._id}/refresh`, 'POST', {})).status, 409);
     // Seed an existing account so the browser opens the company through the real editor row.
     await fixture.request('/accounts', 'POST', { name: 'Счёт компании', companyId: company._id, initialBalance: 0 });
     // The assistant uses the same calendar through an authenticated read-only MCP route.
@@ -135,9 +140,10 @@ async function run() {
     assert.equal(mcpResult.workspaceId, String(mcpWorkspace._id)); assert.equal(mcpResult.tasks[0].title, 'Задача для помощника');
     assert.equal((await fetch(`${fixture.apiUrl}/mcp/business/tasks`, { method: 'POST', headers: mcpHeaders })).status, 403);
     const taxRead = await fetch(`${fixture.apiUrl}/mcp/business/status`, { headers: mcpHeaders }); assert.equal(taxRead.status, 200);
-    console.log('PASS: real HTTP + MongoDB, scoped tasks, encrypted credentials, KGD deduplication/reopening, non-blocking sync, disconnect fencing and shared workspace isolation');
+    console.log('PASS: isolated company profiles, explicit 1C binding without BIN, manual companies remain untouched, duplicate binding prevention, edits/links/version conflicts, calendar and KGD regression');
     if (process.argv.includes('--browser')) {
-      await Company.updateOne({ _id: company._id }, { $unset: { legalAddress: '', director: '', registrationDate: '', activity: '', registrationStatus: '' } });
+      await Company.updateOne({ _id: company._id }, { $unset: { onecSync: '' }, $set: { identificationNumber: null } });
+      await Contractor.deleteMany({ userId: fixture.userId });
       const { verifyBusinessUi } = await import('../../../index12-frontend/tests/browser/business.mjs');
       await verifyBusinessUi({ apiUrl, entitiesApiUrl: fixture.apiUrl, actor: fixture.userId, workspaceId: String(workspace._id), company, profile });
     }

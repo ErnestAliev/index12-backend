@@ -1,9 +1,10 @@
 'use strict';
 const express = require('express');
 const { Types } = require('mongoose');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { fail, identifier, lookupRegistry, fetchTaxDebt, encryptToken, decryptToken } = require('./providers.cjs');
-const { localStoragePath, passwordSecret, publicEds } = require('./eds.cjs');
+const { profileInput } = require('./company-profile.cjs');
+const { lookupProfile, listCandidates } = require('./onec/profile.cjs');
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Almaty' }).format(new Date());
 function dateOnly(value) {
   if (value === null || value === '') return null;
@@ -31,7 +32,7 @@ function taskInput(body, partial = false) {
   }
   return result;
 }
-function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
+function createBusinessRouter({ db, Company, Contractor, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
   const router = express.Router();
   const coll = name => db().collection(`business${name}`);
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -42,7 +43,7 @@ function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthen
     coll('Tasks').createIndex({ scope: 1, dueDate: 1 }),
     coll('Registry').createIndex({ scope: 1, bin: 1 }, { unique: true }),
     coll('Registry').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
-    coll('Eds').createIndex({ scope: 1, companyId: 1 }, { unique: true })
+    Company.init(), ...(Contractor ? [Contractor.init()] : [])
   ]).catch(error => { indexes = null; throw error; });
   // Tax data and tokens are available to workspace administrators only.
   router.use(isAuthenticated, checkWorkspacePermission(['admin']), wrap(async (req, _res, next) => {
@@ -103,7 +104,7 @@ function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthen
     for (let i = 0; i < rows.length; i += 2) await Promise.allSettled(rows.slice(i, i + 2).map(runOne));
   }
   router.get('/status', wrap(async (req, res) => {
-    res.json({ workspaceId: String(req.user.currentWorkspaceId || req.cachedWorkspace._id), actorId: String(req.user.id), registryConfigured: !!env.EGOV_API_KEY, taxConfigured: !!env.KGD_PORTAL_TOKEN && /^[a-f\d]{64}$/i.test(env.INTEGRATIONS_ENCRYPTION_KEY || ''), taxCoverage: ['debt'], taxInboxConnected: false, edsAuthenticationConnected: false, connections: (await coll('Connections').find({ scope: req.businessScope }).toArray()).map(publicConnection) });
+    res.json({ workspaceId: String(req.user.currentWorkspaceId || req.cachedWorkspace._id), actorId: String(req.user.id), registryConfigured: !!env.EGOV_API_KEY, onecConfigured: !!env.ONEC_BASE_URL && !!env.ONEC_USERNAME && !!env.ONEC_PASSWORD && env.ONEC_WORKSPACE_ID === String(req.cachedWorkspace._id), taxConfigured: !!env.KGD_PORTAL_TOKEN && /^[a-f\d]{64}$/i.test(env.INTEGRATIONS_ENCRYPTION_KEY || ''), taxCoverage: ['debt'], taxInboxConnected: false, connections: (await coll('Connections').find({ scope: req.businessScope }).toArray()).map(publicConnection) });
   }));
   router.get('/registry/:bin', wrap(async (req, res) => {
     const bin = identifier(req.params.bin);
@@ -114,48 +115,77 @@ function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthen
     await coll('Registry').updateOne(filter, { $set: { result, expiresAt: new Date(Date.now() + 15 * 60000) } }, { upsert: true });
     res.json({ ...result, cached: false });
   }));
-  router.get('/companies/:id', wrap(async (req, res) => {
+  const entityModel = kind => kind === 'companies' ? Company : kind === 'contractors' ? Contractor : null;
+  router.param('kind', (_req, _res, next, kind) => next(entityModel(kind) ? undefined : 'route'));
+  const entityFor = async (req) => {
+    const model = entityModel(req.params.kind);
+    if (!model || !/^[a-f\d]{24}$/i.test(req.params.id)) fail('Карточка не найдена', 404);
+    const scope = req.businessScope;
+    const ids = /^[a-f\d]{24}$/i.test(scope) ? [scope, new Types.ObjectId(scope)] : [scope];
+    const entity = await model.findOne({ _id: req.params.id, userId: { $in: ids } }).lean();
+    if (!entity) fail('Карточка не найдена', 404);
+    return { model, entity };
+  };
+  const versionFilter = (entity, version) => {
+    if (!Number.isInteger(version) || version < 0) fail('Нужна версия карточки', 400);
+    if ((entity.profileVersion || 0) !== version) fail('Карточка изменена. Откройте её заново', 409);
+    return version ? { profileVersion: version } : { $or: [{ profileVersion: 0 }, { profileVersion: { $exists: false } }] };
+  };
+  router.get('/:kind/:id', wrap(async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
-    const company = await companyFor(req.businessScope, req.params.id);
-    const eds = await coll('Eds').findOne({ scope: req.businessScope, companyId: req.params.id });
-    const connection = await coll('Connections').findOne({ scope: req.businessScope, companyId: req.params.id });
-    res.json({ company, eds: publicEds(eds, company.identificationNumber), connection: connection ? publicConnection(connection) : null });
+    const { entity } = await entityFor(req); res.json({ company: entity });
   }));
-  router.put('/companies/:id/eds', wrap(async (req, res) => {
-    res.set('Cache-Control', 'private, no-store');
-    const company = await companyFor(req.businessScope, req.params.id);
-    const bin = identifier(company.identificationNumber);
-    const storagePath = localStoragePath(req.body.storagePath);
-    const filter = { scope: req.businessScope, companyId: req.params.id };
-    const previous = await coll('Eds').findOne(filter);
-    const row = { ...filter, bin, storagePath, enabled: true, updatedAt: new Date() };
-    if (req.body.password != null && req.body.password !== '') row.passwordSecret = passwordSecret(req.body.password, row, env);
-    else if (previous?.storagePath === storagePath && previous.bin === bin && previous.passwordSecret) row.passwordSecret = previous.passwordSecret;
-    else fail('Укажите пароль ЭЦП');
-    await coll('Eds').updateOne(filter, { $set: row }, { upsert: true });
-    res.json({ eds: publicEds(row, bin) });
+  router.patch('/:kind/:id', wrap(async (req, res) => {
+    const { model, entity } = await entityFor(req);
+    const filter = versionFilter(entity, req.body.expectedVersion);
+    const fields = profileInput(req.body.changes);
+    if (!Object.keys(fields).length) fail('Нет изменений');
+    const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, ...filter }, { $set: fields, $inc: { profileVersion: 1 } }, { new: true, runValidators: true }).lean();
+    if (!company) fail('Карточка изменена. Откройте её заново', 409);
+    emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);
+    res.json({ company });
   }));
-  router.delete('/companies/:id/eds', wrap(async (req, res) => {
-    await companyFor(req.businessScope, req.params.id);
-    await coll('Eds').deleteOne({ scope: req.businessScope, companyId: req.params.id });
-    res.json({ disconnected: true });
+  const requireOnec = req => {
+    if (env.ONEC_WORKSPACE_ID !== String(req.cachedWorkspace._id) || !env.ONEC_BASE_URL || !env.ONEC_USERNAME || !env.ONEC_PASSWORD) fail('MCP-подключение 1С для этой рабочей области не настроено', 503);
+  };
+  router.get('/:kind/:id/onec-candidates', wrap(async (req, res) => {
+    await entityFor(req); requireOnec(req);
+    const search = typeof req.query.search === 'string' ? req.query.search.slice(0, 120) : '';
+    const skip = Number(req.query.skip || 0);
+    if (!Number.isInteger(skip) || skip < 0 || skip > 100000) fail('Некорректная страница списка');
+    res.json(await onecCandidates(req.params.kind, { search, skip }));
   }));
-  router.post('/companies/:id/refresh', wrap(async (req, res) => {
-    const company = await companyFor(req.businessScope, req.params.id);
-    const bin = identifier(company.identificationNumber);
-    const filter = { scope: req.businessScope, companyId: req.params.id, bin, enabled: true };
-    const eds = await coll('Eds').findOne(filter);
-    if (!eds) fail('Сначала подключите ЭЦП компании', 409);
-    const result = await registryLookup(bin, { apiKey: env.EGOV_API_KEY });
-    if (!result.profile) fail('Юридическое лицо не найдено в eGov', 404);
-    if (result.profile.identificationNumber !== bin) fail('БИН в ответе eGov не соответствует компании', 502);
-    const current = await companyFor(req.businessScope, req.params.id);
-    if (current.identificationNumber !== bin || !await coll('Eds').findOne({ ...filter, passwordSecret: eds.passwordSecret })) fail('Настройки компании изменились. Повторите обновление', 409);
-    const fields = Object.fromEntries(['legalAddress', 'director', 'registrationDate', 'activity', 'registrationStatus'].map(field => [field, result.profile[field] || null]));
-    const updated = await Company.findOneAndUpdate({ _id: company._id, userId: current.userId, identificationNumber: bin }, { $set: fields }, { new: true }).lean();
-    if (!updated) fail('Настройки компании изменились. Повторите обновление', 409);
-    res.json({ company: updated, source: result.source, checkedAt: result.checkedAt });
-    setImmediate(() => sync(req.businessScope).catch(() => {}));
+  router.post('/:kind/:id/sync-onec', wrap(async (req, res) => {
+    const { model, entity } = await entityFor(req);
+    requireOnec(req);
+    const filter = versionFilter(entity, req.body.expectedVersion);
+    const bin = entity.identificationNumber || '';
+    const ref = req.body.ref || entity.onecSync?.ref;
+    if (!ref) fail('Сначала выберите запись из справочника 1С и свяжите её с этой карточкой', 409);
+    const connectionKey = createHash('sha256').update(env.ONEC_BASE_URL.replace(/\/?$/, '/')).digest('hex');
+    if (entity.onecSync?.connectionKey && entity.onecSync.connectionKey !== connectionKey) fail('Подключённая база 1С изменилась. Сначала удалите старую связь и выберите запись заново', 409);
+    if (ref && !/^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(ref)) fail('Некорректная ссылка 1С');
+    const linked = await model.findOne({ userId: entity.userId, 'onecSync.ref': ref, _id: { $ne: entity._id } }).lean();
+    if (linked) fail(`Эта запись 1С уже связана с «${linked.name}». Выберите другую запись`, 409);
+    const result = await onecLookup(bin, req.params.kind, undefined, ref);
+    const expectedCollection = req.params.kind === 'companies' ? 'Catalog_Организации' : 'Catalog_Контрагенты';
+    if (result.sync.ref !== ref || result.sync.collection !== expectedCollection) fail('MCP 1С вернул другую запись', 502);
+    if (!ref && bin && result.fields.identificationNumber !== bin) fail('БИН/ИИН из 1С не совпадает с карточкой', 502);
+    const fields = profileInput(result.fields);
+    delete fields.name; // Preserve the display name used by operations and accounts.
+    if (fields.bankAccounts) fields.bankAccounts = [...fields.bankAccounts, ...(entity.bankAccounts || []).filter(row => !fields.bankAccounts.some(source => source.iban === row.iban))];
+    const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, identificationNumber: entity.identificationNumber ?? null, ...filter }, { $set: { ...fields, onecSync: { ...result.sync, connectionKey } }, $inc: { profileVersion: 1 } }, { new: true, runValidators: true }).lean();
+    if (!company) fail('Карточка изменена во время загрузки. Повторите синхронизацию', 409);
+    emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);
+    res.json({ company, sync: result.sync });
+  }));
+  router.post('/:kind/:id/unlink-onec', wrap(async (req, res) => {
+    const { model, entity } = await entityFor(req);
+    const filter = versionFilter(entity, req.body.expectedVersion);
+    const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, ...filter }, { $unset: { onecSync: '' }, $inc: { profileVersion: 1 } }, { new: true }).lean();
+    if (!company) fail('Карточка изменена. Откройте её заново', 409);
+    emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);
+    res.json({ company });
   }));
   router.put('/companies/:id/connection', wrap(async (req, res) => {
     if (!env.KGD_PORTAL_TOKEN) fail('На сервере не настроен токен API КГД', 503);
@@ -206,7 +236,11 @@ function createBusinessRouter({ db, Company, getWorkspaceStorageUserId, isAuthen
     if (!result.deletedCount) fail('Ручная задача не найдена', 404);
     res.json({ deleted: true });
   }));
-  router.use((error, _req, res, _next) => { if (!error.status) reportError(error); res.status(error.status || 500).json({ message: error.status ? error.message : 'Ошибка обработки данных компании' }); });
+  router.use((error, _req, res, _next) => {
+    if (error.code === 11000 && error.keyPattern?.['onecSync.ref']) return res.status(409).json({ message: 'Эта запись 1С уже связана с другой карточкой' });
+    if (!error.status) reportError(error);
+    res.status(error.status || 500).json({ message: error.status ? error.message : 'Ошибка обработки данных компании' });
+  });
   return router;
 }
 module.exports = { createBusinessRouter, taskInput, dateOnly, today };

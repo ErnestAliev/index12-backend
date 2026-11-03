@@ -265,6 +265,7 @@ const accountSchema = new mongoose.Schema({
 const Account = mongoose.model('Account', accountSchema);
 
 const companySchema = new mongoose.Schema({
+    ...require('./business/company-profile.cjs').profileSchema(mongoose),
     name: String,
     order: { type: Number, default: 0 },
     legalForm: { type: String, default: null },          // too | ip | individual | other
@@ -279,6 +280,7 @@ const companySchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
+companySchema.index({ userId: 1, 'onecSync.ref': 1 }, { unique: true, partialFilterExpression: { 'onecSync.ref': { $type: 'string' } } });
 const Company = mongoose.model('Company', companySchema);
 
 const individualSchema = new mongoose.Schema({
@@ -298,6 +300,7 @@ const individualSchema = new mongoose.Schema({
 const Individual = mongoose.model('Individual', individualSchema);
 
 const contractorSchema = new mongoose.Schema({
+    ...require('./business/company-profile.cjs').profileSchema(mongoose),
     createdVia: String,
     createdBy: String,
     mcpImportId: String,
@@ -319,6 +322,7 @@ const contractorSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
+contractorSchema.index({ userId: 1, 'onecSync.ref': 1 }, { unique: true, partialFilterExpression: { 'onecSync.ref': { $type: 'string' } } });
 const Contractor = mongoose.model('Contractor', contractorSchema);
 
 const projectSchema = new mongoose.Schema({
@@ -3148,6 +3152,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
             const workspaceId = req.user.currentWorkspaceId || null;
 
             let createData = { ...req.body, userId };
+            if (path === 'companies' || path === 'contractors') { Object.assign(createData, require('./business/company-profile.cjs').profileInput(req.body)); delete createData.onecSync; delete createData.profileVersion; }
             delete createData.createdVia; delete createData.createdBy; delete createData.mcpImportId;
             if (req.mcpContext?.importId) Object.assign(createData, { _id: req.mcpContext.entityId, createdVia: 'mcp', createdBy: req.user.id, mcpImportId: req.mcpContext.importId });
 
@@ -3255,6 +3260,11 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
             const items = req.body; const userId = await getCompositeUserId(req);
             const updatePromises = items.map(item => {
                 const updateData = { ...item }; delete updateData._id; delete updateData.userId;
+                if (model === Company || model === Contractor) {
+                    delete updateData.profileVersion; delete updateData.onecSync; delete updateData.workspaceId;
+                    Object.assign(updateData, require('./business/company-profile.cjs').profileInput(updateData));
+                    return model.findOneAndUpdate({ _id: item._id, userId }, { $set: updateData, $inc: { profileVersion: 1 } }, { new: true, runValidators: true });
+                }
                 if (model === Account) {
                     delete updateData.syncVersion; delete updateData.changeHistory; delete updateData.__v;
                     delete updateData.workspaceId;
@@ -3372,7 +3382,7 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
-app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission }));
+app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 
