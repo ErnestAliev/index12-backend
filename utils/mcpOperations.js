@@ -352,6 +352,12 @@ function registerMcpOperationRoutes(app, deps) {
         res.json({ id: input.id, deleted: true, alreadyDeleted: false, version: input.expectedVersion, workspaceId: String(req.user.currentWorkspaceId) });
     }));
     registerMcpImportRoutes(app, deps, { authenticate, requireScope, wrap, fail, createSchema, prepareOperation: prepare, createOperation, invoke, execution });
+    // Calendar and tax summaries are read-only through MCP. Tokens never leave this API.
+    app.use('/api/mcp/business', authenticate, requireScope('read'), (req, res, next) => {
+        if (req.method !== 'GET') return res.status(403).json({ message: 'Этот инструмент предоставляет только чтение задач и состояния КГД.' });
+        next();
+    }, require('../business/router.cjs').createBusinessRouter({ db, Company: deps.Company, isAuthenticated: (_req, _res, next) => next(), checkWorkspacePermission,
+        getWorkspaceStorageUserId: workspace => workspace.isDefault ? String(workspace.userId) : `${workspace.userId}_ws_${workspace._id}` }));
     app.use('/api/mcp', async (error, req, res, _next) => {
         const structured = error instanceof OperationError || error.public ? { code: error.code, field: error.field || null, message: error.message, ...(error.details ? { details: error.details } : {}) } : error instanceof z.ZodError ? validationError(error) : { code: error.statusCode === 403 ? 'FORBIDDEN' : 'INTERNAL_ERROR', field: null, message: error.statusCode === 403 ? 'Нет доступа к выбранному счёту.' : 'Не удалось обработать операцию INDEX12.' };
         if (req.mcpContext) { try { await execution.failed(req, structured); } catch { /* Never replace the original failure or retry the mutation. */ } }

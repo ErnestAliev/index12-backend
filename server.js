@@ -271,6 +271,11 @@ const companySchema = new mongoose.Schema({
     taxRegime: { type: String, default: 'simplified' },
     taxPercent: { type: Number, default: 3 },
     identificationNumber: { type: String, default: null },  // ИИН/БИН
+    legalAddress: { type: String, maxlength: 2000 },
+    director: { type: String, maxlength: 2000 },
+    registrationDate: { type: String, maxlength: 2000 },
+    activity: { type: String, maxlength: 2000 },
+    registrationStatus: { type: String, maxlength: 2000 },
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
     workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true }
 });
@@ -304,6 +309,11 @@ const contractorSchema = new mongoose.Schema({
     defaultCategoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
     // 🟢 NEW: Legal data fields for document generation
     identificationNumber: { type: String, default: null },  // БИН/ИИН
+    legalAddress: { type: String, maxlength: 2000 },
+    director: { type: String, maxlength: 2000 },
+    registrationDate: { type: String, maxlength: 2000 },
+    activity: { type: String, maxlength: 2000 },
+    registrationStatus: { type: String, maxlength: 2000 },
     contractNumber: { type: String, default: null },        // Номер договора
     contractDate: { type: Date, default: null },            // Дата договора
     userId: { type: mongoose.Schema.Types.Mixed, required: true, index: true },
@@ -3175,6 +3185,14 @@ const generateCRUD = (model, path, emitEventName = null) => {
                 createData.defaultCategoryId = req.body.defaultCategoryId || null;
             }
 
+            if (path === 'contractors' || path === 'companies') {
+                for (const field of ['identificationNumber', 'legalAddress', 'director', 'registrationDate', 'activity', 'registrationStatus']) {
+                    if (req.body[field] != null && typeof req.body[field] !== 'string') throw new Error('Некорректные реквизиты компании');
+                    createData[field] = req.body[field]?.trim().slice(0, 2000) || null;
+                }
+                if (createData.identificationNumber && !/^\d{12}$/.test(createData.identificationNumber)) throw new Error('БИН/ИИН должен содержать 12 цифр');
+            }
+
             if (path === 'companies') {
                 const normalizedName = String(req.body.name || '').trim();
                 const normalizedRegime = normalizeCompanyTaxRegime(req.body.taxRegime);
@@ -3354,6 +3372,7 @@ generateCRUD(Contractor, 'contractors');
 generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
+app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 
