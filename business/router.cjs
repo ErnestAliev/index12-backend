@@ -8,7 +8,7 @@ const { lookupProfile, listCandidates } = require('./onec/profile.cjs');
 const { today, dateOnly, taskInput } = require('./task-domain.cjs');
 const { registerTaskRoutes } = require('./task-routes.cjs');
 const { registerReminderRoutes } = require('./reminders.cjs');
-function createBusinessRouter({ db, Company, Contractor, Individual, taskMutation, taskSession, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
+function createBusinessRouter({ db, Company, Contractor, Individual, Event, taskMutation, taskSession, purchaseGuard, purchaseClientFactory, purchaseDownload, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
   const router = express.Router();
   const coll = name => db().collection(`business${name}`);
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -194,6 +194,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, taskMutatio
     res.status(202).json({ accepted: true });
     setImmediate(() => sync(scope).catch(() => {}));
   }));
+  require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload });
   registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession });
   registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {

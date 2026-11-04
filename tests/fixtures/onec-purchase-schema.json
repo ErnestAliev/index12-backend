@@ -1,0 +1,2208 @@
+[
+  {
+    "name": "Document_СчетНаОплатуПоставщика",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Number",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Date",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Posted",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Автор_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВалютаДокумента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ДоговорКонтрагента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "КодНазначенияПлатежа",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Комментарий",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Контрагент_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "КратностьВзаиморасчетов",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "КурсВзаиморасчетов",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Организация_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Ответственный_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Склад_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СтруктурнаяЕдиница",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СуммаВключаетНДС",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СуммаДокумента",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "ТипЦен_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "УчитыватьНДС",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СтруктурноеПодразделение_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НомерВходящегоДокумента",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДатаВходящегоДокумента",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "Товары",
+        "type": "Collection(StandardODATA.Document_СчетНаОплатуПоставщика_Товары_RowType)"
+      },
+      {
+        "name": "Услуги",
+        "type": "Collection(StandardODATA.Document_СчетНаОплатуПоставщика_Услуги_RowType)"
+      },
+      {
+        "name": "ОС",
+        "type": "Collection(StandardODATA.Document_СчетНаОплатуПоставщика_ОС_RowType)"
+      },
+      {
+        "name": "СтруктурнаяЕдиница_Type",
+        "type": "Edm.String"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Автор",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Автор"
+      },
+      {
+        "name": "ВалютаДокумента",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_ВалютаДокумента"
+      },
+      {
+        "name": "ДоговорКонтрагента",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_ДоговорКонтрагента"
+      },
+      {
+        "name": "Контрагент",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Контрагент"
+      },
+      {
+        "name": "Организация",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Организация"
+      },
+      {
+        "name": "Ответственный",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Ответственный"
+      },
+      {
+        "name": "Склад",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Склад"
+      },
+      {
+        "name": "ТипЦен",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_ТипЦен"
+      },
+      {
+        "name": "СтруктурноеПодразделение",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_СтруктурноеПодразделение"
+      }
+    ]
+  },
+  {
+    "name": "Document_СчетНаОплатуПоставщика_Товары",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Номенклатура_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ЕдиницаИзмерения_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Цена",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Сумма",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаНДС",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Коэффициент",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Количество",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Номенклатура",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Товары_Номенклатура"
+      },
+      {
+        "name": "ЕдиницаИзмерения",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Товары_ЕдиницаИзмерения"
+      },
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Товары_СтавкаНДС"
+      }
+    ]
+  },
+  {
+    "name": "Document_СчетНаОплатуПоставщика_Услуги",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Содержание",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Количество",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Цена",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Сумма",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаНДС",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Номенклатура_Key",
+        "type": "Edm.Guid"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Услуги_СтавкаНДС"
+      },
+      {
+        "name": "Номенклатура",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_Услуги_Номенклатура"
+      }
+    ]
+  },
+  {
+    "name": "Document_СчетНаОплатуПоставщика_ОС",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "ОсновноеСредство_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Сумма",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаНДС",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "ОсновноеСредство",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_ОС_ОсновноеСредство"
+      },
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПоставщика_ОС_СтавкаНДС"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Number",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Date",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Posted",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Автор_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "БанкПосредник",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ВалютаДокумента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВидНалога_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВидОперации",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ВидПлатежа",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ВидУчетаНУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВключатьКомиссиюБанка",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ДатаВалютирования",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаВыписки",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаПолученияТовара",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДокументОснование",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодБК",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодНазначенияПлатежа",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Комментарий",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Контрагент_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НазначениеПлатежа",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Оплачено",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Организация_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Ответственный_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "РННПлательщика",
+        "type": "Edm.String"
+      },
+      {
+        "name": "РННПолучателя",
+        "type": "Edm.String"
+      },
+      {
+        "name": "РучнаяКорректировка",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СубконтоДтБУ1",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтБУ2",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтБУ3",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтНУ1",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтНУ2",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтНУ3",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СуммаДокумента",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СчетБанк_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетБанкаПосредника_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетКонтрагента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетОрганизации_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомБУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомНУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ТекстПлательщика",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ТекстПолучателя",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ПроцентКомиссии",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СуммаКомиссии",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "УчитыватьКПН",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СтруктурноеПодразделениеОтправитель_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СтруктурноеПодразделениеПолучатель_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ДатаВходящегоДокумента",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "НомерВходящегоДокумента",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ФактическийПлательщик",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ПеречислениеЗаработнойПлаты",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеЗаработнойПлаты_RowType)"
+      },
+      {
+        "name": "РасшифровкаПлатежа",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_RowType)"
+      },
+      {
+        "name": "ПеречислениеПенсионныхВзносов",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПенсионныхВзносов_RowType)"
+      },
+      {
+        "name": "ПеречислениеСоциальныхОтчислений",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеСоциальныхОтчислений_RowType)"
+      },
+      {
+        "name": "ПеречислениеПоИсполнительнымЛистам",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПоИсполнительнымЛистам_RowType)"
+      },
+      {
+        "name": "ПеречислениеНДССИзмененнымСрокомУплаты",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_RowType)"
+      },
+      {
+        "name": "ПеречислениеВПодотчет",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеВПодотчет_RowType)"
+      },
+      {
+        "name": "ПеречислениеЕдиныхПлатежей",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеЕдиныхПлатежей_RowType)"
+      },
+      {
+        "name": "ПеречислениеПрочихВыплат",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПрочихВыплат_RowType)"
+      },
+      {
+        "name": "ПеречислениеПрочихДоходов",
+        "type": "Collection(StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПрочихДоходов_RowType)"
+      },
+      {
+        "name": "БанкПосредник_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДокументОснование_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтБУ1_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтБУ2_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтБУ3_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтНУ1_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтНУ2_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоДтНУ3_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ФактическийПлательщик_Type",
+        "type": "Edm.String"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Автор",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_Автор"
+      },
+      {
+        "name": "ВалютаДокумента",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ВалютаДокумента"
+      },
+      {
+        "name": "ВидНалога",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ВидНалога"
+      },
+      {
+        "name": "ВидУчетаНУ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ВидУчетаНУ"
+      },
+      {
+        "name": "Контрагент",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_Контрагент"
+      },
+      {
+        "name": "Организация",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_Организация"
+      },
+      {
+        "name": "Ответственный",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_Ответственный"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СтатьяДвиженияДенежныхСредств"
+      },
+      {
+        "name": "СчетБанк",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СчетБанк"
+      },
+      {
+        "name": "СчетБанкаПосредника",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СчетБанкаПосредника"
+      },
+      {
+        "name": "СчетКонтрагента",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СчетКонтрагента"
+      },
+      {
+        "name": "СчетОрганизации",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СчетОрганизации"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомБУ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СчетУчетаРасчетовСКонтрагентомБУ"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомНУ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СчетУчетаРасчетовСКонтрагентомНУ"
+      },
+      {
+        "name": "СтруктурноеПодразделениеОтправитель",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СтруктурноеПодразделениеОтправитель"
+      },
+      {
+        "name": "СтруктурноеПодразделениеПолучатель",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_СтруктурноеПодразделениеПолучатель"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеЗаработнойПлаты",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Ведомость_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКВыплате",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Ведомость",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеЗаработнойПлаты_Ведомость"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "ДоговорКонтрагента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Сделка",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КурсВзаиморасчетов",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СуммаПлатежа",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "КратностьВзаиморасчетов",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "СуммаВзаиморасчетов",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаНДС",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомБУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаРасчетовПоАвансам_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомНУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетНаОплату_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Сделка_Type",
+        "type": "Edm.String"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "ДоговорКонтрагента",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_ДоговорКонтрагента"
+      },
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_СтавкаНДС"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_СтатьяДвиженияДенежныхСредств"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомБУ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_СчетУчетаРасчетовСКонтрагентомБУ"
+      },
+      {
+        "name": "СчетУчетаРасчетовПоАвансам",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_СчетУчетаРасчетовПоАвансам"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентомНУ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_СчетУчетаРасчетовСКонтрагентомНУ"
+      },
+      {
+        "name": "СчетНаОплату",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_РасшифровкаПлатежа_СчетНаОплату"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеПенсионныхВзносов",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Документ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКПеречислению",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Документ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПенсионныхВзносов_Документ"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеСоциальныхОтчислений",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Документ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКПеречислению",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Документ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеСоциальныхОтчислений_Документ"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеПоИсполнительнымЛистам",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Документ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКПеречислению",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СуммаСборов",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СуммаПлатежа",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Документ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПоИсполнительнымЛистам_Документ"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Договор_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Контрагент_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентом_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НДСВидПоступления_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НДСВидОборота",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетУчетаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ГТД_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СрокПлатежа",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "СуммаПлатежа",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Договор",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_Договор"
+      },
+      {
+        "name": "Контрагент",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_Контрагент"
+      },
+      {
+        "name": "СчетУчетаРасчетовСКонтрагентом",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_СчетУчетаРасчетовСКонтрагентом"
+      },
+      {
+        "name": "НДСВидПоступления",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_НДСВидПоступления"
+      },
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_СтавкаНДС"
+      },
+      {
+        "name": "СчетУчетаНДС",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_СчетУчетаНДС"
+      },
+      {
+        "name": "ГТД",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеНДССИзмененнымСрокомУплаты_ГТД"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеВПодотчет",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "ФизЛицо_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВидЗадолженностиПодотчетногоЛица",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаПлатежа",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СчетУчета_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НомерКартСчета_Key",
+        "type": "Edm.Guid"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "ФизЛицо",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеВПодотчет_ФизЛицо"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеВПодотчет_СтатьяДвиженияДенежныхСредств"
+      },
+      {
+        "name": "СчетУчета",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеВПодотчет_СчетУчета"
+      },
+      {
+        "name": "НомерКартСчета",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеВПодотчет_НомерКартСчета"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеЕдиныхПлатежей",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Документ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКПеречислению",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Документ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеЕдиныхПлатежей_Документ"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеПрочихВыплат",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Документ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКПеречислению",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Документ",
+        "relationship": "StandardODATA.Document_ПлатежноеПоручениеИсходящее_ПеречислениеПрочихВыплат_Документ"
+      }
+    ]
+  },
+  {
+    "name": "Document_ПлатежноеПоручениеИсходящее_ПеречислениеПрочихДоходов",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Документ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаКПеречислению",
+        "type": "Edm.Double"
+      }
+    ],
+    "navigation": []
+  },
+  {
+    "name": "Catalog_СтавкиНДС",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Ставка",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "ДляОсвобожденногоОборота",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "МестоРеализацииНеРК",
+        "type": "Edm.Boolean"
+      }
+    ],
+    "navigation": []
+  },
+  {
+    "name": "Catalog_Организации",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ГоловнаяОрганизация_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ДатаПостановкиНаУчетПоНДС",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаРегистрации",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаСвидетельстваПоНДС",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ИдентификационныйНомер",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ИндивидуальныйПредприниматель_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ИностраннаяОрганизация",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "КБЕ",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодВСтранеРегистрации",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодПоОКПО",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УдалитьЛоготип_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НаименованиеИнострОрганизации",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НаименованиеПолное",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НалоговыйКомитет_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НомерСвидетельстваПоНДС",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ОсновнаяКасса_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ОсновнойБанковскийСчет_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ОсновнойВидДеятельности_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Префикс",
+        "type": "Edm.String"
+      },
+      {
+        "name": "РНН",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СерияСвидетельстваПоНДС",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СтранаПостоянногоМестонахождения_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СтранаРегистрации_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ЮрФизЛицо",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УказыватьРеквизитыГоловнойОрганизацииВСчетеФактуре",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ФайлЛоготипа_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "МестныйБюджет_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "УчетПоМестнымБюджетам",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ФайлПечати_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ДополнительныеРеквизиты",
+        "type": "Collection(StandardODATA.Catalog_Организации_ДополнительныеРеквизиты_RowType)"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "ГоловнаяОрганизация",
+        "relationship": "StandardODATA.Catalog_Организации_ГоловнаяОрганизация"
+      },
+      {
+        "name": "ИндивидуальныйПредприниматель",
+        "relationship": "StandardODATA.Catalog_Организации_ИндивидуальныйПредприниматель"
+      },
+      {
+        "name": "УдалитьЛоготип",
+        "relationship": "StandardODATA.Catalog_Организации_УдалитьЛоготип"
+      },
+      {
+        "name": "НалоговыйКомитет",
+        "relationship": "StandardODATA.Catalog_Организации_НалоговыйКомитет"
+      },
+      {
+        "name": "ОсновнаяКасса",
+        "relationship": "StandardODATA.Catalog_Организации_ОсновнаяКасса"
+      },
+      {
+        "name": "ОсновнойБанковскийСчет",
+        "relationship": "StandardODATA.Catalog_Организации_ОсновнойБанковскийСчет"
+      },
+      {
+        "name": "ОсновнойВидДеятельности",
+        "relationship": "StandardODATA.Catalog_Организации_ОсновнойВидДеятельности"
+      },
+      {
+        "name": "СтранаПостоянногоМестонахождения",
+        "relationship": "StandardODATA.Catalog_Организации_СтранаПостоянногоМестонахождения"
+      },
+      {
+        "name": "СтранаРегистрации",
+        "relationship": "StandardODATA.Catalog_Организации_СтранаРегистрации"
+      },
+      {
+        "name": "ФайлЛоготипа",
+        "relationship": "StandardODATA.Catalog_Организации_ФайлЛоготипа"
+      },
+      {
+        "name": "МестныйБюджет",
+        "relationship": "StandardODATA.Catalog_Организации_МестныйБюджет"
+      },
+      {
+        "name": "ФайлПечати",
+        "relationship": "StandardODATA.Catalog_Организации_ФайлПечати"
+      }
+    ]
+  },
+  {
+    "name": "Catalog_Номенклатура",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Parent_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "IsFolder",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Артикул",
+        "type": "Edm.String"
+      },
+      {
+        "name": "БазоваяЕдиницаИзмерения_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВидНДСПриИмпорте",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ВидНоменклатуры_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Комментарий",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НаименованиеПолное",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НоменклатурнаяГруппа_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Услуга",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СтавкаАкциза_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "КодКПВЭД",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КоэффициентРасчетаОблагаемойБазыАкциза",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "ВидПодакцизногоТМЗ",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодТНВЭД",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ИдентификаторТовараЭСФ",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ОсобенностьУчета",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Описание",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодНацКаталога",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ВесНетто",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "НаименованиеНацКаталог",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДополнительныеРеквизиты",
+        "type": "Collection(StandardODATA.Catalog_Номенклатура_ДополнительныеРеквизиты_RowType)"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Parent",
+        "relationship": "StandardODATA.Catalog_Номенклатура_Parent"
+      },
+      {
+        "name": "БазоваяЕдиницаИзмерения",
+        "relationship": "StandardODATA.Catalog_Номенклатура_БазоваяЕдиницаИзмерения"
+      },
+      {
+        "name": "ВидНоменклатуры",
+        "relationship": "StandardODATA.Catalog_Номенклатура_ВидНоменклатуры"
+      },
+      {
+        "name": "НоменклатурнаяГруппа",
+        "relationship": "StandardODATA.Catalog_Номенклатура_НоменклатурнаяГруппа"
+      },
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Catalog_Номенклатура_СтавкаНДС"
+      },
+      {
+        "name": "СтавкаАкциза",
+        "relationship": "StandardODATA.Catalog_Номенклатура_СтавкаАкциза"
+      }
+    ]
+  },
+  {
+    "name": "Catalog_Контрагенты",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Parent_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "IsFolder",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ГоловнойКонтрагент_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ДатаСвидетельстваПоНДС",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДокументУдостоверяющийЛичность",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ИдентификационныйКодЛичности",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ИндивидуальныйПредпринимательАдвокатЧастныйНотариус",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "КБЕ",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодПоОКПО",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Комментарий",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НаименованиеПолное",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НомерНалоговойРегистрацииВСтранеРезидентства",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НомерСвидетельстваПоНДС",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ОсновноеКонтактноеЛицо_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ОсновнойБанковскийСчет_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ОсновнойДоговорКонтрагента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "РНН",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СерияСвидетельстваПоНДС",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СИК",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СтранаРезидентства_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ФизЛицо_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ЮрФизЛицо",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УказыватьРеквизитыГоловнойОрганизацииВСчетеФактуре",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ГосударственноеУчреждение",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "МалаяТорговаяТочка",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "КодОрганаГосударственныхДоходов",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДополнительныеРеквизиты",
+        "type": "Collection(StandardODATA.Catalog_Контрагенты_ДополнительныеРеквизиты_RowType)"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Parent",
+        "relationship": "StandardODATA.Catalog_Контрагенты_Parent"
+      },
+      {
+        "name": "ГоловнойКонтрагент",
+        "relationship": "StandardODATA.Catalog_Контрагенты_ГоловнойКонтрагент"
+      },
+      {
+        "name": "ОсновноеКонтактноеЛицо",
+        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновноеКонтактноеЛицо"
+      },
+      {
+        "name": "ОсновнойБанковскийСчет",
+        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновнойБанковскийСчет"
+      },
+      {
+        "name": "ОсновнойДоговорКонтрагента",
+        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновнойДоговорКонтрагента"
+      },
+      {
+        "name": "СтранаРезидентства",
+        "relationship": "StandardODATA.Catalog_Контрагенты_СтранаРезидентства"
+      },
+      {
+        "name": "ФизЛицо",
+        "relationship": "StandardODATA.Catalog_Контрагенты_ФизЛицо"
+      }
+    ]
+  },
+  {
+    "name": "Catalog_ДоговорыКонтрагентов",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Owner_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Parent_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "IsFolder",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ВалютаВзаиморасчетов_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВедениеВзаиморасчетов",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Комментарий",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Организация_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ТипЦен_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВидДоговора",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УчетАгентскогоНДС",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "НомерДоговора",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДатаДоговора",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаНачалаДействияДоговора",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаОкончанияДействияДоговора",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "УстановленСрокОплаты",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СрокОплаты",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "ДоговорСовместнойДеятельности",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "УсловияОплаты",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УсловияПоставки",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УчастникСРП",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ПоверенныйОператор_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СпособВыпискиАктовВыполненныхРабот",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УникальныйНомерВалютногоКонтроля",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДатаПрисвоенияУникальногоНомераВалютногоКонтроля",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "УчастникиСовместнойДеятельности",
+        "type": "Collection(StandardODATA.Catalog_ДоговорыКонтрагентов_УчастникиСовместнойДеятельности_RowType)"
+      },
+      {
+        "name": "ДополнительныеРеквизиты",
+        "type": "Collection(StandardODATA.Catalog_ДоговорыКонтрагентов_ДополнительныеРеквизиты_RowType)"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Owner",
+        "relationship": "StandardODATA.Catalog_ДоговорыКонтрагентов_Owner"
+      },
+      {
+        "name": "Parent",
+        "relationship": "StandardODATA.Catalog_ДоговорыКонтрагентов_Parent"
+      },
+      {
+        "name": "ВалютаВзаиморасчетов",
+        "relationship": "StandardODATA.Catalog_ДоговорыКонтрагентов_ВалютаВзаиморасчетов"
+      },
+      {
+        "name": "Организация",
+        "relationship": "StandardODATA.Catalog_ДоговорыКонтрагентов_Организация"
+      },
+      {
+        "name": "ТипЦен",
+        "relationship": "StandardODATA.Catalog_ДоговорыКонтрагентов_ТипЦен"
+      },
+      {
+        "name": "ПоверенныйОператор",
+        "relationship": "StandardODATA.Catalog_ДоговорыКонтрагентов_ПоверенныйОператор"
+      }
+    ]
+  },
+  {
+    "name": "Catalog_Валюты",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "БуквенныйКод",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НаименованиеПолное",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ПараметрыПрописиНаРусском",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ЗагружатьКурсИзИнтернета",
+        "type": "Edm.Boolean"
+      }
+    ],
+    "navigation": []
+  },
+  {
+    "name": "Catalog_БанковскиеСчета",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Owner",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Банк_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "БанкДляРасчетов_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВалютаДенежныхСредств_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ВидСчета",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДатаЗакрытия",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "ДатаОткрытия",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "МесяцПрописью",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "НомерСчета",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Префикс",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СуммаБезДробнойЧасти",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ТекстКорреспондента",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ТекстНазначения",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ДоговорКонтрагента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ПроцентКомиссии",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "УчитыватьНДС",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетЗатратБУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СчетЗатратНУ_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СубконтоЗатратБУ1",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратБУ2",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратБУ3",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратНУ1",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратНУ2",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратНУ3",
+        "type": "Edm.String"
+      },
+      {
+        "name": "НДСВидПоступления_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "НДСВидОборота",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СчетУчетаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ОбменСБанкомВключен",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ИспользоватьПрямойОбменСБанком",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "ИспользоватьОбменСБанком",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Программа",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Кодировка",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ФайлЗагрузки",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ФайлВыгрузки",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Owner_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратБУ1_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратБУ2_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратБУ3_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратНУ1_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратНУ2_Type",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СубконтоЗатратНУ3_Type",
+        "type": "Edm.String"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Банк",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_Банк"
+      },
+      {
+        "name": "БанкДляРасчетов",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_БанкДляРасчетов"
+      },
+      {
+        "name": "ВалютаДенежныхСредств",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_ВалютаДенежныхСредств"
+      },
+      {
+        "name": "ДоговорКонтрагента",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_ДоговорКонтрагента"
+      },
+      {
+        "name": "СтатьяДвиженияДенежныхСредств",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СтатьяДвиженияДенежныхСредств"
+      },
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СтавкаНДС"
+      },
+      {
+        "name": "СчетЗатратБУ",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетЗатратБУ"
+      },
+      {
+        "name": "СчетЗатратНУ",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетЗатратНУ"
+      },
+      {
+        "name": "НДСВидПоступления",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_НДСВидПоступления"
+      },
+      {
+        "name": "СчетУчетаНДС",
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетУчетаНДС"
+      }
+    ]
+  }
+]

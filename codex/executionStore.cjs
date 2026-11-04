@@ -103,6 +103,11 @@ class ExecutionStore {
       if (item.state === 'completed' && item.result) events.push({ tool: 'index12_execute_import', type: 'completed', result: item.result });
       else if (Object.keys(item.steps || {}).length) events.push({ tool: 'index12_execute_import', type: 'completed', result: { id: item._id, completed: false, entities: item.steps, partial: true } });
     }
+    const purchases = await this.db.collection('onecPurchases').find({ executionIds:id, ...scope }).toArray();
+    for (const item of purchases) {
+      const steps=Object.fromEntries(Object.entries(item.steps||{}).filter(([,step])=>step.state==='completed'));
+      if(Object.keys(steps).length)events.push({tool:'index12_execute_purchase',type:'completed',result:{planToken:item._id,completed:item.state==='completed',partial:item.state!=='completed',steps,error:item.error||null}});
+    }
     return { run, events };
   }
 }

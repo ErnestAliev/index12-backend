@@ -95,6 +95,7 @@ class CloudChat {
       for (const file of job.attachments || []) {
         if (!file.fileId && /^data:image\/(png|jpeg|webp|gif);base64,/.test(file.url || '')) { content.push({ type: 'input_image', image_url: file.url }); continue; }
         const row = await db.collection('desktopFiles').findOne({ _id: file.fileId, ...scope, chatId: chat._id }); if (!row) throw Error('Прикреплённый файл недоступен.');
+        content[0].text += `\nОригинал файла ${row.name}: desktopFileId=${row._id}. Для upload_purchase_pdf используй этот ID, не ID OpenAI.`;
         const data = fileBuffer(row); if (data.length > FILE_LIMIT || data.length !== row.size) throw Error('Прикреплённый файл повреждён.');
         if (/^image\/(png|jpeg|webp|gif)$/.test(row.mimeType)) content.push({ type: 'input_image', image_url: `data:${row.mimeType};base64,${data.toString('base64')}` });
         else { const form = new FormData(); form.set('purpose', 'user_data'); form.set('file', new Blob([data], { type: row.mimeType }), row.name); const remote = await (await this.api('files', { method: 'POST', body: form }, signal)).json(); uploaded.push(remote.id); if (/\.pdf$/i.test(row.name)) content.push({ type: 'input_file', file_id: remote.id }); else content[0].text += `\nПрикреплён файл ${row.name}; доступен в Python-контейнере.`; }
