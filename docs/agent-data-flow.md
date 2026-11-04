@@ -17,6 +17,26 @@ source ID in the audit trail, and leaves the source unchanged. Copy creation
 uses its own idempotency namespace and the normal permission/transaction/
 timeline allocation handlers. Copy and move are distinct operations.
 
+Timeline placement is owned by the server. Creation (including MCP import and
+copy) checks every operation kind for the day, ignoring UI account/project
+filters and matching both string and legacy ObjectId owners. Browser moves to
+another day also resolve a stale requested cell against the live database, so a
+later manual move cannot cover an existing MCP chip. Existing same-day UI swaps
+and split-share grouping retain their established behavior.
+
+Allocation and persistence run inside the same history transaction, serialized
+by its workspace lock in MongoDB across backend instances. The local day queue
+is supplementary, not the cross-process guarantee. MCP receipts expose the
+actual `operation.dateKey` and `operation.cellIndex`. A fully occupied 32-cell
+visible day returns `TIMELINE_DAY_FULL` and rolls back creation, copy or move
+instead of saving an invisible operation below the grid. MCP never moves an
+existing neighbor or silently chooses another date.
+
+`node tests/integration/timeline-slots.cjs` boots two actual backend processes
+with an isolated MongoDB and exercises real browser-session and MCP requests:
+legacy owners, mixed operation types, stale manual placement over an MCP expense,
+concurrent writes, replay, copy/import/transfers and full-day rollback.
+
 OAuth discovery is at `/.well-known/oauth-protected-resource/mcp` and
 `/.well-known/oauth-authorization-server`. ChatGPT can use its trusted client
 metadata document or dynamic registration. Registration accepts only ChatGPT

@@ -563,12 +563,25 @@ const findOrCreateEntity = async (model, name, cache, userId) => {
     } catch (err) { return null; }
 };
 
-const getFirstFreeCellIndex = async (dateKey, userId, preferredIndex = 0) => {
-    const events = await Event.find({ dateKey: dateKey, userId: userId }, 'cellIndex');
-    const used = new Set(events.map(e => e.cellIndex));
-    let idx = Number.isInteger(preferredIndex) && preferredIndex >= 0 ? preferredIndex : 0;
-    while (used.has(idx)) { idx++; }
-    return idx;
+const getFirstFreeCellIndex = async (dateKey, userId, preferredIndex = 0, options = {}) => {
+    // The timeline reads both legacy ObjectId and string owners. Allocation must
+    // use the same scope, irrespective of project/account/operation filters.
+    const owner = String(userId);
+    const filter = { dateKey, userId: /^[a-f\d]{24}$/i.test(owner) ? { $in: [owner, new mongoose.Types.ObjectId(owner)] } : userId };
+    if (options.excludeId) {
+        filter._id = { $ne: options.excludeId };
+        filter.parentOpId = { $ne: options.excludeId }; // Split shares are one chip.
+    }
+    if (options.transferGroupId) filter.transferGroupId = { $ne: options.transferGroupId };
+    const events = await Event.find(filter, 'cellIndex');
+    const used = new Set(events.map(e => Number(e.cellIndex)).filter(Number.isInteger));
+    const limit = options.maxCells ?? Infinity;
+    const preferred = Number.isInteger(preferredIndex) && preferredIndex >= 0 && preferredIndex < limit ? preferredIndex : 0;
+    let idx = preferred;
+    while (idx < limit && used.has(idx)) idx++;
+    if (idx < limit) return idx;
+    for (idx = 0; idx < preferred; idx++) if (!used.has(idx)) return idx;
+    throw Object.assign(new Error('На выбранный день нет свободной ячейки таймлайна. Операция не сохранена; выберите другой день.'), { code: 'TIMELINE_DAY_FULL', public: true, statusCode: 409 });
 };
 
 const findCategoryByName = async (name, userId) => {
@@ -2573,7 +2586,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
                 }
                 cellIndex = parent.cellIndex;
             } else {
-                cellIndex = await getFirstFreeCellIndex(dateKey, userId, data.cellIndex);
+                cellIndex = await getFirstFreeCellIndex(dateKey, userId, data.cellIndex, req.mcpContext ? { maxCells: 32 } : {});
             }
             const newEvent = new Event({
                 ...data,
@@ -2613,6 +2626,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
 
         res.status(201).json(newEvent);
     } catch (err) {
+        if (req.mcpContext && err.code === 'TIMELINE_DAY_FULL') throw err;
         const statusCode = err.statusCode || 400;
         res.status(statusCode).json({ message: err.message });
     }
@@ -2747,9 +2761,13 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         const versionGuard = req.mcpContext ? mcpVersionFilter(req.mcpContext.expectedVersion) : {};
         const audit = req.mcpContext && !req.historyUndo ? { $push: { changeHistory: mcpAuditEntry(req, existingEvent, updatedData, req.mcpContext.expectedVersion + 1) } } : {};
         if (req.mcpContext) updatedData.updatedVia = req.historyUndo ? 'history' : 'mcp';
+        const targetDateKey = updatedData.dateKey || existingEvent.dateKey;
+        const dateChanged = targetDateKey !== existingEvent.dateKey;
+        const resolvePosition = !req.historyPositionResolved && !existingEvent.isSplitChild && (dateChanged || (req.mcpContext && Number.isInteger(updatedData.cellIndex) && updatedData.cellIndex !== existingEvent.cellIndex));
         const persistUpdate = async () => {
-            if (req.mcpContext && updatedData.dateKey && !req.historyPositionResolved && (updatedData.dateKey !== existingEvent.dateKey || (req.historyUndo && Number.isInteger(updatedData.cellIndex) && updatedData.cellIndex !== existingEvent.cellIndex))) {
-                updatedData.cellIndex = await getFirstFreeCellIndex(updatedData.dateKey, userId, req.historyUndo ? updatedData.cellIndex : 0);
+            if (resolvePosition) {
+                const preferred = Number.isInteger(updatedData.cellIndex) ? updatedData.cellIndex : dateChanged ? 0 : existingEvent.cellIndex;
+                updatedData.cellIndex = await getFirstFreeCellIndex(targetDateKey, userId, preferred, { excludeId: existingEvent._id, transferGroupId: existingEvent.type === 'transfer' ? existingEvent.transferGroupId : null, maxCells: 32 });
             }
             return Event.findOneAndUpdate(
                 { _id: id, userId: userIdQuery, ...versionGuard },
@@ -2757,8 +2775,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
                 { new: true }
             );
         };
-        const updatedEvent = await withRelatedOperationGuard(Event, userIdQuery, [existingEvent, updatedData], () => req.mcpContext && updatedData.dateKey && updatedData.dateKey !== existingEvent.dateKey
-            ? withDaySlotLock(userId, updatedData.dateKey, persistUpdate) : persistUpdate());
+        const updatedEvent = await withRelatedOperationGuard(Event, userIdQuery, [existingEvent, updatedData], () => resolvePosition
+            ? withDaySlotLock(userId, targetDateKey, persistUpdate) : persistUpdate());
         if (!updatedEvent) { return res.status(req.mcpContext ? 409 : 404).json({ message: req.mcpContext ? 'Операция изменена. Прочитайте её заново и повторите правку с новой версией.' : 'Not found' }); }
         const allocationChanges = { deletedIds: [], operations: [] };
         if (rebuildProjectShares || (existingEvent.isSplitParent && updatedData.projectScope === 'all')) {
@@ -2803,6 +2821,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
 
         res.status(200).json(allocationChanges.deletedIds.length || allocationChanges.operations.length ? { ...updatedEvent.toObject(), allocationChanges } : updatedEvent);
     } catch (err) {
+        if (req.mcpContext && err.code === 'TIMELINE_DAY_FULL') throw err;
         const statusCode = err.statusCode || 400;
         res.status(statusCode).json({ message: err.message });
     }
@@ -2929,7 +2948,7 @@ app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', '
 
         if (isSystemWithdrawal(req.body)) {
             const withdrawalEvent = await withDaySlotLock(userId, finalDateKey, async () => {
-                const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex);
+                const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex, req.mcpContext ? { maxCells: 32 } : {});
                 const withdrawalEvent = new Event({
                     type: 'transfer', amount: Math.abs(amount),
                     isTransfer: true,
@@ -2981,7 +3000,7 @@ app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', '
         const desc = req.body.description;
 
         const transferEvent = await withDaySlotLock(userId, finalDateKey, async () => {
-            const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex);
+            const cellIndex = await getFirstFreeCellIndex(finalDateKey, userId, req.body.cellIndex, req.mcpContext ? { maxCells: 32 } : {});
             const transferEvent = new Event({
                 type: 'transfer', amount: Math.abs(amount),
                 fromAccountId: safeId(fromAccountId),
@@ -3020,6 +3039,7 @@ app.post('/api/transfers', isAuthenticated, checkWorkspacePermission(['admin', '
         res.status(201).json(transferEvent);
 
     } catch (err) {
+        if (req.mcpContext && err.code === 'TIMELINE_DAY_FULL') throw err;
         console.error('[SERVER ERROR] Transfer failed:', err);
         res.status(400).json({ message: err.message });
     }
