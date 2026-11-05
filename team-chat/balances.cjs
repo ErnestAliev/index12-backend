@@ -31,6 +31,7 @@ function projectCash(accounts, operations, requests, asOf = today()) {
       else
         timeline.push({
           day,
+          accountId: id,
           companyId: String(ids.get(id).companyId || ""),
           cents,
         });
@@ -65,6 +66,7 @@ function projectCash(accounts, operations, requests, asOf = today()) {
     companies.get(companyId).requestedCents += r.amountCents;
     timeline.push({
       day: r.dueDate < asOf ? asOf : r.dueDate,
+      accountId: r.placement?.accountId ? String(r.placement.accountId) : null,
       companyId,
       cents: -r.amountCents,
     });
@@ -86,12 +88,45 @@ function projectCash(accounts, operations, requests, asOf = today()) {
     asOf,
     unallocatedCents,
     companies: [...companies.values()],
-    accounts: accounts.map((a) => ({
-      _id: String(a._id),
-      name: a.name,
-      companyId: String(a.companyId || ""),
-      balanceCents: current.get(String(a._id)),
-    })),
+    accounts: accounts.map((a) => {
+      const id = String(a._id),
+        balanceCents = current.get(id);
+      const allocated = requests.filter(
+        (r) =>
+          activeStates.includes(r.state) &&
+          !r.operationId &&
+          r.placement?.accountId === id &&
+          String(r.companyId) === String(a.companyId),
+      );
+      const requestedCents = allocated.reduce(
+        (sum, r) => sum + r.amountCents,
+        0,
+      );
+      const approvedCents = allocated
+        .filter((r) => r.state === "ready")
+        .reduce((sum, r) => sum + r.amountCents, 0);
+      const impacts = timeline.filter((r) => r.accountId === id);
+      let projectedCents = balanceCents,
+        minimumCents = balanceCents;
+      for (const day of dates) {
+        projectedCents += impacts
+          .filter((r) => r.day === day)
+          .reduce((sum, r) => sum + r.cents, 0);
+        minimumCents = Math.min(minimumCents, projectedCents);
+      }
+      return {
+        _id: id,
+        name: a.name,
+        companyId: String(a.companyId || ""),
+        balanceCents,
+        requestedCents,
+        pendingCents: requestedCents - approvedCents,
+        approvedCents,
+        afterRequestsCents: balanceCents - requestedCents,
+        projectedCents,
+        minimumCents,
+      };
+    }),
   };
 }
 function createCashReader({ Account, Event, merge }) {

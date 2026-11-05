@@ -50,6 +50,17 @@ function createTeamChatRouter({
     bus = new EventEmitter();
   bus.setMaxListeners(1000);
   const coll = (name) => db().collection("teamChat" + name);
+  const sessions = require("./session.cjs").createChatSessions({ coll });
+  const identity = (p) => ({
+    workspaceId: p.workspaceId,
+    name: p.workspace.name,
+    actorId: p.actorId,
+    displayName: p.name,
+    role: p.role,
+    status: p.status,
+    owner: p.owner,
+    roles,
+  });
   const opts = () =>
     history?.current()?.session ? { session: history.current().session } : {};
   const wrap = (fn) => (req, res, next) =>
@@ -70,6 +81,7 @@ function createTeamChatRouter({
   let indexes;
   const ready = () =>
     (indexes ||= Promise.all([
+      coll("Sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       coll("Members").createIndex(
         { workspaceId: 1, phone: 1 },
         { unique: true },
@@ -137,6 +149,26 @@ function createTeamChatRouter({
       res.json({ name: workspace.name });
     }),
   );
+  router.get(
+    "/manifest/:token",
+    wrap(async (req, res) => {
+      const invite = await invitation(text(req.params.token, 100));
+      res.type("application/manifest+json").json({
+        id: "/team/" + invite.workspaceId,
+        name: "INDEX12 — Чат сотрудников",
+        short_name: "INDEX12 Чат",
+        start_url: "/team/" + req.params.token,
+        scope: "/team/",
+        display: "standalone",
+        background_color: "#191919",
+        theme_color: "#191919",
+        icons: [
+          { src: "/pwa-192x192.png", sizes: "192x192", type: "image/png" },
+          { src: "/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+        ],
+      });
+    }),
+  );
   router.post(
     "/auth",
     wrap(async (req, res) => {
@@ -187,30 +219,29 @@ function createTeamChatRouter({
         fail("Проверьте номер телефона и пароль", 401);
       if (member.status === "rejected" || member.status === "revoked")
         fail("Доступ к чату не одобрен", 403);
-      // Chat-only login never grants an INDEX12 workspace session or financial permissions.
-      await new Promise((resolve, reject) =>
-        req.session.regenerate((error) => (error ? reject(error) : resolve())),
-      );
-      req.session.teamChatMemberId = member._id;
-      await new Promise((resolve, reject) =>
-        req.session.save((error) => (error ? reject(error) : resolve())),
-      );
+      // A separate persistent cookie cannot authenticate to INDEX12 financial APIs.
+      await sessions.issue(req, res, member._id);
       bus.emit(member.workspaceId);
       res.json({ status: member.status });
     }),
   );
   router.use(
     wrap(async (req, res, next) => {
+      const persistentId = await sessions.memberId(req, res);
+      const chatOnly =
+        req.headers["x-index12-chat-only"] === "1" ||
+        req.query.chatOnly === "1";
       const wanted =
         req.headers["x-index12-workspace-id"] ||
         req.query.workspaceId ||
-        req.user?.currentWorkspaceId;
+        (chatOnly && persistentId ? null : req.user?.currentWorkspaceId);
       let workspace =
         wanted && Types.ObjectId.isValid(wanted)
           ? await Workspace.findById(wanted).lean()
           : null;
       if (
         workspace &&
+        (!chatOnly || !persistentId) &&
         req.user &&
         String(workspace.userId) === String(req.user.id || req.user._id)
       ) {
@@ -224,17 +255,17 @@ function createTeamChatRouter({
           workspaceId: String(workspace._id),
           actorId: "owner:" + workspace.userId,
           owner: true,
-          role: settings?.ownerRole || "manager",
+          role: ["manager", "director"].includes(settings?.ownerRole)
+            ? settings.ownerRole
+            : "manager",
           name: req.user.name || "Владелец",
           status: "active",
           workspace,
         };
       } else {
+        const memberId = persistentId || req.session?.teamChatMemberId;
         const member =
-          req.session?.teamChatMemberId &&
-          (await coll("Members").findOne({
-            _id: req.session.teamChatMemberId,
-          }));
+          memberId && (await coll("Members").findOne({ _id: memberId }));
         if (!member || (wanted && String(wanted) !== member.workspaceId))
           fail("Войдите в чат по приглашению", 401);
         if (!["pending", "active"].includes(member.status))
@@ -242,6 +273,7 @@ function createTeamChatRouter({
         workspace = await Workspace.findById(member.workspaceId).lean();
         if (!workspace) fail("Чат недоступен", 404);
         req.team = { ...member, actorId: member._id, owner: false, workspace };
+        if (!persistentId) await sessions.issue(req, res, member._id);
       }
       req.team.scope = String(getWorkspaceStorageUserId(workspace));
       next();
@@ -251,21 +283,13 @@ function createTeamChatRouter({
     "/me",
     wrap(async (req, res) => {
       const p = req.team;
-      res.json({
-        workspaceId: p.workspaceId,
-        name: p.workspace.name,
-        actorId: p.actorId,
-        displayName: p.name,
-        role: p.role,
-        status: p.status,
-        owner: p.owner,
-        roles,
-      });
+      res.json(identity(p));
     }),
   );
   router.post(
     "/logout",
     wrap(async (req, res) => {
+      await sessions.clear(req, res);
       delete req.session.teamChatMemberId;
       await new Promise((resolve, reject) =>
         req.session.save((e) => (e ? reject(e) : resolve())),
@@ -336,17 +360,7 @@ function createTeamChatRouter({
         .sort({ createdAt: -1, _id: -1 })
         .limit(51)
         .toArray();
-      const requestFilter = {
-        ...filter,
-        ...(p.role === "employee"
-          ? { authorId: p.actorId }
-          : p.role === "director"
-            ? {
-                state: { $ne: "manager_review" },
-                history: { $elemMatch: { role: "manager", action: "approve" } },
-              }
-            : {}),
-      };
+      const requestFilter = { ...filter, deletedAt: { $exists: false } };
       const requests = await coll("Requests")
         .find(requestFilter)
         .sort({ createdAt: -1 })
@@ -355,7 +369,6 @@ function createTeamChatRouter({
       const allActive = await coll("Requests")
         .find({
           ...filter,
-          ...(p.role === "employee" ? { authorId: p.actorId } : {}),
           state: { $in: activeStates },
         })
         .toArray();
@@ -369,9 +382,9 @@ function createTeamChatRouter({
             })
             .toArray()
         : [];
-      const fileIds = rows.flatMap((m) =>
-        (m.attachments || []).map((f) => f.fileId),
-      );
+      const fileIds = rows
+        .filter((m) => !m.deletedAt)
+        .flatMap((m) => (m.attachments || []).map((f) => f.fileId));
       const fileStates = await coll("Files")
         .find(
           { _id: { $in: fileIds }, workspaceId: p.workspaceId },
@@ -396,6 +409,24 @@ function createTeamChatRouter({
           invoiceDismissed: !!fileStates.find((f) => f._id === file.fileId)
             ?.invoiceDismissed,
         }));
+      const checkedIds = String(req.query.messageIds || "")
+        .split(",")
+        .filter((id) => /^[a-f\d-]{36}$/i.test(id))
+        .slice(0, 1000);
+      const deletedMessageIds = checkedIds.length
+        ? (
+            await coll("Messages")
+              .find(
+                {
+                  ...filter,
+                  _id: { $in: checkedIds },
+                  deletedAt: { $exists: true },
+                },
+                { projection: { _id: 1 } },
+              )
+              .toArray()
+          ).map((m) => m._id)
+        : [];
       const companies =
         p.role === "employee"
           ? []
@@ -411,7 +442,16 @@ function createTeamChatRouter({
           ? await getBalances(req.team, allActive)
           : null;
       res.json({
-        messages: rows.slice(0, 50).reverse(),
+        identity: identity(p),
+        messages: rows
+          .slice(0, 50)
+          .reverse()
+          .map((m) =>
+            m.deletedAt
+              ? { _id: m._id, deletedAt: m.deletedAt, createdAt: m.createdAt }
+              : m,
+          ),
+        deletedMessageIds,
         hasMore: rows.length > 50,
         requests: requests.slice(0, 500),
         placements,
@@ -441,7 +481,8 @@ function createTeamChatRouter({
     "/settings",
     wrap(async (req, res) => {
       owner(req);
-      if (!Object.hasOwn(roles, req.body.ownerRole)) fail("Выберите роль");
+      if (!["manager", "director"].includes(req.body.ownerRole))
+        fail("Выберите роль управляющего или руководителя");
       await coll("Settings").updateOne(
         { _id: req.team.workspaceId },
         { $set: { ownerRole: req.body.ownerRole } },
@@ -591,6 +632,25 @@ function createTeamChatRouter({
       res.status(201).json({ message: row });
     }),
   );
+  router.delete(
+    "/messages/:id",
+    wrap(async (req, res) => {
+      const row = await coll("Messages").findOne({
+        _id: req.params.id,
+        workspaceId: req.team.workspaceId,
+      });
+      if (!row) fail("Сообщение не найдено", 404);
+      if (!req.team.owner && row.authorId !== req.team.actorId)
+        fail("Можно удалить только своё сообщение", 403);
+      if (!row.deletedAt)
+        await coll("Messages").updateOne(
+          { _id: row._id, workspaceId: row.workspaceId },
+          { $set: { deletedAt: new Date(), deletedBy: req.team.actorId } },
+        );
+      notify(req);
+      res.json({ deletedMessageId: row._id });
+    }),
+  );
   require("./request-routes.cjs").registerRequestRoutes(router, {
     coll,
     wrap,
@@ -617,14 +677,18 @@ function createTeamChatRouter({
         _id: req.params.id,
         workspaceId: req.team.workspaceId,
       });
-      if (!row) fail("Заявка не найдена", 404);
+      if (!row || row.deletedAt) fail("Заявка не найдена", 404);
       if (
         req.body.action === "approve" &&
         row.state === "manager_review" &&
         !row.placement
       )
         fail("Сначала дополните заявку и разместите её на таймлайне", 409);
-      const state = decision(row.state, req.team.role, req.body.action),
+      const actingRole =
+        row.state === "manager_review" && req.team.owner
+          ? "manager"
+          : req.team.role;
+      const state = decision(row.state, actingRole, req.body.action),
         note = text(req.body.note || "", 1000, false);
       if (!Number.isInteger(req.body.expectedVersion))
         fail("Прочитайте актуальную заявку");
@@ -642,7 +706,7 @@ function createTeamChatRouter({
             history: {
               actorId: req.team.actorId,
               name: req.team.name,
-              role: req.team.role,
+              role: actingRole,
               action: req.body.action,
               note,
               at: new Date(),
@@ -660,14 +724,14 @@ function createTeamChatRouter({
     "/requests/:id/convert",
     wrap(async (req, res) => {
       owner(req);
-      if (req.team.role !== "manager")
-        fail("Операцию создаёт управляющий", 403);
+      if (!["manager", "director"].includes(req.team.role))
+        fail("Операцию создаёт управляющий или руководитель", 403);
       const write = history.wrapHandler(async (request, output) => {
         const row = await coll("Requests").findOne(
           { _id: request.params.id, workspaceId: request.team.workspaceId },
           opts(),
         );
-        if (!row) fail("Заявка не найдена", 404);
+        if (!row || row.deletedAt) fail("Заявка не найдена", 404);
         if (row.operationId)
           return output.json({ operationId: row.operationId, replayed: true });
         if (row.state !== "ready")

@@ -140,4 +140,93 @@ test("cash projection handles transfers, withdrawals, split totals and already r
   assert.equal(r.companies[0].requestedCents, 0);
 });
 
-test('an unassigned staff request never borrows an arbitrary managed company cash pool',()=>{const result=projectCash([{_id:'a',companyId:'first',initialBalance:1000},{_id:'b',companyId:'second',initialBalance:2000}],[],[{companyId:null,amountCents:50000,dueDate:'2026-11-06',state:'manager_review'}],'2026-11-05');assert.equal(result.unallocatedCents,50000);assert.deepEqual(result.companies.map(c=>c.minimumCents),[100000,200000]);});
+test("an unassigned staff request never borrows an arbitrary managed company cash pool", () => {
+  const result = projectCash(
+    [
+      { _id: "a", companyId: "first", initialBalance: 1000 },
+      { _id: "b", companyId: "second", initialBalance: 2000 },
+    ],
+    [],
+    [
+      {
+        companyId: null,
+        amountCents: 50000,
+        dueDate: "2026-11-06",
+        state: "manager_review",
+      },
+    ],
+    "2026-11-05",
+  );
+  assert.equal(result.unallocatedCents, 50000);
+  assert.deepEqual(
+    result.companies.map((c) => c.minimumCents),
+    [100000, 200000],
+  );
+});
+
+test("per-account cash shows pending and approved requests without borrowing from another account or double counting a recorded purchase", () => {
+  const requests = [
+    {
+      state: "manager_review",
+      companyId: "c",
+      amountCents: 20000,
+      dueDate: "2026-11-06",
+      placement: { accountId: "a" },
+    },
+    {
+      state: "ready",
+      companyId: "c",
+      amountCents: 30000,
+      dueDate: "2026-11-07",
+      placement: { accountId: "a" },
+    },
+    {
+      state: "director_review",
+      companyId: "c",
+      amountCents: 10000,
+      dueDate: "2026-11-07",
+      placement: { accountId: "b" },
+    },
+    {
+      state: "recorded",
+      companyId: "c",
+      amountCents: 10000,
+      dueDate: "2026-11-05",
+      placement: { accountId: "a" },
+      operationId: "saved",
+    },
+  ];
+  const result = projectCash(
+    [
+      { _id: "a", name: "Bank", companyId: "c", initialBalance: 1000 },
+      { _id: "b", name: "Cash", companyId: "c", initialBalance: 2000 },
+    ],
+    [
+      {
+        type: "expense",
+        amount: -100,
+        accountId: "a",
+        date: "2026-11-05T07:00:00Z",
+      },
+      {
+        type: "income",
+        amount: 200,
+        accountId: "a",
+        date: "2026-11-06T07:00:00Z",
+      },
+    ],
+    requests,
+    "2026-11-05",
+  );
+  const bank = result.accounts.find((a) => a._id === "a"),
+    cash = result.accounts.find((a) => a._id === "b");
+  assert.equal(bank.balanceCents, 90000);
+  assert.equal(bank.pendingCents, 20000);
+  assert.equal(bank.approvedCents, 30000);
+  assert.equal(bank.afterRequestsCents, 40000);
+  assert.equal(bank.projectedCents, 60000);
+  assert.equal(cash.balanceCents, 200000);
+  assert.equal(cash.pendingCents, 10000);
+  assert.equal(cash.approvedCents, 0);
+  assert.equal(cash.afterRequestsCents, 190000);
+});

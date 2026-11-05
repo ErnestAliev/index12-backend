@@ -47,7 +47,7 @@ function registerRequestRoutes(
     history.current()?.session ? { session: history.current().session } : {};
   const manager = (req) => {
     owner(req);
-    if (req.team.role !== "manager")
+    if (!["manager", "director"].includes(req.team.role))
       fail("Подготовку выполняет управляющий", 403);
   };
   const getRequest = async (req) => {
@@ -55,7 +55,7 @@ function registerRequestRoutes(
       { _id: req.params.id, workspaceId: req.team.workspaceId },
       opts(),
     );
-    if (!row) fail("Заявка не найдена", 404);
+    if (!row || row.deletedAt) fail("Заявка не найдена", 404);
     return row;
   };
   const checkVersion = (row, version) => {
@@ -197,6 +197,7 @@ function registerRequestRoutes(
       ],
     });
     if (existing) {
+      if (existing.deletedAt) fail("Заявка уже удалена", 409);
       if (
         existing.workspaceId !== row.workspaceId ||
         existing.authorId !== row.authorId ||
@@ -388,6 +389,25 @@ function registerRequestRoutes(
       manager(req);
       await history.wrapHandler(async (req, res) => {
         const row = await getRequest(req);
+        const mutationId = req.body.mutationId;
+        if (mutationId !== undefined && !/^[a-f\d-]{36}$/i.test(mutationId))
+          fail("Проверьте ключ сохранения");
+        const mutationHash = createHash("sha256")
+          .update(
+            JSON.stringify({
+              operation: req.body.operation || {},
+              submit: req.body.submit === true,
+            }),
+          )
+          .digest("hex");
+        if (mutationId && row.placementMutation?.id === mutationId) {
+          if (
+            row.placementMutation.hash !== mutationHash ||
+            row.placementMutation.actorId !== req.team.actorId
+          )
+            fail("Ключ сохранения уже использован", 409);
+          return res.json({ request: row, replayed: true });
+        }
         checkVersion(row, req.body.expectedVersion);
         if (row.state !== "manager_review")
           fail("Верните заявку управляющему перед изменением реквизитов", 409);
@@ -398,6 +418,15 @@ function registerRequestRoutes(
           {
             $set: {
               ...data,
+              ...(mutationId
+                ? {
+                    placementMutation: {
+                      id: mutationId,
+                      hash: mutationHash,
+                      actorId: req.team.actorId,
+                    },
+                  }
+                : {}),
               scope: req.team.scope,
               state: submit ? "director_review" : "manager_review",
               updatedAt: new Date(),
@@ -407,7 +436,7 @@ function registerRequestRoutes(
               history: {
                 actorId: req.team.actorId,
                 name: req.team.name,
-                role: req.team.role,
+                role: "manager",
                 action: submit ? "approve" : "enrich",
                 at: new Date(),
                 details: data.placement,
@@ -419,6 +448,57 @@ function registerRequestRoutes(
         if (!updated) fail("Заявка изменилась", 409);
         notify(req);
         res.json({ request: updated });
+      })(req, res, (error) => {
+        throw error;
+      });
+    }),
+  );
+  router.delete(
+    "/requests/:id",
+    wrap(async (req, res) => {
+      await history.wrapHandler(async (req, res) => {
+        const row = await getRequest(req);
+        const reviewer = ["manager", "director"].includes(req.team.role);
+        if (
+          !req.team.owner &&
+          !reviewer &&
+          (row.authorId !== req.team.actorId || row.operationId)
+        )
+          fail("Можно удалить только свою незаписанную заявку", 403);
+        checkVersion(row, req.body.expectedVersion);
+        const updated = await coll("Requests").findOneAndUpdate(
+          {
+            _id: row._id,
+            workspaceId: row.workspaceId,
+            version: row.version,
+            deletedAt: { $exists: false },
+          },
+          {
+            $set: {
+              deletedAt: new Date(),
+              deletedBy: req.team.actorId,
+              state: "deleted",
+              updatedAt: new Date(),
+            },
+            $inc: { version: 1 },
+            $push: {
+              history: {
+                actorId: req.team.actorId,
+                name: req.team.name,
+                role: req.team.role,
+                action: "delete",
+                at: new Date(),
+              },
+            },
+          },
+          { ...opts(), returnDocument: "after" },
+        );
+        if (!updated) fail("Заявка изменилась", 409);
+        notify(req);
+        res.json({
+          deletedRequestId: row._id,
+          operationId: row.operationId || null,
+        });
       })(req, res, (error) => {
         throw error;
       });
@@ -483,6 +563,7 @@ function registerRequestRoutes(
         workspaceId: req.team.workspaceId,
         authorId: req.team.actorId,
         "attachments.fileId": req.params.fileId,
+        deletedAt: { $exists: false },
       });
       if (!message) fail("Только автор может обрабатывать свой PDF", 403);
       await coll("Files").updateOne(
@@ -505,6 +586,7 @@ function registerRequestRoutes(
         workspaceId: req.team.workspaceId,
         authorId: req.team.actorId,
         "attachments.fileId": req.params.fileId,
+        deletedAt: { $exists: false },
       });
       if (!message) fail("Только автор может обрабатывать свой PDF", 403);
       const file = await coll("Files").findOne({
@@ -524,6 +606,7 @@ function registerRequestRoutes(
         ],
       });
       if (old) {
+        if (old.deletedAt) fail("Заявка по этому PDF удалена", 409);
         if (old.authorId !== req.team.actorId)
           fail("Этот счёт уже передан на согласование", 409);
         await coll("Files").updateOne(

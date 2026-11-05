@@ -212,6 +212,33 @@ const { startFixture } = require("./subcategories.cjs");
         .data.contractors[0]._id,
       supplier.data.contractor._id,
     );
+    const manifest = await fetch(
+      origin + "/api/team-chat/manifest/" + inviteToken,
+    );
+    assert.equal(manifest.status, 200);
+    assert.equal((await manifest.json()).start_url, "/team/" + inviteToken);
+    assert.ok(employee.auth.Cookie.startsWith("index12_team="));
+    const employeeMe = await api("/me", undefined, "GET", employee.auth);
+    assert.equal(employeeMe.data.role, "employee");
+    const mixedIdentity = await api("/me", undefined, "GET", {
+      ...ownerHeaders,
+      Cookie: ownerHeaders.Cookie + "; " + employee.auth.Cookie,
+      "x-index12-chat-only": "1",
+    });
+    assert.equal(
+      mixedIdentity.data.role,
+      "employee",
+      "A standalone staff login cannot be confused with an existing INDEX12 owner login",
+    );
+    assert.match(employeeMe.cookie, /^index12_team=/);
+    const settings = await api("/settings", { ownerRole: "director" }, "PATCH");
+    assert.equal(settings.status, 200);
+    assert.equal((await api("/me", undefined, "GET")).data.role, "director");
+    assert.equal(
+      (await api("/state", undefined, "GET")).data.identity.role,
+      "director",
+    );
+    await api("/settings", { ownerRole: "manager" }, "PATCH");
     const input = {
       id: require("node:crypto").randomUUID(),
       title: "Купить лампочки",
@@ -228,13 +255,14 @@ const { startFixture } = require("./subcategories.cjs");
     assert.equal(
       (await api("/state", undefined, "GET", director.auth)).data.requests
         .length,
-      0,
-      "Director cannot see raw unsubmitted requests",
+      1,
+      "All participants see the common request queue",
     );
     assert.equal(
-      (await api("/state", undefined, "GET", director.auth)).data.financial.unallocatedCents,
+      (await api("/state", undefined, "GET", director.auth)).data.financial
+        .unallocatedCents,
       120000,
-      "Director forecast includes pending requests without exposing raw cards",
+      "Director forecast includes all pending requests",
     );
     assert.equal(
       (await api(path + "/decision", { action: "approve", expectedVersion: 0 }))
@@ -270,15 +298,50 @@ const { startFixture } = require("./subcategories.cjs");
       comment: input.comment,
       description: input.title,
     };
+    const mutationId = require("node:crypto").randomUUID();
     const placed = await api(path + "/placement", {
+      mutationId,
       expectedVersion: 0,
       operation,
     });
     assert.equal(placed.status, 200, JSON.stringify(placed.data));
     assert.equal(placed.data.request.placement.cellIndex, 0);
     assert.equal(placed.data.request.subcategoryName, "Лампочки");
+    const replayPlacement = await api(path + "/placement", {
+      mutationId,
+      expectedVersion: 0,
+      operation,
+    });
+    assert.equal(replayPlacement.status, 200);
+    assert.equal(replayPlacement.data.request.version, 1);
+    assert.equal(replayPlacement.data.replayed, true);
+    assert.equal(
+      (
+        await api(path + "/placement", {
+          mutationId,
+          expectedVersion: 0,
+          operation: { ...operation, amount: -100 },
+        })
+      ).status,
+      409,
+    );
     const state = (await api("/state", undefined, "GET")).data;
     assert.equal(state.placements[0]._id, input.id);
+    const accountForecast = state.financial.accounts.find(
+      (a) => a._id === String(account._id),
+    );
+    assert.equal(accountForecast.pendingCents, 120000);
+    assert.equal(accountForecast.afterRequestsCents, -20000);
+    assert.equal(
+      (await api("/state", undefined, "GET", employee.auth)).data.members
+        .length,
+      0,
+    );
+    assert.equal(
+      (await api("/state", undefined, "GET", director.auth)).data.requests
+        .length,
+      1,
+    );
     assert.equal(
       state.financial.companies.find((c) => c.companyId === String(company._id))
         .minimumCents,
@@ -461,6 +524,107 @@ const { startFixture } = require("./subcategories.cjs");
       headers: director.auth,
     });
     assert.equal((await bytes.arrayBuffer()).byteLength, pdfBytes.length);
+    // Common queue, scoped deletion, and persistent chat session independent from INDEX12 login.
+    const secondEmployee = await join(
+      "Another employee",
+      "+77010000004",
+      "employee",
+    );
+    const commonState = await api(
+      "/state",
+      undefined,
+      "GET",
+      secondEmployee.auth,
+    );
+    assert.ok(
+      commonState.data.requests.some((r) => r._id === parsed.data.request._id),
+    );
+    const deletionPath = "/requests/" + parsed.data.request._id;
+    assert.equal(
+      (
+        await api(
+          deletionPath,
+          { expectedVersion: 0 },
+          "DELETE",
+          secondEmployee.auth,
+        )
+      ).status,
+      403,
+    );
+    assert.equal(
+      (await api(deletionPath, { expectedVersion: 0 }, "DELETE", employee.auth))
+        .status,
+      200,
+    );
+    assert.ok(
+      !(await api("/state", undefined, "GET")).data.requests.some(
+        (r) => r._id === parsed.data.request._id,
+      ),
+    );
+    assert.equal((await api(pdfPath, {}, "POST", employee.auth)).status, 409);
+    assert.equal(
+      (await api("/messages/" + message.id, {}, "DELETE", secondEmployee.auth))
+        .status,
+      403,
+    );
+    assert.equal(
+      (await api("/messages/" + message.id, {}, "DELETE", employee.auth))
+        .status,
+      200,
+    );
+    const tombstones = await api(
+      "/state?messageIds=" + message.id,
+      undefined,
+      "GET",
+      director.auth,
+    );
+    assert.ok(tombstones.data.deletedMessageIds.includes(message.id));
+    assert.equal(
+      JSON.stringify(tombstones.data.messages).includes("PDF invoice"),
+      false,
+    );
+    // Deleting a request releases its reserved cell without deleting a recorded expense.
+    const removable = { ...input, id: require("node:crypto").randomUUID() };
+    await api("/requests", removable, "POST", employee.auth);
+    await api("/settings", { ownerRole: "director" }, "PATCH");
+    const preparedAsDirector = await api(
+      "/requests/" + removable.id + "/placement",
+      { expectedVersion: 0, operation },
+    );
+    assert.equal(
+      preparedAsDirector.status,
+      200,
+      JSON.stringify(preparedAsDirector.data),
+    );
+    assert.equal(
+      (await api("/requests/" + removable.id, { expectedVersion: 1 }, "DELETE"))
+        .status,
+      200,
+    );
+    assert.ok(
+      !(await api("/state", undefined, "GET")).data.placements.some(
+        (r) => r._id === removable.id,
+      ),
+    );
+    await api("/settings", { ownerRole: "manager" }, "PATCH");
+    assert.equal(
+      (await api(path, { expectedVersion: 4 }, "DELETE")).status,
+      200,
+    );
+    assert.ok(
+      await fixture.models.Event.exists({ _id: converted[0].data.operationId }),
+    );
+    const sessionCookie = secondEmployee.auth.Cookie;
+    await api("/logout", {}, "POST", secondEmployee.auth);
+    assert.equal(
+      (
+        await api("/me", undefined, "GET", {
+          ...anonymous,
+          Cookie: sessionCookie,
+        })
+      ).status,
+      401,
+    );
     await api(
       "/members/" + employee.member._id,
       { role: "employee", status: "revoked", expectedVersion: 1 },
@@ -476,7 +640,7 @@ const { startFixture } = require("./subcategories.cjs");
       401,
     );
     console.log(
-      "PASS: staff counterparty creation, no staff company selection, scoped PDF workflow with source/party/category matching, manager enrichment, hidden director queue until submission, immutable approvals, reserved cells across MCP, atomic conversion and comments",
+      "PASS: staff counterparty creation, no staff company selection, scoped PDF workflow with source/party/category matching, manager enrichment, common request queue, persistent sessions, scoped deletion, immutable approvals, reserved cells across MCP, atomic conversion and comments",
     );
     if (process.argv.includes("--browser")) {
       const { verifyTeamChat } = await import(
