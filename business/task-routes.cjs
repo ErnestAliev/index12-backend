@@ -7,7 +7,7 @@ const { taskInput, scheduleInput, publicTask, dateOnly, localInstant } = require
 const { safeName, imageMime, fileMeta, fileBuffer, FILE_LIMIT, TOTAL_LIMIT } = require('../codex/files.cjs');
 const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const digest = value => createHash('sha256').update(value).digest('hex');
-function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession = () => null }) {
+function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession = () => null, onTasksChanged = () => {} }) {
   const opts = () => taskSession() ? { session: taskSession() } : {};
   const identity = req => ({ workspaceId: String(req.cachedWorkspace._id), actorId: String(req.user.id || req.user._id) });
   const active = req => ({ scope: req.businessScope, deletedAt: { $exists: false } });
@@ -63,6 +63,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
   }
   const result = async (req, task) => ({ ...identity(req), id: task._id, version: task.version || 0, task: await view(req, task) });
   router.get('/tasks', wrap(async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
     const filter = active(req);
     if (req.query.from || req.query.to) {
       const from = dateOnly(req.query.from), to = dateOnly(req.query.to);
@@ -81,7 +82,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
     const tasks = []; for (const row of rows.slice(0, 2000)) tasks.push(await view(req, row, names));
     res.json({ ...identity(req), tasks, truncated: rows.length > 2000 });
   }));
-  router.get('/tasks/:id', wrap(async (req, res) => res.json(await result(req, await taskFor(req)))));
+  router.get('/tasks/:id', wrap(async (req, res) => { res.set('Cache-Control', 'private, no-store'); res.json(await result(req, await taskFor(req))); }));
   router.post('/tasks', write(async (req, res) => {
     const input = taskInput(req.body), requestHash = digest(canonical(input));
     let creationKey;
@@ -93,7 +94,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
     }
     const data = scheduleInput(input, null); await validateReferences(req, data);
     const task = { _id: randomUUID(), scope: req.businessScope, workspaceId: identity(req).workspaceId, createdBy: identity(req).actorId, companyId: null, party: null, dueDate: null, description: '', status: 'open', reminderOffsets: [10, 30, 60], reminderDates: [], overdueReminders: 1, overdueRepeatMinutes: 60, links: [], attachments: [], version: 0, reminderRevision: 0, ...data, source: 'manual', ...(creationKey ? { creationKey, requestHash } : {}), createdAt: new Date(), updatedAt: new Date() };
-    await coll('Tasks').insertOne(task, opts()); await retainFiles(req, task);
+    await coll('Tasks').insertOne(task, opts()); await retainFiles(req, task); onTasksChanged(req);
     res.status(201).json({ ...await result(req, task), _id: task._id });
   }));
   router.patch('/tasks/:id', write(async (req, res) => {
@@ -103,7 +104,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
     const scheduleChanged = ['dueDate', 'startsAt', 'endsAt', 'allDay', 'reminderOffsets', 'reminderDates', 'overdueReminders', 'overdueRepeatMinutes', 'status'].some(key => Object.hasOwn(data, key) && canonical(data[key]) !== canonical(existing[key]));
     const task = await coll('Tasks').findOneAndUpdate({ _id: existing._id, ...active(req), ...version }, { $set: { ...data, updatedAt: new Date() }, $inc: { version: 1, ...(scheduleChanged ? { reminderRevision: 1 } : {}) } }, { ...opts(), returnDocument: 'after' });
     if (!task) fail('Задача изменена. Обновите карточку перед сохранением', 409);
-    await retainFiles(req, task); res.json(await result(req, task));
+    await retainFiles(req, task); onTasksChanged(req); res.json(await result(req, task));
   }));
   router.delete('/tasks/:id', write(async (req, res) => {
     const existing = await taskFor(req, true);
@@ -111,7 +112,7 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
     const version = revision(existing, req.body.expectedVersion);
     const deleted = await coll('Tasks').updateOne({ _id: existing._id, ...active(req), ...version }, { $set: { deletedAt: new Date(), deletedVersion: req.body.expectedVersion, updatedAt: new Date() }, $inc: { version: 1 } }, opts());
     if (!deleted.matchedCount) fail('Задача изменена. Обновите карточку перед удалением', 409);
-    await retainFiles(req, { _id: existing._id, attachments: [] });
+    await retainFiles(req, { _id: existing._id, attachments: [] }); onTasksChanged(req);
     res.json({ ...identity(req), id: existing._id, version: (existing.version || 0) + 1, deleted: true });
   }));
   router.post('/task-files', express.raw({ type: 'application/octet-stream', limit: FILE_LIMIT }), wrap(async (req, res) => {

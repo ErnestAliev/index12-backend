@@ -380,7 +380,7 @@ function registerMcpOperationRoutes(app, deps) {
         if (!grant?.scopes?.includes('read') || access?.role !== 'admin') fail('FORBIDDEN',null,'Доступ к цепочке 1С отозван.',403);
         if (req.path.endsWith('/execute') && !['create','imports:direct'].every(scope=>grant.scopes.includes(scope))) fail('FORBIDDEN',null,'Разрешение на создание документов 1С отозвано.',403);
     }, isAuthenticated: (_req, _res, next) => next(), checkWorkspacePermission,
-        purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload,
+        purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, emitEntityEvent:deps.emitEntityEvent,
         taskMutation: (req, res, fn) => execution.execute(req, res, fn), taskSession: () => deps.audit?.current()?.session,
         getWorkspaceStorageUserId: workspace => workspace.isDefault ? String(workspace.userId) : `${workspace.userId}_ws_${workspace._id}` }));
     app.use('/api/mcp', async (error, req, res, _next) => {

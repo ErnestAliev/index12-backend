@@ -10,6 +10,8 @@ const { registerTaskRoutes } = require('./task-routes.cjs');
 const { registerReminderRoutes } = require('./reminders.cjs');
 function createBusinessRouter({ db, Company, Contractor, Individual, Event, taskMutation, taskSession, purchaseGuard, purchaseClientFactory, purchaseDownload, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
   const router = express.Router();
+  // Invalidate only; calendar contents still require an authenticated, scoped read.
+  const onTasksChanged = req => emitEntityEvent(req, req.businessScope, 'calendar_changed', { workspaceId: String(req.cachedWorkspace._id) });
   const coll = name => db().collection(`business${name}`);
   const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
   let indexes;
@@ -48,7 +50,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
   };
   const contextFor = connection => `${connection.scope}:${connection.companyId}:${connection.bin}`;
   const publicConnection = connection => ({ companyId: connection.companyId, bin: connection.bin, enabled: connection.enabled, status: connection.status, lastAttemptAt: connection.lastAttemptAt || null, lastSuccessAt: connection.lastSuccessAt || null, error: connection.error || null, snapshot: connection.snapshot || null });
-  async function runOne(connection) {
+  async function runOne(connection, req) {
     const leaseId = randomUUID();
     const lease = await coll('Connections').findOneAndUpdate({ _id: connection._id, enabled: true, $or: [{ leaseUntil: null }, { leaseUntil: { $lt: new Date() } }] }, { $set: { leaseId, leaseUntil: new Date(Date.now() + 60000), lastAttemptAt: new Date(), nextAttemptAt: new Date(Date.now() + 15 * 60000), status: 'syncing' } }, { returnDocument: 'after' });
     if (!lease) return;
@@ -72,14 +74,15 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
         // Keep the task history and user's completion state; zero debt is not a bank payment receipt.
         await coll('Tasks').updateOne({ scope: lease.scope, sourceKey: `kgd-debt:${lease.companyId}:${lease.bin}` }, { $set: { description: `Последний ответ КГД: ${snapshot.totalArrear} ₸. Проверено ${snapshot.checkedAt}.`, evidence: snapshot, updatedAt: new Date() }, $inc: { version: 1 } });
       }
+      onTasksChanged(req);
     } catch (error) {
       await coll('Connections').updateOne(filter, { $set: { status: 'error', error: error.status ? error.message : 'Не удалось проверить КГД. Проверьте подключение', leaseUntil: null } });
     }
   }
-  async function sync(scope) {
+  async function sync(scope, req) {
     const rows = await coll('Connections').find({ scope, enabled: true, $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: new Date() } }] }).limit(100).toArray();
     // Two companies at a time; the HTTP request never waits for external services.
-    for (let i = 0; i < rows.length; i += 2) await Promise.allSettled(rows.slice(i, i + 2).map(runOne));
+    for (let i = 0; i < rows.length; i += 2) await Promise.allSettled(rows.slice(i, i + 2).map(row => runOne(row, req)));
   }
   router.get('/status', wrap(async (req, res) => {
     res.json({ workspaceId: String(req.user.currentWorkspaceId || req.cachedWorkspace._id), actorId: String(req.user.id), registryConfigured: !!env.EGOV_API_KEY, onecConfigured: !!env.ONEC_BASE_URL && !!env.ONEC_USERNAME && !!env.ONEC_PASSWORD && env.ONEC_WORKSPACE_ID === String(req.cachedWorkspace._id), taxConfigured: !!env.KGD_PORTAL_TOKEN && /^[a-f\d]{64}$/i.test(env.INTEGRATIONS_ENCRYPTION_KEY || ''), taxCoverage: ['debt'], taxInboxConnected: false, connections: (await coll('Connections').find({ scope: req.businessScope }).toArray()).map(publicConnection) });
@@ -174,7 +177,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
     const token = encryptToken(req.body.personalAccountToken, env.INTEGRATIONS_ENCRYPTION_KEY, contextFor(connection));
     const row = await coll('Connections').findOneAndUpdate({ scope: connection.scope, companyId: connection.companyId }, { $set: { ...connection, token, enabled: true, status: 'pending', error: null, snapshot: null, lastSuccessAt: null, nextAttemptAt: null, leaseUntil: null, leaseId: null } }, { upsert: true, returnDocument: 'after' });
     res.json(publicConnection(row));
-    setImmediate(() => sync(connection.scope).catch(() => {}));
+    setImmediate(() => sync(connection.scope, req).catch(() => {}));
   }));
   router.delete('/companies/:id/connection', wrap(async (req, res) => {
     await companyFor(req.businessScope, req.params.id);
@@ -187,15 +190,15 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
     if (!await coll('Connections').findOne(filter)) fail('КГД компании не подключён', 404);
     const result = await coll('Connections').updateOne({ ...filter, $or: [{ lastAttemptAt: null }, { lastAttemptAt: { $lte: new Date(Date.now() - 60000) } }] }, { $set: { nextAttemptAt: null } });
     res.status(202).json({ accepted: !!result.matchedCount, message: result.matchedCount ? 'Проверка запущена' : 'Повторная проверка доступна через минуту после предыдущей' });
-    if (result.matchedCount) setImmediate(() => sync(req.businessScope).catch(() => {}));
+    if (result.matchedCount) setImmediate(() => sync(req.businessScope, req).catch(() => {}));
   }));
   router.post('/sync', wrap(async (req, res) => {
     const scope = req.businessScope;
     res.status(202).json({ accepted: true });
-    setImmediate(() => sync(scope).catch(() => {}));
+    setImmediate(() => sync(scope, req).catch(() => {}));
   }));
-  require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload });
-  registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession });
+  require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload, onTasksChanged });
+  registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession, onTasksChanged });
   registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {
     if (error.code === 11000 && error.keyPattern?.['onecSync.ref']) return res.status(409).json({ message: 'Эта запись 1С уже связана с другой карточкой' });

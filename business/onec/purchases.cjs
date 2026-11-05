@@ -47,7 +47,7 @@ async function validateData(client,collection,input,cache=new Map(), nested=fals
   }
   return result;
 }
-function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.env,guard=async()=>{},clientFactory=()=>new ReadClient(env),download=downloadPdf}) {
+function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.env,guard=async()=>{},clientFactory=()=>new ReadClient(env),download=downloadPdf,onTasksChanged=()=>{}}) {
   const plans=()=>db().collection('onecPurchases'), files=()=>db().collection('onecPurchaseFiles');
   let indexes;
   const ready=()=>indexes ||= Promise.all([
@@ -249,7 +249,8 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
       await db().collection('businessTaskFiles').updateOne({_id:file._id,scope:row.scope},{$setOnInsert:file,$addToSet:{taskIds:row.taskId},$unset:{expiresAt:''}},{upsert:true});attachments.push(fileMeta(file));
     }
     const task={_id:row.taskId,scope:row.scope,workspaceId:row.workspaceId,createdBy:row.actorId,companyId:null,party:{kind:'contractors',id:row.input.contractorId},partyName:row.supplierName,title:`Запросить закрывающие документы: ${row.supplierName}`.slice(0,300),description:`${row.companyName}: счёт №${row.input.invoice.НомерВходящегоДокумента} от ${row.input.invoice.ДатаВходящегоДокумента.slice(0,10)}, ${row.input.invoice.СуммаДокумента}. ${row.input.payment.НазначениеПлатежа}\nЗапросить акт выполненных работ/накладную и ЭСФ, если применимо. Подготовка поручения не подтверждает оплату.\n1С: счёт ${row.steps.invoice.id}; поручение ${row.steps.payment.id}.\n${row.schedule.legal.note}`,status:'open',...row.schedule,links:[{title:'Цепочка покупки',url:row.taskLink}],attachments,source:'onec_purchase',sourceKey,evidence:{purchaseId:row._id,companyId:row.input.companyId,contractorId:row.input.contractorId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,operationId:row.input.operationId||null,legal:row.schedule.legal},version:0,reminderRevision:0,createdAt:new Date(),updatedAt:new Date()};
-    await tasks.updateOne({scope:row.scope,sourceKey},{$setOnInsert:task},{upsert:true});
+    const inserted = await tasks.updateOne({scope:row.scope,sourceKey},{$setOnInsert:task},{upsert:true});
+    if (inserted.upsertedCount) onTasksChanged(req);
     await saveStep(row,'task',{state:'completed',verifiedAt:new Date()});
   }
   router.post('/onec/purchases/execute',use(async(req,res,client)=>{

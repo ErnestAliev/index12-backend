@@ -74,9 +74,10 @@ const io = socketIo(server, {
 io.on('connection', (socket) => {
     console.log('🔌 [Socket.io] New connection:', socket.id);
 
-    socket.on('join', (workspaceId) => {
+    socket.on('join', async (workspaceId, acknowledge) => {
         if (workspaceId) {
-            socket.join(workspaceId);
+            await socket.join(String(workspaceId));
+            if (typeof acknowledge === 'function') acknowledge({ workspaceId: String(workspaceId) });
             console.log('✅ [Socket.io] User joined workspace room:', workspaceId, 'Socket:', socket.id);
         }
     });
