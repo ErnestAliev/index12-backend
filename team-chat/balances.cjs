@@ -36,6 +36,7 @@ function projectCash(accounts, operations, requests, asOf = today()) {
         });
     }
   }
+  let unallocatedCents = 0;
   const companies = new Map();
   for (const a of accounts) {
     const companyId = String(a.companyId || "");
@@ -50,6 +51,10 @@ function projectCash(accounts, operations, requests, asOf = today()) {
   for (const r of requests.filter(
     (r) => activeStates.includes(r.state) && !r.operationId,
   )) {
+    if (!r.companyId) {
+      unallocatedCents += r.amountCents;
+      continue;
+    }
     const companyId = String(r.companyId);
     if (!companies.has(companyId))
       companies.set(companyId, {
@@ -79,6 +84,7 @@ function projectCash(accounts, operations, requests, asOf = today()) {
   }
   return {
     asOf,
+    unallocatedCents,
     companies: [...companies.values()],
     accounts: accounts.map((a) => ({
       _id: String(a._id),

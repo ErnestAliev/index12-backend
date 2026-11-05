@@ -33,26 +33,24 @@ const { startFixture } = require("./subcategories.cjs");
       workspaceId: String(workspace._id),
     };
     const token = "idx12_" + randomBytes(32).toString("base64url");
-    await db
-      .collection("mcpCredentials")
-      .insertOne({
-        _id: createHash("sha256").update(token).digest("hex"),
-        ...scope,
-        ownerId: scope.actorId,
-        scopes: [
-          "read",
-          "create",
-          "update",
-          "delete",
-          "entities:create",
-          "imports:execute",
-          "imports:direct",
-        ],
-        confirmationMode: "direct",
-        planSigningKey: randomBytes(32).toString("hex"),
-        expiresAt: new Date(Date.now() + 600000),
-        revokedAt: null,
-      });
+    await db.collection("mcpCredentials").insertOne({
+      _id: createHash("sha256").update(token).digest("hex"),
+      ...scope,
+      ownerId: scope.actorId,
+      scopes: [
+        "read",
+        "create",
+        "update",
+        "delete",
+        "entities:create",
+        "imports:execute",
+        "imports:direct",
+      ],
+      confirmationMode: "direct",
+      planSigningKey: randomBytes(32).toString("hex"),
+      expiresAt: new Date(Date.now() + 600000),
+      revokedAt: null,
+    });
     const headers = {
       Authorization: "Bearer " + token,
       "X-Index12-Actor-ID": scope.actorId,
@@ -103,21 +101,19 @@ const { startFixture } = require("./subcategories.cjs");
     const origin = await boot();
     const sid = "calendar-browser-session",
       expiry = new Date(Date.now() + 600000);
-    await db
-      .collection("sessions")
-      .insertOne({
-        _id: sid,
-        expires: expiry,
-        session: JSON.stringify({
-          cookie: {
-            originalMaxAge: 600000,
-            expires: expiry,
-            httpOnly: true,
-            path: "/",
-          },
-          passport: { user: scope.actorId },
-        }),
-      });
+    await db.collection("sessions").insertOne({
+      _id: sid,
+      expires: expiry,
+      session: JSON.stringify({
+        cookie: {
+          originalMaxAge: 600000,
+          expires: expiry,
+          httpOnly: true,
+          path: "/",
+        },
+        passport: { user: scope.actorId },
+      }),
+    });
     const cookie = encodeURIComponent(
       "s:" + sign(sid, "calendar-test-only-secret"),
     );
@@ -138,8 +134,10 @@ const { startFixture } = require("./subcategories.cjs");
         data: await response.json(),
       };
     };
+
     const company = await fixture.models.Company.create({
       name: "Team company",
+      identificationNumber: "250340021816",
       userId: scope.actorId,
       workspaceId: workspace._id,
     });
@@ -149,323 +147,336 @@ const { startFixture } = require("./subcategories.cjs");
       userId: scope.actorId,
       initialBalance: 1000,
     });
-    const invite = await api("/invite", {});
-    assert.equal(invite.status, 200, JSON.stringify(invite.data));
-    const inviteToken = invite.data.url.split("/").at(-1);
-    const anonymous = { "Content-Type": "application/json" };
-    const employee = await api(
-      "/auth",
-      {
-        token: inviteToken,
-        name: "Employee",
-        phone: "+77010000001",
-        password: "test-passphrase-2026",
-        register: true,
-      },
+    const category = await fixture.models.Category.create({
+      name: "Обслуживание",
+      type: "expense",
+      userId: scope.actorId,
+    });
+    const subcategory = await fixture.models.Subcategory.create({
+      name: "Лампочки",
+      nameKey: "лампочки",
+      parentCategoryId: category._id,
+      userId: scope.actorId,
+    });
+    const invite = await api("/invite", {}),
+      inviteToken = invite.data.url.split("/").at(-1),
+      anonymous = { "Content-Type": "application/json" };
+    async function join(name, phone, role) {
+      const registered = await api(
+        "/auth",
+        {
+          token: inviteToken,
+          name,
+          phone,
+          password: "test-passphrase-2026",
+          register: true,
+        },
+        "POST",
+        anonymous,
+      );
+      assert.equal(registered.status, 200, JSON.stringify(registered.data));
+      const auth = { ...anonymous, Cookie: registered.cookie };
+      assert.equal((await api("/state", undefined, "GET", auth)).status, 403);
+      const state = (await api("/state", undefined, "GET")).data;
+      const member = state.members.find((m) => m.phone === phone);
+      assert.equal(JSON.stringify(member).includes("password"), false);
+      assert.equal(
+        (
+          await api(
+            "/members/" + member._id,
+            { role, status: "active", expectedVersion: 0 },
+            "PATCH",
+          )
+        ).status,
+        200,
+      );
+      return { auth, member };
+    }
+    const employee = await join("Employee", "+77010000001", "employee"),
+      director = await join("Director", "+77010000002", "director");
+    assert.equal(
+      (await api("/state", undefined, "GET", employee.auth)).data.companies
+        .length,
+      0,
+      "Staff do not pick or browse our companies",
+    );
+    const supplier = await api(
+      "/contractors",
+      { name: "Поставщик лампочек" },
       "POST",
-      anonymous,
+      employee.auth,
     );
-    assert.equal(employee.status, 200, JSON.stringify(employee.data));
-    const employeeHeaders = { ...anonymous, Cookie: employee.cookie };
+    assert.equal(supplier.status, 201, JSON.stringify(supplier.data));
     assert.equal(
-      (await api("/state", undefined, "GET", employeeHeaders)).status,
-      403,
-      "Pending members cannot read messages",
+      (await api("/contractors?search=ламп", undefined, "GET", employee.auth))
+        .data.contractors[0]._id,
+      supplier.data.contractor._id,
     );
-    let state = (await api("/state", undefined, "GET")).data,
-      member = state.members.find((m) => m.phone === "+77010000001");
-    assert.ok(member);
-    assert.equal(JSON.stringify(state.members).includes("password"), false);
-    assert.equal(
-      (
-        await api(
-          "/members/" + member._id,
-          { role: "employee", status: "active", expectedVersion: 0 },
-          "PATCH",
-        )
-      ).status,
-      200,
-    );
-    assert.equal(
-      (await api("/me", undefined, "GET", employeeHeaders)).data.status,
-      "active",
-    );
-    assert.equal(
-      (await api("/invite", {}, "POST", employeeHeaders)).status,
-      403,
-      "Chat members cannot manage invitations",
-    );
-    assert.equal(
-      (
-        await api(
-          "/state?workspaceId=" + new mongoose.Types.ObjectId(),
-          undefined,
-          "GET",
-          employeeHeaders,
-        )
-      ).status,
-      401,
-    );
-    const message = {
+    const input = {
       id: require("node:crypto").randomUUID(),
-      text: "Employee message",
-    };
-    assert.equal(
-      (await api("/messages", message, "POST", employeeHeaders)).status,
-      201,
-    );
-    assert.equal(
-      (await api("/messages", message, "POST", employeeHeaders)).data.replayed,
-      true,
-    );
-    assert.equal(
-      (
-        await api(
-          "/messages",
-          { ...message, text: "Altered" },
-          "POST",
-          employeeHeaders,
-        )
-      ).status,
-      409,
-    );
-    const request = {
-      id: require("node:crypto").randomUUID(),
-      title: "Buy lamps",
-      amount: "1200.00",
-      companyId: String(company._id),
+      title: "Купить лампочки",
+      amount: "1 200.00",
+      contractorId: supplier.data.contractor._id,
       dueDate: "2026-11-06",
+      comment: "Пять штук для коридора",
     };
-    const created = await api("/requests", request, "POST", employeeHeaders);
+    const created = await api("/requests", input, "POST", employee.auth);
     assert.equal(created.status, 201, JSON.stringify(created.data));
-    const path = "/requests/" + request.id;
+    const path = "/requests/" + input.id;
+    assert.equal(created.data.request.companyId, null);
+    assert.equal(created.data.request.comment, input.comment);
+    assert.equal(
+      (await api("/state", undefined, "GET", director.auth)).data.requests
+        .length,
+      0,
+      "Director cannot see raw unsubmitted requests",
+    );
+    assert.equal(
+      (await api("/state", undefined, "GET", director.auth)).data.financial.unallocatedCents,
+      120000,
+      "Director forecast includes pending requests without exposing raw cards",
+    );
+    assert.equal(
+      (await api(path + "/decision", { action: "approve", expectedVersion: 0 }))
+        .status,
+      409,
+      "Manager must enrich and place before approving",
+    );
     assert.equal(
       (
         await api(
-          path + "/decision",
-          { action: "approve", expectedVersion: 0 },
+          path + "/placement",
+          { expectedVersion: 0, operation: {} },
           "POST",
-          employeeHeaders,
+          employee.auth,
         )
       ).status,
-      409,
+      403,
     );
     assert.equal(
-      (
-        await api(path + "/convert", {
-          expectedVersion: 0,
-          accountId: String(account._id),
-        })
-      ).status,
-      409,
+      (await api("/state", undefined, "GET")).data.financial.unallocatedCents,
+      120000,
     );
-    state = (await api("/state", undefined, "GET")).data;
-    assert.equal(state.forecastCents, 120000);
+    const operation = {
+      type: "expense",
+      amount: -1200,
+      date: "2026-11-06T07:00:00Z",
+      accountId: String(account._id),
+      companyId: String(company._id),
+      contractorId: input.contractorId,
+      categoryId: String(category._id),
+      subcategoryId: String(subcategory._id),
+      cellIndex: 0,
+      comment: input.comment,
+      description: input.title,
+    };
+    const placed = await api(path + "/placement", {
+      expectedVersion: 0,
+      operation,
+    });
+    assert.equal(placed.status, 200, JSON.stringify(placed.data));
+    assert.equal(placed.data.request.placement.cellIndex, 0);
+    assert.equal(placed.data.request.subcategoryName, "Лампочки");
+    const state = (await api("/state", undefined, "GET")).data;
+    assert.equal(state.placements[0]._id, input.id);
     assert.equal(
       state.financial.companies.find((c) => c.companyId === String(company._id))
         .minimumCents,
       -20000,
     );
+    const otherResponse = await fetch(origin + "/api/mcp/operations", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        type: "expense",
+        amount: "50.00",
+        date: "2026-11-06",
+        accountId: String(account._id),
+        description: "Other operation",
+        idempotencyKey: "team-reservation-test",
+      }),
+    });
+    const other = await otherResponse.json();
+    assert.equal(otherResponse.status, 201, JSON.stringify(other));
     assert.equal(
-      (await api(path + "/decision", { action: "approve", expectedVersion: 0 }))
+      other.operation.cellIndex,
+      1,
+      "MCP cannot cover a staged request chip",
+    );
+    const moved = await fetch(origin + "/api/events/" + other.id, {
+      method: "PUT",
+      headers: ownerHeaders,
+      body: JSON.stringify({ cellIndex: 0 }),
+    });
+    const movedBody = await moved.json();
+    assert.equal(moved.status, 200, JSON.stringify(movedBody));
+    assert.notEqual(
+      movedBody.cellIndex,
+      0,
+      "A same-day manual move cannot cover a request reservation",
+    );
+
+    assert.equal(
+      (await api(path + "/decision", { action: "approve", expectedVersion: 1 }))
         .data.request.state,
       "director_review",
     );
+    const forwarded = (await api("/state", undefined, "GET", director.auth))
+      .data.requests[0];
+    assert.equal(forwarded.placement.accountName, "Team cash");
+    assert.equal(forwarded.comment, input.comment);
+    assert.equal(forwarded.history.at(-1).role, "manager");
     assert.equal(
-      (await api(path + "/decision", { action: "approve", expectedVersion: 1 }))
+      (await api(path + "/placement", { expectedVersion: 2, operation }))
         .status,
       409,
-      "Manager cannot approve as director",
+      "Forwarded payment details are immutable",
     );
-    const director = await api(
-      "/auth",
-      {
-        token: inviteToken,
-        name: "Director",
-        phone: "+77010000002",
-        password: "test-passphrase-2026",
-        register: true,
-      },
-      "POST",
-      anonymous,
+    assert.equal(
+      (await api(path + "/decision", { action: "approve", expectedVersion: 2 }))
+        .status,
+      409,
+      "Manager cannot substitute for director",
     );
-    state = (await api("/state", undefined, "GET")).data;
-    const leader = state.members.find((m) => m.phone === "+77010000002");
-    await api(
-      "/members/" + leader._id,
-      { role: "director", status: "active", expectedVersion: 0 },
-      "PATCH",
-    );
-    const directorHeaders = { ...anonymous, Cookie: director.cookie };
     assert.equal(
       (
         await api(
           path + "/decision",
-          { action: "approve", expectedVersion: 1 },
+          { action: "approve", expectedVersion: 2 },
           "POST",
-          directorHeaders,
+          director.auth,
         )
       ).data.request.state,
       "ready",
     );
-    const converted = await api(path + "/convert", {
-      expectedVersion: 2,
-      accountId: String(account._id),
-    });
-    assert.equal(converted.status, 201, JSON.stringify(converted.data));
-    assert.equal(converted.data.operation.amount, -1200);
-    assert.equal(
-      String(
-        converted.data.operation.companyId._id ||
-          converted.data.operation.companyId,
-      ),
-      String(company._id),
-    );
-    const replay = await api(path + "/convert", {
-      expectedVersion: 2,
-      accountId: String(account._id),
-    });
-    assert.equal(replay.data.operationId, converted.data.operationId);
-    assert.equal(replay.data.replayed, true);
-    assert.equal(
-      await fixture.models.Event.countDocuments({ description: /Buy lamps/ }),
-      1,
-    );
-    state = (await api("/state", undefined, "GET")).data;
-    assert.equal(
-      state.forecastCents,
-      0,
-      "Recorded request is not counted twice",
-    );
-    const request2 = {
-      ...request,
-      id: require("node:crypto").randomUUID(),
-      title: "Cleaning",
-    };
-    await api("/requests", request2, "POST", employeeHeaders);
-    await api("/requests/" + request2.id + "/decision", {
-      action: "reject",
-      expectedVersion: 0,
-    });
-    assert.equal((await api("/state", undefined, "GET")).data.forecastCents, 0);
-
-    const concurrent = {
-      ...request,
-      id: require("node:crypto").randomUUID(),
-      title: "Concurrent purchase",
-    };
-    await api("/requests", concurrent, "POST", employeeHeaders);
-    await api("/requests/" + concurrent.id + "/decision", {
-      action: "approve",
-      expectedVersion: 0,
-    });
-    await api(
-      "/requests/" + concurrent.id + "/decision",
-      { action: "approve", expectedVersion: 1 },
-      "POST",
-      directorHeaders,
-    );
-    const wrongCompany = await fixture.models.Company.create({
-      name: "Other company",
-      userId: scope.actorId,
-    });
-    const wrongAccount = await fixture.models.Account.create({
-      name: "Wrong company account",
-      companyId: wrongCompany._id,
-      userId: scope.actorId,
-    });
     assert.equal(
       (
-        await api("/requests/" + concurrent.id + "/convert", {
-          expectedVersion: 2,
-          accountId: String(wrongAccount._id),
+        await api(path + "/convert", {
+          expectedVersion: 3,
+          accountId: String(new mongoose.Types.ObjectId()),
         })
       ).status,
-      404,
+      409,
+      "Conversion cannot change approved account",
     );
-    const parallel = await Promise.all(
+    const converted = await Promise.all(
       Array.from({ length: 4 }, () =>
-        api("/requests/" + concurrent.id + "/convert", {
-          expectedVersion: 2,
-          accountId: String(account._id),
-        }),
+        api(path + "/convert", { expectedVersion: 3 }),
       ),
     );
     assert.ok(
-      parallel.every((r) => [200, 201].includes(r.status)),
-      JSON.stringify(parallel.map((r) => r.data)),
+      converted.every((r) => [200, 201].includes(r.status)),
+      JSON.stringify(converted.map((r) => r.data)),
     );
-    assert.equal(new Set(parallel.map((r) => r.data.operationId)).size, 1);
-    assert.equal(
-      await fixture.models.Event.countDocuments({
-        description: /Concurrent purchase/,
-      }),
-      1,
-    );
-    assert.equal(
-      (
-        await fixture.models.Event.findOne({
-          description: /Concurrent purchase/,
-        })
-      ).cellIndex,
-      1,
-      "Chat expense uses a free timeline cell",
+    assert.equal(new Set(converted.map((r) => r.data.operationId)).size, 1);
+    const saved = await fixture.models.Event.findOne({
+      _id: converted[0].data.operationId,
+    });
+    assert.equal(saved.cellIndex, 0);
+    assert.equal(saved.comment, input.comment);
+    assert.equal(String(saved.subcategoryId), String(subcategory._id));
+    assert.equal((await api("/state", undefined, "GET")).data.forecastCents, 0);
+    const rejected = {
+      ...input,
+      id: require("node:crypto").randomUUID(),
+      title: "Отменённая покупка",
+    };
+    await api("/requests", rejected, "POST", employee.auth);
+    await api("/requests/" + rejected.id + "/decision", {
+      expectedVersion: 0,
+      action: "reject",
+    });
+    assert.equal((await api("/state", undefined, "GET")).data.forecastCents, 0);
+    const pdfBytes = Buffer.from(
+      "%PDF-1.4\n% controlled fixture; extraction result supplied independently",
     );
     const upload = await fetch(origin + "/api/team-chat/files", {
       method: "POST",
       headers: {
-        Cookie: employeeHeaders.Cookie,
+        Cookie: employee.auth.Cookie,
         "Content-Type": "application/octet-stream",
-        "x-file-name": "document.txt",
+        "x-file-name": "invoice.pdf",
       },
-      body: Buffer.from("team attachment"),
+      body: pdfBytes,
     });
     assert.equal(upload.status, 201);
     const file = (await upload.json()).file;
-    await api(
-      "/messages",
+    const message = {
+      id: require("node:crypto").randomUUID(),
+      text: "Счёт поставщика",
+      fileIds: [file.fileId],
+    };
+    assert.equal(
+      (await api("/messages", message, "POST", employee.auth)).status,
+      201,
+    );
+    assert.equal(
+      (await api("/messages", message, "POST", employee.auth)).data.replayed,
+      true,
+    );
+    await db.collection("teamChatFiles").updateOne(
+      { _id: file.fileId },
       {
-        id: require("node:crypto").randomUUID(),
-        text: "Attached file",
-        fileIds: [file.fileId],
+        $set: {
+          invoiceAnalysis: {
+            isInvoice: true,
+            title: "Обслуживание светильников",
+            amount: "4321.45",
+            currency: "KZT",
+            dueDate: "2026-11-10",
+            supplierName: "Поставщик лампочек",
+            supplierBin: null,
+            buyerName: "Team company",
+            buyerBin: "250340021816",
+            invoiceNumber: "13",
+            comment: "Из PDF",
+            categoryId: String(category._id),
+            subcategoryId: String(subcategory._id),
+          },
+        },
       },
-      "POST",
-      employeeHeaders,
     );
-    const download = await fetch(
-      origin + "/api/team-chat/files/" + file.fileId,
-      { headers: directorHeaders },
+    const pdfPath =
+      "/messages/" + message.id + "/files/" + file.fileId + "/invoice";
+    assert.equal(
+      (await api(pdfPath, {}, "POST", director.auth)).status,
+      403,
+      "Only PDF sender confirms processing",
     );
-    assert.equal(await download.text(), "team attachment");
+    const parsed = await api(pdfPath, {}, "POST", employee.auth);
+    assert.equal(parsed.status, 201, JSON.stringify(parsed.data));
+    assert.equal(parsed.data.request.companyId, String(company._id));
+    assert.equal(parsed.data.request.contractorId, input.contractorId);
+    assert.equal(parsed.data.request.categoryId, String(category._id));
+    assert.equal(parsed.data.request.amountCents, 432145);
+    assert.equal(
+      (await api(pdfPath, {}, "POST", employee.auth)).data.request._id,
+      parsed.data.request._id,
+    );
     assert.equal(
       (await fetch(origin + "/api/team-chat/files/" + file.fileId)).status,
       401,
     );
-    const rawMember = await db
-      .collection("teamChatMembers")
-      .findOne({ _id: member._id });
-    assert.equal(
-      JSON.stringify(rawMember.password).includes("test-passphrase-2026"),
-      false,
-    );
+    const bytes = await fetch(origin + "/api/team-chat/files/" + file.fileId, {
+      headers: director.auth,
+    });
+    assert.equal((await bytes.arrayBuffer()).byteLength, pdfBytes.length);
     await api(
-      "/members/" + member._id,
+      "/members/" + employee.member._id,
       { role: "employee", status: "revoked", expectedVersion: 1 },
       "PATCH",
     );
     assert.equal(
-      (await api("/state", undefined, "GET", employeeHeaders)).status,
+      (await api("/state", undefined, "GET", employee.auth)).status,
       403,
-      "Revocation applies to existing sessions",
     );
     assert.equal(
-      (await fetch(origin + "/api/accounts", { headers: employeeHeaders }))
+      (await fetch(origin + "/api/accounts", { headers: employee.auth }))
         .status,
       401,
-      "Phone registration never grants financial access",
     );
     console.log(
-      "PASS: real phone sessions, pending/approval/revocation, workspace isolation, message idempotency, mandatory two-stage decisions, cash forecast, atomic operation conversion and no duplicates",
+      "PASS: staff counterparty creation, no staff company selection, scoped PDF workflow with source/party/category matching, manager enrichment, hidden director queue until submission, immutable approvals, reserved cells across MCP, atomic conversion and comments",
     );
     if (process.argv.includes("--browser")) {
       const { verifyTeamChat } = await import(
@@ -477,6 +488,9 @@ const { startFixture } = require("./subcategories.cjs");
         scope,
         token: inviteToken,
         company: String(company._id),
+        account: String(account._id),
+        contractor: input.contractorId,
+        category: String(category._id),
       });
     }
   } finally {

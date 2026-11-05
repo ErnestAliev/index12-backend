@@ -368,6 +368,7 @@ const eventSchema = new mongoose.Schema({
     type: String,
     amount: Number,
     description: String,
+    comment: {type:String,default:'',maxlength:10000},
 
     categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Category' },
     subcategoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Subcategory', default: null },
@@ -575,7 +576,8 @@ const getFirstFreeCellIndex = async (dateKey, userId, preferredIndex = 0, option
     }
     if (options.transferGroupId) filter.transferGroupId = { $ne: options.transferGroupId };
     const events = await Event.find(filter, 'cellIndex');
-    const used = new Set(events.map(e => Number(e.cellIndex)).filter(Number.isInteger));
+    const reserved=await mongoose.connection.db.collection('teamChatRequests').find({scope:owner,state:{$in:['manager_review','director_review','ready']},'placement.dateKey':dateKey,operationId:{$exists:false},...(options.excludeTeamRequestId?{_id:{$ne:options.excludeTeamRequestId}}:{})},{session:changeHistory.current()?.session,projection:{'placement.cellIndex':1}}).toArray();
+    const used = new Set([...events.map(e=>Number(e.cellIndex)),...reserved.map(r=>Number(r.placement.cellIndex))].filter(Number.isInteger));
     const limit = options.maxCells ?? Infinity;
     const preferred = Number.isInteger(preferredIndex) && preferredIndex >= 0 && preferredIndex < limit ? preferredIndex : 0;
     let idx = preferred;
@@ -2587,7 +2589,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
                 }
                 cellIndex = parent.cellIndex;
             } else {
-                cellIndex = await getFirstFreeCellIndex(dateKey, userId, data.cellIndex, req.mcpContext || req.teamChatOperation ? { maxCells: 32 } : {});
+                cellIndex = await getFirstFreeCellIndex(dateKey, userId, data.cellIndex, req.mcpContext || req.teamChatOperation ? { maxCells: 32,excludeTeamRequestId:req.teamChatRequestId } : {});
             }
             const newEvent = new Event({
                 ...data,
@@ -2764,7 +2766,8 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (req.mcpContext) updatedData.updatedVia = req.historyUndo ? 'history' : 'mcp';
         const targetDateKey = updatedData.dateKey || existingEvent.dateKey;
         const dateChanged = targetDateKey !== existingEvent.dateKey;
-        const resolvePosition = !req.historyPositionResolved && !existingEvent.isSplitChild && (dateChanged || (req.mcpContext && Number.isInteger(updatedData.cellIndex) && updatedData.cellIndex !== existingEvent.cellIndex));
+        const requestCollision=Number.isInteger(updatedData.cellIndex)&&!!await mongoose.connection.db.collection('teamChatRequests').findOne({scope:String(userId),state:{$in:['manager_review','director_review','ready']},'placement.dateKey':targetDateKey,'placement.cellIndex':updatedData.cellIndex,operationId:{$exists:false}},{session:changeHistory.current()?.session,projection:{_id:1}});
+        const resolvePosition = !req.historyPositionResolved && !existingEvent.isSplitChild && (dateChanged || requestCollision || (req.mcpContext && Number.isInteger(updatedData.cellIndex) && updatedData.cellIndex !== existingEvent.cellIndex));
         const persistUpdate = async () => {
             if (resolvePosition) {
                 const preferred = Number.isInteger(updatedData.cellIndex) ? updatedData.cellIndex : dateChanged ? 0 : existingEvent.cellIndex;
@@ -3408,7 +3411,7 @@ const remoteMcp = require('./mcp/remote.cjs').createRemoteMcp({ db: () => mongoo
 app.use(remoteMcp.router);
 app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
-app.use('/api/team-chat', require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, Company, Account, Category, Event, getWorkspaceStorageUserId, createOperation: mcpEventHandlers.create, history: changeHistory, frontendUrl: FRONTEND_URL, getBalances: require('./team-chat/balances.cjs').createCashReader({Account, Event, merge: mergeLegacyInterCompanyTransfers}) }));
+app.use('/api/team-chat', require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, Company, Contractor, Account, Category, Subcategory, Project, Event, allocateCell:getFirstFreeCellIndex, emitToWorkspace, getWorkspaceStorageUserId, createOperation: mcpEventHandlers.create, history: changeHistory, frontendUrl: FRONTEND_URL, getBalances: require('./team-chat/balances.cjs').createCashReader({Account, Event, merge: mergeLegacyInterCompanyTransfers}) }));
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 
 

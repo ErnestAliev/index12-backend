@@ -139,3 +139,5 @@ test("cash projection handles transfers, withdrawals, split totals and already r
   assert.equal(r.companies[0].currentCents, 60000);
   assert.equal(r.companies[0].requestedCents, 0);
 });
+
+test('an unassigned staff request never borrows an arbitrary managed company cash pool',()=>{const result=projectCash([{_id:'a',companyId:'first',initialBalance:1000},{_id:'b',companyId:'second',initialBalance:2000}],[],[{companyId:null,amountCents:50000,dueDate:'2026-11-06',state:'manager_review'}],'2026-11-05');assert.equal(result.unallocatedCents,50000);assert.deepEqual(result.companies.map(c=>c.minimumCents),[100000,200000]);});

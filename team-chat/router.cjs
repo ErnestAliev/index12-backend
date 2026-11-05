@@ -33,6 +33,12 @@ function createTeamChatRouter({
   Company,
   Account,
   Category,
+  Contractor,
+  Subcategory,
+  Project,
+  allocateCell,
+  emitToWorkspace,
+  parseInvoice,
   Event,
   getWorkspaceStorageUserId,
   createOperation,
@@ -70,6 +76,25 @@ function createTeamChatRouter({
       ),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
       coll("Requests").createIndex({ workspaceId: 1, createdAt: -1 }),
+      coll("Requests").createIndex({
+        scope: 1,
+        state: 1,
+        "placement.dateKey": 1,
+      }),
+      coll("Requests").createIndex(
+        { workspaceId: 1, sourceFileId: 1 },
+        {
+          unique: true,
+          partialFilterExpression: { sourceFileId: { $type: "string" } },
+        },
+      ),
+      coll("Requests").createIndex(
+        { workspaceId: 1, sourceSha256: 1 },
+        {
+          unique: true,
+          partialFilterExpression: { sourceSha256: { $type: "string" } },
+        },
+      ),
       coll("Files").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       coll("Attempts").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     ]).catch((e) => {
@@ -313,7 +338,14 @@ function createTeamChatRouter({
         .toArray();
       const requestFilter = {
         ...filter,
-        ...(p.role === "employee" ? { authorId: p.actorId } : {}),
+        ...(p.role === "employee"
+          ? { authorId: p.actorId }
+          : p.role === "director"
+            ? {
+                state: { $ne: "manager_review" },
+                history: { $elemMatch: { role: "manager", action: "approve" } },
+              }
+            : {}),
       };
       const requests = await coll("Requests")
         .find(requestFilter)
@@ -321,11 +353,53 @@ function createTeamChatRouter({
         .limit(501)
         .toArray();
       const allActive = await coll("Requests")
-        .find({ ...requestFilter, state: { $in: activeStates } })
+        .find({
+          ...filter,
+          ...(p.role === "employee" ? { authorId: p.actorId } : {}),
+          state: { $in: activeStates },
+        })
         .toArray();
-      const companies = await Company.find(scopeFilter(req))
-        .select("_id name")
-        .lean();
+      const placements = p.owner
+        ? await coll("Requests")
+            .find({
+              workspaceId: p.workspaceId,
+              state: { $in: activeStates },
+              placement: { $exists: true },
+              operationId: { $exists: false },
+            })
+            .toArray()
+        : [];
+      const fileIds = rows.flatMap((m) =>
+        (m.attachments || []).map((f) => f.fileId),
+      );
+      const fileStates = await coll("Files")
+        .find(
+          { _id: { $in: fileIds }, workspaceId: p.workspaceId },
+          {
+            projection: {
+              mimeType: 1,
+              invoiceDismissed: 1,
+              invoiceRequestId: 1,
+            },
+          },
+        )
+        .toArray();
+      for (const message of rows)
+        message.attachments = (message.attachments || []).map((file) => ({
+          ...file,
+          isPdf:
+            fileStates.find((f) => f._id === file.fileId)?.mimeType ===
+              "application/pdf" || /\.pdf$/i.test(file.name),
+          invoiceRequestId:
+            fileStates.find((f) => f._id === file.fileId)?.invoiceRequestId ||
+            null,
+          invoiceDismissed: !!fileStates.find((f) => f._id === file.fileId)
+            ?.invoiceDismissed,
+        }));
+      const companies =
+        p.role === "employee"
+          ? []
+          : await Company.find(scopeFilter(req)).select("_id name").lean();
       const members = p.owner
         ? await coll("Members")
             .find(filter, { projection: { password: 0 } })
@@ -340,6 +414,7 @@ function createTeamChatRouter({
         messages: rows.slice(0, 50).reverse(),
         hasMore: rows.length > 50,
         requests: requests.slice(0, 500),
+        placements,
         requestsTruncated: requests.length > 500,
         forecastCents: forecast(allActive),
         companies,
@@ -423,7 +498,10 @@ function createTeamChatRouter({
         workspaceId: req.team.workspaceId,
         actorId: req.team.actorId,
         name,
-        mimeType: "application/octet-stream",
+        mimeType:
+          req.body.subarray(0, 5).toString() === "%PDF-"
+            ? "application/pdf"
+            : "application/octet-stream",
         size: req.body.length,
         data: req.body,
         expiresAt: new Date(Date.now() + 86400000),
@@ -513,59 +591,25 @@ function createTeamChatRouter({
       res.status(201).json({ message: row });
     }),
   );
-  router.post(
-    "/requests",
-    wrap(async (req, res) => {
-      const id = text(req.body.id, 80),
-        title = text(req.body.title, 300),
-        amountCents = money(req.body.amount),
-        dueDate = dateOnly(req.body.dueDate);
-      if (!dueDate || !/^[a-f\d-]{36}$/i.test(id)) fail("Укажите дату расхода");
-      if (
-        typeof req.body.companyId !== "string" ||
-        !/^[a-f\d]{24}$/i.test(req.body.companyId)
-      )
-        fail("Выберите компанию");
-      const company = await Company.findOne({
-        _id: req.body.companyId,
-        ...scopeFilter(req),
-      })
-        .select("_id name")
-        .lean();
-      if (!company) fail("Выберите компанию", 404);
-      const row = {
-        _id: id,
-        workspaceId: req.team.workspaceId,
-        authorId: req.team.actorId,
-        authorName: req.team.name,
-        title,
-        amountCents,
-        dueDate,
-        companyId: String(company._id),
-        companyName: company.name,
-        state: "manager_review",
-        version: 0,
-        createdAt: new Date(),
-        history: [],
-      };
-      const old = await coll("Requests").findOne({ _id: id });
-      if (old) {
-        if (
-          old.workspaceId !== row.workspaceId ||
-          old.authorId !== row.authorId ||
-          old.title !== title ||
-          old.amountCents !== amountCents ||
-          old.dueDate !== dueDate ||
-          old.companyId !== row.companyId
-        )
-          fail("Ключ заявки уже использован", 409);
-        return res.json({ request: old, replayed: true });
-      }
-      await coll("Requests").insertOne(row);
-      notify(req);
-      res.status(201).json({ request: row });
-    }),
-  );
+  require("./request-routes.cjs").registerRequestRoutes(router, {
+    coll,
+    wrap,
+    scopeFilter,
+    owner,
+    notify,
+    Company,
+    Workspace,
+    Contractor,
+    Account,
+    Category,
+    Subcategory,
+    Project,
+    Event,
+    history,
+    allocateCell,
+    emitToWorkspace,
+    parseInvoice,
+  });
   router.post(
     "/requests/:id/decision",
     wrap(async (req, res) => {
@@ -574,6 +618,12 @@ function createTeamChatRouter({
         workspaceId: req.team.workspaceId,
       });
       if (!row) fail("Заявка не найдена", 404);
+      if (
+        req.body.action === "approve" &&
+        row.state === "manager_review" &&
+        !row.placement
+      )
+        fail("Сначала дополните заявку и разместите её на таймлайне", 409);
       const state = decision(row.state, req.team.role, req.body.action),
         note = text(req.body.note || "", 1000, false);
       if (!Number.isInteger(req.body.expectedVersion))
@@ -606,20 +656,6 @@ function createTeamChatRouter({
       res.json({ request: updated });
     }),
   );
-  router.get(
-    "/operation-options",
-    wrap(async (req, res) => {
-      owner(req);
-      res.json({
-        accounts: await Account.find(scopeFilter(req))
-          .select("_id name companyId")
-          .lean(),
-        categories: await Category.find(scopeFilter(req))
-          .select("_id name")
-          .lean(),
-      });
-    }),
-  );
   router.post(
     "/requests/:id/convert",
     wrap(async (req, res) => {
@@ -638,6 +674,19 @@ function createTeamChatRouter({
           fail("Нужно согласование управляющего и руководителя", 409);
         if (row.version !== request.body.expectedVersion)
           fail("Заявка изменилась", 409);
+        if (!row.placement)
+          fail("Дополните и повторно согласуйте реквизиты заявки", 409);
+        const supplied = request.body;
+        for (const field of ["accountId", "categoryId"])
+          if (supplied[field] && supplied[field] !== row.placement[field])
+            fail("Реквизиты отличаются от утверждённых руководителем", 409);
+        if (supplied.dueDate && supplied.dueDate !== row.dueDate)
+          fail("Дата отличается от утверждённой руководителем", 409);
+        request.body = {
+          ...row.placement,
+          expectedVersion: supplied.expectedVersion,
+          dueDate: row.dueDate,
+        };
         if (
           typeof request.body.accountId !== "string" ||
           !/^[a-f\d]{24}$/i.test(request.body.accountId)
@@ -687,15 +736,18 @@ function createTeamChatRouter({
           accountId: String(account._id),
           companyId: row.companyId,
           categoryId: before.categoryId || null,
-          description: `${row.title}\nЗаявка ${row._id}; ${row.authorName}`,
-          cellIndex: 0,
+          ...row.placement,
+          comment: row.comment || "",
+          cellIndex: row.placement.cellIndex,
         };
         request.teamChatOperation = true;
+        request.teamChatRequestId = row._id;
         try {
           await createOperation(request, buffer);
         } finally {
           request.body = before;
           delete request.teamChatOperation;
+          delete request.teamChatRequestId;
         }
         if (code >= 400 || !operation?._id)
           fail(

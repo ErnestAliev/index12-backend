@@ -23,7 +23,7 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
   const context = {
     isSystemWithdrawal, normalizeTransferData,
     Account: { findOne: async () => ({ companyId: 'company' }) },
-    app, Event, mongoose: { Types: { ObjectId: class {} } },
+    app, Event, mongoose: { Types: { ObjectId: class {} },connection:{db:{collection:()=>({findOne:async()=>null,find:()=>({toArray:async()=>[]})})}} }, changeHistory:{current:()=>null},
     captureMcpHandler: (_kind, handler) => handler,
     checkWorkspacePermission: () => (_req, _res, next) => next(),
     canEdit: () => {}, canDelete: () => {},
