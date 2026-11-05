@@ -131,6 +131,23 @@ function registerRequestRoutes(
       });
     }),
   );
+  router.get(
+    "/categories",
+    wrap(async (req, res) => {
+      const search = normalize(req.query.search);
+      const all = await Category.find({
+        ...scopeFilter(req),
+        type: { $ne: "income" },
+      })
+        .select("_id name")
+        .sort({ name: 1, _id: 1 })
+        .lean();
+      const rows = search
+        ? all.filter((c) => normalize(c.name).includes(search))
+        : all;
+      res.json({ categories: rows.slice(0, 50) });
+    }),
+  );
   router.post(
     "/contractors",
     wrap(async (req, res) =>
@@ -160,6 +177,19 @@ function registerRequestRoutes(
       }).lean();
       if (!company) fail("Компания недоступна", 404);
     }
+    const requestedCategoryId = source?.categoryId || input.categoryId;
+    let category = null;
+    if (requestedCategoryId) {
+      if (!id(requestedCategoryId)) fail("Проверьте категорию расхода");
+      category = await Category.findOne({
+        _id: requestedCategoryId,
+        ...scopeFilter(req),
+        type: { $ne: "income" },
+      })
+        .select("_id name")
+        .lean();
+      if (!category) fail("Категория расхода недоступна", 404);
+    }
     const row = {
       _id: requestId,
       scope: req.team.scope,
@@ -175,8 +205,8 @@ function registerRequestRoutes(
       authorComment: comment,
       companyId: company ? String(company._id) : null,
       companyName: company?.name || "",
-      categoryId: source?.categoryId || null,
-      categoryNames: source?.categoryName ? [source.categoryName] : [],
+      categoryId: category ? String(category._id) : null,
+      categoryNames: category ? [category.name] : [],
       subcategoryName: source?.subcategoryName || "",
       subcategoryId: source?.subcategoryId || null,
       sourceFileId: source?.fileId || null,
@@ -204,6 +234,7 @@ function registerRequestRoutes(
         existing.title !== title ||
         existing.amountCents !== amountCents ||
         existing.contractorId !== row.contractorId ||
+        existing.categoryId !== row.categoryId ||
         existing.comment !== comment ||
         existing.dueDate !== dueDate
       )

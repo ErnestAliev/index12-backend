@@ -242,6 +242,7 @@ const { startFixture } = require("./subcategories.cjs");
     const input = {
       id: require("node:crypto").randomUUID(),
       title: "Купить лампочки",
+      categoryId: String(category._id),
       amount: "1 200.00",
       contractorId: supplier.data.contractor._id,
       dueDate: "2026-11-06",
@@ -252,6 +253,34 @@ const { startFixture } = require("./subcategories.cjs");
     const path = "/requests/" + input.id;
     assert.equal(created.data.request.companyId, null);
     assert.equal(created.data.request.comment, input.comment);
+    assert.equal(created.data.request.categoryId, String(category._id));
+    assert.deepEqual(created.data.request.categoryNames, ["Обслуживание"]);
+    const suggestedCategories = await api(
+      "/categories?search=бслу",
+      undefined,
+      "GET",
+      employee.auth,
+    );
+    assert.equal(suggestedCategories.status, 200);
+    assert.equal(
+      suggestedCategories.data.categories[0]._id,
+      String(category._id),
+    );
+    assert.equal(
+      (
+        await api(
+          "/requests",
+          {
+            ...input,
+            id: require("node:crypto").randomUUID(),
+            categoryId: String(new mongoose.Types.ObjectId()),
+          },
+          "POST",
+          employee.auth,
+        )
+      ).status,
+      404,
+    );
     assert.equal(
       (await api("/state", undefined, "GET", director.auth)).data.requests
         .length,
