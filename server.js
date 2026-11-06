@@ -3411,7 +3411,8 @@ const remoteMcp = require('./mcp/remote.cjs').createRemoteMcp({ db: () => mongoo
 app.use(remoteMcp.router);
 app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
-app.use('/api/team-chat', require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, Company, Contractor, Account, Category, Subcategory, Project, Event, allocateCell:getFirstFreeCellIndex, emitToWorkspace, getWorkspaceStorageUserId, createOperation: mcpEventHandlers.create, history: changeHistory, frontendUrl: FRONTEND_URL, getBalances: require('./team-chat/balances.cjs').createCashReader({Account, Event, merge: mergeLegacyInterCompanyTransfers}) }));
+const teamChatRouter = require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, User, Company, Contractor, Account, Category, Subcategory, Project, Event, allocateCell:getFirstFreeCellIndex, emitToWorkspace, getWorkspaceStorageUserId, createOperation: mcpEventHandlers.create, history: changeHistory, frontendUrl: FRONTEND_URL, getBalances: require('./team-chat/balances.cjs').createCashReader({Account, Event, merge: mergeLegacyInterCompanyTransfers}) });
+app.use('/api/team-chat', teamChatRouter);
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 
 
@@ -3442,6 +3443,7 @@ mongoose.connect(DB_URL, {
     .then(async () => {
         console.log('✅ MongoDB подключена.');
         require('./business/reminders.cjs').startReminders({ db: mongoose.connection.db, Workspace });
+        teamChatRouter.startPush();
         server.listen(PORT, () => {
             console.log(`✅ Сервер запущен на порту ${PORT}`);
             cloudChat.start();

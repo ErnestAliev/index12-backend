@@ -145,6 +145,11 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         history: [...(row.approval?.history || []), entry],
       };
       const updated = await update(req, row, { $set: { approval } });
+      notify(req, {
+        key: `approval:${updated._id}:${updated.version}`,
+        title: "Chat · Согласование",
+        body: row.text || "Решение по сообщению",
+      });
       res.json({ messageId: updated._id });
     }),
   );
@@ -268,7 +273,14 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         if (saved?.forwardKey !== fingerprint)
           fail("Ключ пересылки уже использован", 409);
       }
-      notify({ ...req, team: { ...req.team, workspaceId: targetId } });
+      notify(
+        { ...req, team: { ...req.team, workspaceId: targetId } },
+        {
+          key: "message:" + messageId,
+          title: "Chat · " + req.team.name,
+          body: row.text || "Файл в чате",
+        },
+      );
       res
         .status(201)
         .json({ forwardedMessageId: messageId, targetWorkspaceId: targetId });

@@ -30,6 +30,7 @@ const {
 function createTeamChatRouter({
   db,
   Workspace,
+  User,
   Company,
   Account,
   Category,
@@ -51,6 +52,8 @@ function createTeamChatRouter({
   bus.setMaxListeners(1000);
   const coll = (name) => db().collection("teamChat" + name);
   const sessions = require("./session.cjs").createChatSessions({ coll });
+  const push = require("./push.cjs").createChatPush({ coll, Workspace });
+  router.startPush = () => push.start();
   const identity = (p) => ({
     workspaceId: p.workspaceId,
     name: p.workspace.name,
@@ -115,8 +118,20 @@ function createTeamChatRouter({
       indexes = null;
       throw e;
     }));
-  function notify(req) {
-    const send = () => bus.emit(req.team.workspaceId);
+  function notify(req, event) {
+    const send = () => {
+      bus.emit(req.team.workspaceId);
+      if (event)
+        void push
+          .enqueue({
+            workspaceId: req.team.workspaceId,
+            actorId: req.team.actorId,
+            ...event,
+          })
+          .catch(() =>
+            console.error("[Team chat] Could not queue notification"),
+          );
+    };
     if (!history?.defer(send)) send();
   }
   router.use(
@@ -146,9 +161,22 @@ function createTeamChatRouter({
     wrap(async (req, res) => {
       const invite = await invitation(req.params.token),
         workspace = await Workspace.findById(invite.workspaceId)
-          .select("name")
+          .select("name userId")
           .lean();
-      res.json({ name: workspace.name });
+      const creator =
+        !invite.creatorName && User
+          ? await User.findById(workspace.userId).select("name").lean()
+          : null;
+      const role = Object.hasOwn(roles, invite.role || "")
+        ? invite.role
+        : "employee";
+      res.json({
+        name: workspace.name,
+        workspaceId: invite.workspaceId,
+        inviterName: invite.creatorName || creator?.name || "Владелец",
+        role,
+        roleName: roles[role],
+      });
     }),
   );
   router.get(
@@ -157,20 +185,32 @@ function createTeamChatRouter({
       const invite = await invitation(text(req.params.token, 100));
       res.type("application/manifest+json").json({
         id: "/team/" + invite.workspaceId,
-        name: "INDEX12 — Чат сотрудников",
-        short_name: "INDEX12 Чат",
+        name: "Chat",
+        short_name: "Chat",
         start_url: "/team/" + req.params.token,
         scope: "/team/",
         display: "standalone",
         background_color: "#191919",
         theme_color: "#191919",
         icons: [
-          { src: "/pwa-192x192.png", sizes: "192x192", type: "image/png" },
-          { src: "/pwa-512x512.png", sizes: "512x512", type: "image/png" },
+          { src: "/chat-192.png", sizes: "192x192", type: "image/png" },
+          {
+            src: "/chat-512.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "any maskable",
+          },
         ],
       });
     }),
   );
+  router.get("/push-config", (_req, res) => {
+    const keys = require("./push.cjs").pushKeys(process.env);
+    res.json({
+      configured: !!(keys.publicKey && keys.privateKey),
+      publicKey: keys.publicKey || null,
+    });
+  });
   router.post(
     "/auth",
     wrap(async (req, res) => {
@@ -203,13 +243,28 @@ function createTeamChatRouter({
           phone: number,
           name: text(req.body.name, 100),
           password,
-          role: "employee",
+          role: Object.hasOwn(roles, invite.role || "")
+            ? invite.role
+            : "employee",
           status: "pending",
           version: 0,
           createdAt: new Date(),
         };
         try {
           await coll("Members").insertOne(member);
+          const workspace = await Workspace.findById(member.workspaceId)
+            .select("userId")
+            .lean();
+          void push
+            .enqueue({
+              workspaceId: member.workspaceId,
+              actorId: member._id,
+              onlyActor: "owner:" + workspace.userId,
+              key: "join:" + member._id,
+              title: "Запрос в Chat",
+              body: member.name + " просит доступ",
+            })
+            .catch(() => {});
         } catch (e) {
           if (e.code === 11000) fail("Номер уже зарегистрирован", 409);
           throw e;
@@ -293,6 +348,15 @@ function createTeamChatRouter({
   router.post(
     "/logout",
     wrap(async (req, res) => {
+      if (
+        typeof req.body.endpoint === "string" &&
+        req.body.endpoint.length <= 4096
+      )
+        await coll("PushSubscriptions").deleteOne({
+          _id: createHash("sha256").update(req.body.endpoint).digest("hex"),
+          actorId: req.team.actorId,
+          workspaceId: req.team.workspaceId,
+        });
       await sessions.clear(req, res);
       delete req.session.teamChatMemberId;
       await new Promise((resolve, reject) =>
@@ -301,6 +365,7 @@ function createTeamChatRouter({
       res.json({ ok: true });
     }),
   );
+  push.register(router, { wrap, invitation });
   router.use((req, res, next) =>
     req.team.status === "active"
       ? next()
@@ -336,35 +401,45 @@ function createTeamChatRouter({
       });
     }),
   );
+  async function messagePage(p, before) {
+    const filter = { workspaceId: p.workspaceId },
+      messageFilter = { ...filter, deletedAt: { $exists: false } };
+    if (before) {
+      if (typeof before !== "string" || !/^[a-f\d-]{36}$/i.test(before))
+        fail("Некорректная страница истории");
+      const cursor = await coll("Messages").findOne({ _id: before, ...filter });
+      if (!cursor) fail("Сообщение не найдено", 404);
+      messageFilter.$or = [
+        { createdAt: { $lt: cursor.createdAt } },
+        { createdAt: cursor.createdAt, _id: { $lt: cursor._id } },
+      ];
+    }
+    return coll("Messages")
+      .find(messageFilter, {
+        projection: { editHistory: 0, approvalArchive: 0 },
+      })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(51)
+      .toArray();
+  }
+  router.get(
+    "/messages",
+    wrap(async (req, res) => {
+      const rows = await messagePage(req.team, req.query.before);
+      await messageActions.decorate(req, rows);
+      res.json({
+        messages: rows.slice(0, 50).reverse(),
+        hasMore: rows.length > 50,
+      });
+    }),
+  );
   router.get(
     "/state",
     wrap(async (req, res) => {
       const checkedAt = new Date();
       const p = req.team,
         filter = { workspaceId: p.workspaceId };
-      const before = req.query.before,
-        messageFilter = {
-          ...filter,
-          ...(before ? { _id: { $lt: before } } : {}),
-        };
-      // Sortable server timestamps + a compound cursor retain history without a silent fixed list.
-      if (before) {
-        const cursor = await coll("Messages").findOne({
-          _id: before,
-          ...filter,
-        });
-        if (!cursor) fail("Сообщение не найдено", 404);
-        delete messageFilter._id;
-        messageFilter.$or = [
-          { createdAt: { $lt: cursor.createdAt } },
-          { createdAt: cursor.createdAt, _id: { $lt: cursor._id } },
-        ];
-      }
-      const rows = await coll("Messages")
-        .find(messageFilter)
-        .sort({ createdAt: -1, _id: -1 })
-        .limit(51)
-        .toArray();
+      const rows = await messagePage(p, req.query.before);
       const requestFilter = { ...filter, deletedAt: { $exists: false } };
       const requests = await coll("Requests")
         .find(requestFilter)
@@ -421,7 +496,7 @@ function createTeamChatRouter({
       const checkedIds = String(req.query.messageIds || "")
         .split(",")
         .filter((id) => /^[a-f\d-]{36}$/i.test(id))
-        .slice(0, 1000);
+        .slice(0, 150);
       const deletedMessageIds = checkedIds.length
         ? (
             await coll("Messages")
@@ -496,10 +571,15 @@ function createTeamChatRouter({
     "/invite",
     wrap(async (req, res) => {
       owner(req);
+      const role = req.body.role || "employee";
+      if (!Object.hasOwn(roles, role)) fail("Выберите роль приглашения");
       const token = randomBytes(32).toString("base64url");
       await coll("Invites").insertOne({
         _id: createHash("sha256").update(token).digest("hex"),
         workspaceId: req.team.workspaceId,
+        creatorName: req.team.name,
+        creatorId: req.team.actorId,
+        role,
         revokedAt: null,
         createdAt: new Date(),
       });
@@ -551,7 +631,18 @@ function createTeamChatRouter({
         { returnDocument: "after" },
       );
       if (!row) fail("Заявка сотрудника изменилась. Обновите список", 409);
-      notify(req);
+      notify(
+        req,
+        row.status === "active"
+          ? {
+              key: `member:${row._id}:${row.version}`,
+              onlyActor: row._id,
+              title: "Chat · Доступ открыт",
+              body: "Ваша роль: " + roles[row.role],
+              allowPending: true,
+            }
+          : undefined,
+      );
       res.json({ ok: true });
     }),
   );
@@ -662,7 +753,11 @@ function createTeamChatRouter({
         },
         { $set: { linked: true }, $unset: { expiresAt: "" } },
       );
-      notify(req);
+      notify(req, {
+        key: "message:" + row._id,
+        title: req.team.workspace.name + " · " + req.team.name,
+        body: row.text || "Файл в чате",
+      });
       res.status(201).json({ message: row });
     }),
   );
@@ -754,7 +849,11 @@ function createTeamChatRouter({
         { returnDocument: "after" },
       );
       if (!updated) fail("Заявка уже изменилась", 409);
-      notify(req);
+      notify(req, {
+        key: `request:${updated._id}:${updated.version}`,
+        title: "Chat · Решение по заявке",
+        body: updated.title,
+      });
       res.json({ request: updated });
     }),
   );

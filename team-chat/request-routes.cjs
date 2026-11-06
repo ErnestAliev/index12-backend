@@ -258,7 +258,11 @@ function registerRequestRoutes(
       }
       throw e;
     }
-    notify(req);
+    notify(req, {
+      key: "request:" + row._id,
+      title: "Chat · Новая заявка",
+      body: row.title,
+    });
     return { request: row };
   }
   router.post(
@@ -475,7 +479,16 @@ function registerRequestRoutes(
           { ...opts(), returnDocument: "after" },
         );
         if (!updated) fail("Заявка изменилась", 409);
-        notify(req);
+        notify(
+          req,
+          submit
+            ? {
+                key: `request:${updated._id}:${updated.version}`,
+                title: "Chat · На согласование руководителю",
+                body: updated.title,
+              }
+            : undefined,
+        );
         res.json({ request: updated });
       })(req, res, (error) => {
         throw error;

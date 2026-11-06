@@ -78,6 +78,10 @@ const { startFixture } = require("./subcategories.cjs");
           GOOGLE_CLIENT_SECRET: "",
           OPENAI_API_KEY: "",
           INDEX12_CLOUD_CHAT_ENABLED: "false",
+          TEAM_CHAT_VAPID_PUBLIC_KEY: "",
+          TEAM_CHAT_VAPID_PRIVATE_KEY: "",
+          CALENDAR_VAPID_PUBLIC_KEY: "",
+          CALENDAR_VAPID_PRIVATE_KEY: "",
           VAPID_PUBLIC_KEY: "",
           VAPID_PRIVATE_KEY: "",
         },
@@ -976,6 +980,7 @@ const { startFixture } = require("./subcategories.cjs");
     console.log(
       "PASS: staff counterparty creation, no staff company selection, scoped PDF workflow with source/party/category matching, manager enrichment, common request queue, persistent sessions, scoped deletion, immutable approvals, reserved cells across MCP, atomic conversion and comments",
     );
+    await require("./team-chat-onboarding.cjs")({ db, Workspace: fixture.identityModels.Workspace, api, scope, employee, director });
     if (process.argv.includes("--browser")) {
       const { verifyTeamChat } = await import(
         "../../../index12-frontend/tests/browser/team-chat.mjs"
