@@ -23,13 +23,14 @@ function createChatSessions({
   const key = (token) => createHash("sha256").update(token).digest("hex");
   const setCookie = (res, token) =>
     res.cookie(COOKIE, token, { ...cookieOptions, maxAge: LIFETIME });
-  async function issue(req, res, memberId) {
+  async function issue(req, res, memberId, authEpoch = 0) {
     const previous = tokenFrom(req);
     if (previous) await coll("Sessions").deleteOne({ _id: key(previous) });
     const token = randomBytes(32).toString("base64url");
     await coll("Sessions").insertOne({
       _id: key(token),
       memberId,
+      authEpoch,
       expiresAt: new Date(Date.now() + LIFETIME),
       renewedAt: new Date(),
     });
@@ -54,6 +55,7 @@ function createChatSessions({
         },
       );
     }
+    req.teamSessionEpoch = session.authEpoch || 0;
     setCookie(res, token);
     return session.memberId;
   }

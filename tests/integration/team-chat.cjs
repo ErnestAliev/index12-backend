@@ -981,6 +981,7 @@ const { startFixture } = require("./subcategories.cjs");
       "PASS: staff counterparty creation, no staff company selection, scoped PDF workflow with source/party/category matching, manager enrichment, common request queue, persistent sessions, scoped deletion, immutable approvals, reserved cells across MCP, atomic conversion and comments",
     );
     await require("./team-chat-onboarding.cjs")({ db, Workspace: fixture.identityModels.Workspace, api, scope, employee, director });
+    await require("./team-chat-administration.cjs")({ api, db, scope, director });
     if (process.argv.includes("--browser")) {
       const { verifyTeamChat } = await import(
         "../../../index12-frontend/tests/browser/team-chat.mjs"

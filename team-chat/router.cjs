@@ -82,9 +82,32 @@ function createTeamChatRouter({
     : "www." + alternate.hostname;
   allowedOrigins.add(alternate.origin);
   frontendUrl = front.origin;
+  const invites = require("./invites.cjs").createInvites({
+    coll,
+    Workspace,
+    frontendUrl,
+  });
   let indexes;
   const ready = () =>
     (indexes ||= Promise.all([
+      coll("Invites").createIndex(
+        { tokenHash: 1 },
+        {
+          unique: true,
+          partialFilterExpression: { tokenHash: { $type: "string" } },
+        },
+      ),
+      coll("Invites").createIndex({ previousTokenHashes: 1 }, { sparse: true }),
+      coll("Invites").createIndex({ workspaceId: 1, createdAt: -1 }),
+      coll("Recoveries").createIndex({
+        workspaceId: 1,
+        status: 1,
+        expiresAt: 1,
+      }),
+      coll("Recoveries").createIndex(
+        { expiresAt: 1 },
+        { expireAfterSeconds: 0 },
+      ),
       coll("Sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       coll("Members").createIndex(
         { workspaceId: 1, phone: 1 },
@@ -147,19 +170,11 @@ function createTeamChatRouter({
       next();
     }),
   );
-  async function invitation(token) {
-    const row = await coll("Invites").findOne({
-      _id: createHash("sha256").update(String(token)).digest("hex"),
-      revokedAt: null,
-    });
-    if (!row || !(await Workspace.exists({ _id: row.workspaceId })))
-      fail("Приглашение недействительно", 404);
-    return row;
-  }
+  const invitation = (token, options) => invites.lookup(token, options);
   router.get(
     "/invite/:token",
     wrap(async (req, res) => {
-      const invite = await invitation(req.params.token),
+      const invite = await invitation(req.params.token, { allowClosed: true }),
         workspace = await Workspace.findById(invite.workspaceId)
           .select("name userId")
           .lean();
@@ -176,13 +191,16 @@ function createTeamChatRouter({
         inviterName: invite.creatorName || creator?.name || "Владелец",
         role,
         roleName: roles[role],
+        joinable: invite.joinable,
       });
     }),
   );
   router.get(
     "/manifest/:token",
     wrap(async (req, res) => {
-      const invite = await invitation(text(req.params.token, 100));
+      const invite = await invitation(text(req.params.token, 100), {
+        allowClosed: true,
+      });
       res.type("application/manifest+json").json({
         id: "/team/" + invite.workspaceId,
         name: "Chat",
@@ -211,10 +229,21 @@ function createTeamChatRouter({
       publicKey: keys.publicKey || null,
     });
   });
+  const recovery = require("./recovery.cjs").createRecovery({
+    db,
+    coll,
+    invites,
+    Workspace,
+    frontendUrl,
+    notify,
+  });
+  recovery.registerPublic(router, wrap);
   router.post(
     "/auth",
     wrap(async (req, res) => {
-      const invite = await invitation(text(req.body.token, 100)),
+      const invite = await invitation(text(req.body.token, 100), {
+          allowClosed: req.body.register !== true,
+        }),
         number = phone(req.body.phone);
       const bucket = Math.floor(Date.now() / 600000),
         key = createHash("sha256")
@@ -235,7 +264,23 @@ function createTeamChatRouter({
         phone: number,
       });
       if (req.body.register === true) {
-        if (member) fail("Номер уже зарегистрирован. Войдите с паролем", 409);
+        if (member) {
+          const closed =
+            member.status === "revoked" || member.status === "rejected";
+          throw Object.assign(
+            new Error(
+              member.status === "revoked"
+                ? "Доступ к чату отозван владельцем. Попросите вернуть доступ"
+                : member.status === "rejected"
+                  ? "Заявка на доступ отклонена владельцем"
+                  : "Номер уже зарегистрирован. Введите свой пароль",
+            ),
+            {
+              status: closed ? 403 : 409,
+              code: closed ? "CHAT_ACCESS_CLOSED" : "PHONE_REGISTERED",
+            },
+          );
+        }
         const password = await hashPassword(req.body.password);
         member = {
           _id: randomUUID(),
@@ -275,9 +320,14 @@ function createTeamChatRouter({
       )
         fail("Проверьте номер телефона и пароль", 401);
       if (member.status === "rejected" || member.status === "revoked")
-        fail("Доступ к чату не одобрен", 403);
+        fail(
+          member.status === "revoked"
+            ? "Доступ к чату отозван владельцем. Попросите вернуть доступ"
+            : "Заявка на доступ отклонена владельцем",
+          403,
+        );
       // A separate persistent cookie cannot authenticate to INDEX12 financial APIs.
-      await sessions.issue(req, res, member._id);
+      await sessions.issue(req, res, member._id, member.authEpoch || 0);
       bus.emit(member.workspaceId);
       res.json({ status: member.status });
     }),
@@ -325,14 +375,26 @@ function createTeamChatRouter({
           workspace,
         };
       } else {
-        if (!member || (wanted && String(wanted) !== member.workspaceId))
+        if (
+          !member ||
+          (wanted && String(wanted) !== member.workspaceId) ||
+          (persistentId
+            ? (req.teamSessionEpoch || 0) !== (member.authEpoch || 0)
+            : !!member.authEpoch)
+        ) {
+          await sessions.clear(req, res);
+          if (req.session) delete req.session.teamChatMemberId;
           fail("Войдите в чат по приглашению", 401);
-        if (!["pending", "active"].includes(member.status))
+        }
+        if (
+          !["pending", "active", "revoked", "rejected"].includes(member.status)
+        )
           fail("Доступ к чату закрыт", 403);
         workspace = await Workspace.findById(member.workspaceId).lean();
         if (!workspace) fail("Чат недоступен", 404);
         req.team = { ...member, actorId: member._id, owner: false, workspace };
-        if (!persistentId) await sessions.issue(req, res, member._id);
+        if (!persistentId)
+          await sessions.issue(req, res, member._id, member.authEpoch || 0);
       }
       req.team.scope = String(getWorkspaceStorageUserId(workspace));
       next();
@@ -365,7 +427,20 @@ function createTeamChatRouter({
       res.json({ ok: true });
     }),
   );
-  push.register(router, { wrap, invitation });
+  router.use((req, res, next) =>
+    ["pending", "active"].includes(req.team.status)
+      ? next()
+      : res.status(403).json({
+          message:
+            req.team.status === "revoked"
+              ? "Доступ к чату отозван владельцем"
+              : "Заявка на доступ отклонена владельцем",
+        }),
+  );
+  push.register(router, {
+    wrap,
+    invitation: (token) => invitation(token, { allowClosed: true }),
+  });
   router.use((req, res, next) =>
     req.team.status === "active"
       ? next()
@@ -375,6 +450,7 @@ function createTeamChatRouter({
     if (!req.team.owner)
       fail("Только владелец настраивает участников чата", 403);
   };
+  recovery.registerOwner(router, { wrap, owner });
   const scopeFilter = (req) => ({
     userId: {
       $in: /^[a-f\d]{24}$/i.test(req.team.scope)
@@ -439,60 +515,49 @@ function createTeamChatRouter({
       const checkedAt = new Date();
       const p = req.team,
         filter = { workspaceId: p.workspaceId };
-      const rows = await messagePage(p, req.query.before);
-      const requestFilter = { ...filter, deletedAt: { $exists: false } };
-      const requests = await coll("Requests")
-        .find(requestFilter)
-        .sort({ createdAt: -1 })
-        .limit(501)
-        .toArray();
-      const allActive = await coll("Requests")
-        .find({
-          ...filter,
-          state: { $in: activeStates },
-        })
-        .toArray();
+      const [rows, requests, allActive, companies, members, recoveryCount] =
+        await Promise.all([
+          messagePage(p, req.query.before),
+          coll("Requests")
+            .find({ ...filter, deletedAt: { $exists: false } })
+            .sort({ createdAt: -1 })
+            .limit(501)
+            .toArray(),
+          coll("Requests")
+            .find({ ...filter, state: { $in: activeStates } })
+            .toArray(),
+          !p.owner && p.role === "employee"
+            ? []
+            : Company.find(scopeFilter(req)).select("_id name").lean(),
+          p.owner
+            ? coll("Members")
+                .find(filter, { projection: { password: 0 } })
+                .sort({ createdAt: -1 })
+                .toArray()
+            : [],
+          p.owner
+            ? coll("Recoveries").countDocuments({
+                ...filter,
+                status: "pending",
+                expiresAt: { $gt: new Date() },
+              })
+            : 0,
+        ]);
       const placements = p.owner
-        ? await coll("Requests")
-            .find({
-              workspaceId: p.workspaceId,
-              state: { $in: activeStates },
-              placement: { $exists: true },
-              operationId: { $exists: false },
-            })
-            .toArray()
+        ? allActive.filter((r) => r.placement && !r.operationId)
         : [];
-      const fileIds = rows
-        .filter((m) => !m.deletedAt)
-        .flatMap((m) => (m.attachments || []).map((f) => f.fileId));
-      const fileStates = await coll("Files")
-        .find(
-          { _id: { $in: fileIds }, workspaceId: p.workspaceId },
-          {
-            projection: {
-              mimeType: 1,
-              invoiceDismissed: 1,
-              invoiceRequestId: 1,
-            },
-          },
-        )
-        .toArray();
-      for (const message of rows) {
-        delete message.editHistory;
-        delete message.approvalArchive;
-      }
-      for (const message of rows)
-        message.attachments = (message.attachments || []).map((file) => ({
-          ...file,
-          isPdf:
-            fileStates.find((f) => f._id === file.fileId)?.mimeType ===
-              "application/pdf" || /\.pdf$/i.test(file.name),
-          invoiceRequestId:
-            fileStates.find((f) => f._id === file.fileId)?.invoiceRequestId ||
-            null,
-          invoiceDismissed: !!fileStates.find((f) => f._id === file.fileId)
-            ?.invoiceDismissed,
-        }));
+      const financialPromise = Promise.resolve(
+        !["messages", "members"].includes(req.query.section) &&
+          (p.owner || p.role !== "employee") &&
+          getBalances
+          ? getBalances(req.team, allActive)
+          : p.owner || p.role !== "employee"
+            ? undefined
+            : null,
+      ).then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
       const checkedIds = String(req.query.messageIds || "")
         .split(",")
         .filter((id) => /^[a-f\d-]{36}$/i.test(id))
@@ -529,20 +594,9 @@ function createTeamChatRouter({
             .toArray()
         : [];
       await messageActions.decorate(req, [...rows, ...messageUpdates]);
-      const companies =
-        !p.owner && p.role === "employee"
-          ? []
-          : await Company.find(scopeFilter(req)).select("_id name").lean();
-      const members = p.owner
-        ? await coll("Members")
-            .find(filter, { projection: { password: 0 } })
-            .sort({ createdAt: -1 })
-            .toArray()
-        : [];
-      const financial =
-        (p.owner || p.role !== "employee") && getBalances
-          ? await getBalances(req.team, allActive)
-          : null;
+      const financialResult = await financialPromise;
+      if (financialResult.error) throw financialResult.error;
+      const financial = financialResult.value;
       res.json({
         identity: identity(p),
         checkedAt,
@@ -563,27 +617,46 @@ function createTeamChatRouter({
         forecastCents: forecast(allActive),
         companies,
         members,
+        recoveryCount,
         financial,
       });
+    }),
+  );
+  router.get(
+    "/invites",
+    wrap(async (req, res) => {
+      owner(req);
+      res.json({ invites: await invites.list(req.team.workspaceId) });
     }),
   );
   router.post(
     "/invite",
     wrap(async (req, res) => {
       owner(req);
-      const role = req.body.role || "employee";
-      if (!Object.hasOwn(roles, role)) fail("Выберите роль приглашения");
-      const token = randomBytes(32).toString("base64url");
-      await coll("Invites").insertOne({
-        _id: createHash("sha256").update(token).digest("hex"),
-        workspaceId: req.team.workspaceId,
-        creatorName: req.team.name,
-        creatorId: req.team.actorId,
-        role,
-        revokedAt: null,
-        createdAt: new Date(),
-      });
-      res.json({ url: frontendUrl + "/team/" + token });
+      const invite = await invites.create(
+        req.team,
+        req.body.role || "employee",
+      );
+      notify(req);
+      res.json({ invite, url: invite.url });
+    }),
+  );
+  router.patch(
+    "/invites/:id",
+    wrap(async (req, res) => {
+      owner(req);
+      const invite = await invites.change(req.team, req.params.id, req.body);
+      notify(req);
+      res.json({ invite, url: invite.url });
+    }),
+  );
+  router.delete(
+    "/invites/:id",
+    wrap(async (req, res) => {
+      owner(req);
+      await invites.change(req.team, req.params.id, req.body, true);
+      notify(req);
+      res.json({ deletedInviteId: req.params.id });
     }),
   );
   router.patch(
@@ -643,7 +716,8 @@ function createTeamChatRouter({
             }
           : undefined,
       );
-      res.json({ ok: true });
+      const { password: _password, ...member } = row;
+      res.json({ member });
     }),
   );
   router.post(
@@ -983,6 +1057,9 @@ function createTeamChatRouter({
       (error.name === "CastError" || error.code === 11000 ? 400 : 500);
     if (status >= 500) console.error("[Team chat]", error.name);
     res.status(status).json({
+      ...(typeof error.code === "string" && /^(CHAT_|PHONE_)/.test(error.code)
+        ? { code: error.code }
+        : {}),
       message:
         status >= 500
           ? "Не удалось выполнить действие"
