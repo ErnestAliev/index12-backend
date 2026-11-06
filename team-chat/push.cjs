@@ -188,6 +188,20 @@ function createChatPush({
     kick();
   }
   function register(router, { wrap, invitation }) {
+    router.get(
+      "/push/subscriptions/status",
+      wrap(async (req, res) => {
+        const endpoint = req.query.endpoint;
+        if (typeof endpoint !== "string" || endpoint.length > 4096)
+          fail("Укажите подписку устройства");
+        const row = await coll("PushSubscriptions").findOne({
+          _id: hash(endpoint),
+          actorId: req.team.actorId,
+          workspaceId: req.team.workspaceId,
+        });
+        res.json({ enabled: configured && !!row });
+      }),
+    );
     router.get("/push/key", (_req, res) =>
       res.json({ configured, publicKey: configured ? keys.publicKey : null }),
     );
@@ -197,11 +211,20 @@ function createChatPush({
         if (!configured)
           fail("Уведомления чата пока не настроены на сервере", 503);
         const token = req.body.token;
-        if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,100}$/.test(token))
-          fail("Некорректное приглашение");
-        const invite = await invitation(typeof token === "string" ? token : "");
-        if (invite.workspaceId !== req.team.workspaceId)
-          fail("Приглашение другого чата", 403);
+        let url;
+        if (token === undefined && req.team.owner) {
+          url = "/?teamChat=" + req.team.workspaceId;
+        } else {
+          if (
+            typeof token !== "string" ||
+            !/^[A-Za-z0-9_-]{20,100}$/.test(token)
+          )
+            fail("Некорректное приглашение");
+          const invite = await invitation(token);
+          if (invite.workspaceId !== req.team.workspaceId)
+            fail("Приглашение другого чата", 403);
+          url = "/team/" + token;
+        }
         const subscription = subscriptionInput(req.body.subscription || {});
         // One endpoint represents one device. Rebinding after login prevents another account's notifications.
         const _id = hash(subscription.endpoint);
@@ -212,7 +235,7 @@ function createChatPush({
               workspaceId: req.team.workspaceId,
               actorId: req.team.actorId,
               subscription,
-              url: "/team/" + token,
+              url,
               updatedAt: new Date(),
             },
           },

@@ -197,6 +197,7 @@ module.exports = async function verifyOnboarding({
     req.team = {
       workspaceId: scope.workspaceId,
       actorId: req.headers["test-actor"] || director.member._id,
+      owner: req.headers["test-actor"] === "owner:fixture",
     };
     next();
   });
@@ -254,6 +255,32 @@ module.exports = async function verifyOnboarding({
       (await request("/push/subscriptions", { token, subscription })).status,
       200,
     );
+    assert.equal(
+      (
+        await request(
+          "/push/subscriptions/status?endpoint=" + encodeURIComponent(endpoint),
+          undefined,
+          "GET",
+        )
+      ).data.enabled,
+      true,
+    );
+    assert.equal(
+      (
+        await request(
+          "/push/subscriptions/status?endpoint=" + encodeURIComponent(endpoint),
+          undefined,
+          "GET",
+          pending._id,
+        )
+      ).data.enabled,
+      false,
+    );
+    assert.equal(
+      (await request("/push/subscriptions", { subscription })).status,
+      400,
+      "Staff still need a scoped invitation",
+    );
     const count = sent.length;
     assert.equal(
       (await request("/push/test", { endpoint }, "POST", pending._id)).status,
@@ -287,6 +314,49 @@ module.exports = async function verifyOnboarding({
     assert.equal(
       await coll("PushSubscriptions").findOne({ _id: hash(endpoint) }),
       null,
+    );
+    assert.equal(
+      (
+        await request(
+          "/push/subscriptions/status?endpoint=" + encodeURIComponent(endpoint),
+          undefined,
+          "GET",
+        )
+      ).data.enabled,
+      false,
+    );
+    assert.equal(
+      (
+        await request(
+          "/push/subscriptions",
+          { subscription },
+          "POST",
+          "owner:fixture",
+        )
+      ).status,
+      200,
+    );
+    const ownerDevice = await coll("PushSubscriptions").findOne({
+      _id: hash(endpoint),
+    });
+    assert.equal(ownerDevice.url, "/?teamChat=" + scope.workspaceId);
+    assert.equal(ownerDevice.actorId, "owner:fixture");
+    assert.equal(
+      (
+        await request(
+          "/push/subscriptions/status?endpoint=" + encodeURIComponent(endpoint),
+          undefined,
+          "GET",
+          "owner:fixture",
+        )
+      ).data.enabled,
+      true,
+    );
+    await request(
+      "/push/subscriptions",
+      { endpoint },
+      "DELETE",
+      "owner:fixture",
     );
   } finally {
     await new Promise((resolve) => server.close(resolve));
