@@ -226,19 +226,47 @@ const { startFixture } = require("./subcategories.cjs");
       "x-index12-chat-only": "1",
     });
     assert.equal(
-      mixedIdentity.data.role,
-      "employee",
-      "A standalone staff login cannot be confused with an existing INDEX12 owner login",
+      mixedIdentity.data.owner,
+      true,
+      "Verified workspace ownership cannot be downgraded by a staff cookie",
     );
     assert.match(employeeMe.cookie, /^index12_team=/);
-    const settings = await api("/settings", { ownerRole: "director" }, "PATCH");
-    assert.equal(settings.status, 200);
-    assert.equal((await api("/me", undefined, "GET")).data.role, "director");
-    assert.equal(
-      (await api("/state", undefined, "GET")).data.identity.role,
-      "director",
-    );
-    await api("/settings", { ownerRole: "manager" }, "PATCH");
+    for (const ownerRole of ["director", "employee", "manager"]) {
+      const settings = await api("/settings", { ownerRole }, "PATCH");
+      assert.equal(settings.status, 200);
+      assert.equal(settings.data.identity.role, ownerRole);
+      assert.equal(settings.data.identity.owner, true);
+      const stateAsRole = (await api("/state", undefined, "GET")).data;
+      assert.equal(stateAsRole.identity.permissions.manageMembers, true);
+      assert.ok(stateAsRole.members.some((m) => m._id === employee.member._id));
+      assert.ok(stateAsRole.financial);
+      assert.equal(
+        (await api("/operation-options", undefined, "GET")).status,
+        200,
+      );
+    }
+    for (const other of [employee, director]) {
+      assert.equal(
+        (await api("/settings", { ownerRole: "manager" }, "PATCH", other.auth))
+          .status,
+        403,
+      );
+      assert.equal(
+        (await api("/state", undefined, "GET", other.auth)).data.members.length,
+        0,
+      );
+      assert.equal(
+        (
+          await api(
+            "/members/" + other.member._id,
+            { role: "manager", status: "active", expectedVersion: 1 },
+            "PATCH",
+            other.auth,
+          )
+        ).status,
+        403,
+      );
+    }
     const input = {
       id: require("node:crypto").randomUUID(),
       title: "Купить лампочки",
@@ -553,6 +581,283 @@ const { startFixture } = require("./subcategories.cjs");
       headers: director.auth,
     });
     assert.equal((await bytes.arrayBuffer()).byteLength, pdfBytes.length);
+    // Message actions: revisions, reactions, two-stage approval, forwarding and scope boundaries.
+    const reviewId = require("node:crypto").randomUUID();
+    await api(
+      "/messages",
+      { id: reviewId, text: "Прошу одобрить покупку лампочек" },
+      "POST",
+      employee.auth,
+    );
+    const messagePath = "/messages/" + reviewId;
+    const readMessage = async () =>
+      (await api("/state", undefined, "GET")).data.messages.find(
+        (m) => m._id === reviewId,
+      );
+    const eventCountBeforeReview = await fixture.models.Event.countDocuments(
+      {},
+    );
+    assert.equal(
+      (
+        await api(
+          messagePath,
+          { text: "Чужая правка", expectedVersion: 0 },
+          "PATCH",
+        )
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await api(
+          messagePath + "/decision",
+          { action: "approve", expectedVersion: 0 },
+          "POST",
+          employee.auth,
+        )
+      ).status,
+      403,
+    );
+    await api(
+      messagePath + "/reaction",
+      { emoji: "👍" },
+      "POST",
+      employee.auth,
+    );
+    await api(
+      messagePath + "/reaction",
+      { emoji: "👍" },
+      "POST",
+      director.auth,
+    );
+    await api(
+      messagePath + "/reaction",
+      { emoji: "👍" },
+      "POST",
+      employee.auth,
+    );
+    assert.equal(
+      (await readMessage()).reactions.find((r) => r.emoji === "👍").count,
+      2,
+    );
+    assert.equal((await readMessage()).version, 0);
+    await api(
+      messagePath + "/reaction",
+      { emoji: "❤️" },
+      "POST",
+      director.auth,
+    );
+    await api(
+      messagePath + "/reaction",
+      { emoji: null },
+      "POST",
+      employee.auth,
+    );
+    assert.deepEqual(
+      (await readMessage()).reactions.map((r) => [r.emoji, r.count]),
+      [["❤️", 1]],
+    );
+    assert.equal(
+      (
+        await api(
+          messagePath + "/reaction",
+          { emoji: "invalid" },
+          "POST",
+          employee.auth,
+        )
+      ).status,
+      400,
+    );
+    assert.equal(
+      (
+        await api(messagePath + "/decision", {
+          action: "approve",
+          expectedVersion: 0,
+        })
+      ).status,
+      200,
+    );
+    assert.equal((await readMessage()).approval.state, "director_review");
+    assert.equal(
+      (
+        await api(
+          messagePath + "/decision",
+          { action: "approve", expectedVersion: 0 },
+          "POST",
+          director.auth,
+        )
+      ).status,
+      409,
+    );
+    assert.equal(
+      (
+        await api(
+          messagePath + "/decision",
+          { action: "approve", expectedVersion: 1 },
+          "POST",
+          director.auth,
+        )
+      ).status,
+      200,
+    );
+    assert.deepEqual(
+      (await readMessage()).approval.history.map((h) => h.role),
+      ["manager", "director"],
+    );
+    const beforeEdit = (await api("/state", undefined, "GET")).data.checkedAt;
+    assert.equal(
+      (
+        await api(
+          messagePath,
+          {
+            text: "Прошу одобрить покупку десяти лампочек",
+            expectedVersion: 2,
+          },
+          "PATCH",
+          employee.auth,
+        )
+      ).status,
+      200,
+    );
+    assert.equal((await readMessage()).approval, undefined);
+    assert.equal((await readMessage()).contentVersion, 1);
+    assert.equal((await readMessage()).editHistory, undefined);
+    assert.equal(
+      (
+        await api(
+          messagePath,
+          { text: "stale", expectedVersion: 2 },
+          "PATCH",
+          employee.auth,
+        )
+      ).status,
+      409,
+    );
+    const incremental = await api(
+      "/state?messageIds=" +
+        reviewId +
+        "&updatedSince=" +
+        encodeURIComponent(beforeEdit),
+      undefined,
+      "GET",
+    );
+    assert.ok(
+      incremental.data.messageUpdates.some(
+        (m) => m._id === reviewId && m.version === 3,
+      ),
+    );
+    assert.equal(
+      (
+        await api(messagePath + "/decision", {
+          action: "reject",
+          expectedVersion: 3,
+        })
+      ).status,
+      200,
+    );
+    assert.equal((await readMessage()).approval.state, "rejected");
+    assert.equal(
+      (
+        await api(messagePath + "/decision", {
+          action: "approve",
+          expectedVersion: 4,
+        })
+      ).status,
+      409,
+    );
+    assert.equal(
+      await fixture.models.Event.countDocuments({}),
+      eventCountBeforeReview,
+      "Message approval never creates an implicit financial entry",
+    );
+    const forwardId = require("node:crypto").randomUUID(),
+      forwardBody = {
+        id: forwardId,
+        targetWorkspaceId: scope.workspaceId,
+        expectedVersion: 4,
+      };
+    assert.equal(
+      (await api(messagePath + "/forward", forwardBody, "POST", employee.auth))
+        .status,
+      201,
+    );
+    assert.equal(
+      (await api(messagePath + "/forward", forwardBody, "POST", employee.auth))
+        .data.replayed,
+      true,
+    );
+    const forwardedMessage = (
+      await api("/state", undefined, "GET")
+    ).data.messages.find((m) => m._id === forwardId);
+    assert.equal(forwardedMessage.approval, undefined);
+    assert.equal(forwardedMessage.forwardedFrom.authorName, "Employee");
+    assert.equal(
+      (
+        await api(
+          messagePath + "/forward",
+          {
+            ...forwardBody,
+            id: require("node:crypto").randomUUID(),
+            targetWorkspaceId: String(new mongoose.Types.ObjectId()),
+          },
+          "POST",
+          employee.auth,
+        )
+      ).status,
+      403,
+    );
+    const otherWorkspace = await fixture.identityModels.Workspace.create({
+      name: "Other chat",
+      userId: scope.actorId,
+    });
+    assert.equal(
+      (await api("/message-targets", undefined, "GET", employee.auth)).data
+        .targets.length,
+      1,
+    );
+    assert.ok(
+      (await api("/message-targets", undefined, "GET")).data.targets.some(
+        (t) => t._id === String(otherWorkspace._id),
+      ),
+    );
+    const pdfForwardId = require("node:crypto").randomUUID();
+    assert.equal(
+      (
+        await api("/messages/" + message.id + "/forward", {
+          id: pdfForwardId,
+          targetWorkspaceId: String(otherWorkspace._id),
+          expectedVersion: 0,
+        })
+      ).status,
+      201,
+    );
+    const otherState = await api("/state", undefined, "GET", {
+      ...ownerHeaders,
+      "x-index12-workspace-id": String(otherWorkspace._id),
+    });
+    const pdfForward = otherState.data.messages.find(
+      (m) => m._id === pdfForwardId,
+    );
+    assert.ok(pdfForward.attachments[0].fileId !== file.fileId);
+    assert.equal(
+      (
+        await fetch(
+          origin + "/api/team-chat/files/" + pdfForward.attachments[0].fileId,
+          { headers: employee.auth },
+        )
+      ).status,
+      404,
+    );
+    const fileCopy = await fetch(
+      origin + "/api/team-chat/files/" + pdfForward.attachments[0].fileId,
+      {
+        headers: {
+          ...ownerHeaders,
+          "x-index12-workspace-id": String(otherWorkspace._id),
+        },
+      },
+    );
+    assert.equal((await fileCopy.arrayBuffer()).byteLength, pdfBytes.length);
     // Common queue, scoped deletion, and persistent chat session independent from INDEX12 login.
     const secondEmployee = await join(
       "Another employee",

@@ -59,6 +59,7 @@ function createTeamChatRouter({
     role: p.role,
     status: p.status,
     owner: p.owner,
+    permissions: { manageMembers: p.owner === true },
     roles,
   });
   const opts = () =>
@@ -87,6 +88,7 @@ function createTeamChatRouter({
         { unique: true },
       ),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
+      coll("MessageReactions").createIndex({ workspaceId: 1, messageId: 1 }),
       coll("Requests").createIndex({ workspaceId: 1, createdAt: -1 }),
       coll("Requests").createIndex({
         scope: 1,
@@ -228,20 +230,25 @@ function createTeamChatRouter({
   router.use(
     wrap(async (req, res, next) => {
       const persistentId = await sessions.memberId(req, res);
+      const memberId = persistentId || req.session?.teamChatMemberId;
+      const member = memberId
+        ? await coll("Members").findOne({ _id: memberId })
+        : null;
       const chatOnly =
         req.headers["x-index12-chat-only"] === "1" ||
         req.query.chatOnly === "1";
       const wanted =
         req.headers["x-index12-workspace-id"] ||
         req.query.workspaceId ||
-        (chatOnly && persistentId ? null : req.user?.currentWorkspaceId);
+        (chatOnly && member
+          ? member.workspaceId
+          : req.user?.currentWorkspaceId || member?.workspaceId);
       let workspace =
         wanted && Types.ObjectId.isValid(wanted)
           ? await Workspace.findById(wanted).lean()
           : null;
       if (
         workspace &&
-        (!chatOnly || !persistentId) &&
         req.user &&
         String(workspace.userId) === String(req.user.id || req.user._id)
       ) {
@@ -255,7 +262,7 @@ function createTeamChatRouter({
           workspaceId: String(workspace._id),
           actorId: "owner:" + workspace.userId,
           owner: true,
-          role: ["manager", "director"].includes(settings?.ownerRole)
+          role: Object.hasOwn(roles, settings?.ownerRole || "")
             ? settings.ownerRole
             : "manager",
           name: req.user.name || "Владелец",
@@ -263,9 +270,6 @@ function createTeamChatRouter({
           workspace,
         };
       } else {
-        const memberId = persistentId || req.session?.teamChatMemberId;
-        const member =
-          memberId && (await coll("Members").findOne({ _id: memberId }));
         if (!member || (wanted && String(wanted) !== member.workspaceId))
           fail("Войдите в чат по приглашению", 401);
         if (!["pending", "active"].includes(member.status))
@@ -335,6 +339,7 @@ function createTeamChatRouter({
   router.get(
     "/state",
     wrap(async (req, res) => {
+      const checkedAt = new Date();
       const p = req.team,
         filter = { workspaceId: p.workspaceId };
       const before = req.query.before,
@@ -397,6 +402,10 @@ function createTeamChatRouter({
           },
         )
         .toArray();
+      for (const message of rows) {
+        delete message.editHistory;
+        delete message.approvalArchive;
+      }
       for (const message of rows)
         message.attachments = (message.attachments || []).map((file) => ({
           ...file,
@@ -427,8 +436,26 @@ function createTeamChatRouter({
               .toArray()
           ).map((m) => m._id)
         : [];
+      const since = new Date(req.query.updatedSince || 0);
+      const messageUpdates = checkedIds.length
+        ? await coll("Messages")
+            .find(
+              {
+                ...filter,
+                _id: { $in: checkedIds },
+                deletedAt: { $exists: false },
+                ...(Number.isFinite(since.getTime())
+                  ? { updatedAt: { $gte: since } }
+                  : {}),
+              },
+              { projection: { editHistory: 0, approvalArchive: 0 } },
+            )
+            .limit(1000)
+            .toArray()
+        : [];
+      await messageActions.decorate(req, [...rows, ...messageUpdates]);
       const companies =
-        p.role === "employee"
+        !p.owner && p.role === "employee"
           ? []
           : await Company.find(scopeFilter(req)).select("_id name").lean();
       const members = p.owner
@@ -438,11 +465,13 @@ function createTeamChatRouter({
             .toArray()
         : [];
       const financial =
-        p.role !== "employee" && getBalances
+        (p.owner || p.role !== "employee") && getBalances
           ? await getBalances(req.team, allActive)
           : null;
       res.json({
         identity: identity(p),
+        checkedAt,
+        messageUpdates,
         messages: rows
           .slice(0, 50)
           .reverse()
@@ -481,15 +510,17 @@ function createTeamChatRouter({
     "/settings",
     wrap(async (req, res) => {
       owner(req);
-      if (!["manager", "director"].includes(req.body.ownerRole))
-        fail("Выберите роль управляющего или руководителя");
+      if (!Object.hasOwn(roles, req.body.ownerRole)) fail("Выберите роль");
       await coll("Settings").updateOne(
         { _id: req.team.workspaceId },
         { $set: { ownerRole: req.body.ownerRole } },
         { upsert: true },
       );
       notify(req);
-      res.json({ ok: true });
+      res.json({
+        ok: true,
+        identity: identity({ ...req.team, role: req.body.ownerRole }),
+      });
     }),
   );
   router.patch(
@@ -601,6 +632,9 @@ function createTeamChatRouter({
         text: content,
         attachments,
         createdAt: new Date(),
+        updatedAt: new Date(),
+        version: 0,
+        contentVersion: 0,
       };
       const old = await coll("Messages").findOne({ _id: id });
       if (old) {
@@ -650,6 +684,10 @@ function createTeamChatRouter({
       notify(req);
       res.json({ deletedMessageId: row._id });
     }),
+  );
+  const messageActions = require("./message-routes.cjs").registerMessageRoutes(
+    router,
+    { coll, wrap, notify, Workspace },
   );
   require("./request-routes.cjs").registerRequestRoutes(router, {
     coll,
@@ -724,8 +762,6 @@ function createTeamChatRouter({
     "/requests/:id/convert",
     wrap(async (req, res) => {
       owner(req);
-      if (!["manager", "director"].includes(req.team.role))
-        fail("Операцию создаёт управляющий или руководитель", 403);
       const write = history.wrapHandler(async (request, output) => {
         const row = await coll("Requests").findOne(
           { _id: request.params.id, workspaceId: request.team.workspaceId },

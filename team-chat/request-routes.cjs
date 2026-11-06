@@ -47,8 +47,6 @@ function registerRequestRoutes(
     history.current()?.session ? { session: history.current().session } : {};
   const manager = (req) => {
     owner(req);
-    if (!["manager", "director"].includes(req.team.role))
-      fail("Подготовку выполняет управляющий", 403);
   };
   const getRequest = async (req) => {
     const row = await coll("Requests").findOne(
