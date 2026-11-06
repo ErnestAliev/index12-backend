@@ -105,6 +105,12 @@ function projectCash(accounts, operations, requests, asOf = today()) {
       const approvedCents = allocated
         .filter((r) => r.state === "ready")
         .reduce((sum, r) => sum + r.amountCents, 0);
+      const dueRequestedCents = allocated
+        .filter((r) => r.dueDate <= asOf)
+        .reduce((sum, r) => sum + r.amountCents, 0);
+      const monthRequestedCents = allocated
+        .filter((r) => r.dueDate.slice(0, 7) <= asOf.slice(0, 7))
+        .reduce((sum, r) => sum + r.amountCents, 0);
       const impacts = timeline.filter((r) => r.accountId === id);
       let projectedCents = balanceCents,
         minimumCents = balanceCents;
@@ -124,14 +130,10 @@ function projectCash(accounts, operations, requests, asOf = today()) {
         pendingCents: requestedCents - approvedCents,
         approvedCents,
         afterRequestsCents: balanceCents - requestedCents,
-        dueRequestedCents: allocated
-          .filter((r) => r.dueDate <= asOf)
-          .reduce((sum, r) => sum + r.amountCents, 0),
-        afterDueRequestsCents:
-          balanceCents -
-          allocated
-            .filter((r) => r.dueDate <= asOf)
-            .reduce((sum, r) => sum + r.amountCents, 0),
+        dueRequestedCents,
+        monthRequestedCents,
+        afterDueRequestsCents: balanceCents - dueRequestedCents,
+        afterMonthRequestsCents: balanceCents - monthRequestedCents,
         projectedCents,
         minimumCents,
       };

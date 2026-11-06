@@ -225,9 +225,33 @@ test("per-account cash shows pending and approved requests without borrowing fro
   assert.equal(bank.approvedCents, 30000);
   assert.equal(bank.afterRequestsCents, 40000);
   assert.equal(bank.afterDueRequestsCents, 90000);
+  assert.equal(bank.afterMonthRequestsCents, 40000);
   assert.equal(bank.projectedCents, 60000);
   assert.equal(cash.balanceCents, 200000);
   assert.equal(cash.pendingCents, 10000);
   assert.equal(cash.approvedCents, 0);
   assert.equal(cash.afterRequestsCents, 190000);
+});
+test("account month-end requests respect month boundaries, overdue costs and recorded exclusions", () => {
+  for (const [asOf, monthEnd, nextMonth] of [
+    ["2026-11-06", "2026-11-30", "2026-12-01"],
+    ["2026-12-31", "2026-12-31", "2027-01-01"],
+    ["2028-02-28", "2028-02-29", "2028-03-01"],
+  ]) {
+    const request = {state: "manager_review", companyId: "c", placement: {accountId: "a"}, amountCents: 3000};
+    const result = projectCash([{_id: "a", companyId: "c", initialBalance: 100}], [], [
+      {...request, dueDate: "2025-12-31"},
+      {...request, dueDate: asOf},
+      {...request, dueDate: monthEnd},
+      {...request, dueDate: nextMonth},
+      {...request, dueDate: monthEnd, state: "rejected"},
+      {...request, dueDate: monthEnd, operationId: "saved"},
+      {...request, dueDate: monthEnd, companyId: "other"},
+      {...request, dueDate: monthEnd, placement: {accountId: "other"}},
+    ], asOf).accounts[0];
+    assert.equal(result.afterDueRequestsCents, asOf === monthEnd ? 1000 : 4000);
+    assert.equal(result.afterMonthRequestsCents, 1000);
+    assert.equal(result.monthRequestedCents, 9000);
+    assert.equal(result.afterRequestsCents, -2000);
+  }
 });
