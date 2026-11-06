@@ -162,6 +162,10 @@ const { startFixture } = require("./subcategories.cjs");
       parentCategoryId: category._id,
       userId: scope.actorId,
     });
+    const project = await fixture.models.Project.create({
+      name: "Объект А",
+      userId: scope.actorId,
+    });
     const invite = await api("/invite", {}),
       inviteToken = invite.data.url.split("/").at(-1),
       anonymous = { "Content-Type": "application/json" };
@@ -216,6 +220,16 @@ const { startFixture } = require("./subcategories.cjs");
         .data.contractors[0]._id,
       supplier.data.contractor._id,
     );
+    await require("./team-chat-actions.cjs")({
+      api,
+      db,
+      employee,
+      director,
+      category,
+      subcategory,
+      project,
+      contractorId: supplier.data.contractor._id,
+    });
     const manifest = await fetch(
       origin + "/api/team-chat/manifest/" + inviteToken,
     );
@@ -509,6 +523,7 @@ const { startFixture } = require("./subcategories.cjs");
     await api("/requests/" + rejected.id + "/decision", {
       expectedVersion: 0,
       action: "reject",
+      note: "Покупка больше не требуется",
     });
     assert.equal((await api("/state", undefined, "GET")).data.forecastCents, 0);
     const pdfBytes = Buffer.from(
@@ -754,6 +769,7 @@ const { startFixture } = require("./subcategories.cjs");
       (
         await api(messagePath + "/decision", {
           action: "reject",
+          note: "Нужны дополнительные сведения",
           expectedVersion: 3,
         })
       ).status,
@@ -980,8 +996,20 @@ const { startFixture } = require("./subcategories.cjs");
     console.log(
       "PASS: staff counterparty creation, no staff company selection, scoped PDF workflow with source/party/category matching, manager enrichment, common request queue, persistent sessions, scoped deletion, immutable approvals, reserved cells across MCP, atomic conversion and comments",
     );
-    await require("./team-chat-onboarding.cjs")({ db, Workspace: fixture.identityModels.Workspace, api, scope, employee, director });
-    await require("./team-chat-administration.cjs")({ api, db, scope, director });
+    await require("./team-chat-onboarding.cjs")({
+      db,
+      Workspace: fixture.identityModels.Workspace,
+      api,
+      scope,
+      employee,
+      director,
+    });
+    await require("./team-chat-administration.cjs")({
+      api,
+      db,
+      scope,
+      director,
+    });
     if (process.argv.includes("--browser")) {
       const { verifyTeamChat } = await import(
         "../../../index12-frontend/tests/browser/team-chat.mjs"
@@ -995,6 +1023,8 @@ const { startFixture } = require("./subcategories.cjs");
         account: String(account._id),
         contractor: input.contractorId,
         category: String(category._id),
+        subcategory: String(subcategory._id),
+        project: String(project._id),
       });
     }
   } finally {

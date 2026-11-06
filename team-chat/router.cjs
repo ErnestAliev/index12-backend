@@ -115,6 +115,7 @@ function createTeamChatRouter({
       ),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
       coll("MessageReactions").createIndex({ workspaceId: 1, messageId: 1 }),
+      coll("MessageReads").createIndex({ workspaceId: 1, messageId: 1 }),
       coll("Requests").createIndex({ workspaceId: 1, createdAt: -1 }),
       coll("Requests").createIndex({
         scope: 1,
@@ -515,34 +516,64 @@ function createTeamChatRouter({
       const checkedAt = new Date();
       const p = req.team,
         filter = { workspaceId: p.workspaceId };
-      const [rows, requests, allActive, companies, members, recoveryCount] =
-        await Promise.all([
-          messagePage(p, req.query.before),
-          coll("Requests")
-            .find({ ...filter, deletedAt: { $exists: false } })
-            .sort({ createdAt: -1 })
-            .limit(501)
-            .toArray(),
-          coll("Requests")
-            .find({ ...filter, state: { $in: activeStates } })
-            .toArray(),
-          !p.owner && p.role === "employee"
-            ? []
-            : Company.find(scopeFilter(req)).select("_id name").lean(),
-          p.owner
-            ? coll("Members")
-                .find(filter, { projection: { password: 0 } })
-                .sort({ createdAt: -1 })
-                .toArray()
-            : [],
-          p.owner
-            ? coll("Recoveries").countDocuments({
-                ...filter,
-                status: "pending",
-                expiresAt: { $gt: new Date() },
-              })
-            : 0,
-        ]);
+      const [
+        rows,
+        requests,
+        allActive,
+        companies,
+        members,
+        recoveryCount,
+        people,
+      ] = await Promise.all([
+        messagePage(p, req.query.before),
+        coll("Requests")
+          .find({ ...filter, deletedAt: { $exists: false } })
+          .sort({ createdAt: -1 })
+          .limit(501)
+          .toArray(),
+        coll("Requests")
+          .find({ ...filter, state: { $in: activeStates } })
+          .toArray(),
+        !p.owner && p.role === "employee"
+          ? []
+          : Company.find(scopeFilter(req)).select("_id name").lean(),
+        p.owner
+          ? coll("Members")
+              .find(filter, { projection: { password: 0 } })
+              .sort({ createdAt: -1 })
+              .toArray()
+          : [],
+        p.owner
+          ? coll("Recoveries").countDocuments({
+              ...filter,
+              status: "pending",
+              expiresAt: { $gt: new Date() },
+            })
+          : 0,
+        (async () => {
+          const [staff, settings, user] = await Promise.all([
+            coll("Members")
+              .find(
+                { ...filter, status: "active" },
+                { projection: { _id: 1, name: 1, role: 1 } },
+              )
+              .toArray(),
+            coll("Settings").findOne({ _id: p.workspaceId }),
+            User
+              ? User.findById(p.workspace.userId).select("name").lean()
+              : null,
+          ]);
+          return [
+            {
+              _id: "owner:" + p.workspace.userId,
+              name: user?.name || (p.owner ? p.name : "Владелец"),
+              role: settings?.ownerRole || "manager",
+              owner: true,
+            },
+            ...staff,
+          ];
+        })(),
+      ]);
       const placements = p.owner
         ? allActive.filter((r) => r.placement && !r.operationId)
         : [];
@@ -617,6 +648,7 @@ function createTeamChatRouter({
         forecastCents: forecast(allActive),
         companies,
         members,
+        people,
         recoveryCount,
         financial,
       });
@@ -777,6 +809,36 @@ function createTeamChatRouter({
         (!content && !ids.length)
       )
         fail("Введите сообщение или прикрепите файл");
+      const mentionIds = req.body.mentionIds || [];
+      if (
+        !Array.isArray(mentionIds) ||
+        mentionIds.length > 30 ||
+        mentionIds.some((i) => typeof i !== "string" || i.length > 100)
+      )
+        fail("Проверьте отмеченных сотрудников");
+      const mentioned = mentionIds.length
+        ? await coll("Members")
+            .find(
+              {
+                _id: { $in: mentionIds },
+                workspaceId: req.team.workspaceId,
+                status: "active",
+              },
+              { projection: { _id: 1, name: 1 } },
+            )
+            .toArray()
+        : [];
+      if (mentionIds.includes("owner:" + req.team.workspace.userId)) {
+        const user = User
+          ? await User.findById(req.team.workspace.userId).select("name").lean()
+          : null;
+        mentioned.push({
+          _id: "owner:" + req.team.workspace.userId,
+          name: user?.name || "Владелец",
+        });
+      }
+      if (new Set(mentionIds).size !== mentioned.length)
+        fail("Отмеченный сотрудник недоступен", 404);
       const attachments = [];
       for (const fileId of ids) {
         const file = await coll("Files").findOne({
@@ -800,6 +862,14 @@ function createTeamChatRouter({
         updatedAt: new Date(),
         version: 0,
         contentVersion: 0,
+        ...(mentioned.length
+          ? {
+              mentions: mentioned.map((p) => ({
+                actorId: p._id,
+                name: p.name,
+              })),
+            }
+          : {}),
       };
       const old = await coll("Messages").findOne({ _id: id });
       if (old) {
@@ -807,6 +877,8 @@ function createTeamChatRouter({
           old.workspaceId !== row.workspaceId ||
           old.authorId !== row.authorId ||
           old.text !== row.text ||
+          JSON.stringify(old.mentions || []) !==
+            JSON.stringify(row.mentions || []) ||
           JSON.stringify(old.attachments) !== JSON.stringify(attachments)
         )
           fail("Ключ сообщения уже использован", 409);
@@ -897,6 +969,8 @@ function createTeamChatRouter({
           : req.team.role;
       const state = decision(row.state, actingRole, req.body.action),
         note = text(req.body.note || "", 1000, false);
+      if (req.body.action === "reject" && !note)
+        fail("Укажите причину отклонения");
       if (!Number.isInteger(req.body.expectedVersion))
         fail("Прочитайте актуальную заявку");
       const updated = await coll("Requests").findOneAndUpdate(
@@ -907,7 +981,11 @@ function createTeamChatRouter({
           state: row.state,
         },
         {
-          $set: { state, updatedAt: new Date() },
+          $set: {
+            state,
+            rejectionReason: req.body.action === "reject" ? note : null,
+            updatedAt: new Date(),
+          },
           $inc: { version: 1 },
           $push: {
             history: {

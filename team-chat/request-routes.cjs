@@ -130,6 +130,26 @@ function registerRequestRoutes(
     }),
   );
   router.get(
+    "/request-options",
+    wrap(async (req, res) => {
+      const [projects, categories, subcategories] = await Promise.all([
+        Project.find(scopeFilter(req))
+          .select("_id name")
+          .sort({ name: 1 })
+          .lean(),
+        Category.find({ ...scopeFilter(req), type: { $ne: "income" } })
+          .select("_id name")
+          .sort({ name: 1 })
+          .lean(),
+        Subcategory.find(scopeFilter(req))
+          .select("_id name parentCategoryId")
+          .sort({ name: 1 })
+          .lean(),
+      ]);
+      res.json({ projects, categories, subcategories });
+    }),
+  );
+  router.get(
     "/categories",
     wrap(async (req, res) => {
       const search = normalize(req.query.search);
@@ -188,12 +208,38 @@ function registerRequestRoutes(
         .lean();
       if (!category) fail("Категория расхода недоступна", 404);
     }
+    let subcategory = null,
+      project = null;
+    const subcategoryId = source?.subcategoryId || input.subcategoryId;
+    if (subcategoryId) {
+      if (!id(subcategoryId) || !category)
+        fail("Выберите категорию подкатегории");
+      subcategory = await Subcategory.findOne({
+        _id: subcategoryId,
+        parentCategoryId: category._id,
+        ...scopeFilter(req),
+      })
+        .select("_id name")
+        .lean();
+      if (!subcategory) fail("Подкатегория не относится к выбранной категории");
+    }
+    if (input.projectId) {
+      if (!id(input.projectId)) fail("Проверьте проект");
+      project = await Project.findOne({
+        _id: input.projectId,
+        ...scopeFilter(req),
+      })
+        .select("_id name")
+        .lean();
+      if (!project) fail("Проект недоступен", 404);
+    }
     const row = {
       _id: requestId,
       scope: req.team.scope,
       workspaceId: req.team.workspaceId,
       authorId: req.team.actorId,
       authorName: req.team.name,
+      authorRole: req.team.role,
       title,
       amountCents,
       dueDate,
@@ -205,8 +251,10 @@ function registerRequestRoutes(
       companyName: company?.name || "",
       categoryId: category ? String(category._id) : null,
       categoryNames: category ? [category.name] : [],
-      subcategoryName: source?.subcategoryName || "",
-      subcategoryId: source?.subcategoryId || null,
+      subcategoryName: subcategory?.name || "",
+      subcategoryId: subcategory ? String(subcategory._id) : null,
+      projectId: project ? String(project._id) : null,
+      projectNames: project ? [project.name] : [],
       sourceFileId: source?.fileId || null,
       sourceSha256: source?.sha256 || null,
       sourceMessageId: source?.messageId || null,
@@ -233,11 +281,17 @@ function registerRequestRoutes(
         existing.amountCents !== amountCents ||
         existing.contractorId !== row.contractorId ||
         existing.categoryId !== row.categoryId ||
+        (existing.subcategoryId || null) !== row.subcategoryId ||
+        (existing.projectId || null) !== row.projectId ||
         existing.comment !== comment ||
         existing.dueDate !== dueDate
       )
         fail("Ключ заявки уже использован", 409);
-      return { request: existing, replayed: true };
+      return {
+        request: existing,
+        message: await requestMessage(existing),
+        replayed: true,
+      };
     }
     try {
       await coll("Requests").insertOne(row);
@@ -258,13 +312,66 @@ function registerRequestRoutes(
       }
       throw e;
     }
+    const message = await requestMessage(row);
     notify(req, {
       key: "request:" + row._id,
       title: "Chat · Новая заявка",
       body: row.title,
     });
-    return { request: row };
+    return { request: row, message };
   }
+  async function requestMessage(row) {
+    const h = createHash("sha256")
+      .update(row.workspaceId + ":request:" + row._id)
+      .digest("hex");
+    const messageId = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+    await coll("Messages").updateOne(
+      {
+        _id: messageId,
+        workspaceId: row.workspaceId,
+        kind: "request",
+        requestId: row._id,
+      },
+      {
+        $setOnInsert: {
+          authorId: row.authorId,
+          authorName: row.authorName,
+          text: row.title,
+          attachments: [],
+          version: 0,
+          createdAt: row.createdAt,
+          updatedAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+    return coll("Messages").findOne({
+      _id: messageId,
+      workspaceId: row.workspaceId,
+    });
+  }
+  router.get(
+    "/requests/:id",
+    wrap(async (req, res) => res.json({ request: await getRequest(req) })),
+  );
+  router.post(
+    "/requests/:id/read",
+    wrap(async (req, res) => {
+      const row = await getRequest(req);
+      if (row.authorId !== req.team.actorId && !row.viewedAt) {
+        const result = await coll("Requests").updateOne(
+          {
+            _id: row._id,
+            workspaceId: row.workspaceId,
+            viewedAt: { $exists: false },
+          },
+          { $set: { viewedAt: new Date() } },
+        );
+        if (result.modifiedCount) notify(req);
+      }
+      res.json({ read: true });
+    }),
+  );
   router.post(
     "/requests",
     wrap(async (req, res) => {
@@ -394,6 +501,17 @@ function registerRequestRoutes(
       ),
       subcategoryId: subcategory ? String(subcategory._id) : null,
       subcategoryName: subcategory?.name || "",
+      projectId: projectIds[0] || null,
+      projectNames: projectIds.length
+        ? (
+            await Project.find({
+              _id: { $in: projectIds },
+              ...scopeFilter(req),
+            })
+              .select("name")
+              .lean()
+          ).map((p) => p.name)
+        : [],
       comment: text(data.comment ?? row.comment ?? "", 10000, false),
       placement: {
         type: "expense",

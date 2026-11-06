@@ -52,6 +52,8 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     "/messages/:id",
     wrap(async (req, res) => {
       const row = await load(req);
+      if (row.kind === "request")
+        fail("Измените реквизиты в карточке заявки", 409);
       if (row.authorId !== req.team.actorId)
         fail("Можно изменить только своё сообщение", 403);
       expected(req, row);
@@ -77,6 +79,75 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         },
       });
       res.json({ messageId: updated._id });
+    }),
+  );
+  router.post(
+    "/messages/read",
+    wrap(async (req, res) => {
+      const ids = req.body.ids;
+      if (
+        !Array.isArray(ids) ||
+        ids.length > 100 ||
+        ids.some((id) => typeof id !== "string" || !/^[a-f\d-]{36}$/i.test(id))
+      )
+        fail("Проверьте список сообщений");
+      const rows = await coll("Messages")
+        .find({
+          _id: { $in: ids },
+          workspaceId: req.team.workspaceId,
+          authorId: { $ne: req.team.actorId },
+          deletedAt: { $exists: false },
+        })
+        .toArray();
+      if (!rows.length) return res.json({ read: 0 });
+      const at = new Date();
+      const result = await coll("MessageReads").bulkWrite(
+        rows.map((row) => ({
+          updateOne: {
+            filter: {
+              _id: createHash("sha256")
+                .update(
+                  row.workspaceId + ":" + row._id + ":" + req.team.actorId,
+                )
+                .digest("hex"),
+            },
+            update: {
+              $setOnInsert: {
+                workspaceId: row.workspaceId,
+                messageId: row._id,
+                actorId: req.team.actorId,
+                name: req.team.name,
+                readAt: at,
+              },
+              $max: { contentVersion: Number(row.contentVersion || 0) },
+            },
+            upsert: true,
+          },
+        })),
+      );
+      // A repeated acknowledgement must not emit another event to every client.
+      const firstReads = result.upsertedCount + result.modifiedCount;
+      if (firstReads) {
+        await coll("Messages").updateMany(
+          {
+            _id: { $in: rows.map((r) => r._id) },
+            workspaceId: req.team.workspaceId,
+          },
+          { $set: { updatedAt: at } },
+        );
+        const requests = rows.map((r) => r.requestId).filter(Boolean);
+        if (requests.length)
+          await coll("Requests").updateMany(
+            {
+              _id: { $in: requests },
+              workspaceId: req.team.workspaceId,
+              viewedAt: { $exists: false },
+            },
+            { $set: { viewedAt: at } },
+          );
+        notify(req);
+      }
+      res.json({ read: rows.length });
     }),
   );
   router.post(
@@ -118,6 +189,8 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     wrap(async (req, res) => {
       const row = await load(req);
       expected(req, row);
+      if (row.kind === "request")
+        fail("Используйте согласование в карточке заявки", 409);
       const state = row.approval?.state || "manager_review";
       if (!["manager_review", "director_review"].includes(state))
         fail("По сообщению уже принято решение", 409);
@@ -126,11 +199,14 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         fail("Согласование выполняет другой участник", 403);
       const action = req.body.action;
       if (!["approve", "reject"].includes(action)) fail("Выберите решение");
+      const note = text(req.body.note || "", 1000, false);
+      if (action === "reject" && !note) fail("Укажите причину отклонения");
       const entry = {
         actorId: req.team.actorId,
         name: req.team.name,
         role: stage,
         action,
+        note,
         at: new Date(),
         contentVersion: Number(row.contentVersion || 0),
       };
@@ -298,6 +374,14 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           )
           .toArray()
       : [];
+    const reads = ids.length
+      ? await coll("MessageReads")
+          .find(
+            { workspaceId: req.team.workspaceId, messageId: { $in: ids } },
+            { projection: { messageId: 1, actorId: 1, contentVersion: 1 } },
+          )
+          .toArray()
+      : [];
     const fileIds = messages
       .filter((m) => !m.deletedAt)
       .flatMap((m) => (m.attachments || []).map((f) => f.fileId));
@@ -320,6 +404,12 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       delete message.approvalArchive;
       delete message.forwardKey;
       message.version = version(message);
+      message.readCount = reads.filter(
+        (r) =>
+          r.messageId === message._id &&
+          r.actorId !== message.authorId &&
+          r.contentVersion === Number(message.contentVersion || 0),
+      ).length;
       message.reactions = emojis
         .map((emoji) => ({
           emoji,
