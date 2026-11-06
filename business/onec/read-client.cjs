@@ -3,7 +3,7 @@ const { XMLParser } = require('fast-xml-parser');
 const array = value => value == null ? [] : Array.isArray(value) ? value : [value];
 const fail = (code, message) => { const e = new Error(message); e.code = code; throw e; };
 const guid = /^[a-f\d]{8}(-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
-// Shared transport. Writes are exposed only by the durable purchase workflow.
+// Fixed-base transport shared by durable purchase and document mutation workflows.
 function parseMetadata(xml) {
   if (typeof xml !== 'string' || /<!DOCTYPE|<!ENTITY/i.test(xml)) fail('INVALID_METADATA', 'Некорректные метаданные 1С');
   const tree = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', removeNSPrefix: true }).parse(xml);
@@ -26,7 +26,7 @@ class ReadClient {
     this.base = new URL(env.ONEC_BASE_URL?.replace(/\/?$/, '/') || 'https://invalid.local/');
     if (this.base.protocol !== 'https:' || this.base.username || this.base.password || this.base.search || this.base.hash) fail('CONFIG_ERROR', 'Некорректный HTTPS-адрес базы 1С');
   }
-  async request(relative, query = {}, xml = false, mutation) {
+  async request(relative, query = {}, xml = false, mutation, transport = {}) {
     if (!this.env.ONEC_USERNAME || !this.env.ONEC_PASSWORD || !this.env.ONEC_BASE_URL) fail('CONFIG_ERROR', 'MCP-подключение 1С не настроено');
     const url = new URL(relative, this.base);
     if (url.origin !== this.base.origin || !url.pathname.startsWith(this.base.pathname)) fail('INVALID_PATH', 'Адрес вне выбранной базы 1С');
@@ -34,12 +34,13 @@ class ReadClient {
     // 1C Fresh treats form-encoded '+' as a literal in OData expressions.
     url.search = url.search.replace(/\+/g, '%20');
     let response;
-    try { response = await (this.fetch || fetch)(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), ...(mutation ? { method: 'POST', body: JSON.stringify(mutation) } : {}), headers: {
+    try { response = await (this.fetch || fetch)(url, { redirect: 'manual', signal: AbortSignal.timeout(15000), ...(mutation ? { method: transport.method || 'POST', body: JSON.stringify(mutation) } : {}), headers: {
       Authorization: `Basic ${Buffer.from(`${this.env.ONEC_USERNAME}:${this.env.ONEC_PASSWORD}`).toString('base64')}`,
       ...(mutation ? { 'Content-Type': 'application/json; charset=utf-8' } : {}),
-      Accept: xml ? 'application/xml' : 'application/json'
+      Accept: xml ? 'application/xml' : 'application/json', ...(transport.headers || {})
     } }); } catch { fail('NETWORK_ERROR', 'Нет ответа от 1С'); }
     if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); fail(`HTTP_${response.status}`, '1С вернула перенаправление. Проверьте адрес публикации'); }
+    if (response.ok && [204,205].includes(response.status)) return null;
     const reader = response.body.getReader(), chunks = []; let size = 0;
     try { for (;;) { const { done, value } = await reader.read(); if (done) break; size += value.length; if (size > 25 * 1024 * 1024) { await reader.cancel(); fail('RESPONSE_TOO_LARGE', 'Ответ 1С слишком большой'); } chunks.push(value); } }
     catch (e) { if (e.code) throw e; fail('NETWORK_ERROR', 'Ответ 1С прерван'); }
@@ -53,6 +54,7 @@ class ReadClient {
       fail(`HTTP_${response.status}`,`1С вернула HTTP ${response.status}${detail?`: ${detail}`:''}`);
     }
     if (xml) return raw;
+    if (response.status === 204 || response.status === 205 || !raw.trim()) return null;
     try { return JSON.parse(raw); } catch { fail('INVALID_RESPONSE', '1С вернула некорректный JSON'); }
   }
   async metadata() { return this.sets ||= parseMetadata(await this.request('$metadata', {}, true)); }
@@ -72,6 +74,16 @@ class ReadClient {
     const schema = await this.schema(collection);
     if (!guid.test(id) || schema.keys.length !== 1 || schema.keys[0] !== 'Ref_Key') fail('INVALID_KEY', 'Некорректная ссылка 1С');
     return { object: await this.request(`${encodeURIComponent(collection)}(guid'${id}')`, { $format: 'json' }) };
+  }
+  async update(collection, id, data, expectedVersion) {
+    await this.schema(collection);
+    if (!guid.test(id) || typeof expectedVersion !== 'string' || !/^[A-Za-z0-9+/]{1,150}={0,2}$/.test(expectedVersion)) fail('INVALID_VERSION', 'Нужна свежая версия DataVersion из чтения документа');
+    return this.request(`${encodeURIComponent(collection)}(guid'${id}')`, { $format:'json' }, false, data, { method:'PATCH', headers:{'If-Match':expectedVersion} });
+  }
+  async setPosted(collection, id, post, expectedVersion) {
+    await this.schema(collection);
+    if (!guid.test(id) || !/^[A-Za-z0-9+/]{1,150}={0,2}$/.test(expectedVersion || '')) fail('INVALID_VERSION','Нужна свежая версия документа');
+    return this.request(`${encodeURIComponent(collection)}(guid'${id}')/${post ? 'Post' : 'Unpost'}`, post ? { PostingModeOperational:false } : {}, false, {}, { method:'POST', headers:{'If-Match':expectedVersion} });
   }
   async create(collection, id, data) {
     await this.schema(collection);

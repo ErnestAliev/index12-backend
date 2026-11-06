@@ -1,6 +1,7 @@
 'use strict';
 
 const WRITE_CAPABILITIES = {
+  index12_onec_update_object: 'updateOnecObjects', index12_onec_set_posted: 'updateOnecObjects', index12_onec_set_deletion_mark: 'deleteOnecObjects',
   index12_execute_purchase:'createOnecPurchase', index12_upload_purchase_pdf:'createOnecPurchase', index12_cancel_purchase_plan:'createOnecPurchase',
   index12_create_task: 'createTasks', index12_update_task: 'updateTasks', index12_delete_task: 'deleteTasks',
   index12_update_account_initial_balance: 'updateAccountInitialBalance',
@@ -8,7 +9,7 @@ const WRITE_CAPABILITIES = {
   index12_copy_operation: 'copy',
   index12_create_transfer: 'createTransfers', index12_update_transfer: 'updateTransfers', index12_execute_import: 'executeImport',
 };
-const INDEX12_TOOLS = ['index12_onec_status','index12_onec_schema','index12_onec_query','index12_onec_get_object','index12_prepare_purchase','index12_purchase_status','index12_status', 'index12_list_tasks', 'index12_get_task', 'index12_read_task_file', 'index12_find_entities', 'index12_financial_summary', 'index12_list_operations', 'index12_account_balances', 'index12_get_operation', 'index12_get_account', 'index12_company_profile', ...Object.keys(WRITE_CAPABILITIES), 'index12_prepare_import'];
+const INDEX12_TOOLS = ['index12_onec_mutation_status','index12_onec_status','index12_onec_schema','index12_onec_query','index12_onec_get_object','index12_prepare_purchase','index12_purchase_status','index12_status', 'index12_list_tasks', 'index12_get_task', 'index12_read_task_file', 'index12_find_entities', 'index12_financial_summary', 'index12_list_operations', 'index12_account_balances', 'index12_get_operation', 'index12_get_account', 'index12_company_profile', ...Object.keys(WRITE_CAPABILITIES), 'index12_prepare_import'];
 
 async function readMcpAccess(binding, request = fetch) {
   const base = new URL(binding.apiUrl);

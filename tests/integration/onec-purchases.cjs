@@ -10,20 +10,36 @@ const schemas=require('../fixtures/onec-purchase-schema.json');
   const env={ONEC_BASE_URL:'https://onec.example.invalid/odata/standard.odata/',ONEC_USERNAME:'fixture',ONEC_PASSWORD:'fixture-password',ONEC_PURCHASE_WRITES:'true'};
   const original=Object.fromEntries(Object.keys(env).concat('ONEC_WORKSPACE_ID').map(k=>[k,process.env[k]]));Object.assign(process.env,env);
   const refs=Object.fromEntries(['org','supplier','contract','currency','ourBank','theirBank','vat','item'].map(k=>[k,randomUUID()]));
-  const records=new Map(),posts=[];let mode=null;
+  const records=new Map(),posts=[],patches=[],commands=[];let mode=null, versionCounter=1;
+  const version=()=>{const b=Buffer.alloc(8);b.writeBigUInt64LE(BigInt(++versionCounter));return b.toString("base64");};
   const put=(collection,ref,data)=>records.set(`${collection}:${ref}`,{Ref_Key:ref,DeletionMark:false,...data});
   put('Catalog_Организации',refs.org,{ИдентификационныйНомер:'250340021816'});put('Catalog_Контрагенты',refs.supplier,{ИдентификационныйКодЛичности:'830612300086'});
   put('Catalog_Валюты',refs.currency,{Description:'KZT'});put('Catalog_СтавкиНДС',refs.vat,{Description:'Без НДС',Ставка:0});
   put('Catalog_ДоговорыКонтрагентов',refs.contract,{Owner_Key:refs.supplier,Организация_Key:refs.org,ВалютаВзаиморасчетов_Key:refs.currency});
   for(const [ref,owner,type] of [[refs.ourBank,refs.org,'Организации'],[refs.theirBank,refs.supplier,'Контрагенты']])put('Catalog_БанковскиеСчета',ref,{Owner:owner,Owner_Type:`StandardODATA.Catalog_${type}`,ВалютаДенежныхСредств_Key:refs.currency});
   async function transport(url,options){
-    const path=decodeURIComponent(url.pathname).split('/').pop(),match=/^(.+)\(guid'([^']+)'\)$/.exec(path);
+    const parts=decodeURIComponent(url.pathname).split('/'), command=['Post','Unpost'].includes(parts.at(-1))?parts.pop():null;
+    const path=parts.at(-1),match=/^(.+)\(guid'([^']+)'\)$/.exec(path);
     const collection=match?match[1]:path;
+    if(command && options.method==='POST') {
+      const row=records.get(`${collection}:${match[2]}`); if(!row)return new Response('{}',{status:404});
+      commands.push({command,id:row.Ref_Key}); row.Posted=command==='Post';row.DataVersion=version();return new Response(null,{status:204});
+    }
+    if(options.method==='PATCH') {
+      const row=records.get(`${collection}:${match[2]}`);if(!row)return new Response('{}',{status:404});
+      if(mode==='patch-conflict'){mode=null;row.DataVersion=version();return new Response('{}',{status:412});}
+      if(options.headers['If-Match']!==row.DataVersion)return new Response('{}',{status:412});
+      const data=JSON.parse(options.body);patches.push({collection,id:row.Ref_Key,data});
+      Object.assign(row,data,{DataVersion:version()});
+      if(mode==='patch-timeout'){mode=null;throw Error('Lost PATCH acknowledgement');}
+      if(mode==='patch-delay')await new Promise(r=>setTimeout(r,80));
+      return new Response(null,{status:204});
+    }
     if(options.method==='POST') {
       const data=JSON.parse(options.body);posts.push({collection,data});
       if(mode===`reject:${collection}`)return new Response('{}',{status:403});
       if(mode===`delay:${collection}`)await new Promise(resolve=>setTimeout(resolve,100));
-      put(collection,data.Ref_Key,{...data,Number:`fixture-${posts.length}`,Posted:false});
+      put(collection,data.Ref_Key,{...data,Number:`fixture-${posts.length}`,Posted:false,DataVersion:version()});
       if(mode===`timeout:${collection}`){mode=null;throw Error('Simulated lost response with secret that must never escape');}
       return Response.json(records.get(`${collection}:${data.Ref_Key}`));
     }
@@ -48,7 +64,7 @@ const schemas=require('../fixtures/onec-purchase-schema.json');
     await db.collection('cloudWorkers').insertOne({_id:`${scope.actorId}:${scope.workspaceId}`,instanceId:workerId,seenAt:new Date()});const executions=new ExecutionStore(db);await executions.open(job,workerId);await executions.bind(job._id,workerId,'purchase-thread','purchase-turn');
     runtime=createMcpRuntime({config:{...scope,ownerId:scope.actorId,apiUrl:fixture.apiUrl.slice(0,-4),apiToken:token},database:async()=>db,runtimeEnv:{INDEX12_MCP_EXECUTION_MODE:'durable'},executionMeta:{'x-codex-turn-metadata':{thread_id:'purchase-thread',turn_id:'purchase-turn'}}});
     const call=async(name,args)=>{const r=await runtime.invoke(name,args);assert.ok(!r.isError,JSON.stringify(r.structuredContent));return r.structuredContent;};
-    const api=async(path,body)=>{const r=await fetch(fixture.apiUrl+ '/mcp/business/onec/'+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'X-Index12-Actor-ID':scope.actorId,'X-Index12-Workspace-ID':scope.workspaceId,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return {status:r.status,...await r.json()};};
+    const api=async(path,body,method)=>{const r=await fetch(fixture.apiUrl+ '/mcp/business/onec/'+path,{method:method||(body?'POST':'GET'),headers:{Authorization:'Bearer '+token,'X-Index12-Actor-ID':scope.actorId,'X-Index12-Workspace-ID':scope.workspaceId,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return {status:r.status,...await r.json()};};
     const originalPdf=Buffer.from('%PDF-1.7\noriginal supplier invoice bytes'),desktopFileId=randomUUID();await db.collection('desktopFiles').insertOne({_id:desktopFileId,...scope,name:'Supplier.pdf',mimeType:'application/pdf',size:originalPdf.length,data:originalPdf});
     const upload=await call('index12_upload_purchase_pdf',{desktopFileId});assert.equal(upload.sha256,createHash('sha256').update(originalPdf).digest('hex'));
     assert.equal((await call('index12_upload_purchase_pdf',{desktopFileId})).pdfId,upload.pdfId);
@@ -84,6 +100,7 @@ const schemas=require('../fixtures/onec-purchase-schema.json');
     const revised=await call('index12_prepare_purchase',{...input('21'),idempotencyKey:'purchase-fixture-21-revised'});assert.notEqual(revised.planToken,toRevise.planToken);
     assert.equal((await api('purchases/execute',{planToken:toRevise.planToken})).error.code,'PURCHASE_CANCELLED');
     assert.equal((await api('purchases/cancel',{planToken:prepared.planToken})).error.code,'PURCHASE_CANNOT_CANCEL');
+    await require('./onec-mutations.cjs')({call,api,db,scope,companyId:String(companyId),paymentId:result.steps.payment.id||result.steps.payment.ref||payment.Ref_Key,records,patches,commands,setMode:v=>mode=v,tokenHash});
     await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:['read']}});assert.equal((await api('purchases/execute',{planToken:prepared.planToken})).status,403);
     await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:['read','create','imports:direct']}});
     const canceled=await call('index12_prepare_purchase',input('20'));await executions.stop({executionId:job._id,threadId:'purchase-thread',turnId:'purchase-turn'},scope,{code:'CANCELLED',message:'Stopped'});

@@ -21,16 +21,16 @@ const referenceCollections = {
 };
 const protectedFields = new Set(['Ref_Key','DataVersion','Number','Posted','DeletionMark','Оплачено','Организация_Key','Контрагент_Key','ДокументОснование','ДокументОснование_Type','СчетНаОплату_Key','__proto__','constructor','prototype']);
 function instant1c(value) { if(typeof value!=='string')fault('INVALID_DATE','Укажите дату документа'); const day=value.slice(0,10); dateOnly(day); if(value!==day&&!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$/.test(value))fault('INVALID_DATE','Дата 1С: YYYY-MM-DD или YYYY-MM-DDTHH:mm:ss'); return value===day?`${day}T00:00:00`:value; }
-async function validateData(client,collection,input,cache=new Map(), nested=false) {
+async function validateData(client,collection,input,cache=new Map(), nested=false, options={}) {
   const schema=await client.schema(collection), properties=new Map(schema.properties.map(p=>[p.name,p.type]));
   const result={};
   for(const [key,value] of Object.entries(input)) {
-    if(protectedFields.has(key)||!properties.has(key)||key.includes('@'))fault('INVALID_ONEC_FIELD',`Поле ${collection}.${key} не разрешено`,400);
+    if((protectedFields.has(key)&&!(options.update && key==='Number'))||!properties.has(key)||key.includes('@'))fault('INVALID_ONEC_FIELD',`Поле ${collection}.${key} не разрешено`,400);
     if(key.endsWith('_Type')||properties.has(`${key}_Type`))fault('UNSUPPORTED_ONEC_REFERENCE',`Для составной ссылки ${key} нужна отдельная проверка типа и владельца`);
     const type=properties.get(key);
     if(type.startsWith('Collection(')) {
       if(!Array.isArray(value)||value.length>100||nested)fault('INVALID_ONEC_ROWS','В документе допускается до 100 строк');
-      result[key]=[]; for(const row of value) result[key].push(await validateData(client,`${collection}_${key}`,row,cache,true)); continue;
+      result[key]=[]; for(const row of value) result[key].push(await validateData(client,`${collection}_${key}`,row,cache,true,options)); continue;
     }
     if(type==='Edm.Guid') {
       if(typeof value!=='string'||!GUID.test(value)||value===ZERO)fault('INVALID_ONEC_REFERENCE',`Проверьте ссылку ${key}`);
@@ -92,7 +92,7 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
       try{await client.query({collection,top:1,select:'Ref_Key'});access[collection]={published:true,read:true,create:'not_tested'};}
       catch(error){access[collection]={published:sets.some(s=>s.name===collection),read:false,code:error.code,create:'not_tested'};}
     }
-    res.json({...identity(req),connected:true,remote:true,macRequired:false,access,workflow:['supplier_invoice','outgoing_payment_order','closing_documents_task'],invoicePdfAttachment:false,pdfStorage:'INDEX12 calendar task',writesEnabled:env.ONEC_PURCHASE_WRITES==='true',posting:false,bankPayments:false});
+    res.json({...identity(req),connected:true,remote:true,macRequired:false,access,workflow:['supplier_invoice','outgoing_payment_order','closing_documents_task'],invoicePdfAttachment:false,pdfStorage:'INDEX12 calendar task',writesEnabled:env.ONEC_PURCHASE_WRITES==='true',posting:env.ONEC_PURCHASE_WRITES==='true',objectUpdates:env.ONEC_PURCHASE_WRITES==='true',deletionMark:env.ONEC_PURCHASE_WRITES==='true',versionCheck:'DataVersion / If-Match',bankPayments:false});
   }));
   router.get('/onec/schema',use(async(req,res,client)=>{
     const collection=req.query.collection; const sets=await client.metadata();

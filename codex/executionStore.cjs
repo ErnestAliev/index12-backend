@@ -108,6 +108,8 @@ class ExecutionStore {
       const steps=Object.fromEntries(Object.entries(item.steps||{}).filter(([,step])=>step.state==='completed'));
       if(Object.keys(steps).length)events.push({tool:'index12_execute_purchase',type:'completed',result:{planToken:item._id,completed:item.state==='completed',partial:item.state!=='completed',steps,error:item.error||null}});
     }
+    const mutations = await this.db.collection('onecObjectMutations').find({ executionIds:id, ...scope, state:'completed' }).toArray();
+    for (const item of mutations) events.push({ tool: item.action === 'posting' ? 'index12_onec_set_posted' : item.action === 'deletion' ? 'index12_onec_set_deletion_mark' : 'index12_onec_update_object', type:'completed', result:item.result });
     return { run, events };
   }
 }

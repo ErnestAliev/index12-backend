@@ -34,10 +34,10 @@ function toolFailure(item, requestFailure) {
 function receipt(item) {
   if (!WRITE_CAPABILITIES[item.tool] || toolFailure(item)) return null;
   const data = resultData(item);
-  if (!data || !data.id && !data.completed) return null;
+  if (!data || data.inProgress || data.uncertain || !data.id && !data.completed) return null;
   const operation = data.operation?.operation || data.operation;
   return { tool: item.tool, id: data.id || data.operation?.id || data.importId || null, version: data.version ?? data.operation?.version ?? null,
-    amount: operation?.amount ?? null, date: operation?.date ?? null, initialBalance: data.account?.initialBalance ?? null,
+    amount: operation?.amount ?? null, date: data.date ?? operation?.date ?? null, initialBalance: data.account?.initialBalance ?? null,
     ...(data.partial ? { partial: true, entities: data.entities } : {}) };
 }
 function executionReport(error, completed = []) {

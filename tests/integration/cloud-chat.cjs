@@ -21,7 +21,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
       if (!url.startsWith('https://api.openai.com/')) return fetch(url, options);
       assert.equal(url, 'https://api.openai.com/v1/responses'); calls++;
       const body = JSON.parse(options.body);
-      assert.equal(body.store, false); assert.ok(body.tools.some(t => t.name === 'index12_create_task'));
+      assert.equal(body.store, false); assert.ok(body.tools.some(t => t.name === 'index12_create_task')); assert.ok(body.tools.some(t => t.name === 'index12_onec_update_object')); assert.match(body.instructions,/Дата сообщения в Asia\/Almaty/);
       if (body.input.at(-1).type !== 'function_call_output') return Response.json({ status: 'completed', output: [{ type: 'function_call', call_id: 'call-' + calls, name: 'index12_create_task', arguments: JSON.stringify({ title: 'Cloud task ' + calls, idempotencyKey: 'cloud-task-' + calls }) }] });
       if (failAfterWrite) return Response.json({ error: { message: 'private internal error' } }, { status: 500 });
       return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Задача создана.', annotations: [] }] }] });
