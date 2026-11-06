@@ -220,6 +220,7 @@ const { startFixture } = require("./subcategories.cjs");
         .data.contractors[0]._id,
       supplier.data.contractor._id,
     );
+    await require("./team-chat-replies.cjs")({ api, db, employee });
     await require("./team-chat-actions.cjs")({
       api,
       db,
@@ -407,6 +408,18 @@ const { startFixture } = require("./subcategories.cjs");
     );
     assert.equal(accountForecast.pendingCents, 120000);
     assert.equal(accountForecast.afterRequestsCents, -20000);
+    const inConversation = (
+      await api("/state?section=messages", undefined, "GET")
+    ).data;
+    assert.equal(
+      inConversation.financial.accounts.find(
+        (a) => a._id === String(account._id),
+      ).afterDueRequestsCents,
+      -20000,
+    );
+    assert.ok(
+      inConversation.activeRequestCosts.some((r) => r._id === input.id),
+    );
     assert.equal(
       (await api("/state", undefined, "GET", employee.auth)).data.members
         .length,

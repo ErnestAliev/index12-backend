@@ -114,6 +114,7 @@ function createTeamChatRouter({
         { unique: true },
       ),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
+      coll("Messages").createIndex({ workspaceId: 1, "replyTo.messageId": 1 }),
       coll("MessageReactions").createIndex({ workspaceId: 1, messageId: 1 }),
       coll("MessageReads").createIndex({ workspaceId: 1, messageId: 1 }),
       coll("Requests").createIndex({ workspaceId: 1, createdAt: -1 }),
@@ -578,7 +579,9 @@ function createTeamChatRouter({
         ? allActive.filter((r) => r.placement && !r.operationId)
         : [];
       const financialPromise = Promise.resolve(
-        !["messages", "members"].includes(req.query.section) &&
+        req.query.section !== "members" &&
+          (req.query.section !== "messages" ||
+            allActive.some((r) => r.placement)) &&
           (p.owner || p.role !== "employee") &&
           getBalances
           ? getBalances(req.team, allActive)
@@ -651,6 +654,21 @@ function createTeamChatRouter({
         people,
         recoveryCount,
         financial,
+        ...(p.owner || p.role !== "employee"
+          ? {
+              activeRequestCosts: allActive.map((r) => ({
+                _id: r._id,
+                state: r.state,
+                amountCents: r.amountCents,
+                companyId: r.companyId,
+                dueDate: r.dueDate,
+                operationId: r.operationId || null,
+                placement: r.placement
+                  ? { accountId: r.placement.accountId }
+                  : null,
+              })),
+            }
+          : {}),
       });
     }),
   );
@@ -809,6 +827,41 @@ function createTeamChatRouter({
         (!content && !ids.length)
       )
         fail("Введите сообщение или прикрепите файл");
+      const old = await coll("Messages").findOne({ _id: id });
+      if (
+        old &&
+        (old.workspaceId !== req.team.workspaceId ||
+          old.authorId !== req.team.actorId)
+      )
+        fail("Ключ сообщения уже использован", 409);
+      let replyTo;
+      if (req.body.replyToId) {
+        const sourceId = req.body.replyToId;
+        if (
+          typeof sourceId !== "string" ||
+          !/^[a-f\d-]{36}$/i.test(sourceId) ||
+          sourceId === id
+        )
+          fail("Выберите исходное сообщение");
+        if (old?.replyTo?.messageId === sourceId) replyTo = old.replyTo;
+        else {
+          const source = await coll("Messages").findOne({
+            _id: sourceId,
+            workspaceId: req.team.workspaceId,
+            deletedAt: { $exists: false },
+          });
+          if (!source) fail("Исходное сообщение удалено или недоступно", 404);
+          replyTo = {
+            messageId: source._id,
+            authorId: source.authorId,
+            authorName: source.authorName,
+            text: String(source.text || "").slice(0, 1000),
+            fileName: source.attachments?.[0]?.name || "",
+            fileCount: source.attachments?.length || 0,
+            contentVersion: Number(source.contentVersion || 0),
+          };
+        }
+      }
       const mentionIds = req.body.mentionIds || [];
       if (
         !Array.isArray(mentionIds) ||
@@ -862,6 +915,7 @@ function createTeamChatRouter({
         updatedAt: new Date(),
         version: 0,
         contentVersion: 0,
+        ...(replyTo ? { replyTo } : {}),
         ...(mentioned.length
           ? {
               mentions: mentioned.map((p) => ({
@@ -871,17 +925,18 @@ function createTeamChatRouter({
             }
           : {}),
       };
-      const old = await coll("Messages").findOne({ _id: id });
       if (old) {
         if (
           old.workspaceId !== row.workspaceId ||
           old.authorId !== row.authorId ||
           old.text !== row.text ||
+          (old.replyTo?.messageId || null) !== (replyTo?.messageId || null) ||
           JSON.stringify(old.mentions || []) !==
             JSON.stringify(row.mentions || []) ||
           JSON.stringify(old.attachments) !== JSON.stringify(attachments)
         )
           fail("Ключ сообщения уже использован", 409);
+        await messageActions.decorate(req, [old]);
         return res.json({ message: old, replayed: true });
       }
       try {
@@ -904,6 +959,7 @@ function createTeamChatRouter({
         title: req.team.workspace.name + " · " + req.team.name,
         body: row.text || "Файл в чате",
       });
+      await messageActions.decorate(req, [row]);
       res.status(201).json({ message: row });
     }),
   );
@@ -922,6 +978,10 @@ function createTeamChatRouter({
           { _id: row._id, workspaceId: row.workspaceId },
           { $set: { deletedAt: new Date(), deletedBy: req.team.actorId } },
         );
+      await coll("Messages").updateMany(
+        { workspaceId: req.team.workspaceId, "replyTo.messageId": row._id },
+        { $set: { updatedAt: new Date() } },
+      );
       notify(req);
       res.json({ deletedMessageId: row._id });
     }),

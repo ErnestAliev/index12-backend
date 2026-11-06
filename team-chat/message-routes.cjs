@@ -45,6 +45,11 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       },
     );
     if (!updated) fail("Сообщение изменилось. Откройте его заново", 409);
+    if (changes.$set?.contentVersion !== undefined)
+      await coll("Messages").updateMany(
+        { workspaceId: row.workspaceId, "replyTo.messageId": row._id },
+        { $set: { updatedAt: new Date() } },
+      );
     notify(req);
     return updated;
   }
@@ -79,6 +84,14 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         },
       });
       res.json({ messageId: updated._id });
+    }),
+  );
+  router.get(
+    "/messages/:id",
+    wrap(async (req, res) => {
+      const row = await load(req);
+      await decorate(req, [row]);
+      res.json({ message: row });
     }),
   );
   router.post(
@@ -382,6 +395,17 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           )
           .toArray()
       : [];
+    const replyIds = [
+      ...new Set(messages.map((m) => m.replyTo?.messageId).filter(Boolean)),
+    ];
+    const sources = replyIds.length
+      ? await coll("Messages")
+          .find(
+            { workspaceId: req.team.workspaceId, _id: { $in: replyIds } },
+            { projection: { _id: 1, deletedAt: 1, contentVersion: 1 } },
+          )
+          .toArray()
+      : [];
     const fileIds = messages
       .filter((m) => !m.deletedAt)
       .flatMap((m) => (m.attachments || []).map((f) => f.fileId));
@@ -404,6 +428,24 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       delete message.approvalArchive;
       delete message.forwardKey;
       message.version = version(message);
+      if (message.replyTo) {
+        const source = sources.find((s) => s._id === message.replyTo.messageId);
+        message.replyTo =
+          !source || source.deletedAt
+            ? {
+                messageId: message.replyTo.messageId,
+                authorName: message.replyTo.authorName,
+                text: "",
+                fileName: "",
+                deleted: true,
+              }
+            : {
+                ...message.replyTo,
+                edited:
+                  Number(source.contentVersion || 0) !==
+                  Number(message.replyTo.contentVersion || 0),
+              };
+      }
       message.readCount = reads.filter(
         (r) =>
           r.messageId === message._id &&

@@ -224,6 +224,7 @@ test("per-account cash shows pending and approved requests without borrowing fro
   assert.equal(bank.pendingCents, 20000);
   assert.equal(bank.approvedCents, 30000);
   assert.equal(bank.afterRequestsCents, 40000);
+  assert.equal(bank.afterDueRequestsCents, 90000);
   assert.equal(bank.projectedCents, 60000);
   assert.equal(cash.balanceCents, 200000);
   assert.equal(cash.pendingCents, 10000);

@@ -95,7 +95,7 @@ function projectCash(accounts, operations, requests, asOf = today()) {
         (r) =>
           activeStates.includes(r.state) &&
           !r.operationId &&
-          r.placement?.accountId === id &&
+          String(r.placement?.accountId || "") === id &&
           String(r.companyId) === String(a.companyId),
       );
       const requestedCents = allocated.reduce(
@@ -117,26 +117,49 @@ function projectCash(accounts, operations, requests, asOf = today()) {
       return {
         _id: id,
         name: a.name,
+        ownerName: a.ownerName || "",
         companyId: String(a.companyId || ""),
         balanceCents,
         requestedCents,
         pendingCents: requestedCents - approvedCents,
         approvedCents,
         afterRequestsCents: balanceCents - requestedCents,
+        dueRequestedCents: allocated
+          .filter((r) => r.dueDate <= asOf)
+          .reduce((sum, r) => sum + r.amountCents, 0),
+        afterDueRequestsCents:
+          balanceCents -
+          allocated
+            .filter((r) => r.dueDate <= asOf)
+            .reduce((sum, r) => sum + r.amountCents, 0),
         projectedCents,
         minimumCents,
       };
     }),
   };
 }
-function createCashReader({ Account, Event, merge }) {
+function createCashReader({ Account, Event, Company, Individual, merge }) {
   return async (p, requests) => {
     const scope = {
       $in: /^[a-f\d]{24}$/i.test(p.scope)
         ? [p.scope, new (require("mongoose").Types.ObjectId)(p.scope)]
         : [p.scope],
     };
-    const accounts = await Account.find({ userId: scope }).lean();
+    const [accounts, companies, individuals] = await Promise.all([
+      Account.find({ userId: scope }).lean(),
+      Company ? Company.find({ userId: scope }).select("_id name").lean() : [],
+      Individual
+        ? Individual.find({ userId: scope }).select("_id name").lean()
+        : [],
+    ]);
+    const namedAccounts = accounts.map((a) => ({
+      ...a,
+      ownerName:
+        companies.find((c) => String(c._id) === String(a.companyId))?.name ||
+        individuals.find((i) => String(i._id) === String(a.individualId))
+          ?.name ||
+        "",
+    }));
     const horizon =
       requests
         .filter((r) => activeStates.includes(r.state))
@@ -150,7 +173,7 @@ function createCashReader({ Account, Event, merge }) {
         $lt: new Date(Date.parse(localInstant(date, "00:00")) + 86400000),
       },
     }).lean();
-    return projectCash(accounts, merge(events), requests);
+    return projectCash(namedAccounts, merge(events), requests);
   };
 }
 module.exports = { projectCash, createCashReader };
