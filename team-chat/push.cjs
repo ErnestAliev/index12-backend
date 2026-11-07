@@ -154,6 +154,8 @@ function createChatPush({
     onlyActor,
     allowPending = false,
     testId,
+    taskId,
+    messageId,
   }) {
     if (!configured) return;
     await ready();
@@ -174,6 +176,8 @@ function createChatPush({
               body: String(body || "Новое событие в чате").slice(0, 180),
               tag: "team-" + hash(key).slice(0, 24),
               testId,
+              taskId,
+              messageId,
             },
             allowPending,
             done: false,

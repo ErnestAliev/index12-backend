@@ -7,7 +7,6 @@ const roles = {
   manager: "Управляющий",
   director: "Руководитель компании",
 };
-const activeStates = ["manager_review", "director_review", "ready"];
 function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status });
 }
@@ -45,36 +44,4 @@ async function verifyPassword(password, stored) {
     expected = Buffer.from(stored.hash, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
-function decision(state, role, action) {
-  if (!["approve", "reject"].includes(action)) fail("Выберите решение");
-  if (state === "manager_review" && role === "manager")
-    return action === "approve" ? "director_review" : "rejected";
-  if (state === "director_review" && role === "director")
-    return action === "approve" ? "ready" : "rejected";
-  fail("Сейчас решение должен принять другой участник", 409);
-}
-function money(value) {
-  if (!/^(?:0|[1-9]\d{0,11})(?:[.,]\d{1,2})?$/.test(String(value)))
-    fail("Укажите сумму с точностью до тиына");
-  const cents = Math.round(Number(String(value).replace(",", ".")) * 100);
-  if (!Number.isSafeInteger(cents) || cents <= 0)
-    fail("Сумма должна быть больше нуля");
-  return cents;
-}
-function forecast(rows) {
-  return rows
-    .filter((r) => activeStates.includes(r.state) && !r.operationId)
-    .reduce((sum, row) => sum + row.amountCents, 0);
-}
-module.exports = {
-  roles,
-  activeStates,
-  fail,
-  text,
-  phone,
-  hashPassword,
-  verifyPassword,
-  decision,
-  money,
-  forecast,
-};
+module.exports = { roles, fail, text, phone, hashPassword, verifyPassword };

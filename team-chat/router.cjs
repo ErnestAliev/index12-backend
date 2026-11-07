@@ -5,21 +5,12 @@ const { randomUUID, randomBytes, createHash } = require("node:crypto");
 const { Types } = require("mongoose");
 const {
   roles,
-  activeStates,
   fail,
   text,
   phone,
   hashPassword,
   verifyPassword,
-  decision,
-  money,
-  forecast,
 } = require("./domain.cjs");
-const {
-  dateOnly,
-  today,
-  localInstant,
-} = require("../business/task-domain.cjs");
 const {
   safeName,
   fileMeta,
@@ -31,21 +22,9 @@ function createTeamChatRouter({
   db,
   Workspace,
   User,
-  Company,
-  Account,
-  Category,
-  Contractor,
-  Subcategory,
-  Project,
-  allocateCell,
-  emitToWorkspace,
-  parseInvoice,
-  Event,
   getWorkspaceStorageUserId,
-  createOperation,
   history,
   frontendUrl,
-  getBalances,
 }) {
   const router = express.Router(),
     bus = new EventEmitter();
@@ -65,8 +44,6 @@ function createTeamChatRouter({
     permissions: { manageMembers: p.owner === true },
     roles,
   });
-  const opts = () =>
-    history?.current()?.session ? { session: history.current().session } : {};
   const wrap = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res, next)).catch(next);
   const allowedOrigins = new Set([
@@ -116,27 +93,18 @@ function createTeamChatRouter({
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
       coll("Messages").createIndex({ workspaceId: 1, "replyTo.messageId": 1 }),
       coll("MessageReactions").createIndex({ workspaceId: 1, messageId: 1 }),
-      coll("MessageReads").createIndex({ workspaceId: 1, messageId: 1 }),
-      coll("Requests").createIndex({ workspaceId: 1, createdAt: -1 }),
-      coll("Requests").createIndex({
-        scope: 1,
-        state: 1,
-        "placement.dateKey": 1,
+      coll("MessageReads").createIndex({
+        workspaceId: 1,
+        messageId: 1,
+        actorId: 1,
       }),
-      coll("Requests").createIndex(
-        { workspaceId: 1, sourceFileId: 1 },
-        {
-          unique: true,
-          partialFilterExpression: { sourceFileId: { $type: "string" } },
-        },
-      ),
-      coll("Requests").createIndex(
-        { workspaceId: 1, sourceSha256: 1 },
-        {
-          unique: true,
-          partialFilterExpression: { sourceSha256: { $type: "string" } },
-        },
-      ),
+      coll("Tasks").createIndex({ workspaceId: 1, createdAt: -1 }),
+      coll("Messages").createIndex({
+        workspaceId: 1,
+        taskId: 1,
+        createdAt: -1,
+        _id: -1,
+      }),
       coll("Files").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       coll("Attempts").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     ]).catch((e) => {
@@ -453,13 +421,6 @@ function createTeamChatRouter({
       fail("Только владелец настраивает участников чата", 403);
   };
   recovery.registerOwner(router, { wrap, owner });
-  const scopeFilter = (req) => ({
-    userId: {
-      $in: /^[a-f\d]{24}$/i.test(req.team.scope)
-        ? [req.team.scope, new Types.ObjectId(req.team.scope)]
-        : [req.team.scope],
-    },
-  });
   router.get(
     "/events",
     wrap(async (req, res) => {
@@ -479,17 +440,40 @@ function createTeamChatRouter({
       });
     }),
   );
-  async function messagePage(p, before) {
+  const tasks = require("./tasks.cjs").registerTaskRoutes(router, {
+    coll,
+    wrap,
+    notify,
+    User,
+  });
+  async function messagePage(p, before, taskId = null) {
     const filter = { workspaceId: p.workspaceId },
-      messageFilter = { ...filter, deletedAt: { $exists: false } };
+      messageFilter = {
+        ...filter,
+        deletedAt: { $exists: false },
+        kind: { $nin: ["request", ...(taskId ? ["task"] : [])] },
+        ...(taskId
+          ? { taskId }
+          : { $or: [{ taskId: { $exists: false } }, { kind: "task" }] }),
+      };
     if (before) {
       if (typeof before !== "string" || !/^[a-f\d-]{36}$/i.test(before))
         fail("Некорректная страница истории");
       const cursor = await coll("Messages").findOne({ _id: before, ...filter });
-      if (!cursor) fail("Сообщение не найдено", 404);
-      messageFilter.$or = [
-        { createdAt: { $lt: cursor.createdAt } },
-        { createdAt: cursor.createdAt, _id: { $lt: cursor._id } },
+      if (
+        !cursor ||
+        (taskId
+          ? cursor.taskId !== taskId || cursor.kind === "task"
+          : cursor.taskId && cursor.kind !== "task")
+      )
+        fail("Сообщение не найдено", 404);
+      messageFilter.$and = [
+        {
+          $or: [
+            { createdAt: { $lt: cursor.createdAt } },
+            { createdAt: cursor.createdAt, _id: { $lt: cursor._id } },
+          ],
+        },
       ];
     }
     return coll("Messages")
@@ -503,7 +487,12 @@ function createTeamChatRouter({
   router.get(
     "/messages",
     wrap(async (req, res) => {
-      const rows = await messagePage(req.team, req.query.before);
+      if (req.query.taskId) await tasks.load(req, req.query.taskId);
+      const rows = await messagePage(
+        req.team,
+        req.query.before,
+        req.query.taskId || null,
+      );
       await messageActions.decorate(req, rows);
       res.json({
         messages: rows.slice(0, 50).reverse(),
@@ -517,27 +506,8 @@ function createTeamChatRouter({
       const checkedAt = new Date();
       const p = req.team,
         filter = { workspaceId: p.workspaceId };
-      const [
-        rows,
-        requests,
-        allActive,
-        companies,
-        members,
-        recoveryCount,
-        people,
-      ] = await Promise.all([
+      const [rows, members, recoveryCount, people] = await Promise.all([
         messagePage(p, req.query.before),
-        coll("Requests")
-          .find({ ...filter, deletedAt: { $exists: false } })
-          .sort({ createdAt: -1 })
-          .limit(501)
-          .toArray(),
-        coll("Requests")
-          .find({ ...filter, state: { $in: activeStates } })
-          .toArray(),
-        !p.owner && p.role === "employee"
-          ? []
-          : Company.find(scopeFilter(req)).select("_id name").lean(),
         p.owner
           ? coll("Members")
               .find(filter, { projection: { password: 0 } })
@@ -575,23 +545,6 @@ function createTeamChatRouter({
           ];
         })(),
       ]);
-      const placements = p.owner
-        ? allActive.filter((r) => r.placement && !r.operationId)
-        : [];
-      const financialPromise = Promise.resolve(
-        req.query.section !== "members" &&
-          (req.query.section !== "messages" ||
-            allActive.some((r) => r.placement)) &&
-          (p.owner || p.role !== "employee") &&
-          getBalances
-          ? getBalances(req.team, allActive)
-          : p.owner || p.role !== "employee"
-            ? undefined
-            : null,
-      ).then(
-        (value) => ({ value }),
-        (error) => ({ error }),
-      );
       const checkedIds = String(req.query.messageIds || "")
         .split(",")
         .filter((id) => /^[a-f\d-]{36}$/i.test(id))
@@ -628,9 +581,6 @@ function createTeamChatRouter({
             .toArray()
         : [];
       await messageActions.decorate(req, [...rows, ...messageUpdates]);
-      const financialResult = await financialPromise;
-      if (financialResult.error) throw financialResult.error;
-      const financial = financialResult.value;
       res.json({
         identity: identity(p),
         checkedAt,
@@ -645,30 +595,10 @@ function createTeamChatRouter({
           ),
         deletedMessageIds,
         hasMore: rows.length > 50,
-        requests: requests.slice(0, 500),
-        placements,
-        requestsTruncated: requests.length > 500,
-        forecastCents: forecast(allActive),
-        companies,
+        tasks: await tasks.summaries(req),
         members,
         people,
         recoveryCount,
-        financial,
-        ...(p.owner || p.role !== "employee"
-          ? {
-              activeRequestCosts: allActive.map((r) => ({
-                _id: r._id,
-                state: r.state,
-                amountCents: r.amountCents,
-                companyId: r.companyId,
-                dueDate: r.dueDate,
-                operationId: r.operationId || null,
-                placement: r.placement
-                  ? { accountId: r.placement.accountId }
-                  : null,
-              })),
-            }
-          : {}),
       });
     }),
   );
@@ -788,7 +718,20 @@ function createTeamChatRouter({
         mimeType:
           req.body.subarray(0, 5).toString() === "%PDF-"
             ? "application/pdf"
-            : "application/octet-stream",
+            : req.body
+                  .subarray(0, 8)
+                  .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+              ? "image/png"
+              : req.body[0] === 255 &&
+                  req.body[1] === 216 &&
+                  req.body[2] === 255
+                ? "image/jpeg"
+                : /^GIF8[79]a/.test(req.body.subarray(0, 6).toString())
+                  ? "image/gif"
+                  : req.body.subarray(0, 4).toString() === "RIFF" &&
+                      req.body.subarray(8, 12).toString() === "WEBP"
+                    ? "image/webp"
+                    : "application/octet-stream",
         size: req.body.length,
         data: req.body,
         expiresAt: new Date(Date.now() + 86400000),
@@ -827,6 +770,8 @@ function createTeamChatRouter({
         (!content && !ids.length)
       )
         fail("Введите сообщение или прикрепите файл");
+      const taskId = req.body.taskId || null;
+      if (taskId) await tasks.load(req, taskId);
       const old = await coll("Messages").findOne({ _id: id });
       if (
         old &&
@@ -850,7 +795,12 @@ function createTeamChatRouter({
             workspaceId: req.team.workspaceId,
             deletedAt: { $exists: false },
           });
-          if (!source) fail("Исходное сообщение удалено или недоступно", 404);
+          if (
+            !source ||
+            (source.taskId || null) !== taskId ||
+            source.kind === "task"
+          )
+            fail("Исходное сообщение удалено или недоступно", 404);
           replyTo = {
             messageId: source._id,
             authorId: source.authorId,
@@ -906,6 +856,7 @@ function createTeamChatRouter({
         fail("Общий размер файлов — до 25 МБ");
       const row = {
         _id: id,
+        ...(taskId ? { taskId } : {}),
         workspaceId: req.team.workspaceId,
         authorId: req.team.actorId,
         authorName: req.team.name,
@@ -930,6 +881,8 @@ function createTeamChatRouter({
           old.workspaceId !== row.workspaceId ||
           old.authorId !== row.authorId ||
           old.text !== row.text ||
+          (old.taskId || null) !== taskId ||
+          old.kind === "task" ||
           (old.replyTo?.messageId || null) !== (replyTo?.messageId || null) ||
           JSON.stringify(old.mentions || []) !==
             JSON.stringify(row.mentions || []) ||
@@ -958,6 +911,8 @@ function createTeamChatRouter({
         key: "message:" + row._id,
         title: req.team.workspace.name + " · " + req.team.name,
         body: row.text || "Файл в чате",
+        taskId: row.taskId,
+        messageId: row._id,
       });
       await messageActions.decorate(req, [row]);
       res.status(201).json({ message: row });
@@ -971,6 +926,7 @@ function createTeamChatRouter({
         workspaceId: req.team.workspaceId,
       });
       if (!row) fail("Сообщение не найдено", 404);
+      if (row.kind === "task") fail("Откройте задачу для изменения", 409);
       if (!req.team.owner && row.authorId !== req.team.actorId)
         fail("Можно удалить только своё сообщение", 403);
       if (!row.deletedAt)
@@ -990,203 +946,8 @@ function createTeamChatRouter({
     router,
     { coll, wrap, notify, Workspace },
   );
-  require("./request-routes.cjs").registerRequestRoutes(router, {
-    coll,
-    wrap,
-    scopeFilter,
-    owner,
-    notify,
-    Company,
-    Workspace,
-    Contractor,
-    Account,
-    Category,
-    Subcategory,
-    Project,
-    Event,
-    history,
-    allocateCell,
-    emitToWorkspace,
-    parseInvoice,
-  });
-  router.post(
-    "/requests/:id/decision",
-    wrap(async (req, res) => {
-      const row = await coll("Requests").findOne({
-        _id: req.params.id,
-        workspaceId: req.team.workspaceId,
-      });
-      if (!row || row.deletedAt) fail("Заявка не найдена", 404);
-      if (
-        req.body.action === "approve" &&
-        row.state === "manager_review" &&
-        !row.placement
-      )
-        fail("Сначала дополните заявку и разместите её на таймлайне", 409);
-      const actingRole =
-        row.state === "manager_review" && req.team.owner
-          ? "manager"
-          : req.team.role;
-      const state = decision(row.state, actingRole, req.body.action),
-        note = text(req.body.note || "", 1000, false);
-      if (req.body.action === "reject" && !note)
-        fail("Укажите причину отклонения");
-      if (!Number.isInteger(req.body.expectedVersion))
-        fail("Прочитайте актуальную заявку");
-      const updated = await coll("Requests").findOneAndUpdate(
-        {
-          _id: row._id,
-          workspaceId: row.workspaceId,
-          version: req.body.expectedVersion,
-          state: row.state,
-        },
-        {
-          $set: {
-            state,
-            rejectionReason: req.body.action === "reject" ? note : null,
-            updatedAt: new Date(),
-          },
-          $inc: { version: 1 },
-          $push: {
-            history: {
-              actorId: req.team.actorId,
-              name: req.team.name,
-              role: actingRole,
-              action: req.body.action,
-              note,
-              at: new Date(),
-            },
-          },
-        },
-        { returnDocument: "after" },
-      );
-      if (!updated) fail("Заявка уже изменилась", 409);
-      notify(req, {
-        key: `request:${updated._id}:${updated.version}`,
-        title: "Chat · Решение по заявке",
-        body: updated.title,
-      });
-      res.json({ request: updated });
-    }),
-  );
-  router.post(
-    "/requests/:id/convert",
-    wrap(async (req, res) => {
-      owner(req);
-      const write = history.wrapHandler(async (request, output) => {
-        const row = await coll("Requests").findOne(
-          { _id: request.params.id, workspaceId: request.team.workspaceId },
-          opts(),
-        );
-        if (!row || row.deletedAt) fail("Заявка не найдена", 404);
-        if (row.operationId)
-          return output.json({ operationId: row.operationId, replayed: true });
-        if (row.state !== "ready")
-          fail("Нужно согласование управляющего и руководителя", 409);
-        if (row.version !== request.body.expectedVersion)
-          fail("Заявка изменилась", 409);
-        if (!row.placement)
-          fail("Дополните и повторно согласуйте реквизиты заявки", 409);
-        const supplied = request.body;
-        for (const field of ["accountId", "categoryId"])
-          if (supplied[field] && supplied[field] !== row.placement[field])
-            fail("Реквизиты отличаются от утверждённых руководителем", 409);
-        if (supplied.dueDate && supplied.dueDate !== row.dueDate)
-          fail("Дата отличается от утверждённой руководителем", 409);
-        request.body = {
-          ...row.placement,
-          expectedVersion: supplied.expectedVersion,
-          dueDate: row.dueDate,
-        };
-        if (
-          typeof request.body.accountId !== "string" ||
-          !/^[a-f\d]{24}$/i.test(request.body.accountId)
-        )
-          fail("Выберите счёт");
-        if (
-          request.body.categoryId &&
-          (typeof request.body.categoryId !== "string" ||
-            !/^[a-f\d]{24}$/i.test(request.body.categoryId))
-        )
-          fail("Выберите категорию");
-        const account = await Account.findOne({
-          _id: request.body.accountId,
-          companyId: row.companyId,
-          ...scopeFilter(request),
-        }).lean();
-        if (!account) fail("Выберите счёт этой компании", 404);
-        if (
-          request.body.categoryId &&
-          !(await Category.exists({
-            _id: request.body.categoryId,
-            ...scopeFilter(request),
-          }))
-        )
-          fail("Категория недоступна", 404);
-        const dueDate =
-          request.body.dueDate === undefined
-            ? row.dueDate
-            : dateOnly(request.body.dueDate);
-        if (!dueDate) fail("Укажите дату операции");
-        const before = request.body;
-        let operation,
-          code = 200;
-        const buffer = Object.create(output);
-        buffer.status = function (value) {
-          code = value;
-          return this;
-        };
-        buffer.json = function (value) {
-          operation = value;
-          return this;
-        };
-        request.body = {
-          type: "expense",
-          amount: -row.amountCents / 100,
-          date: localInstant(dueDate, "12:00"),
-          accountId: String(account._id),
-          companyId: row.companyId,
-          categoryId: before.categoryId || null,
-          ...row.placement,
-          comment: row.comment || "",
-          cellIndex: row.placement.cellIndex,
-        };
-        request.teamChatOperation = true;
-        request.teamChatRequestId = row._id;
-        try {
-          await createOperation(request, buffer);
-        } finally {
-          request.body = before;
-          delete request.teamChatOperation;
-          delete request.teamChatRequestId;
-        }
-        if (code >= 400 || !operation?._id)
-          fail(
-            operation?.message || "Не удалось создать операцию",
-            code >= 400 ? code : 500,
-          );
-        await coll("Requests").updateOne(
-          { _id: row._id, workspaceId: row.workspaceId },
-          {
-            $set: {
-              state: "recorded",
-              operationId: String(operation._id),
-              recordedAt: new Date(),
-              recordedBy: request.team.actorId,
-            },
-            $inc: { version: 1 },
-          },
-          opts(),
-        );
-        notify(request);
-        output
-          .status(201)
-          .json({ operationId: String(operation._id), operation });
-      });
-      await write(req, res, (error) => {
-        throw error;
-      });
-    }),
+  router.use((_req, res) =>
+    res.status(404).json({ message: "Маршрут чата не найден" }),
   );
   router.use((error, req, res, _next) => {
     const status =

@@ -57,8 +57,8 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     "/messages/:id",
     wrap(async (req, res) => {
       const row = await load(req);
-      if (row.kind === "request")
-        fail("Измените реквизиты в карточке заявки", 409);
+      if (["request", "task"].includes(row.kind))
+        fail("Откройте карточку для изменения", 409);
       if (row.authorId !== req.team.actorId)
         fail("Можно изменить только своё сообщение", 403);
       expected(req, row);
@@ -148,16 +148,6 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           },
           { $set: { updatedAt: at } },
         );
-        const requests = rows.map((r) => r.requestId).filter(Boolean);
-        if (requests.length)
-          await coll("Requests").updateMany(
-            {
-              _id: { $in: requests },
-              workspaceId: req.team.workspaceId,
-              viewedAt: { $exists: false },
-            },
-            { $set: { viewedAt: at } },
-          );
         notify(req);
       }
       res.json({ read: rows.length });
@@ -202,7 +192,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     wrap(async (req, res) => {
       const row = await load(req);
       expected(req, row);
-      if (row.kind === "request")
+      if (["request", "task"].includes(row.kind))
         fail("Используйте согласование в карточке заявки", 409);
       const state = row.approval?.state || "manager_review";
       if (!["manager_review", "director_review"].includes(state))
@@ -416,8 +406,6 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
             {
               projection: {
                 mimeType: 1,
-                invoiceDismissed: 1,
-                invoiceRequestId: 1,
               },
             },
           )
@@ -473,8 +461,6 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           isPdf:
             file?.mimeType === "application/pdf" ||
             /\.pdf$/i.test(attachment.name),
-          invoiceDismissed: !!file?.invoiceDismissed,
-          invoiceRequestId: file?.invoiceRequestId || null,
         };
       });
     }
