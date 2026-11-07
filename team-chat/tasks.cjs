@@ -46,16 +46,32 @@ function taskInput(body) {
     fileIds,
   };
 }
-function registerTaskRoutes(router, { coll, wrap, notify, User }) {
+function registerTaskRoutes(router, { coll, wrap, notify, User, db }) {
   const filter = (req) => ({ workspaceId: req.team.workspaceId });
-  async function load(req, id = req.params.id) {
+  async function load(
+    req,
+    id = req.params.id,
+    includeDeleted = false,
+    options = {},
+  ) {
     if (!uuid(id)) fail("Задача недоступна", 404);
-    const task = await coll("Tasks").findOne({ _id: id, ...filter(req) });
+    const task = await coll("Tasks").findOne(
+      {
+        _id: id,
+        ...filter(req),
+        ...(includeDeleted ? {} : { deletedAt: { $exists: false } }),
+      },
+      options,
+    );
     if (!task) fail("Задача недоступна", 404);
     return task;
   }
   async function summaries(req, ids) {
-    const match = { ...filter(req), ...(ids ? { _id: { $in: ids } } : {}) };
+    const match = {
+      ...filter(req),
+      deletedAt: { $exists: false },
+      ...(ids ? { _id: { $in: ids } } : {}),
+    };
     return coll("Tasks")
       .aggregate([
         { $match: match },
@@ -257,7 +273,8 @@ function registerTaskRoutes(router, { coll, wrap, notify, User }) {
         row &&
         (row.workspaceId !== req.team.workspaceId ||
           row.creatorId !== req.team.actorId ||
-          row.createHash !== fingerprint)
+          row.createHash !== fingerprint ||
+          row.deletedAt)
       )
         fail("Ключ задачи уже использован", 409);
       if (!row) {
@@ -339,7 +356,12 @@ function registerTaskRoutes(router, { coll, wrap, notify, User }) {
       data.attachments = await attachments(req, fileIds, old);
       await pin(req, fileIds);
       const result = await coll("Tasks").updateOne(
-        { _id: old._id, ...filter(req), version: old.version },
+        {
+          _id: old._id,
+          ...filter(req),
+          version: old.version,
+          deletedAt: { $exists: false },
+        },
         {
           $set: { ...data, updatedAt: new Date(), updatedBy: req.team.actorId },
           $inc: { version: 1 },
@@ -349,6 +371,64 @@ function registerTaskRoutes(router, { coll, wrap, notify, User }) {
         fail("Задача изменилась. Откройте её заново", 409);
       notify(req);
       res.json({ task: (await summaries(req, [old._id]))[0] });
+    }),
+  );
+  router.delete(
+    "/tasks/:id",
+    wrap(async (req, res) => {
+      const session = db().client.startSession();
+      let replayed = false;
+      try {
+        await session.withTransaction(async () => {
+          const task = await load(req, req.params.id, true, { session });
+          if (!req.team.owner && task.creatorId !== req.team.actorId)
+            fail("Удалять задачу может её автор или владелец", 403);
+          if (task.deletedAt) {
+            replayed = true;
+            return;
+          }
+          if (
+            !Number.isInteger(req.body.expectedVersion) ||
+            req.body.expectedVersion !== task.version
+          )
+            fail("Задача изменилась. Откройте её заново", 409);
+          const at = new Date();
+          const result = await coll("Tasks").updateOne(
+            {
+              _id: task._id,
+              ...filter(req),
+              version: task.version,
+              deletedAt: { $exists: false },
+            },
+            {
+              $set: {
+                deletedAt: at,
+                deletedBy: req.team.actorId,
+                updatedAt: at,
+              },
+              $inc: { version: 1 },
+            },
+            { session },
+          );
+          if (!result.modifiedCount)
+            fail("Задача изменилась. Откройте её заново", 409);
+          await coll("Messages").updateMany(
+            { ...filter(req), taskId: task._id },
+            {
+              $set: {
+                deletedAt: at,
+                deletedBy: req.team.actorId,
+                updatedAt: at,
+              },
+            },
+            { session },
+          );
+        });
+      } finally {
+        await session.endSession();
+      }
+      notify(req);
+      res.json({ deletedTaskId: req.params.id, replayed });
     }),
   );
   return { load, summaries };

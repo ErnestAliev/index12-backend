@@ -249,33 +249,157 @@ module.exports = async ({
   );
   // Stored legacy requests neither leak into chat nor reserve financial/calendar state.
   const legacyId = randomUUID();
-  await db
-    .collection("teamChatMessages")
-    .insertOne({
-      _id: legacyId,
-      workspaceId: scope.workspaceId,
-      kind: "request",
-      createdAt: new Date(Date.now() + 100000),
-      attachments: [],
-    });
+  await db.collection("teamChatMessages").insertOne({
+    _id: legacyId,
+    workspaceId: scope.workspaceId,
+    kind: "request",
+    createdAt: new Date(Date.now() + 100000),
+    attachments: [],
+  });
   assert.ok(
     !(await api("/state", undefined, "GET")).data.messages.some(
       (m) => m._id === legacyId,
     ),
   );
   const foreign = randomUUID();
-  await db
-    .collection("teamChatTasks")
-    .insertOne({
-      _id: foreign,
-      workspaceId: randomUUID(),
-      creatorId: employeeId,
-      assigneeIds: [employeeId],
-      createdAt: new Date(),
-    });
+  await db.collection("teamChatTasks").insertOne({
+    _id: foreign,
+    workspaceId: randomUUID(),
+    creatorId: employeeId,
+    assigneeIds: [employeeId],
+    createdAt: new Date(),
+  });
   assert.equal(
     (await api("/tasks/" + foreign, undefined, "GET", employee.auth)).status,
     404,
+  );
+  const deletionId = randomUUID(),
+    deletionComment = randomUUID();
+  await api(
+    "/tasks",
+    {
+      id: deletionId,
+      description: "Удалить тестовую задачу",
+      assigneeIds: [employeeId],
+      timing: "none",
+    },
+    "POST",
+    employee.auth,
+  );
+  await api(
+    "/messages",
+    { id: deletionComment, taskId: deletionId, text: "Переписка задачи" },
+    "POST",
+    employee.auth,
+  );
+  assert.equal(
+    (
+      await api(
+        "/tasks/" + deletionId,
+        { expectedVersion: 0 },
+        "DELETE",
+        director.auth,
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await api(
+        "/tasks/" + deletionId,
+        { expectedVersion: 1 },
+        "DELETE",
+        employee.auth,
+      )
+    ).status,
+    409,
+  );
+  assert.equal(
+    (
+      await api(
+        "/tasks/" + deletionId,
+        { expectedVersion: 0 },
+        "DELETE",
+        employee.auth,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await api(
+        "/tasks/" + deletionId,
+        { expectedVersion: 0 },
+        "DELETE",
+        employee.auth,
+      )
+    ).status,
+    200,
+    "delete retry is idempotent",
+  );
+  assert.equal(
+    (await api("/tasks/" + deletionId, undefined, "GET")).status,
+    404,
+  );
+  assert.equal(
+    (await api("/messages?taskId=" + deletionId, undefined, "GET")).status,
+    404,
+  );
+  assert.equal(
+    (await api("/messages/" + deletionComment, undefined, "GET")).status,
+    404,
+  );
+  assert.equal(
+    (
+      await api(
+        "/messages/" + deletionComment + "/reaction",
+        { emoji: "👍" },
+        "POST",
+        employee.auth,
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await api(
+        "/messages",
+        { id: randomUUID(), taskId: deletionId, text: "Нельзя" },
+        "POST",
+        employee.auth,
+      )
+    ).status,
+    404,
+  );
+  assert.ok(
+    (await db.collection("teamChatMessages").findOne({ _id: deletionComment }))
+      .deletedAt,
+  );
+  assert.ok(
+    (await db.collection("teamChatMessages").findOne({ _id: deletionId }))
+      .deletedAt,
+  );
+  assert.ok(
+    !(await api("/state", undefined, "GET")).data.tasks.some(
+      (t) => t._id === deletionId,
+    ),
+  );
+  assert.equal(
+    (
+      await api(
+        "/tasks",
+        {
+          id: deletionId,
+          description: "Удалить тестовую задачу",
+          assigneeIds: [employeeId],
+          timing: "none",
+        },
+        "POST",
+        employee.auth,
+      )
+    ).status,
+    409,
+    "deleted task cannot be restored by replaying creation",
   );
   // Keep browser test credentials in a temporary file only when explicitly running the UI fixture.
   if (process.env.INDEX12_TASK_BROWSER_FIXTURE) {

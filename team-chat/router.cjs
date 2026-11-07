@@ -445,6 +445,7 @@ function createTeamChatRouter({
     wrap,
     notify,
     User,
+    db,
   });
   async function messagePage(p, before, taskId = null) {
     const filter = { workspaceId: p.workspaceId },
@@ -493,10 +494,34 @@ function createTeamChatRouter({
         req.query.before,
         req.query.taskId || null,
       );
-      await messageActions.decorate(req, rows);
+      const watched = String(req.query.messageIds || "")
+        .split(",")
+        .filter((id) => /^[a-f\d-]{36}$/i.test(id))
+        .slice(0, 150);
+      const updates =
+        req.query.taskId && watched.length
+          ? await coll("Messages")
+              .find(
+                {
+                  workspaceId: req.team.workspaceId,
+                  taskId: req.query.taskId,
+                  kind: { $ne: "task" },
+                  _id: { $in: watched },
+                },
+                { projection: { editHistory: 0, approvalArchive: 0 } },
+              )
+              .toArray()
+          : [];
+      const messageUpdates = updates.filter((m) => !m.deletedAt),
+        deletedMessageIds = updates
+          .filter((m) => m.deletedAt)
+          .map((m) => m._id);
+      await messageActions.decorate(req, [...rows, ...messageUpdates]);
       res.json({
         messages: rows.slice(0, 50).reverse(),
         hasMore: rows.length > 50,
+        messageUpdates,
+        deletedMessageIds,
       });
     }),
   );

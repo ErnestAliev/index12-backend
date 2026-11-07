@@ -17,6 +17,18 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       deletedAt: { $exists: false },
     });
     if (!row) fail("Сообщение недоступно", 404);
+    if (
+      row.taskId &&
+      !(await coll("Tasks").findOne(
+        {
+          _id: row.taskId,
+          workspaceId: req.team.workspaceId,
+          deletedAt: { $exists: false },
+        },
+        { projection: { _id: 1 } },
+      ))
+    )
+      fail("Задача недоступна", 404);
     return row;
   }
   function expected(req, row) {
