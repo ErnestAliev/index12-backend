@@ -206,7 +206,7 @@ const { startFixture } = require("./subcategories.cjs");
     await require("./team-chat-actions.cjs")({ api, db, employee, director });
     await require("./team-chat-replies.cjs")({ api, db, employee });
     await require("./team-chat-tasks.cjs")({ api, db, employee, director, scope, origin, cookie, inviteToken });
-    await require("./team-chat-calendar.cjs")({ api, db, employee, scope, origin, cookie, token });
+    await require("./team-chat-calendar.cjs")({ api, db, employee, director, scope, origin, cookie, token });
   } finally {
     for (const child of processes)
       if (child.exitCode === null) {

@@ -5,7 +5,7 @@ const { Types } = require('mongoose');
 const { fail } = require('./providers.cjs');
 const { taskInput, scheduleInput, publicTask, dateOnly, localInstant } = require('./task-domain.cjs');
 const { safeName, imageMime, fileMeta, fileBuffer, FILE_LIMIT, TOTAL_LIMIT } = require('../codex/files.cjs');
-const { chatCalendar, chatCalendarTask, isChatId } = require('./chat-calendar.cjs');
+const { chatCalendar, chatCalendarTask, isChatId, deletedChatCalendar } = require('./chat-calendar.cjs');
 const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const digest = value => createHash('sha256').update(value).digest('hex');
 function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Individual, taskMutation, taskSession = () => null, onTasksChanged = () => {} }) {
@@ -87,6 +87,13 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
     const combined = [...tasks, ...chat.tasks].sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0) || b._id.localeCompare(a._id));
     res.json({ ...identity(req), tasks: combined.slice(0, 2000), people: chat.people, truncated: rows.length > 2000 || chat.truncated || combined.length > 2000 });
   }));
+  router.get('/tasks/deleted', wrap(async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
+    const rows = await coll('Tasks').find({ scope: req.businessScope, deletedAt: { $type: 'date' } }, opts()).sort({ deletedAt: -1, _id: -1 }).limit(2001).toArray();
+    const chat = await deletedChatCalendar(db(), req.cachedWorkspace._id);
+    const tasks = [...await Promise.all(rows.slice(0, 2000).map(row => view(req, row))), ...chat.tasks].sort((a, b) => Date.parse(b.deletedAt) - Date.parse(a.deletedAt) || b._id.localeCompare(a._id));
+    res.json({ ...identity(req), tasks: tasks.slice(0, 2000), truncated: tasks.length > 2000 || rows.length > 2000 || chat.truncated });
+  }));
   router.get('/tasks/:id', wrap(async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
     if (isChatId(req.params.id)) {
@@ -127,6 +134,24 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
     if (!deleted.matchedCount) fail('Задача изменена. Обновите карточку перед удалением', 409);
     await retainFiles(req, { _id: existing._id, attachments: [] }); onTasksChanged(req);
     res.json({ ...identity(req), id: existing._id, version: (existing.version || 0) + 1, deleted: true });
+  }));
+  router.post('/tasks/:id/restore', write(async (req, res) => {
+    if (!Number.isInteger(req.body.expectedVersion) || req.body.expectedVersion < 0) fail('Укажите версию удалённой задачи');
+    const existing = await taskFor(req, true);
+    if (!existing.deletedAt && existing.restoredFromVersion === req.body.expectedVersion)
+      return res.json({ ...await result(req, existing), restored: true, replayed: true });
+    const version = revision(existing, req.body.expectedVersion);
+    if (!existing.deletedAt) fail('Задача уже восстановлена. Обновите список', 409);
+    const files = await coll('TaskFiles').find({ scope: req.businessScope, _id: { $in: (existing.attachments || []).map(f => f.fileId) } }, { ...opts(), projection: { _id: 1 } }).toArray();
+    const available = new Set(files.map(f => f._id)), attachments = (existing.attachments || []).filter(f => available.has(f.fileId));
+    const task = await coll('Tasks').findOneAndUpdate({ _id: existing._id, scope: req.businessScope, deletedAt: existing.deletedAt, ...version }, {
+      $unset: { deletedAt: '', deletedVersion: '' },
+      $set: { attachments, restoredAt: new Date(), restoredBy: identity(req).actorId, restoredFromVersion: req.body.expectedVersion, updatedAt: new Date() },
+      $inc: { version: 1, reminderRevision: 1 },
+    }, { ...opts(), returnDocument: 'after' });
+    if (!task) fail('Задача изменилась. Обновите список', 409);
+    await retainFiles(req, task); onTasksChanged(req);
+    res.json({ ...await result(req, task), restored: true, missingAttachments: (existing.attachments || []).length - attachments.length });
   }));
   router.post('/task-files', express.raw({ type: 'application/octet-stream', limit: FILE_LIMIT }), wrap(async (req, res) => {
     let name; try { name = safeName(decodeURIComponent(req.headers['x-file-name'] || '')); } catch {}

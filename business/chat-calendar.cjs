@@ -13,10 +13,11 @@ function calendarTask(task) {
     timing: task.timing, dueDate: task.dueDate || null, dueTime: task.dueTime || null,
     startsAt: null, endsAt: null, allDay: !task.dueTime,
     status: task.status === 'done' ? 'done' : 'open', chatStatus: task.status,
+    attachments: task.attachments || [], deletedAt: task.deletedAt,
     version: task.version || 0, createdAt: task.createdAt, updatedAt: task.updatedAt,
   });
 }
-const projection = { _id: 1, workspaceId: 1, description: 1, assigneeIds: 1, assignees: 1, creatorId: 1, creatorName: 1, timing: 1, dueDate: 1, dueTime: 1, status: 1, version: 1, createdAt: 1, updatedAt: 1 };
+const projection = { _id: 1, workspaceId: 1, description: 1, assigneeIds: 1, assignees: 1, creatorId: 1, creatorName: 1, timing: 1, dueDate: 1, dueTime: 1, status: 1, version: 1, createdAt: 1, updatedAt: 1, attachments: 1, deletedAt: 1 };
 async function chatCalendar(db, workspace, range) {
   const workspaceId = String(workspace._id), filter = { workspaceId, deletedAt: { $exists: false } };
   if (range) filter.$or = [{ dueDate: { $gte: range.from, $lte: range.to } }, { dueDate: null }];
@@ -39,4 +40,8 @@ async function chatCalendarTask(db, workspaceId, id) {
   const row = await db.collection('teamChatTasks').findOne({ _id: id.slice(PREFIX.length), workspaceId: String(workspaceId), deletedAt: { $exists: false } }, { projection });
   return row ? calendarTask(row) : null;
 }
-module.exports = { chatCalendar, chatCalendarTask, isChatId };
+async function deletedChatCalendar(db, workspaceId) {
+  const rows = await db.collection('teamChatTasks').find({ workspaceId: String(workspaceId), deletedAt: { $type: 'date' } }, { projection }).sort({ deletedAt: -1, _id: -1 }).limit(2001).toArray();
+  return { tasks: rows.slice(0, 2000).map(calendarTask), truncated: rows.length > 2000 };
+}
+module.exports = { chatCalendar, chatCalendarTask, isChatId, calendarTask, deletedChatCalendar };

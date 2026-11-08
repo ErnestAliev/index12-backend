@@ -2,6 +2,7 @@
 const { createHash } = require("node:crypto");
 const { fail, text } = require("./domain.cjs");
 const { dateOnly } = require("../business/task-domain.cjs");
+const { calendarTask } = require("../business/chat-calendar.cjs");
 const { fileMeta, TOTAL_LIMIT } = require("../codex/files.cjs");
 const uuid = (value) =>
   typeof value === "string" && /^[a-f\d-]{36}$/i.test(value);
@@ -373,7 +374,8 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         fail("Задача изменилась. Откройте её заново", 409);
       notify(req);
       onTasksChanged(req);
-      res.json({ task: (await summaries(req, [old._id]))[0] });
+      const task = (await summaries(req, [old._id]))[0];
+      res.json({ task, calendarTask: calendarTask(task) });
     }),
   );
   router.delete(
@@ -416,12 +418,14 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
           if (!result.modifiedCount)
             fail("Задача изменилась. Откройте её заново", 409);
           await coll("Messages").updateMany(
-            { ...filter(req), taskId: task._id },
+            { ...filter(req), taskId: task._id, deletedAt: { $exists: false } },
             {
               $set: {
                 deletedAt: at,
                 deletedBy: req.team.actorId,
                 updatedAt: at,
+                deletedWithTask: task._id,
+                taskDeletionVersion: task.version + 1,
               },
             },
             { session },
@@ -435,6 +439,33 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
       res.json({ deletedTaskId: req.params.id, replayed });
     }),
   );
+  router.post('/tasks/:id/restore', wrap(async (req, res) => {
+    if (!Number.isInteger(req.body.expectedVersion) || req.body.expectedVersion < 0) fail('Укажите версию удалённой задачи');
+    const session = db().client.startSession();
+    let replayed = false;
+    try {
+      await session.withTransaction(async () => {
+        const task = await load(req, req.params.id, true, { session });
+        if (!req.team.owner && task.creatorId !== req.team.actorId) fail('Восстанавливать задачу может её автор или владелец', 403);
+        if (!task.deletedAt && task.restoredFromVersion === req.body.expectedVersion) { replayed = true; return; }
+        if (!task.deletedAt || !Number.isInteger(req.body.expectedVersion) || task.version !== req.body.expectedVersion) fail('Задача изменилась. Обновите список', 409);
+        const at = new Date();
+        const result = await coll('Tasks').updateOne({ _id: task._id, ...filter(req), version: task.version, deletedAt: task.deletedAt }, {
+          $unset: { deletedAt: '', deletedBy: '' },
+          $set: { updatedAt: at, restoredAt: at, restoredBy: req.team.actorId, restoredFromVersion: task.version }, $inc: { version: 1 },
+        }, { session });
+        if (!result.modifiedCount) fail('Задача изменилась. Обновите список', 409);
+        await coll('Messages').updateMany({ ...filter(req), taskId: task._id, $or: [
+          { deletedWithTask: task._id, taskDeletionVersion: task.version },
+          // Earlier task deletions used a shared timestamp without a cascade marker.
+          { deletedWithTask: { $exists: false }, deletedAt: task.deletedAt, deletedBy: task.deletedBy },
+        ] }, { $unset: { deletedAt: '', deletedBy: '', deletedWithTask: '', taskDeletionVersion: '' }, $set: { updatedAt: at } }, { session });
+      });
+    } finally { await session.endSession(); }
+    const task = (await summaries(req, [req.params.id]))[0];
+    if (!replayed) { notify(req); onTasksChanged(req); }
+    res.json({ task, calendarTask: calendarTask(task), restored: true, replayed });
+  }));
   return { load, summaries };
 }
 module.exports = { registerTaskRoutes, taskInput, uuid };
