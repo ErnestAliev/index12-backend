@@ -71,8 +71,9 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       owner(req);
       const name = text(req.body.name, 100), role = req.body.role || 'employee';
       if (!Object.hasOwn(roles, role)) fail('Выберите роль');
+      const position = text(req.body.position || '', 160, false);
       const password = await hashPassword(req.body.password), id = randomUUID();
-      const member = { _id: id, workspaceId: req.team.workspaceId, name, loginKey: loginKey(name), password, role, status: 'invited', requireInstalledApp: true, version: 0, authEpoch: 0, createdAt: new Date(), createdBy: req.team.actorId };
+      const member = { _id: id, workspaceId: req.team.workspaceId, name, position, loginKey: loginKey(name), password, role, status: 'invited', requireInstalledApp: true, version: 0, authEpoch: 0, createdAt: new Date(), createdBy: req.team.actorId };
       const entry = await invites.create(req.team, role);
       await coll('Invites').updateOne({ _id: entry._id }, { $set: { namedLogin: true, entryForMemberId: id } });
       const token = randomBytes(32).toString('base64url');
@@ -95,19 +96,25 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       const role = req.body.role;
       if (!Object.hasOwn(roles, role)) fail('Выберите роль');
       if (Object.hasOwn(req.body, 'blocked') && typeof req.body.blocked !== 'boolean') fail('Проверьте доступ');
+      const details = {};
+      if (Object.hasOwn(req.body, 'name')) details.name = text(req.body.name, 100);
+      if (Object.hasOwn(req.body, 'position')) details.position = text(req.body.position, 160, false);
       const member = await transaction(async options => {
         const row = await coll('Members').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId, version: req.body.expectedVersion }, options);
         if (!row) fail('Сотрудник изменился. Обновите список', 409);
         let status = row.status;
         if (req.body.blocked === true) status = 'revoked';
         if (req.body.blocked === false && ['revoked', 'rejected'].includes(status)) status = row.activatedAt || row.phone ? 'active' : 'invited';
-        const changed = await coll('Members').findOneAndUpdate({ _id: row._id, workspaceId: req.team.workspaceId, version: row.version }, { $set: { role, status, reviewedAt: new Date(), reviewedBy: req.team.actorId }, $inc: { version: 1, ...(status !== row.status ? { authEpoch: 1 } : {}) } }, { ...options, returnDocument: 'after' });
+        const changed = await coll('Members').findOneAndUpdate({ _id: row._id, workspaceId: req.team.workspaceId, version: row.version }, { $set: { ...details, ...(details.name && row.loginKey ? { loginKey: loginKey(details.name) } : {}), role, status, reviewedAt: new Date(), reviewedBy: req.team.actorId }, $inc: { version: 1, ...(status !== row.status ? { authEpoch: 1 } : {}) } }, { ...options, returnDocument: 'after' });
         if (!changed) fail('Сотрудник изменился. Обновите список', 409);
         if (status !== row.status) {
           await coll('Sessions').deleteMany({ memberId: row._id }, options);
           await coll('PushSubscriptions').deleteMany({ workspaceId: row.workspaceId, actorId: row._id }, options);
         }
         return changed;
+      }).catch(error => {
+        if (error.code === 11000) fail('Сотрудник с таким именем уже существует', 409);
+        throw error;
       });
       notify(req);
       res.json({ member: publicMember(member) });

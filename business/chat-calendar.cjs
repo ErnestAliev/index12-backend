@@ -24,12 +24,12 @@ async function chatCalendar(db, workspace, range) {
   if (range) filter.$or = [{ dueDate: { $gte: range.from, $lte: range.to } }, { dueDate: null }];
   const [rows, staff, owner, settings] = await Promise.all([
     db.collection('teamChatTasks').find(filter, { projection }).sort({ createdAt: -1, _id: -1 }).limit(2001).toArray(),
-    db.collection('teamChatMembers').find({ workspaceId, status: 'active' }, { projection: { _id: 1, name: 1, role: 1 } }).toArray(),
+    db.collection('teamChatMembers').find({ workspaceId, status: { $in: ['active', 'invited'] } }, { projection: { _id: 1, name: 1, role: 1, position: 1 } }).toArray(),
     Types.ObjectId.isValid(workspace.userId) ? db.collection('users').findOne({ _id: new Types.ObjectId(workspace.userId) }, { projection: { name: 1 } }) : null,
     db.collection('teamChatSettings').findOne({ _id: workspaceId }),
   ]);
   const people = new Map([
-    ['owner:' + workspace.userId, { _id: 'owner:' + workspace.userId, name: owner?.name || 'Владелец', role: settings?.ownerRole || 'manager' }],
+    ['owner:' + workspace.userId, { _id: 'owner:' + workspace.userId, name: settings?.ownerName || owner?.name || 'Владелец', position: settings?.ownerPosition || '', role: settings?.ownerRole || 'manager', owner: true }],
     ...staff.map(person => [person._id, person]),
   ]);
   for (const row of rows) for (const person of row.assignees || [])

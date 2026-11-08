@@ -39,6 +39,7 @@ function createTeamChatRouter({
     name: p.workspace.name,
     actorId: p.actorId,
     displayName: p.name,
+    position: p.position || "",
     role: p.role,
     status: p.status === "active" && p.requireInstalledApp && !p.installationConfirmed ? "installation_required" : p.status,
     owner: p.owner,
@@ -344,7 +345,8 @@ function createTeamChatRouter({
           role: Object.hasOwn(roles, settings?.ownerRole || "")
             ? settings.ownerRole
             : "manager",
-          name: req.user.name || "Владелец",
+          name: settings?.ownerName || req.user.name || "Владелец",
+          position: settings?.ownerPosition || "",
           status: "active",
           workspace,
         };
@@ -566,8 +568,8 @@ function createTeamChatRouter({
           const [staff, settings, user] = await Promise.all([
             coll("Members")
               .find(
-                { ...filter, status: "active" },
-                { projection: { _id: 1, name: 1, role: 1 } },
+                { ...filter, status: { $in: ["active", "invited"] } },
+                { projection: { _id: 1, name: 1, role: 1, position: 1, status: 1 } },
               )
               .toArray(),
             coll("Settings").findOne({ _id: p.workspaceId }),
@@ -578,7 +580,8 @@ function createTeamChatRouter({
           return [
             {
               _id: "owner:" + p.workspace.userId,
-              name: user?.name || (p.owner ? p.name : "Владелец"),
+              name: settings?.ownerName || user?.name || (p.owner ? p.name : "Владелец"),
+              position: settings?.ownerPosition || "",
               role: settings?.ownerRole || "manager",
               owner: true,
             },
@@ -637,7 +640,7 @@ function createTeamChatRouter({
         deletedMessageIds,
         hasMore: rows.length > 50,
         tasks: await tasks.summaries(req),
-        members,
+        members: p.owner ? [{ ...people[0], status: "active", version: 0 }, ...members] : members,
         people,
         recoveryCount,
       });
@@ -684,16 +687,25 @@ function createTeamChatRouter({
     "/settings",
     wrap(async (req, res) => {
       owner(req);
-      if (!Object.hasOwn(roles, req.body.ownerRole)) fail("Выберите роль");
+      const changes = {};
+      if (Object.hasOwn(req.body, "ownerRole")) {
+        if (!Object.hasOwn(roles, req.body.ownerRole)) fail("Выберите роль");
+        changes.ownerRole = req.body.ownerRole;
+      }
+      if (Object.hasOwn(req.body, "ownerName")) changes.ownerName = text(req.body.ownerName, 100);
+      if (Object.hasOwn(req.body, "ownerPosition")) changes.ownerPosition = text(req.body.ownerPosition, 160, false);
+      if (!Object.keys(changes).length) fail("Укажите данные профиля чата");
       await coll("Settings").updateOne(
         { _id: req.team.workspaceId },
-        { $set: { ownerRole: req.body.ownerRole } },
+        { $set: changes },
         { upsert: true },
       );
       notify(req);
+      const profile = { ...req.team, role: changes.ownerRole || req.team.role, name: changes.ownerName || req.team.name, position: changes.ownerPosition ?? req.team.position ?? "" };
       res.json({
         ok: true,
-        identity: identity({ ...req.team, role: req.body.ownerRole }),
+        identity: identity(profile),
+        member: { _id: profile.actorId, name: profile.name, position: profile.position, role: profile.role, owner: true, status: "active", version: 0 },
       });
     }),
   );
@@ -873,12 +885,13 @@ function createTeamChatRouter({
             .toArray()
         : [];
       if (mentionIds.includes("owner:" + req.team.workspace.userId)) {
+        const settings = await coll("Settings").findOne({ _id: req.team.workspaceId });
         const user = User
           ? await User.findById(req.team.workspace.userId).select("name").lean()
           : null;
         mentioned.push({
           _id: "owner:" + req.team.workspace.userId,
-          name: user?.name || "Владелец",
+          name: settings?.ownerName || user?.name || "Владелец",
         });
       }
       if (new Set(mentionIds).size !== mentioned.length)

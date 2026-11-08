@@ -219,18 +219,19 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
   async function people(req, ids) {
     const staff = await coll("Members")
       .find(
-        { ...filter(req), _id: { $in: ids }, status: "active" },
+        { ...filter(req), _id: { $in: ids }, status: { $in: ["active", "invited"] } },
         { projection: { _id: 1, name: 1 } },
       )
       .toArray();
     const ownerId = "owner:" + req.team.workspace.userId;
     if (ids.includes(ownerId)) {
+      const settings = await coll("Settings").findOne({ _id: req.team.workspaceId });
       const owner = User
         ? await User.findById(req.team.workspace.userId).select("name").lean()
         : null;
       staff.push({
         _id: ownerId,
-        name: owner?.name || (req.team.owner ? req.team.name : "Владелец"),
+        name: settings?.ownerName || owner?.name || (req.team.owner ? req.team.name : "Владелец"),
       });
     }
     if (staff.length !== ids.length) fail("Ответственный недоступен", 404);
