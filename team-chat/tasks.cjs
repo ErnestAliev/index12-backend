@@ -30,6 +30,8 @@ function taskInput(body) {
   if (!["open", "progress", "delayed", "done"].includes(status))
     fail("Выберите статус");
   const fileIds = body.fileIds || [];
+  if (body.parentTaskId != null && !uuid(body.parentTaskId))
+    fail("Проверьте родительскую задачу");
   if (
     !Array.isArray(fileIds) ||
     fileIds.length > 5 ||
@@ -45,6 +47,7 @@ function taskInput(body) {
     dueTime,
     status,
     fileIds,
+    ...(body.parentTaskId ? { parentTaskId: body.parentTaskId } : {}),
   };
 }
 function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChanged = () => {} }) {
@@ -66,6 +69,15 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
     );
     if (!task) fail("Задача недоступна", 404);
     return task;
+  }
+  async function guardParent(req, parentTaskId, session) {
+    await load(req, parentTaskId, false, { session });
+    const changed = await coll("Tasks").updateOne(
+      { _id: parentTaskId, ...filter(req), deletedAt: { $exists: false } },
+      { $inc: { subtaskRevision: 1 } },
+      { session },
+    );
+    if (!changed.modifiedCount) fail("Родительская задача недоступна", 404);
   }
   async function summaries(req, ids) {
     const match = {
@@ -267,6 +279,8 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
       if (!uuid(req.body.id)) fail("Проверьте задачу");
       const input = taskInput(req.body),
         id = req.body.id;
+      if (input.parentTaskId === id) fail("Задача не может быть своей подзадачей");
+      if (input.parentTaskId) await load(req, input.parentTaskId);
       const fingerprint = createHash("sha256")
         .update(JSON.stringify(input))
         .digest("hex");
@@ -298,14 +312,22 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
           fail("Ключ задачи уже использован", 409);
         await pin(req, fileIds);
         try {
-          await coll("Tasks").insertOne(row);
+          if (row.parentTaskId) {
+            const session = db().client.startSession();
+            try {
+              await session.withTransaction(async () => {
+                await guardParent(req, row.parentTaskId, session);
+                await coll("Tasks").insertOne(row, { session });
+              });
+            } finally { await session.endSession(); }
+          } else await coll("Tasks").insertOne(row);
         } catch (e) {
           if (e.code === 11000) fail("Задача уже создана. Обновите чат", 409);
           throw e;
         }
       }
       // The deterministic cover id makes a retry repair an interrupted creation.
-      await coll("Messages").updateOne(
+      if (!row.parentTaskId) await coll("Messages").updateOne(
         { _id: id, ...filter(req) },
         {
           $setOnInsert: {
@@ -338,6 +360,9 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
     "/tasks/:id",
     wrap(async (req, res) => {
       const old = await load(req);
+      if (Object.hasOwn(req.body, "parentTaskId") &&
+          (req.body.parentTaskId || null) !== (old.parentTaskId || null))
+        fail("Родительскую задачу нельзя менять");
       if (
         !req.team.owner &&
         old.creatorId !== req.team.actorId &&
@@ -392,6 +417,10 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
             replayed = true;
             return;
           }
+          if (await coll("Tasks").findOne(
+            { ...filter(req), parentTaskId: task._id, deletedAt: { $exists: false } },
+            { session, projection: { _id: 1 } },
+          )) fail("Сначала удалите подзадачи", 409);
           if (
             !Number.isInteger(req.body.expectedVersion) ||
             req.body.expectedVersion !== task.version
@@ -449,6 +478,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         if (!req.team.owner && task.creatorId !== req.team.actorId) fail('Восстанавливать задачу может её автор или владелец', 403);
         if (!task.deletedAt && task.restoredFromVersion === req.body.expectedVersion) { replayed = true; return; }
         if (!task.deletedAt || !Number.isInteger(req.body.expectedVersion) || task.version !== req.body.expectedVersion) fail('Задача изменилась. Обновите список', 409);
+        if (task.parentTaskId) await guardParent(req, task.parentTaskId, session);
         const at = new Date();
         const result = await coll('Tasks').updateOne({ _id: task._id, ...filter(req), version: task.version, deletedAt: task.deletedAt }, {
           $unset: { deletedAt: '', deletedBy: '' },

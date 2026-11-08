@@ -100,6 +100,7 @@ function createTeamChatRouter({
         actorId: 1,
       }),
       coll("Tasks").createIndex({ workspaceId: 1, createdAt: -1 }),
+      coll("Tasks").createIndex({ workspaceId: 1, parentTaskId: 1, deletedAt: 1 }),
       coll("Messages").createIndex({
         workspaceId: 1,
         taskId: 1,

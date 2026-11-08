@@ -7,6 +7,7 @@ function calendarTask(task) {
   return publicTask({
     _id: PREFIX + task._id,
     source: 'team-chat', sourceTaskId: task._id, workspaceId: task.workspaceId,
+    ...(task.parentTaskId ? { parentTaskId: PREFIX + task.parentTaskId } : {}),
     title: task.description, description: task.description,
     assigneeIds: task.assigneeIds || [], assignees: task.assignees || [],
     creatorId: task.creatorId, creatorName: task.creatorName,
@@ -17,7 +18,7 @@ function calendarTask(task) {
     version: task.version || 0, createdAt: task.createdAt, updatedAt: task.updatedAt,
   });
 }
-const projection = { _id: 1, workspaceId: 1, description: 1, assigneeIds: 1, assignees: 1, creatorId: 1, creatorName: 1, timing: 1, dueDate: 1, dueTime: 1, status: 1, version: 1, createdAt: 1, updatedAt: 1, attachments: 1, deletedAt: 1 };
+const projection = { parentTaskId: 1, _id: 1, workspaceId: 1, description: 1, assigneeIds: 1, assignees: 1, creatorId: 1, creatorName: 1, timing: 1, dueDate: 1, dueTime: 1, status: 1, version: 1, createdAt: 1, updatedAt: 1, attachments: 1, deletedAt: 1 };
 async function chatCalendar(db, workspace, range) {
   const workspaceId = String(workspace._id), filter = { workspaceId, deletedAt: { $exists: false } };
   if (range) filter.$or = [{ dueDate: { $gte: range.from, $lte: range.to } }, { dueDate: null }];
