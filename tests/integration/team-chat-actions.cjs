@@ -1,6 +1,6 @@
 "use strict";
 const assert = require("node:assert/strict");
-const { randomUUID } = require("node:crypto");
+const { randomUUID, createHash } = require("node:crypto");
 module.exports = async ({
   api,
   db,
@@ -30,8 +30,17 @@ module.exports = async ({
       (m) => m._id === messageId,
     );
   assert.equal((await findMessage()).readCount, 0);
+
+  const workspaceId = sent.data.message.workspaceId;
+  await db.collection("teamChatMessageReads").insertOne({
+    _id: createHash("sha256").update(workspaceId + ":" + messageId + ":" + employee.member._id).digest("hex"),
+    workspaceId, messageId, actorId: employee.member._id, name: "Employee", contentVersion: 0, readAt: new Date(),
+  });
+  assert.equal((await findMessage()).readCount, 0, "old unverified read records are not proof of visible reading");
   await api("/messages/read", { ids: [messageId] }, "POST", employee.auth);
-  await api("/messages/read", { ids: [messageId] }, "POST", employee.auth);
+  assert.equal((await findMessage()).readCount, 0, "delivery/background refresh is not a visible read");
+  await api("/messages/read", { ids: [messageId], visibilityConfirmed: true }, "POST", employee.auth);
+  await api("/messages/read", { ids: [messageId], visibilityConfirmed: true }, "POST", employee.auth);
   assert.equal((await findMessage()).readCount, 1);
   assert.equal(
     await db.collection("teamChatMessageReads").countDocuments({ messageId }),
@@ -43,7 +52,7 @@ module.exports = async ({
     "PATCH",
   );
   assert.equal((await findMessage()).readCount, 0);
-  await api("/messages/read", { ids: [messageId] }, "POST", employee.auth);
+  await api("/messages/read", { ids: [messageId], visibilityConfirmed: true }, "POST", employee.auth);
   assert.equal((await findMessage()).readCount, 1);
   assert.equal(
     (

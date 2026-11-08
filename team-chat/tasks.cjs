@@ -122,6 +122,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db }) {
                           {
                             $match: {
                               actorId: req.team.actorId,
+                              visibilityConfirmed: true,
                               $expr: {
                                 $and: [
                                   { $eq: ["$workspaceId", "$$workspace"] },

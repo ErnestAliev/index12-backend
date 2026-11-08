@@ -128,7 +128,7 @@ module.exports = async ({
     thread.messages.map((m) => m._id),
     [comment.id],
   );
-  await api("/messages/read", { ids: [comment.id] });
+  await api("/messages/read", { ids: [comment.id], visibilityConfirmed: true });
   row = (await api("/tasks/" + input.id, undefined, "GET")).data.task;
   assert.equal(row.unreadCount, 0);
   assert.equal(row.mentioned, true, "mention remains until a reply");

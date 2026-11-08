@@ -116,6 +116,8 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         ids.some((id) => typeof id !== "string" || !/^[a-f\d-]{36}$/i.test(id))
       )
         fail("Проверьте список сообщений");
+      // Legacy clients acknowledged background data loads. Only visible-view acknowledgements count.
+      if (req.body.visibilityConfirmed !== true) return res.json({ read: 0 });
       const rows = await coll("Messages")
         .find({
           _id: { $in: ids },
@@ -144,6 +146,8 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
                 name: req.team.name,
                 readAt: at,
               },
+              $set: { visibilityConfirmed: true },
+              $min: { visibleReadAt: at },
               $max: { contentVersion: Number(row.contentVersion || 0) },
             },
             upsert: true,
@@ -393,7 +397,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       ? await coll("MessageReads")
           .find(
             { workspaceId: req.team.workspaceId, messageId: { $in: ids } },
-            { projection: { messageId: 1, actorId: 1, contentVersion: 1 } },
+            { projection: { messageId: 1, actorId: 1, contentVersion: 1, visibilityConfirmed: 1 } },
           )
           .toArray()
       : [];
@@ -448,6 +452,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       }
       message.readCount = reads.filter(
         (r) =>
+          r.visibilityConfirmed === true &&
           r.messageId === message._id &&
           r.actorId !== message.authorId &&
           r.contentVersion === Number(message.contentVersion || 0),
