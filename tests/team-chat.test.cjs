@@ -6,6 +6,18 @@ const {
   verifyPassword,
 } = require("../team-chat/domain.cjs");
 const { taskInput } = require("../team-chat/tasks.cjs");
+const { deadlineFields } = require('../team-chat/deadlines.cjs');
+test('private overdue recipient follows the time setter, never guesses from later unrelated edits', () => {
+  const task = { timing: 'deadline', dueDate: '2026-11-08', dueTime: '22:00', status: 'open' };
+  const created = { ...task, ...deadlineFields(task, null, 'time-setter'), creatorId: 'author', version: 3 };
+  assert.equal(created.deadlineAt.toISOString(), '2026-11-08T17:00:00.000Z');
+  assert.equal(deadlineFields(task, created, 'text-editor').deadlineActorId, 'time-setter');
+  const moved = deadlineFields({ ...task, dueTime: '23:00' }, created, 'new-setter');
+  assert.equal(moved.deadlineActorId, 'new-setter');
+  assert.equal(moved.deadlineRevision, created.deadlineRevision + 1);
+  assert.equal(deadlineFields(task, { ...task, creatorId: 'author', version: 4 }, 'text-editor').deadlineActorId, null);
+  assert.equal(deadlineFields(task, { ...task, creatorId: 'author', version: 0 }, 'text-editor').deadlineActorId, 'author');
+});
 test("chat login normalizes phones and stores password hashes", async () => {
   assert.equal(phone("8 (701) 123-45-67"), "+77011234567");
   assert.throws(() => phone("admin"));

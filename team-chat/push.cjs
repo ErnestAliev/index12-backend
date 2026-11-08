@@ -143,8 +143,8 @@ function createChatPush({
     scanning = true;
     try {
       await ready();
-      // Old tasks did not record who last set the time. Their author is the fallback.
-      for await (const task of coll('Tasks').find({ deadlineAt: { $exists: false }, dueDate: { $type: 'string' }, dueTime: { $type: 'string' }, timing: { $ne: 'none' }, status: { $ne: 'done' }, deletedAt: { $exists: false } }).limit(100)) {
+      // Only untouched legacy tasks have a known setter: their original author.
+      for await (const task of coll('Tasks').find({ version: 0, deadlineAt: { $exists: false }, dueDate: { $type: 'string' }, dueTime: { $type: 'string' }, timing: { $ne: 'none' }, status: { $ne: 'done' }, deletedAt: { $exists: false } }).limit(100)) {
         const at = deadlineAt(task);
         if (at) await coll('Tasks').updateOne({ _id: task._id, version: task.version, deadlineAt: { $exists: false } }, { $set: { deadlineAt: at, deadlineActorId: task.creatorId, deadlineRevision: 0 } });
       }

@@ -9,7 +9,7 @@ function deadlineFields(input, old, actorId) {
   const reopened = old?.status === 'done' && input.status !== 'done';
   return {
     deadlineAt: deadlineAt(input),
-    deadlineActorId: changed ? actorId : old.deadlineActorId || old.creatorId,
+    deadlineActorId: changed ? actorId : old.deadlineActorId || (old.version === 0 ? old.creatorId : null),
     deadlineRevision: (old?.deadlineRevision || 0) + (changed || reopened ? 1 : 0),
   };
 }
