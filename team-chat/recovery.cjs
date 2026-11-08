@@ -170,6 +170,7 @@ function createRecovery({ db, coll, invites, Workspace, frontendUrl, notify }) {
             },
             {
               $set: { password, passwordChangedAt: new Date() },
+              $unset: { passwordBox: "" },
               $inc: { version: 1, authEpoch: 1 },
             },
             options,

@@ -3,8 +3,9 @@ const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const { roles, text, fail, hashPassword, verifyPassword } = require('./domain.cjs');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const loginKey = value => text(value, 100).normalize('NFKC').replace(/\s+/g, ' ').toLocaleLowerCase('ru');
-const publicMember = ({ password, ...member }) => member;
+const publicMember = ({ password, passwordBox, ...member }) => member;
 function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, notify }) {
+  const passwordContext = row => ({ _id: 'employee-password:' + row._id, workspaceId: row.workspaceId });
   async function ensureIndexes() {
     // Keep uniqueness for legacy phones while allowing new employees without a phone.
     await coll('Members').createIndex({ workspaceId: 1, phone: 1 }, { unique: true, name: 'workspace_phone_present', partialFilterExpression: { phone: { $type: 'string' } } });
@@ -74,6 +75,7 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       const position = text(req.body.position || '', 160, false);
       const password = await hashPassword(req.body.password), id = randomUUID();
       const member = { _id: id, workspaceId: req.team.workspaceId, name, position, loginKey: loginKey(name), password, role, status: 'invited', requireInstalledApp: true, version: 0, authEpoch: 0, createdAt: new Date(), createdBy: req.team.actorId };
+      member.passwordBox = invites.seal(req.body.password, passwordContext(member));
       const entry = await invites.create(req.team, role);
       await coll('Invites').updateOne({ _id: entry._id }, { $set: { namedLogin: true, entryForMemberId: id } });
       const token = randomBytes(32).toString('base64url');
@@ -89,6 +91,40 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       }
       notify(req);
       res.status(201).json({ member: publicMember(member), url: entry.url + '?access=' + token });
+    }));
+    router.get('/access/employees/:id/password', wrap(async (req, res) => {
+      owner(req);
+      const member = await coll('Members').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId });
+      if (!member) fail('Сотрудник недоступен', 404);
+      res.set('Cache-Control', 'no-store');
+      let password;
+      if (member.passwordBox) {
+        try { password = invites.open(member.passwordBox, passwordContext(member)); }
+        catch { return res.json({ available: false, version: member.version, message: 'Пароль недоступен для просмотра. Установите новый.' }); }
+      }
+      if (!password || !(await verifyPassword(password, member.password)))
+        return res.json({ available: false, version: member.version, message: 'Ранее выданный пароль не сохранён для просмотра. Можно установить новый.' });
+      res.json({ available: true, password, version: member.version });
+    }));
+    router.patch('/access/employees/:id/password', wrap(async (req, res) => {
+      owner(req);
+      if (!Number.isInteger(req.body.expectedVersion)) fail('Обновите данные сотрудника');
+      const password = await hashPassword(req.body.password);
+      const member = await transaction(async options => {
+        const row = await coll('Members').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId, version: req.body.expectedVersion }, options);
+        if (!row) fail('Сотрудник изменился. Обновите данные', 409);
+        const changed = await coll('Members').findOneAndUpdate({ _id: row._id, workspaceId: row.workspaceId, version: row.version }, {
+          $set: { password, passwordBox: invites.seal(req.body.password, passwordContext(row)), passwordChangedAt: new Date(), passwordChangedBy: req.team.actorId },
+          $inc: { version: 1, authEpoch: 1 },
+        }, { ...options, returnDocument: 'after' });
+        if (!changed) fail('Сотрудник изменился. Обновите данные', 409);
+        await coll('Sessions').deleteMany({ memberId: row._id }, options);
+        await coll('PushSubscriptions').deleteMany({ workspaceId: row.workspaceId, actorId: row._id }, options);
+        await coll('Recoveries').updateMany({ workspaceId: row.workspaceId, memberId: row._id, status: { $in: ['pending', 'approved'] } }, { $set: { status: 'cancelled' }, $unset: { secretHash: '', entryBox: '' } }, options);
+        return changed;
+      });
+      notify(req);
+      res.json({ member: publicMember(member) });
     }));
     router.patch('/access/employees/:id', wrap(async (req, res) => {
       owner(req);

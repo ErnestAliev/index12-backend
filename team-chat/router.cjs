@@ -553,7 +553,7 @@ function createTeamChatRouter({
         messagePage(p, req.query.before),
         p.owner
           ? coll("Members")
-              .find(filter, { projection: { password: 0 } })
+              .find(filter, { projection: { password: 0, passwordBox: 0 } })
               .sort({ createdAt: -1 })
               .toArray()
           : [],
@@ -749,7 +749,7 @@ function createTeamChatRouter({
             }
           : undefined,
       );
-      const { password: _password, ...member } = row;
+      const { password: _password, passwordBox: _passwordBox, ...member } = row;
       res.json({ member });
     }),
   );
