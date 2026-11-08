@@ -1,6 +1,8 @@
 "use strict";
 const { createHash } = require("node:crypto");
 const { fail, text } = require("./domain.cjs");
+const { taskAccess } = require('./mcp-access.cjs');
+const { deadlineFields } = require('./deadlines.cjs');
 const { dateOnly } = require("../business/task-domain.cjs");
 const { calendarTask } = require("../business/chat-calendar.cjs");
 const { fileMeta, TOTAL_LIMIT } = require("../codex/files.cjs");
@@ -50,7 +52,7 @@ function taskInput(body) {
     ...(body.parentTaskId ? { parentTaskId: body.parentTaskId } : {}),
   };
 }
-function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChanged = () => {} }) {
+function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChanged = () => {}, currentSession = () => null }) {
   const filter = (req) => ({ workspaceId: req.team.workspaceId });
   async function load(
     req,
@@ -63,6 +65,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
       {
         _id: id,
         ...filter(req),
+        ...taskAccess(req.team),
         ...(includeDeleted ? {} : { deletedAt: { $exists: false } }),
       },
       options,
@@ -82,6 +85,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
   async function summaries(req, ids) {
     const match = {
       ...filter(req),
+      ...taskAccess(req.team),
       deletedAt: { $exists: false },
       ...(ids ? { _id: { $in: ids } } : {}),
     };
@@ -300,6 +304,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
           _id: id,
           ...filter(req),
           ...data,
+          ...deadlineFields(data, null, req.team.actorId),
           assignees: await people(req, input.assigneeIds),
           attachments: await attachments(req, fileIds),
           creatorId: req.team.actorId,
@@ -314,13 +319,14 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         await pin(req, fileIds);
         try {
           if (row.parentTaskId) {
-            const session = db().client.startSession();
+            const sharedSession = currentSession(), session = sharedSession || db().client.startSession();
             try {
-              await session.withTransaction(async () => {
+              const work = async () => {
                 await guardParent(req, row.parentTaskId, session);
                 await coll("Tasks").insertOne(row, { session });
-              });
-            } finally { await session.endSession(); }
+              };
+              if (sharedSession) await work(); else await session.withTransaction(work);
+            } finally { if (!sharedSession) await session.endSession(); }
           } else await coll("Tasks").insertOne(row);
         } catch (e) {
           if (e.code === 11000) fail("Задача уже создана. Обновите чат", 409);
@@ -381,6 +387,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         ...req.body,
       });
       const { fileIds, ...data } = input;
+      Object.assign(data, deadlineFields(input, old, req.team.actorId));
       data.assignees = await people(req, input.assigneeIds);
       data.attachments = await attachments(req, fileIds, old);
       await pin(req, fileIds);

@@ -2,6 +2,7 @@
 const { createHash } = require("node:crypto");
 const { Types } = require("mongoose");
 const { text, fail } = require("./domain.cjs");
+const { taskAccess } = require('./mcp-access.cjs');
 const { fileBuffer } = require("../codex/files.cjs");
 const emojis = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const version = (row) => Number(row.version || 0);
@@ -24,6 +25,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           _id: row.taskId,
           workspaceId: req.team.workspaceId,
           deletedAt: { $exists: false },
+          ...taskAccess(req.team),
         },
         { projection: { _id: 1 } },
       ))

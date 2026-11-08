@@ -18,7 +18,7 @@ const BASE_INSTRUCTIONS = `INDEX12: создавай записи по ясно�
 
 const INSTRUCTIONS = `Существующие документы 1С можно редактировать: index12_onec_update_object, проводить/отменять проведение: index12_onec_set_posted, помечать на удаление: index12_onec_set_deletion_mark. Сначала свежий onec_get_object и DataVersion; даты «сегодня/вчера» — Asia/Almaty. Проверяй год и организацию: номера документов повторяются в разные годы. Не заменяй исправление документа созданием дубля. При uncertain проверяй onec_mutation_status с исходным operationId, не повторяй запись. Смена даты в 1С не меняет автоматически операцию INDEX12 и не подтверждает оплату.\nДля покупки в 1С: сначала onec_status/schema и реальные справочники, прочитать исходный счёт; upload_purchase_pdf для оригинала, prepare_purchase для неизменяемого плана, затем execute_purchase по ясному поручению пользователя. Сначала кратко показать план. Не подменять создание документов 1С только расходом INDEX12. Поручение связывается со счётом, обязательная задача о закрывающих создаётся сервером. При partial назвать подтверждённые документы и ошибку; при потере ответа purchase_status, тот же planToken, без нового плана. Сохранённые документы непроведённые, не доказывают оплату. PDF сейчас хранится в задаче INDEX12, ссылка на неё в комментарии 1С; не утверждать, что PDF вложен в сам счёт. Срок 25-го — внутреннее напоминание, не универсальный срок ЭСФ.\n` + BASE_INSTRUCTIONS + '\nЯчейку таймлайна выбирает сервер: перед созданием, копированием и переносом на другой день он проверяет все операции этого дня, независимо от проекта, счёта и типа. Не назначай ячейку сам и не меняй соседние операции ради размещения. В ответе operation.dateKey и operation.cellIndex — фактически сохранённая позиция. При TIMELINE_DAY_FULL запись не создаётся; другую дату выбирает пользователь.';
 
-function createMcpRuntime({ config, database, runtimeEnv = {}, request = fetch, executionMeta, elicit, authScopes, resourceMetadataUrl }) {
+function createMcpRuntime({ config, database, runtimeEnv = {}, request = fetch, executionMeta, elicit, authScopes, resourceMetadataUrl, toolFilter, beforeTool, chatApiCall }) {
 const readConfig = () => ({ config: typeof config === 'function' ? config() : config });
 async function snapshot() {
   return finance.loadSnapshot(await database(), readConfig().config);
@@ -30,12 +30,15 @@ const filters={
   state:z.enum(['all','fact','plan']).default('all'),
   projectId:z.union([id,z.literal('__all_projects__')]).optional(),categoryId:id.optional(),subcategoryId:id.optional(),contractorId:id.optional(),counterpartyIndividualId:id.optional(),accountId:id.optional(),kind:z.enum(['income','expense','transfer']).optional(),
 };
-const server=new McpServer({name:'index12',version:'4.1.0'},{instructions:INSTRUCTIONS});
+const instructions = INSTRUCTIONS + '\n' + require('../team-chat/mcp-tools.cjs').CHAT_INSTRUCTIONS;
+const server=new McpServer({name:'index12',version:'4.2.0'},{instructions});
 const toolHandlers=new Map(), definitions=new Map();
 function register(name,description,shape,run,options={}) {
+  if (toolFilter && !toolFilter(name)) return;
   const schema=shape instanceof z.ZodType ? shape : z.object(shape).strict();
   const execute=async (input,extra)=>{
     try {
+      await beforeTool?.(name);
       const args=schema.parse(input);
       const result=await run(options.apiOnly ? null : await snapshot(),args,extra);
       if (result?.cancelled) await stopExecution({ code: result.confirmationAction === 'decline' ? 'USER_DECLINED' : 'CANCELLED', message: result.message });
@@ -125,6 +128,7 @@ register('index12_list_operations','Исходные операции с име�
   ...filters,afterId:id.optional(),limit:z.number().int().min(1).max(200).default(50),
 },finance.listOperations);
 register('index12_account_balances','Остатки счетов: начальные остатки плюс все денежные движения по asOf включительно. Взаимозачёты, переводы, скрытые счета и вывод на личные нужды учтены отдельно. Не называет остаток прибылью.',{asOf:date.optional()},finance.balances);
+require('../team-chat/mcp-tools.cjs').registerChatTools(register, chatApiCall || ((method, path, body) => apiCall(method, 'team-chat' + path, body)));
 require('./purchases.cjs').registerPurchaseTools(register,apiCall);
 const taskId = z.string().uuid();
 const calendarReadId = z.union([taskId, z.string().regex(/^chat:[a-f\d-]{36}$/i)]);
@@ -155,6 +159,6 @@ server.server.setRequestHandler(CallToolRequestSchema,async (request,extra)=>{
   return {isError:true,content:[{type:'text',text:JSON.stringify({error})}],structuredContent:{error}};
 });
 
-return { server, instructions: INSTRUCTIONS, definitions, invoke: (name, args, extra = {}) => toolHandlers.get(name)?.(args, extra), close: () => server.close() };
+return { server, instructions, definitions, invoke: (name, args, extra = {}) => toolHandlers.get(name)?.(args, extra), close: () => server.close() };
 }
-module.exports = { createMcpRuntime, INSTRUCTIONS };
+module.exports = { createMcpRuntime, INSTRUCTIONS: INSTRUCTIONS + '\n' + require('../team-chat/mcp-tools.cjs').CHAT_INSTRUCTIONS };

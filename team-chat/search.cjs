@@ -1,5 +1,6 @@
 "use strict";
 const { fail, text } = require("./domain.cjs");
+const { taskAccess } = require('./mcp-access.cjs');
 const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
   router.get(
@@ -41,6 +42,7 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
                 $match: {
                   workspaceId,
                   deletedAt: { $exists: false },
+                  ...taskAccess(req.team),
                   $expr: { $eq: ["$_id", "$$task"] },
                 },
               },

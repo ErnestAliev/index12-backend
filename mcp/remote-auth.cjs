@@ -34,7 +34,7 @@ function createRemoteAuth({ db, User, Workspace, env = process.env, origin, allo
     async registerClient(client) {
       const redirects = client.redirect_uris;
       if (!redirects?.length || redirects.length > 10 || redirects.some(uri => {
-        try { const u = new URL(uri); const chatgpt = u.origin === 'https://chatgpt.com' && u.pathname === '/connector_platform_oauth_redirect'; const old = u.origin === 'https://chat.openai.com' && u.pathname === '/aip/oauth/callback'; const local = allowLoopback && u.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(u.hostname); return (!chatgpt && !old && !local) || !!u.username || !!u.password || !!u.hash || !!u.search; } catch { return true; }
+        try { const u = new URL(uri); const chatgpt = u.origin === 'https://chatgpt.com' && (u.pathname === '/connector_platform_oauth_redirect' || /^\/connector\/oauth\/[A-Za-z0-9_-]{1,200}$/.test(u.pathname)); const old = u.origin === 'https://chat.openai.com' && u.pathname === '/aip/oauth/callback'; const local = allowLoopback && u.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(u.hostname); return (!chatgpt && !old && !local) || !!u.username || !!u.password || !!u.hash || !!u.search; } catch { return true; }
       })) throw new E.InvalidClientMetadataError('Разрешены адреса возврата ChatGPT');
       const { client_secret: clientSecret, ...stored } = client;
       if (clientSecret && !/^[a-f\d]{64}$/i.test(env.INTEGRATIONS_ENCRYPTION_KEY || '')) throw new E.ServerError('Не настроено шифрование OAuth');

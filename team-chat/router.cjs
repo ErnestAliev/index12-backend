@@ -3,6 +3,7 @@ const express = require("express");
 const { EventEmitter } = require("node:events");
 const { randomUUID, randomBytes, createHash } = require("node:crypto");
 const { Types } = require("mongoose");
+const { verifyChatToken, allowedMcpRoute, registerConnectorRoutes, taskAccess, ownTasks } = require('./mcp-access.cjs');
 const {
   roles,
   fail,
@@ -30,7 +31,18 @@ function createTeamChatRouter({
   const router = express.Router(),
     bus = new EventEmitter();
   bus.setMaxListeners(1000);
-  const coll = (name) => db().collection("teamChat" + name);
+  const coll = (name) => {
+    const raw = db().collection('teamChat' + name);
+    return new Proxy(raw, { get(target, key) {
+      const optionIndex = { find: 1, findOne: 1, aggregate: 1, insertOne: 1, insertMany: 1, deleteOne: 1, deleteMany: 1, findOneAndDelete: 1, updateOne: 2, updateMany: 2, findOneAndUpdate: 2 }[key];
+      if (optionIndex !== undefined) return (...args) => {
+        const session = history?.current()?.session;
+        if (session) args[optionIndex] = { ...args[optionIndex], session };
+        return target[key](...args);
+      };
+      const value = target[key]; return typeof value === 'function' ? value.bind(target) : value;
+    } });
+  };
   const sessions = require("./session.cjs").createChatSessions({ coll });
   const push = require("./push.cjs").createChatPush({ coll, Workspace });
   router.startPush = () => push.start();
@@ -47,7 +59,8 @@ function createTeamChatRouter({
     roles,
   });
   const wrap = (fn) => (req, res, next) =>
-    Promise.resolve(fn(req, res, next)).catch(next);
+    Promise.resolve().then(() => req.teamMcpOwner && req.team && req.method !== 'GET' && fn.length < 3
+      ? req.teamMutation(req, res, fn) : fn(req, res, next)).catch(next);
   const allowedOrigins = new Set([
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -309,6 +322,14 @@ function createTeamChatRouter({
   );
   router.use(
     wrap(async (req, res, next) => {
+      if (req.headers.authorization && !req.teamMcpOwner) {
+        if (!allowedMcpRoute(req.method, req.path)) fail('Действие недоступно через MCP', 403);
+        const token = /^Bearer (\S+)$/.exec(req.headers.authorization)?.[1];
+        const { grant, member, workspace } = await verifyChatToken({ db, Workspace }, token);
+        if (req.method !== 'GET' && !grant.scopes.includes('index12:write')) fail('Коннектор подключён только для чтения', 403);
+        req.team = { ...member, actorId: member._id, owner: false, workspace, mcp: true, installationConfirmed: true, scope: String(getWorkspaceStorageUserId(workspace)) };
+        return next();
+      }
       const persistentId = await sessions.memberId(req, res);
       const memberId = persistentId || req.session?.teamChatMemberId;
       const member = memberId
@@ -438,6 +459,14 @@ function createTeamChatRouter({
   };
   recovery.registerOwner(router, { wrap, owner });
   access.registerOwner(router, { wrap, owner });
+  registerConnectorRoutes(router, { db, wrap });
+  router.get('/mcp/context', wrap(async (req, res) => {
+    const people = await coll('Members').find({ workspaceId: req.team.workspaceId, status: { $in: ['active', 'invited'] } }, { projection: { _id: 1, name: 1, role: 1, position: 1 } }).toArray();
+    const settings = await coll('Settings').findOne({ _id: req.team.workspaceId });
+    const user = await User.findById(req.team.workspace.userId).select('name').lean();
+    people.unshift({ _id: 'owner:' + req.team.workspace.userId, name: settings?.ownerName || user?.name || 'Владелец', role: settings?.ownerRole || 'manager' });
+    res.json({ identity: identity(req.team), people, timezone: 'Asia/Almaty', taskAccess: ownTasks(req.team) ? 'own' : 'all', financialAccess: req.team.owner || ['manager', 'director'].includes(req.team.role) ? 'read' : 'none', questionHistoryStored: false });
+  }));
   router.get(
     "/events",
     wrap(async (req, res) => {
@@ -464,11 +493,14 @@ function createTeamChatRouter({
     User,
     db,
     onTasksChanged,
+    currentSession: () => history?.current()?.session,
   });
   async function messagePage(p, before, taskId = null) {
+    const accessible = ownTasks(p) ? await coll('Tasks').find({ workspaceId: p.workspaceId, deletedAt: { $exists: false }, ...taskAccess(p) }, { projection: { _id: 1 } }).toArray() : null;
     const filter = { workspaceId: p.workspaceId },
       messageFilter = {
         ...filter,
+        ...(accessible ? { $or: [{ taskId: null, kind: { $ne: 'task' } }, { taskId: { $in: accessible.map(t => t._id) } }] } : {}),
         deletedAt: { $exists: false },
         kind: { $nin: ["request", ...(taskId ? ["task"] : [])] },
         ...(taskId
@@ -810,6 +842,16 @@ function createTeamChatRouter({
       res.send(fileBuffer(row));
     }),
   );
+  router.get('/files/:id/content', wrap(async (req, res) => {
+    const row = await coll('Files').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId });
+    if (!row) fail('Файл недоступен', 404);
+    const accessible = await coll('Tasks').find({ workspaceId: req.team.workspaceId, deletedAt: { $exists: false }, ...taskAccess(req.team) }, { projection: { _id: 1 } }).toArray();
+    const ids = accessible.map(t => t._id);
+    const message = await coll('Messages').findOne({ workspaceId: req.team.workspaceId, deletedAt: { $exists: false }, 'attachments.fileId': row._id, $or: [{ taskId: null }, { taskId: { $in: ids } }] }, { projection: { _id: 1 } });
+    const task = message ? null : await coll('Tasks').findOne({ _id: { $in: ids }, 'attachments.fileId': row._id }, { projection: { _id: 1 } });
+    if (!message && !task && row.actorId !== req.team.actorId) fail('Файл недоступен', 404);
+    res.json({ file: { ...fileMeta(row), dataBase64: fileBuffer(row).toString('base64') } });
+  }));
   router.post(
     "/messages",
     wrap(async (req, res) => {

@@ -93,9 +93,17 @@ function registerMcpOperationRoutes(app, deps) {
     });
     async function authenticate(req, _res, next) {
         try {
-            const match = /^Bearer (idx12_[A-Za-z0-9_-]{43})$/.exec(req.headers.authorization || '');
+            const match = /^Bearer ((?:idx12_|idxchat_)[A-Za-z0-9_-]{43})$/.exec(req.headers.authorization || '');
             if (!match) fail('UNAUTHORIZED', null, 'Требуется токен MCP INDEX12.', 401);
-            const grant = await db().collection('mcpCredentials').findOne({ _id: hashToken(match[1]), revokedAt: null, expiresAt: { $gt: new Date() } });
+            let grant;
+            if (match[1].startsWith('idxchat_')) {
+                const { verifyChatToken, financialRole } = require('../team-chat/mcp-access.cjs');
+                let current;
+                try { current = await verifyChatToken({ db, Workspace }, match[1]); } catch { fail('UNAUTHORIZED', null, 'Подключение сотрудника истекло или отозвано.', 401); }
+                if (!financialRole(current.member.role) || !current.grant.financeAllowed) fail('FORBIDDEN', null, 'Финансовые данные доступны управляющему и руководителю после подтверждения прав при подключении.', 403);
+                if (req.method !== 'GET' && !(req.method === 'POST' && req.originalUrl.split('?')[0] === '/api/mcp/business/onec/query')) fail('FORBIDDEN', null, 'Финансовый доступ сотрудника предназначен для чтения.', 403);
+                grant = { ...current.grant, actorId: current.grant.ownerId, scopes: ['read'], source: 'team_chat_read' };
+            } else grant = await db().collection('mcpCredentials').findOne({ _id: hashToken(match[1]), revokedAt: null, expiresAt: { $gt: new Date() } });
             if (!grant) fail('UNAUTHORIZED', null, 'Токен MCP истёк или отозван.', 401);
             if (req.headers['x-index12-workspace-id'] !== String(grant.workspaceId) || req.headers['x-index12-actor-id'] !== String(grant.actorId)) fail('CONFIGURATION_MISMATCH', 'workspaceId', 'Токен не соответствует пользователю или рабочей области конфигурации MCP.', 403);
             const [user, workspace] = await Promise.all([User.findById(grant.actorId), Workspace.findById(grant.workspaceId)]);
@@ -386,6 +394,18 @@ function registerMcpOperationRoutes(app, deps) {
         purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, emitEntityEvent:deps.emitEntityEvent,
         taskMutation: (req, res, fn) => execution.execute(req, res, fn), taskSession: () => deps.audit?.current()?.session,
         getWorkspaceStorageUserId: workspace => workspace.isDefault ? String(workspace.userId) : `${workspace.userId}_ws_${workspace._id}` }));
+    if (deps.getTeamChatRouter) app.use('/api/mcp/team-chat', authenticate, requireScope('read'), (req, res, next) => {
+        if (req.mcpContext.grant.source === 'team_chat_read' || String(req.cachedWorkspace.userId) !== String(req.user.id)) return next(new OperationError('FORBIDDEN', null, 'Используйте свой коннектор рабочего чата.', 403));
+        const { allowedMcpRoute } = require('../team-chat/mcp-access.cjs');
+        if (!allowedMcpRoute(req.method, req.path)) return next(new OperationError('FORBIDDEN', null, 'Действие недоступно через MCP.', 403));
+        const scope = req.path.endsWith('/decision') ? 'update' : { POST: 'create', PATCH: 'update' }[req.method];
+        if (req.method !== 'GET' && !req.mcpContext.grant.scopes.includes(scope)) return next(new OperationError('FORBIDDEN', null, 'Нет разрешения на изменения.', 403));
+        req.teamMcpOwner = true;
+        req.teamMutation = (request, output, fn) => execution.execute(request, output, fn);
+        const json = res.json.bind(res);
+        res.json = body => json({ ...body, workspaceId: String(req.cachedWorkspace._id), actorId: String(req.user.id) });
+        return deps.getTeamChatRouter()(req, res, next);
+    });
     app.use('/api/mcp', async (error, req, res, _next) => {
         const structured = error instanceof OperationError || error.public ? { code: error.code, field: error.field || null, message: error.message, ...(error.details ? { details: error.details } : {}) } : error instanceof z.ZodError ? validationError(error) : { code: error.statusCode === 403 ? 'FORBIDDEN' : 'INTERNAL_ERROR', field: null, message: error.statusCode === 403 ? 'Нет доступа к выбранному счёту.' : 'Не удалось обработать операцию INDEX12.' };
         if (structured.code === 'INTERNAL_ERROR') console.error('[INDEX12 MCP failure]', JSON.stringify({ name: error.name, code: error.code || null, route: req.originalUrl?.split('?')[0], executionId: req.headers['x-index12-execution-id'] || null, frames: String(error.stack || '').split('\n').slice(1, 8) }));

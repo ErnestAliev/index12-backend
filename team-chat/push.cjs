@@ -3,6 +3,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const webpush = require("web-push");
 const { subscriptionInput } = require("../business/reminders.cjs");
 const { fail } = require("./domain.cjs");
+const { deadlineAt } = require('./deadlines.cjs');
 const hash = (s) => createHash("sha256").update(s).digest("hex");
 function pushKeys(env) {
   const team =
@@ -26,12 +27,14 @@ function createChatPush({
     configured = !!(keys.publicKey && keys.privateKey);
   let indexes,
     running = false,
+    scanning = false,
     timer;
   const ready = () =>
     (indexes ||= Promise.all([
       coll("PushJobs").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
       coll("PushJobs").createIndex({ done: 1, nextAt: 1 }),
       coll("PushSubscriptions").createIndex({ workspaceId: 1, actorId: 1 }),
+      coll('Tasks').createIndex({ deadlineAt: 1, status: 1 }),
     ]).catch((e) => {
       indexes = null;
       throw e;
@@ -78,7 +81,8 @@ function createChatPush({
             target.actorId === job.actorId &&
             target.workspaceId === job.workspaceId
           ) {
-            if (await permitted(target, job.allowPending)) {
+            const deadlineTask = job.deadline ? await coll('Tasks').findOne({ _id: job.deadline.taskId, workspaceId: job.workspaceId, status: { $ne: 'done' }, deletedAt: { $exists: false }, deadlineAt: { $lte: new Date() }, deadlineActorId: job.actorId, deadlineRevision: job.deadline.revision }) : null;
+            if ((!job.deadline || deadlineTask) && await permitted(target, job.allowPending)) {
               await send(
                 target.subscription,
                 JSON.stringify({
@@ -134,6 +138,24 @@ function createChatPush({
       running = false;
     }
   }
+  async function scanDeadlines(now = new Date()) {
+    if (!configured || scanning) return;
+    scanning = true;
+    try {
+      await ready();
+      // Old tasks did not record who last set the time. Their author is the fallback.
+      for await (const task of coll('Tasks').find({ deadlineAt: { $exists: false }, dueDate: { $type: 'string' }, dueTime: { $type: 'string' }, timing: { $ne: 'none' }, status: { $ne: 'done' }, deletedAt: { $exists: false } }).limit(100)) {
+        const at = deadlineAt(task);
+        if (at) await coll('Tasks').updateOne({ _id: task._id, version: task.version, deadlineAt: { $exists: false } }, { $set: { deadlineAt: at, deadlineActorId: task.creatorId, deadlineRevision: 0 } });
+      }
+      for await (const task of coll('Tasks').find({ deadlineAt: { $lte: now }, status: { $ne: 'done' }, deletedAt: { $exists: false } })) {
+        const revision = task.deadlineRevision || 0;
+        if (!task.deadlineActorId || task.deadlineNotifiedRevision === revision) continue;
+        const count = await enqueue({ workspaceId: task.workspaceId, actorId: 'deadline-scheduler', onlyActor: task.deadlineActorId, key: 'deadline:' + task._id + ':' + revision, title: 'Chat · Задача просрочена', body: task.description, taskId: task._id, deadline: { taskId: task._id, revision } });
+        if (count) await coll('Tasks').updateOne({ _id: task._id, deadlineRevision: revision, deadlineAt: task.deadlineAt }, { $set: { deadlineNotifiedRevision: revision } });
+      }
+    } finally { scanning = false; }
+  }
   const kick = () => {
     void drain().catch(() =>
       console.error("[Team chat] Push queue unavailable"),
@@ -141,9 +163,10 @@ function createChatPush({
   };
   function start() {
     if (!configured || timer) return;
-    timer = setInterval(kick, 15000);
+    const tick = () => { kick(); void scanDeadlines().catch(() => console.error('[Team chat] Deadline scan unavailable')); };
+    timer = setInterval(tick, 15000);
     timer.unref();
-    kick();
+    tick();
   }
   async function enqueue({
     workspaceId,
@@ -156,8 +179,9 @@ function createChatPush({
     testId,
     taskId,
     messageId,
+    deadline,
   }) {
-    if (!configured) return;
+    if (!configured) return 0;
     await ready();
     const targets = await coll("PushSubscriptions")
       .find({ workspaceId, actorId: onlyActor || { $ne: actorId } })
@@ -180,6 +204,7 @@ function createChatPush({
               messageId,
             },
             allowPending,
+            ...(deadline ? { deadline } : {}),
             done: false,
             attempts: 0,
             nextAt: new Date(),
@@ -190,6 +215,7 @@ function createChatPush({
       );
     }
     kick();
+    return targets.length;
   }
   function register(router, { wrap, invitation }) {
     router.get(
@@ -320,6 +346,6 @@ function createChatPush({
       }),
     );
   }
-  return { start, enqueue, register, drain, stop: () => clearInterval(timer) };
+  return { start, enqueue, register, drain, scanDeadlines, stop: () => clearInterval(timer) };
 }
 module.exports = { createChatPush, pushKeys };
