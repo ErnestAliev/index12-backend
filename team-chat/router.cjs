@@ -40,7 +40,7 @@ function createTeamChatRouter({
     actorId: p.actorId,
     displayName: p.name,
     role: p.role,
-    status: p.status,
+    status: p.status === "active" && p.requireInstalledApp && !p.installationConfirmed ? "installation_required" : p.status,
     owner: p.owner,
     permissions: { manageMembers: p.owner === true },
     roles,
@@ -65,6 +65,7 @@ function createTeamChatRouter({
     Workspace,
     frontendUrl,
   });
+  const access = require("./access.cjs").createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, notify });
   let indexes;
   const ready = () =>
     (indexes ||= Promise.all([
@@ -87,10 +88,7 @@ function createTeamChatRouter({
         { expireAfterSeconds: 0 },
       ),
       coll("Sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
-      coll("Members").createIndex(
-        { workspaceId: 1, phone: 1 },
-        { unique: true },
-      ),
+      access.ensureIndexes(),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
       coll("Messages").createIndex({ workspaceId: 1, "replyTo.messageId": 1 }),
       coll("MessageReactions").createIndex({ workspaceId: 1, messageId: 1 }),
@@ -164,6 +162,7 @@ function createTeamChatRouter({
         role,
         roleName: roles[role],
         joinable: invite.joinable,
+        namedLogin: invite.namedLogin === true,
       });
     }),
   );
@@ -210,6 +209,7 @@ function createTeamChatRouter({
     notify,
   });
   recovery.registerPublic(router, wrap);
+  access.registerPublic(router, wrap);
   router.post(
     "/auth",
     wrap(async (req, res) => {
@@ -217,6 +217,8 @@ function createTeamChatRouter({
           allowClosed: req.body.register !== true,
         }),
         number = phone(req.body.phone);
+      if (invite.namedLogin && req.body.register === true)
+        fail("Регистрация по этой ссылке закрыта", 403);
       const bucket = Math.floor(Date.now() / 600000),
         key = createHash("sha256")
           .update(`${req.ip}:${invite.workspaceId}:${bucket}`)
@@ -325,7 +327,7 @@ function createTeamChatRouter({
           ? await Workspace.findById(wanted).lean()
           : null;
       if (
-        workspace &&
+        !chatOnly && workspace &&
         req.user &&
         String(workspace.userId) === String(req.user.id || req.user._id)
       ) {
@@ -364,7 +366,7 @@ function createTeamChatRouter({
           fail("Доступ к чату закрыт", 403);
         workspace = await Workspace.findById(member.workspaceId).lean();
         if (!workspace) fail("Чат недоступен", 404);
-        req.team = { ...member, actorId: member._id, owner: false, workspace };
+        req.team = { ...member, actorId: member._id, owner: false, workspace, installationConfirmed: req.teamSessionInstalled === true };
         if (!persistentId)
           await sessions.issue(req, res, member._id, member.authEpoch || 0);
       }
@@ -399,6 +401,16 @@ function createTeamChatRouter({
       res.json({ ok: true });
     }),
   );
+  router.post("/installation", wrap(async (req, res) => {
+    if (req.team.owner || !req.team.requireInstalledApp) return res.json({ identity: identity(req.team) });
+    if (req.team.status !== "active") fail("Доступ к чату закрыт", 403);
+    if (req.body.installed !== true) fail("Добавьте приложение на главный экран", 403);
+    if (!(await sessions.confirmInstalled(req))) fail("Войдите в приложение заново", 401);
+    res.json({ identity: identity({ ...req.team, installationConfirmed: true }) });
+  }));
+  router.use((req, res, next) => req.team.status === "active" && req.team.requireInstalledApp && !req.team.installationConfirmed
+    ? res.status(403).json({ code: "CHAT_INSTALL_REQUIRED", message: "Добавьте Chat на главный экран" })
+    : next());
   router.use((req, res, next) =>
     ["pending", "active"].includes(req.team.status)
       ? next()
@@ -423,6 +435,7 @@ function createTeamChatRouter({
       fail("Только владелец настраивает участников чата", 403);
   };
   recovery.registerOwner(router, { wrap, owner });
+  access.registerOwner(router, { wrap, owner });
   router.get(
     "/events",
     wrap(async (req, res) => {

@@ -56,6 +56,7 @@ function createChatSessions({
       );
     }
     req.teamSessionEpoch = session.authEpoch || 0;
+    req.teamSessionInstalled = session.installed === true;
     setCookie(res, token);
     return session.memberId;
   }
@@ -64,6 +65,15 @@ function createChatSessions({
     if (token) await coll("Sessions").deleteOne({ _id: key(token) });
     res.clearCookie(COOKIE, cookieOptions);
   }
-  return { issue, memberId, clear };
+  async function confirmInstalled(req) {
+    const token = tokenFrom(req);
+    if (!token) return false;
+    const result = await coll("Sessions").updateOne(
+      { _id: key(token), memberId: req.team.actorId, authEpoch: req.team.authEpoch || 0, expiresAt: { $gt: new Date() } },
+      { $set: { installed: true, installedAt: new Date() } },
+    );
+    return result.matchedCount === 1;
+  }
+  return { issue, memberId, clear, confirmInstalled };
 }
 module.exports = { createChatSessions };

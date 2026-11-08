@@ -341,6 +341,10 @@ function createRecovery({ db, coll, invites, Workspace, frontendUrl, notify }) {
             { workspaceId: req.team.workspaceId, memberId: req.params.id },
             options,
           );
+          await coll("EmployeeInvites").deleteMany(
+            { workspaceId: req.team.workspaceId, memberId: req.params.id },
+            options,
+          );
         });
         notify(req);
         res.json({ deletedMemberId: req.params.id });
