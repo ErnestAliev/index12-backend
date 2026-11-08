@@ -199,7 +199,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
   }));
   require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload, onTasksChanged });
   require('./onec/mutations.cjs').registerOnecMutationRoutes(router, { db, Company, env, guard:purchaseGuard, clientFactory:purchaseClientFactory });
-  registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession, onTasksChanged });
+  registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Individual, taskMutation, taskSession, onTasksChanged });
   registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {
     if (error.code === 11000 && error.keyPattern?.['onecSync.ref']) return res.status(409).json({ message: 'Эта запись 1С уже связана с другой карточкой' });

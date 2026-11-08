@@ -5,9 +5,10 @@ const { Types } = require('mongoose');
 const { fail } = require('./providers.cjs');
 const { taskInput, scheduleInput, publicTask, dateOnly, localInstant } = require('./task-domain.cjs');
 const { safeName, imageMime, fileMeta, fileBuffer, FILE_LIMIT, TOTAL_LIMIT } = require('../codex/files.cjs');
+const { chatCalendar, chatCalendarTask, isChatId } = require('./chat-calendar.cjs');
 const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item);
 const digest = value => createHash('sha256').update(value).digest('hex');
-function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individual, taskMutation, taskSession = () => null, onTasksChanged = () => {} }) {
+function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Individual, taskMutation, taskSession = () => null, onTasksChanged = () => {} }) {
   const opts = () => taskSession() ? { session: taskSession() } : {};
   const identity = req => ({ workspaceId: String(req.cachedWorkspace._id), actorId: String(req.user.id || req.user._id) });
   const active = req => ({ scope: req.businessScope, deletedAt: { $exists: false } });
@@ -65,9 +66,11 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
   router.get('/tasks', wrap(async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
     const filter = active(req);
+    let range;
     if (req.query.from || req.query.to) {
       const from = dateOnly(req.query.from), to = dateOnly(req.query.to);
       if (!from || !to || from > to) fail('Проверьте период календаря');
+      range = { from, to };
       const after = new Date(Date.parse(to + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
       filter.$or = [{ dueDate: { $gte: from, $lte: to } }, { startsAt: { $lt: localInstant(after, '00:00') }, endsAt: { $gt: localInstant(from, '00:00') } }, { dueDate: null }];
     }
@@ -80,9 +83,19 @@ function registerTaskRoutes(router, { coll, wrap, Company, Contractor, Individua
       for (const party of parties) names.set(`${kind}:${party._id}`, party.name);
     }));
     const tasks = []; for (const row of rows.slice(0, 2000)) tasks.push(await view(req, row, names));
-    res.json({ ...identity(req), tasks, truncated: rows.length > 2000 });
+    const chat = await chatCalendar(db(), req.cachedWorkspace, range);
+    const combined = [...tasks, ...chat.tasks].sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0) || b._id.localeCompare(a._id));
+    res.json({ ...identity(req), tasks: combined.slice(0, 2000), people: chat.people, truncated: rows.length > 2000 || chat.truncated || combined.length > 2000 });
   }));
-  router.get('/tasks/:id', wrap(async (req, res) => { res.set('Cache-Control', 'private, no-store'); res.json(await result(req, await taskFor(req))); }));
+  router.get('/tasks/:id', wrap(async (req, res) => {
+    res.set('Cache-Control', 'private, no-store');
+    if (isChatId(req.params.id)) {
+      const task = await chatCalendarTask(db(), req.cachedWorkspace._id, req.params.id);
+      if (!task) fail('Задача не найдена', 404);
+      return res.json({ ...identity(req), id: task._id, version: task.version, task });
+    }
+    res.json(await result(req, await taskFor(req)));
+  }));
   router.post('/tasks', write(async (req, res) => {
     const input = taskInput(req.body), requestHash = digest(canonical(input));
     let creationKey;

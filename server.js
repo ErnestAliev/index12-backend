@@ -3410,7 +3410,7 @@ const remoteMcp = require('./mcp/remote.cjs').createRemoteMcp({ db: () => mongoo
 app.use(remoteMcp.router);
 app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
 registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers });
-const teamChatRouter = require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, User, getWorkspaceStorageUserId, history: changeHistory, frontendUrl: FRONTEND_URL });
+const teamChatRouter = require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, User, getWorkspaceStorageUserId, history: changeHistory, frontendUrl: FRONTEND_URL, onTasksChanged: req => emitToWorkspace(req, req.team.workspaceId, 'calendar_changed', { workspaceId: req.team.workspaceId }) });
 app.use('/api/team-chat', teamChatRouter);
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));
 

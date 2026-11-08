@@ -25,6 +25,7 @@ function createTeamChatRouter({
   getWorkspaceStorageUserId,
   history,
   frontendUrl,
+  onTasksChanged = () => {},
 }) {
   const router = express.Router(),
     bus = new EventEmitter();
@@ -446,6 +447,7 @@ function createTeamChatRouter({
     notify,
     User,
     db,
+    onTasksChanged,
   });
   async function messagePage(p, before, taskId = null) {
     const filter = { workspaceId: p.workspaceId },

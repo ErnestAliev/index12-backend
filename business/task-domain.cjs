@@ -85,7 +85,7 @@ function scheduleInput(data, previous, now = Date.now()) {
 }
 function taskState(task, now = Date.now()) {
   if (task.status === 'done') return 'done';
-  const deadline = task.endsAt ? Date.parse(task.endsAt) : task.dueDate ? Date.parse(localInstant(task.dueDate, '23:59')) + 60000 : null;
+  const deadline = task.endsAt ? Date.parse(task.endsAt) : task.dueDate ? task.dueTime ? Date.parse(localInstant(task.dueDate, task.dueTime)) : Date.parse(localInstant(task.dueDate, '23:59')) + 60000 : null;
   if (deadline !== null && deadline <= now) return 'overdue';
   const date = task.startsAt ? dayAt(task.startsAt) : task.dueDate;
   return date === dayAt(now) ? 'today' : 'planned';

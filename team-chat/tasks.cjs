@@ -46,7 +46,7 @@ function taskInput(body) {
     fileIds,
   };
 }
-function registerTaskRoutes(router, { coll, wrap, notify, User, db }) {
+function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChanged = () => {} }) {
   const filter = (req) => ({ workspaceId: req.team.workspaceId });
   async function load(
     req,
@@ -329,6 +329,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db }) {
         body: row.description,
         taskId: id,
       });
+      onTasksChanged(req);
       res.status(201).json({ task: (await summaries(req, [id]))[0] });
     }),
   );
@@ -371,6 +372,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db }) {
       if (!result.modifiedCount)
         fail("Задача изменилась. Откройте её заново", 409);
       notify(req);
+      onTasksChanged(req);
       res.json({ task: (await summaries(req, [old._id]))[0] });
     }),
   );
@@ -429,6 +431,7 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db }) {
         await session.endSession();
       }
       notify(req);
+      onTasksChanged(req);
       res.json({ deletedTaskId: req.params.id, replayed });
     }),
   );
