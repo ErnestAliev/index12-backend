@@ -971,6 +971,7 @@ function createTeamChatRouter({
     router,
     { coll, wrap, notify, Workspace },
   );
+  require("./search.cjs").registerSearchRoutes(router, { coll, wrap, tasks, decorate: messageActions.decorate });
   router.use((_req, res) =>
     res.status(404).json({ message: "Маршрут чата не найден" }),
   );
