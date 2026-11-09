@@ -29,15 +29,7 @@ function registerConnectorRoutes(router, { db, wrap }) {
   const serverUrl = new URL('/team-mcp', process.env.MCP_PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || 'https://index12-backend.onrender.com').href;
   router.get('/mcp/connection', wrap(async (req, res) => {
     const connections = await c('Connections').find({ actorId: req.team.actorId, workspaceId: req.team.workspaceId, authEpoch: req.team.authEpoch || 0, revokedAt: null }, { projection: { _id: 1, clientName: 1, createdAt: 1, scopes: 1, financeAllowed: 1 } }).sort({ createdAt: -1 }).toArray();
-    res.json({ serverUrl, fullData: financialRole(req.team.role), connections });
-  }));
-  router.post('/mcp/connection-code', wrap(async (req, res) => {
-    if (req.team.owner) fail('Владелец подключён через Codex', 403);
-    const code = secret(), expiresAt = new Date(Date.now() + 15 * 60000);
-    await c('Tickets').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
-    await c('Tickets').deleteMany({ actorId: req.team.actorId, workspaceId: req.team.workspaceId });
-    await c('Tickets').insertOne({ _id: digest(code), actorId: req.team.actorId, workspaceId: req.team.workspaceId, ownerId: String(req.team.workspace.userId), authEpoch: req.team.authEpoch || 0, expiresAt });
-    res.json({ code, expiresAt, serverUrl });
+    res.json({ serverUrl, pluginUrl: publishedPluginUrl(process.env.TEAM_CHAT_PLUGIN_URL), fullData: financialRole(req.team.role), connections });
   }));
   router.delete('/mcp/connections/:id', wrap(async (req, res) => {
     const row = await c('Connections').findOne({ _id: req.params.id, actorId: req.team.actorId, workspaceId: req.team.workspaceId });
@@ -46,6 +38,12 @@ function registerConnectorRoutes(router, { db, wrap }) {
     res.json({ ok: true });
   }));
 }
+function publishedPluginUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'chatgpt.com' && !url.port && !url.username && !url.password && /^\/plugins\/plugin_[A-Za-z0-9_-]+$/.test(url.pathname) && !url.search && !url.hash ? url.href : null;
+  } catch { return null; }
+}
 // Bearer clients cannot reach account administration, passwords, subscriptions or cookies.
 function allowedMcpRoute(method, path) {
   if (method === 'GET') return /^\/(?:mcp\/context|messages(?:\/[a-f\d-]{36})?|tasks(?:\/[a-f\d-]{36})?|search|files\/[a-f\d-]{36}\/content)$/.test(path);
@@ -53,4 +51,4 @@ function allowedMcpRoute(method, path) {
   if (method === 'PATCH') return /^\/(?:messages|tasks)\/[a-f\d-]{36}$/.test(path);
   return false;
 }
-module.exports = { digest, secret, financialRole, ownTasks, taskAccess, collection, memberAccess, verifyChatToken, revokeConnection, registerConnectorRoutes, allowedMcpRoute };
+module.exports = { digest, secret, financialRole, ownTasks, taskAccess, collection, memberAccess, verifyChatToken, revokeConnection, registerConnectorRoutes, allowedMcpRoute, publishedPluginUrl };

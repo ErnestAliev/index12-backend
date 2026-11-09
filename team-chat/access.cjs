@@ -158,4 +158,4 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
   }
   return { ensureIndexes, registerPublic, registerOwner };
 }
-module.exports = { createAccess };
+module.exports = { createAccess, loginKey };

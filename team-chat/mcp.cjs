@@ -13,8 +13,10 @@ function createChatMcp({ db, Workspace, clientsStore, origin, request = fetch })
   router.post('/team-mcp', guard, async (req, res) => {
     let runtime, transport;
     try {
-      const { grant, member } = req.auth.extra;
-      const allowed = new Set([...CHAT_TOOLS, ...(financialRole(member.role) && grant.financeAllowed ? FINANCIAL_READ_TOOLS : [])]);
+      const { grant } = req.auth.extra;
+      // Published clients cache tool descriptors. Permissions are checked live below,
+      // never inferred from which descriptors were scanned during publication.
+      const allowed = new Set([...CHAT_TOOLS, ...FINANCIAL_READ_TOOLS]);
       const chatCall = async (method, path, body) => {
         const response = await request(new URL('/api/team-chat' + path, origin), { method, headers: { Authorization: 'Bearer ' + req.auth.token, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), redirect: 'error', signal: AbortSignal.timeout(30000) });
         const data = await response.json();
