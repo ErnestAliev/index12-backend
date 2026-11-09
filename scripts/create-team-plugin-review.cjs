@@ -3,7 +3,7 @@
 // This never reads or copies any existing user's messages or financial data.
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID, randomBytes } = require('node:crypto');
+const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const { MongoClient, ObjectId } = require('mongodb');
 const { hashPassword } = require('../team-chat/domain.cjs');
 const { loginKey } = require('../team-chat/access.cjs');
@@ -20,7 +20,8 @@ async function main() {
   const ownerId = new ObjectId(), workspaceId = new ObjectId(), createdAt = new Date();
   const suffix = randomBytes(5).toString('hex');
   const employees = ['employee', 'manager'].map(role => ({ id: randomUUID(), role, name: `OpenAI ${role} ${suffix}`, password: randomBytes(24).toString('base64url') }));
-  const privateData = { createdAt, workspaceId: String(workspaceId), ownerId: String(ownerId), accounts: employees, sample: { ownTaskId: randomUUID(), otherTaskId: randomUUID(), messageId: randomUUID() }, loginUrl: 'https://api.index12.com/team-mcp/connect', mcpUrl: 'https://api.index12.com/team-mcp' };
+  const entryToken = randomBytes(32).toString('base64url');
+  const privateData = { loginUrl: 'https://index12.com/team/' + entryToken, createdAt, workspaceId: String(workspaceId), ownerId: String(ownerId), accounts: employees, sample: { ownTaskId: randomUUID(), otherTaskId: randomUUID(), messageId: randomUUID() }, entryToken, mcpUrl: 'https://api.index12.com/team-mcp' };
   // Write once before provisioning so a retry cannot silently create more tenants.
   fs.writeFileSync(file, JSON.stringify(privateData, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   try {
@@ -35,6 +36,7 @@ async function main() {
         await db.collection('users').insertOne({ _id: ownerId, name: 'INDEX12 OpenAI Review Sample', email: 'index12-review-' + suffix + '@example.invalid', role: 'admin', ownerId: null, currentWorkspaceId: workspaceId, createdAt, reviewFixture: 'index12-team-v1' }, options);
         await db.collection('workspaces').insertOne({ _id: workspaceId, userId: String(ownerId), name: 'INDEX12 · OpenAI Review Sample', isDefault: true, sharedWith: [], isShared: false, createdAt, reviewFixture: 'index12-team-v1' }, options);
         await db.collection('teamChatMembers').insertMany(members, options);
+        await db.collection('teamChatInvites').insertOne({ _id: randomUUID(), workspaceId: String(workspaceId), tokenHash: createHash('sha256').update(entryToken).digest('hex'), role: 'employee', namedLogin: true, entryForMemberId: employee._id, creatorName: 'INDEX12 Review Sample', creatorId: 'owner:' + ownerId, version: 0, revokedAt: null, createdAt, reviewFixture: 'index12-team-v1' }, options);
         await db.collection('teamChatTasks').insertMany([
           { ...task, _id: privateData.sample.ownTaskId, description: 'Review the sample welcome report', assigneeIds: [employee._id], assignees: [{ actorId: employee._id, name: employee.name }] },
           { ...task, _id: privateData.sample.otherTaskId, description: 'Private manager sample task', assigneeIds: [manager._id], assignees: [{ actorId: manager._id, name: manager.name }] },
