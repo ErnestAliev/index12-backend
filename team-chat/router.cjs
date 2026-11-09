@@ -500,7 +500,7 @@ function createTeamChatRouter({
     const filter = { workspaceId: p.workspaceId },
       messageFilter = {
         ...filter,
-        ...(accessible ? { $or: [{ taskId: null, kind: { $ne: 'task' } }, { taskId: { $in: accessible.map(t => t._id) } }] } : {}),
+        ...(accessible ? { $and: [{ $or: [{ taskId: null, kind: { $ne: 'task' } }, { taskId: { $in: accessible.map(t => t._id) } }] }] } : {}),
         deletedAt: { $exists: false },
         kind: { $nin: ["request", ...(taskId ? ["task"] : [])] },
         ...(taskId
@@ -518,7 +518,7 @@ function createTeamChatRouter({
           : cursor.taskId && cursor.kind !== "task")
       )
         fail("Сообщение не найдено", 404);
-      messageFilter.$and = [
+      messageFilter.$and = [...(messageFilter.$and || []),
         {
           $or: [
             { createdAt: { $lt: cursor.createdAt } },

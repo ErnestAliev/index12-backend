@@ -150,6 +150,8 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
     ]);
     const privateMessageId = randomUUID(), commonId = randomUUID();
     await coll('Messages').insertMany([
+      { _id: ownId, workspaceId, authorId: people.manager._id, authorName: 'manager', taskId: ownId, kind: 'task', text: '', attachments: [], version: 0, createdAt: new Date() },
+      { _id: otherId, workspaceId, authorId: people.manager._id, authorName: 'manager', taskId: otherId, kind: 'task', text: '', attachments: [], version: 0, createdAt: new Date() },
       { _id: privateMessageId, workspaceId, authorId: people.manager._id, authorName: 'manager', taskId: otherId, kind: 'text', text: 'Private other task detail', attachments: [], version: 0, createdAt: new Date() },
       { _id: commonId, workspaceId, authorId: people.manager._id, authorName: 'manager', taskId: null, kind: 'text', text: 'Common team message', attachments: [], version: 0, createdAt: new Date() },
     ]);
@@ -172,6 +174,9 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
     assert.match(JSON.stringify(forbiddenFinance), /FORBIDDEN/);
     const messages = await employeeClient.callTool({ name: 'index12_chat_messages', arguments: {} });
     assert.equal(messages.isError, undefined); assert.ok(!JSON.stringify(messages).includes('Private other task detail'));
+    assert.ok(JSON.stringify(messages).includes(ownId)); assert.ok(!JSON.stringify(messages).includes(otherId));
+    const nextPage = await employeeClient.callTool({ name: 'index12_chat_messages', arguments: { before: ownId } });
+    assert.equal(nextPage.isError, undefined); assert.ok(!JSON.stringify(nextPage).includes(otherId));
     assert.equal(await coll('MessageReads').countDocuments({ actorId: people.employee._id }), 0);
     const managerClient = new Client({ name: 'manager-test', version: '1' }); clients.push(managerClient);
     await managerClient.connect(new StreamableHTTPClientTransport(new URL(metadata.resource), { requestInit: { headers: { Authorization: 'Bearer ' + manager.access_token } } }));

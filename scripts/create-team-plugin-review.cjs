@@ -29,18 +29,18 @@ async function main() {
     try {
       const members = await Promise.all(employees.map(async account => ({ _id: account.id, workspaceId: String(workspaceId), name: account.name, loginKey: loginKey(account.name), role: account.role, password: await hashPassword(account.password), status: 'active', requireInstalledApp: false, authEpoch: 0, version: 0, createdAt, createdBy: 'owner:' + ownerId, reviewFixture: 'index12-team-v1' })));
       const [employee, manager] = members;
-      const task = { workspaceId: String(workspaceId), timing: 'none', dueDate: null, dueTime: null, parentTaskId: null, status: 'open', attachments: [], createdAt, updatedAt: createdAt, version: 0, creatorId: manager._id, creatorName: manager.name, deletedAt: null };
+      const task = { workspaceId: String(workspaceId), timing: 'none', dueDate: null, dueTime: null, parentTaskId: null, status: 'open', attachments: [], createdAt, updatedAt: createdAt, version: 0, creatorId: manager._id, creatorName: manager.name };
       await session.withTransaction(async () => {
         const options = { session };
         await db.collection('users').insertOne({ _id: ownerId, name: 'INDEX12 OpenAI Review Sample', email: 'index12-review-' + suffix + '@example.invalid', role: 'admin', ownerId: null, currentWorkspaceId: workspaceId, createdAt, reviewFixture: 'index12-team-v1' }, options);
         await db.collection('workspaces').insertOne({ _id: workspaceId, userId: String(ownerId), name: 'INDEX12 · OpenAI Review Sample', isDefault: true, sharedWith: [], isShared: false, createdAt, reviewFixture: 'index12-team-v1' }, options);
         await db.collection('teamChatMembers').insertMany(members, options);
         await db.collection('teamChatTasks').insertMany([
-          { ...task, _id: privateData.sample.ownTaskId, description: 'Review the sample welcome report', assigneeIds: [employee._id], assignees: [{ id: employee._id, name: employee.name, role: employee.role }] },
-          { ...task, _id: privateData.sample.otherTaskId, description: 'Private manager sample task', assigneeIds: [manager._id], assignees: [{ id: manager._id, name: manager.name, role: manager.role }] },
+          { ...task, _id: privateData.sample.ownTaskId, description: 'Review the sample welcome report', assigneeIds: [employee._id], assignees: [{ actorId: employee._id, name: employee.name }] },
+          { ...task, _id: privateData.sample.otherTaskId, description: 'Private manager sample task', assigneeIds: [manager._id], assignees: [{ actorId: manager._id, name: manager.name }] },
         ], options);
         await db.collection('teamChatMessages').insertMany([
-          { _id: privateData.sample.messageId, workspaceId: String(workspaceId), authorId: manager._id, authorName: manager.name, kind: 'text', text: 'Welcome to the INDEX12 review workspace. The sample report is ready.', taskId: null, attachments: [], version: 0, createdAt, updatedAt: createdAt },
+          { _id: privateData.sample.messageId, workspaceId: String(workspaceId), authorId: manager._id, authorName: manager.name, kind: 'text', text: 'Welcome to the INDEX12 review workspace. The sample report is ready.', attachments: [], version: 0, createdAt, updatedAt: createdAt },
           { _id: randomUUID(), workspaceId: String(workspaceId), authorId: manager._id, authorName: manager.name, kind: 'text', text: 'Manager-only sample task detail.', taskId: privateData.sample.otherTaskId, attachments: [], version: 0, createdAt, updatedAt: createdAt },
         ], options);
       });
