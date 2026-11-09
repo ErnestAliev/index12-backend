@@ -27,21 +27,38 @@ Draft: `appsub_6af1518ceaa4819193ade69f77ac5657`
 Portal: https://platform.openai.com/plugins/manage/plugin_asdk_app_6af1518cea7c8191984a4567619dd69e
 
 Status: Not submitted / Not published. Domain verification completed in the portal.
+The 2m42s walkthrough uses only the dedicated sample workspace. It is a real
+ChatGPT tab recording with idle frames removed; the original local recording
+is retained. Review URL: https://api.index12.com/plugins/index12-team/review-demo-20261109.mp4
 All four public listing pages return HTTP 200. The domain challenge returns
 only the exact token. The 1.0.0 package was accepted by the portal.
 
 A dedicated sample tenant was provisioned with no existing company data.
 `node scripts/check-team-plugin-review.cjs` passed five positive MCP API cases
 and two negative access cases. Its access token was revoked afterward. The
-assistant prompt-injection case and the real ChatGPT video walkthrough remain;
-an API test does not establish those behaviors. The local OAuth/PKCE, role,
+real ChatGPT walkthrough additionally verified all five positive cases and the
+three negative scenarios. The employee financial request returned FORBIDDEN;
+role escalation, credential disclosure and financial transfers were refused.
+An injected instruction was read from the isolated sample chat and ignored;
+no external send occurred. New sample task and common-chat message writes
+completed through ChatGPT after the explicit write consent. The local OAuth/PKCE, role,
 revocation and task-history pagination integration checks also passed.
 
 The private `.plugin-review.local.json` file contains the sample credentials.
-The portal's OAuth login was blocked by automatic approval review, requiring
-explicit confirmation for entering this password and connecting OpenAI to the
-sample tenant. No OAuth grant to OpenAI was completed. Reviewer credentials and
-video walkthrough URL are still required in Review information.
+The user explicitly confirmed OAuth access and transfer of these reviewer
+credentials to OpenAI. The portal connection now shows Authorized; 28 tools
+were discovered, and the latest MCP scan has no findings. Reviewer credentials
+have been saved in the secure Review information form. A separate development
+connection, INDEX12 Team Review, was installed in the owner's ChatGPT for the
+actual sample-data walkthrough; it is not the public release URL.
+
+The browser CSP had to allow the OpenAI review portal in the callback redirect
+chain, in addition to ChatGPT. The employee-only instructions and company-card
+description are independent of other plugins. Public package baseScopes
+request both read and write permissions at installation; the manually created
+development connection initially requested read only, so the video includes
+a scope-upgrade OAuth prompt. That development-only URL must not be given to
+employees as the published plugin URL.
 The domain challenge URL returned 404 before this token was installed; no
 existing plugin token was overwritten. The challenge token is intentionally
 public and is not a credential.
