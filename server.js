@@ -3407,6 +3407,7 @@ generateCRUD(Project, 'projects');
 generateCRUD(Category, 'categories');
 registerSubcategoryRoutes(app, { Subcategory, Category, Event, getCompositeUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent, captureCreateHandler: captureMcpEntityHandler });
 const remoteMcp = require('./mcp/remote.cjs').createRemoteMcp({ db: () => mongoose.connection.db, User, Workspace });
+require('./team-chat/plugin-site.cjs').registerPluginSite(app);
 app.use(require('./team-chat/mcp.cjs').createChatMcp({ db: () => mongoose.connection.db, Workspace, clientsStore: remoteMcp.provider.clientsStore, origin: remoteMcp.issuer.origin }).router);
 app.use(remoteMcp.router);
 app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));

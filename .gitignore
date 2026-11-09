@@ -39,3 +39,7 @@ Thumbs.db
 .mcp.local.json*
 .desktop-bridge.local.json*
 .desktop-bridge.log
+
+# Plugin release artifacts and private reviewer credentials
+/output/plugins/
+/.plugin-review.local.json

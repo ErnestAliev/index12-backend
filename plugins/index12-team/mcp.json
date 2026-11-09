@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "index12-team": {
+      "type": "streamable-http",
+      "url": "https://api.index12.com/team-mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "resource": "https://api.index12.com/team-mcp",
+            "baseScopes": [
+              "index12:read",
+              "index12:write"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
