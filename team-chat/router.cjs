@@ -3,6 +3,7 @@ const express = require("express");
 const { EventEmitter } = require("node:events");
 const { randomUUID, randomBytes, createHash } = require("node:crypto");
 const { Types } = require("mongoose");
+const { importFile, accessibleChatFile } = require('../utils/fileImport.cjs');
 const { verifyChatToken, allowedMcpRoute, registerConnectorRoutes, taskAccess, ownTasks } = require('./mcp-access.cjs');
 const {
   roles,
@@ -785,6 +786,13 @@ function createTeamChatRouter({
       res.json({ member });
     }),
   );
+  router.post('/files/import', wrap(async (req, res) => {
+    const result = await importFile(req.body, {
+      db: db(), collection: coll('Files'), scope: { workspaceId: req.team.workspaceId, actorId: req.team.actorId }, team: req.team,
+      desktopScope: req.team.owner ? { actorId: String(req.user.id || req.user._id), workspaceId: req.team.workspaceId } : null,
+    });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
   router.post(
     "/files",
     express.raw({ type: "application/octet-stream", limit: FILE_LIMIT }),
@@ -843,13 +851,7 @@ function createTeamChatRouter({
     }),
   );
   router.get('/files/:id/content', wrap(async (req, res) => {
-    const row = await coll('Files').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId });
-    if (!row) fail('Файл недоступен', 404);
-    const accessible = await coll('Tasks').find({ workspaceId: req.team.workspaceId, deletedAt: { $exists: false }, ...taskAccess(req.team) }, { projection: { _id: 1 } }).toArray();
-    const ids = accessible.map(t => t._id);
-    const message = await coll('Messages').findOne({ workspaceId: req.team.workspaceId, deletedAt: { $exists: false }, 'attachments.fileId': row._id, $or: [{ taskId: null }, { taskId: { $in: ids } }] }, { projection: { _id: 1 } });
-    const task = message ? null : await coll('Tasks').findOne({ _id: { $in: ids }, 'attachments.fileId': row._id }, { projection: { _id: 1 } });
-    if (!message && !task && row.actorId !== req.team.actorId) fail('Файл недоступен', 404);
+    const row = await accessibleChatFile(db(), req.team, req.params.id);
     res.json({ file: { ...fileMeta(row), dataBase64: fileBuffer(row).toString('base64') } });
   }));
   router.post(
@@ -1022,14 +1024,16 @@ function createTeamChatRouter({
         workspaceId: req.team.workspaceId,
       });
       if (!row) fail("Сообщение не найдено", 404);
+      if (row.taskId) await tasks.load(req, row.taskId);
       if (row.kind === "task") fail("Откройте задачу для изменения", 409);
       if (!req.team.owner && row.authorId !== req.team.actorId)
         fail("Можно удалить только своё сообщение", 403);
-      if (!row.deletedAt)
-        await coll("Messages").updateOne(
-          { _id: row._id, workspaceId: row.workspaceId },
-          { $set: { deletedAt: new Date(), deletedBy: req.team.actorId } },
-        );
+      if (!row.deletedAt) {
+        const version = Number(row.version || 0);
+        if ((req.team.mcp || req.teamMcpOwner || req.body.expectedVersion !== undefined) && req.body.expectedVersion !== version) fail('Сообщение изменилось. Прочитайте его заново', 409);
+        const result = await coll('Messages').updateOne({ _id: row._id, workspaceId: row.workspaceId, deletedAt: { $exists: false }, ...(version === 0 ? { $or: [{ version: 0 }, { version: { $exists: false } }] } : { version }) }, { $set: { deletedAt: new Date(), deletedBy: req.team.actorId }, $inc: { version: 1 } });
+        if (!result.modifiedCount) fail('Сообщение изменилось. Прочитайте его заново', 409);
+      }
       await coll("Messages").updateMany(
         { workspaceId: req.team.workspaceId, "replyTo.messageId": row._id },
         { $set: { updatedAt: new Date() } },

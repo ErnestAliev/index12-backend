@@ -13,7 +13,7 @@ function pdfBytes(data, name) {
 }
 // Never send application credentials; pin the resolved public address to avoid
 // DNS rebinding. Temporary ChatGPT URLs are not stored in MongoDB or logs.
-async function downloadPdf(file, { resolve=dns.lookup, request=https.get }={}) {
+async function downloadFile(file, { resolve=dns.lookup, request=https.get }={}) {
   const url = new URL(file.download_url);
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || (url.port && url.port !== '443')) throw Error('Нужна защищённая ссылка на файл');
   const addresses = await resolve(url.hostname, { all: true });
@@ -21,12 +21,13 @@ async function downloadPdf(file, { resolve=dns.lookup, request=https.get }={}) {
   const target = addresses[0];
   const data = await new Promise((resolve,reject) => {
     const outgoing = request(url, { lookup: (_host,options,done) => options?.all ? done(null,[target]) : done(null,target.address,target.family), signal: AbortSignal.timeout(20000) }, response => {
-      if (response.statusCode !== 200 || Number(response.headers['content-length'] || 0) > FILE_LIMIT) { response.destroy(); reject(Error('Не удалось скачать PDF')); return; }
+      if (response.statusCode !== 200 || Number(response.headers['content-length'] || 0) > FILE_LIMIT) { response.destroy(); reject(Error('Не удалось скачать файл')); return; }
       const chunks=[]; let size=0;
-      response.on('data',chunk=>{size+=chunk.length; if(size>FILE_LIMIT) response.destroy(Error('PDF больше 10 МБ')); else chunks.push(chunk);});
+      response.on('data',chunk=>{size+=chunk.length; if(size>FILE_LIMIT) response.destroy(Error('Файл больше 10 МБ')); else chunks.push(chunk);});
       response.on('end',()=>resolve(Buffer.concat(chunks))); response.on('error',reject);
     }); outgoing.on('error',reject);
   });
-  return pdfBytes(data,file.file_name);
+  return data;
 }
-module.exports={downloadPdf,pdfBytes,publicAddress};
+async function downloadPdf(file, options) { return pdfBytes(await downloadFile(file, options), file.file_name); }
+module.exports={downloadPdf,downloadFile,pdfBytes,publicAddress};

@@ -43,7 +43,7 @@ async function startFixture(options = {}) {
     mongoose.set('transactionAsyncLocalStorage', true);
     const changeHistory = createHistoryEngine({ mongoose });
     const source = await fs.readFile(path.join(__dirname, '../../server.js'), 'utf8');
-    const app = express(); app.use(require('cors')({ origin: true, credentials: true })); app.use(express.json());
+    const app = express(); app.use(require('cors')({ origin: true, credentials: true })); app.use(express.json({ limit: '16mb' }));
     let dropResponse = false;
     app.use((req, res, next) => {
       const json = res.json.bind(res);

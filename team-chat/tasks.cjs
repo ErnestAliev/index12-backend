@@ -269,12 +269,16 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
   }
   router.get(
     "/tasks",
-    wrap(async (req, res) => res.json({ tasks: await summaries(req) })),
+    wrap(async (req, res) => {
+      if (req.query.deleted === 'true') return res.json({ tasks: await coll('Tasks').find({ ...filter(req), ...taskAccess(req.team), deletedAt: { $exists: true } }, { projection: { createHash: 0 } }).sort({ deletedAt: -1, _id: -1 }).limit(200).toArray() });
+      res.json({ tasks: await summaries(req) });
+    }),
   );
   router.get(
     "/tasks/:id",
     wrap(async (req, res) => {
-      const row = await load(req);
+      const row = await load(req, req.params.id, req.query.includeDeleted === 'true');
+      if (row.deletedAt) { delete row.createHash; return res.json({ task: row }); }
       res.json({ task: (await summaries(req, [row._id]))[0] });
     }),
   );

@@ -6,6 +6,7 @@ const { validateAttachments } = require('./attachments.cjs');
 const { FILE_LIMIT, safeName, validFileId, imageMime, fileMeta, fileBuffer, resolveAttachments } = require('./files.cjs');
 const { answerRequest, publicRequest } = require('./requests.cjs');
 const { ExecutionStore } = require('./executionStore.cjs');
+const { importFile } = require('../utils/fileImport.cjs');
 const { receipt, executionReport } = require('./toolResults.cjs');
 const { VoiceService, registerVoiceRoutes } = require('./voice.cjs');
 const validId = value => /^[a-f\d]{24}$/i.test(String(value || ''));
@@ -13,10 +14,10 @@ const online = worker => !!worker && Date.now() - new Date(worker.seenAt).getTim
 const publicJob = job => job && ({ id: job._id, kind: job.kind, status: job.status, result: job.result || null, error: job.error || null });
 const scopeFor = user => ({ actorId: String(user?._id || user?.id || ''), workspaceId: String(user?.currentWorkspaceId || '') });
 
-function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = process.env.FRONTEND_URL, allowedOrigins = [], voiceService, cloudService }) {
+function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = process.env.FRONTEND_URL, allowedOrigins = [], voiceService, cloudService, history }) {
   const router = express.Router();
   let indexes;
-  const collection = name => db().collection(`desktop${name}`);
+  const collection = name => history ? history.collection(db().collection(`desktop${name}`)) : db().collection(`desktop${name}`);
   const cloudAllowed = scope => cloudService?.configured ? cloudService.allowed(scope) : Promise.resolve(false);
   const voice = voiceService || new VoiceService({ db, Workspace, cloudService });
   async function ensureIndexes() {
@@ -46,7 +47,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       await ensureIndexes(); req.desktopScope = scope; next();
     } catch (error) { next(error); }
   });
-  const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res)).catch(next);
+  const wrap = fn => (req, res, next) => Promise.resolve().then(() => req.codexMcp && req.method !== 'GET' && req.body?.kind !== 'history' ? req.codexMutation(req, res, fn) : fn(req, res)).catch(next);
   const workerFor = async scope => await cloudAllowed(scope) ? await db().collection('cloudWorkers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` }) || cloudService.worker(scope) : collection('Workers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` });
   const jobForClient = async job => job && ({ ...publicJob(job), ...(job.active ? { pendingRequests: (await collection('Requests').find({ jobId: job._id, actorId: job.actorId, workspaceId: job.workspaceId, state: 'pending', expiresAt: { $gt: new Date() } }).sort({ expiresAt: 1 }).limit(20).toArray()).map(publicRequest) } : {}) });
   const executionForClient = async (id, scope) => {
@@ -71,7 +72,14 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   }));
   router.post('/chats', wrap(async (req, res) => {
     if (!await workerFor(req.desktopScope)) return res.status(403).json({ error: 'Desktop-помощник не настроен для этого пользователя и рабочей области.' });
-    const chat = { _id: randomUUID(), ...req.desktopScope, title: 'Новый чат', archived: false, createdAt: new Date(), updatedAt: new Date(), threadId: null };
+    const id = req.body?.id || randomUUID(), title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 100) : 'Новый чат';
+    if (!validFileId(id) || !title) return res.status(400).json({ error: 'Проверьте название и идентификатор чата.' });
+    const old = await collection('Chats').findOne({ _id: id });
+    if (old) {
+      if (old.actorId !== req.desktopScope.actorId || old.workspaceId !== req.desktopScope.workspaceId || old.archived || (old.createdTitle || old.title) !== title) return res.status(409).json({ error: 'Ключ чата уже использован.' });
+      return res.json({ chat: { id: old._id, title: old.title, threadId: null }, replayed: true });
+    }
+    const chat = { _id: id, ...req.desktopScope, title, createdTitle: title, archived: false, createdAt: new Date(), updatedAt: new Date(), threadId: null };
     await collection('Chats').insertOne(chat); res.status(201).json({ chat: { id: chat._id, title: chat.title, threadId: null } });
   }));
   router.get('/chats/:id', wrap(async (req, res) => {
@@ -100,6 +108,20 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const executions = [];
     for (const run of runs.slice(0, 20)) executions.push(await executionForClient(run._id, req.desktopScope));
     res.json({ executions, nextCursor: runs.length > 20 ? Buffer.from(JSON.stringify({ createdAt: runs[19].createdAt, id: runs[19]._id })).toString('base64url') : null });
+  }));
+  router.post('/chats/:id/files/import', wrap(async (req, res) => {
+    const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
+    if (!chat) return res.status(404).json({ error: 'Чат не найден.' });
+    const workspace = await Workspace.findById(req.desktopScope.workspaceId).lean();
+    const owner = String(workspace?.userId) === req.desktopScope.actorId;
+    const result = await importFile(req.body, { db: db(), collection: collection('Files'), scope: req.desktopScope, chatId: chat._id, desktopScope: req.desktopScope,
+      team: owner ? { owner: true, actorId: 'owner:' + req.desktopScope.actorId, workspaceId: req.desktopScope.workspaceId } : null });
+    res.status(result.replayed ? 200 : 201).json(result);
+  }));
+  router.get('/files/:id/content', wrap(async (req, res) => {
+    const row = await collection('Files').findOne({ _id: req.params.id, ...req.desktopScope });
+    if (!row || !await collection('Chats').findOne({ _id: row.chatId, ...req.desktopScope, archived: false })) return res.status(404).json({ error: 'Файл недоступен.' });
+    res.json({ file: { ...fileMeta(row), dataBase64: fileBuffer(row).toString('base64') } });
   }));
   router.post('/chats/:id/files', express.raw({ type: 'application/octet-stream', limit: FILE_LIMIT }), wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
@@ -152,7 +174,8 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       }
     }
     const cloud = await cloudAllowed(scope);
-    if (!cloud && !online(await workerFor(scope))) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
+    const connected = cloud || online(await workerFor(scope));
+    if (!connected && !(req.codexMcp && kind === 'send')) return res.status(503).json({ error: 'Нет связи с Codex на Mac. Запустите связку Index12.' });
     if (!cloud && kind === 'history' && !chat.threadId) return res.json({ job: { status: 'completed', result: { messages: [], nextCursor: null } } });
     const job = { _id: id, ...scope, ...(cloud ? { backend: 'cloud' } : {}), requestHash, chatId: chat._id, kind, message: kind === 'send' ? message.trim() : null, attachments: kind === 'send' ? attachments : [], cursor: cursor || null, status: 'queued', active: true, createdAt: new Date() };
     try { await collection('Jobs').insertOne(job); }
@@ -161,7 +184,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
       throw error;
     }
     await retainFiles();
-    res.status(202).json({ job: publicJob(job) });
+    res.status(202).json({ job: publicJob(job), awaitingConnection: !connected });
     if (cloud) cloudService.kick();
   }));
   router.post('/jobs/:id/requests/:requestId/answer', wrap(async (req, res) => {
@@ -190,7 +213,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   }));
   router.use((error, _req, res, _next) => {
     console.error('[Desktop assistant]', error.name);
-    res.status(error.type === 'entity.too.large' ? 413 : 500).json({ error: error.type === 'entity.too.large' ? 'Размер файла должен быть не больше 10 МБ.' : 'Не удалось обработать запрос к desktop-помощнику.' });
+    res.status(error.status || (error.type === 'entity.too.large' ? 413 : 500)).json({ error: error.status && error.status < 500 ? error.message : error.type === 'entity.too.large' ? 'Размер файла должен быть не больше 10 МБ.' : 'Не удалось обработать запрос к desktop-помощнику.' });
   });
   return router;
 }

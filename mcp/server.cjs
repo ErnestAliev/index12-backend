@@ -28,7 +28,7 @@ async function database() {
   await connection;
   return client.db();
 }
-const { server } = createMcpRuntime({ config: () => readConfig().config, database, runtimeEnv: process.env });
+const { server } = createMcpRuntime({ config: () => readConfig().config, database, runtimeEnv: process.env, allowLocalFiles: true });
 async function close() { await server.close(); if (client) await client.close(); }
 process.on('SIGINT', () => { close().finally(() => process.exit(0)); });
 process.on('SIGTERM', () => { close().finally(() => process.exit(0)); });

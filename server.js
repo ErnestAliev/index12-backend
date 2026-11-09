@@ -106,7 +106,7 @@ app.use(cors({
     credentials: true
 }));
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '16mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // 🟢 Middleware для проброса IO в запросы
@@ -2220,9 +2220,10 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // END INVITATION ROUTES
 // Cloud and desktop chat share scoped MCP authorization and durable execution.
 const cloudChat = new (require('./codex/cloud.cjs').CloudChat)({ db: () => mongoose.connection.db, User, Workspace });
-app.use('/api/codex', require('./codex/router.cjs').createDesktopRouter({
-    db: () => mongoose.connection.db, Workspace, isAuthenticated, cloudService: cloudChat, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
-}));
+const desktopRouter = require('./codex/router.cjs').createDesktopRouter({
+    db: () => mongoose.connection.db, Workspace, isAuthenticated, cloudService: cloudChat, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS, history: changeHistory,
+});
+app.use('/api/codex', desktopRouter);
 
 app.use('/api/user/appearance-themes', require('./appearance/router.cjs').createAppearanceRouter({
     db: () => mongoose.connection.db, isAuthenticated, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS,
@@ -3411,7 +3412,7 @@ require('./team-chat/plugin-site.cjs').registerPluginSite(app);
 app.use(require('./team-chat/mcp.cjs').createChatMcp({ db: () => mongoose.connection.db, Workspace, clientsStore: remoteMcp.provider.clientsStore, origin: remoteMcp.issuer.origin }).router);
 app.use(remoteMcp.router);
 app.use('/api/business', require('./business/router.cjs').createBusinessRouter({ db: () => mongoose.connection.db, Company, Contractor, Individual, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent }));
-registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers, getTeamChatRouter: () => teamChatRouter });
+registerMcpOperationRoutes(app, { mongoose, audit: changeHistory, User, Workspace, Event, Account, Company, Individual, Contractor, Project, Category, Subcategory, checkWorkspacePermission, canEdit, ensureManagerCanAccessOperationAccounts, emitEntityEvent, handlers: mcpEventHandlers, entityHandlers: mcpEntityHandlers, getTeamChatRouter: () => teamChatRouter, getCodexRouter: () => desktopRouter });
 const teamChatRouter = require('./team-chat/router.cjs').createTeamChatRouter({ db: () => mongoose.connection.db, Workspace, User, getWorkspaceStorageUserId, history: changeHistory, frontendUrl: FRONTEND_URL, onTasksChanged: req => emitToWorkspace(req, req.team.workspaceId, 'calendar_changed', { workspaceId: req.team.workspaceId }) });
 app.use('/api/team-chat', teamChatRouter);
 app.use('/api/change-history', require('./history/router.cjs').createHistoryRouter({mongoose, Event, Workspace, engine:changeHistory, isAuthenticated, handlers:mcpEventHandlers, ensureManagerCanAccessOperationAccounts, getFirstFreeCellIndex, emitToWorkspace, frontendUrl:FRONTEND_URL, allowedOrigins:ALLOWED_ORIGINS}));

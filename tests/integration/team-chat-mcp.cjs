@@ -15,8 +15,8 @@ const { deadlineFields } = require('../../team-chat/deadlines.cjs');
 const { digest, publishedPluginUrl } = require('../../team-chat/mcp-access.cjs');
 const { hashPassword } = require('../../team-chat/domain.cjs');
 (async () => {
-  let chatRouter;
-  const fixture = await startFixture({ getTeamChatRouter: () => chatRouter });
+  let chatRouter, codexRouter;
+  const fixture = await startFixture({ getTeamChatRouter: () => chatRouter, getCodexRouter: () => codexRouter });
   const clients = [], oldSecret = process.env.SESSION_SECRET;
   try {
     process.env.SESSION_SECRET = 'team-mcp-fixture-only-secret';
@@ -33,6 +33,7 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
       req.session = sessions.get(key); next();
     });
     chatRouter = createTeamChatRouter({ db: getDb, Workspace, User, history: fixture.audit, getWorkspaceStorageUserId: w => String(w.userId), frontendUrl: origin });
+    codexRouter = require('../../codex/router.cjs').createDesktopRouter({ db: getDb, Workspace, isAuthenticated: (_req, _res, next) => next(), frontendUrl: origin, history: fixture.audit });
     fixture.app.use('/api/team-chat', chatRouter);
     const remote = createRemoteMcp({ db: getDb, User, Workspace, origin, allowLoopback: true, env: { INTEGRATIONS_ENCRYPTION_KEY: 'ad'.repeat(32) } });
     const chatMcp = createChatMcp({ db: getDb, Workspace, origin, clientsStore: remote.provider.clientsStore });
@@ -194,7 +195,7 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
     const revokedData = await managerClient.callTool({ name: 'index12_financial_summary', arguments: {} }); assert.equal(revokedData.isError, true);
     await coll('Members').updateOne({ _id: people.manager._id }, { $set: { role: 'manager' } });
     const ownerToken = 'idx12_' + randomBytes(32).toString('base64url');
-    await db.collection('mcpCredentials').insertOne({ _id: digest(ownerToken), actorId: ownerId, ownerId, workspaceId, scopes: ['read', 'create', 'update'], expiresAt: new Date(Date.now() + 600000), revokedAt: null });
+    await db.collection('mcpCredentials').insertOne({ _id: digest(ownerToken), actorId: ownerId, ownerId, workspaceId, scopes: ['read', 'create', 'update', 'delete'], expiresAt: new Date(Date.now() + 600000), revokedAt: null });
     const runtime = createMcpRuntime({ config: { actorId: ownerId, ownerId, workspaceId, apiUrl: origin, apiToken: ownerToken }, database: async () => db });
     try {
       const parentId = randomUUID(), childId = randomUUID();
@@ -204,6 +205,7 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
       }
       assert.equal(await coll('Tasks').countDocuments({ _id: childId, parentTaskId: parentId }), 1);
       assert.equal(await db.collection('mcpActions').countDocuments({ workspaceId }), 2);
+      await require('./chat-mcp-files.cjs')({ runtime, db, employeeClient, directorToken: director.access_token, managerToken: manager.access_token, request, ownerId, workspaceId, ownId, otherId, commonId, privateMessageId, people, headers });
     } finally { await runtime.close(); }
     const refreshBody = { grant_type: 'refresh_token', client_id: registered.client_id, refresh_token: employee.refresh_token, resource: metadata.resource };
     const refreshed = await request('/team-mcp/token', { method: 'POST', form: true, body: refreshBody }); assert.equal(refreshed.status, 200);

@@ -88,7 +88,7 @@ function registerMcpOperationRoutes(app, deps) {
     const collection = name => deps.audit ? deps.audit.collection(db().collection(name)) : db().collection(name);
     app.use('/api/mcp', (_req, res, next) => {
         const json = res.json.bind(res);
-        res.json = body => json(res.statusCode >= 400 && !body.error ? { error: { code: ({401:'UNAUTHORIZED',403:'FORBIDDEN',404:'NOT_FOUND',409:'VERSION_CONFLICT'})[res.statusCode] || 'VALIDATION_ERROR', field: null, message: body.message || 'Запрос отклонён.' } } : body);
+        res.json = body => json(res.statusCode >= 400 && (!body.error || typeof body.error === 'string') ? { error: { code: ({401:'UNAUTHORIZED',403:'FORBIDDEN',404:'NOT_FOUND',409:'VERSION_CONFLICT'})[res.statusCode] || 'VALIDATION_ERROR', field: null, message: body.message || body.error || 'Запрос отклонён.' } } : body);
         next();
     });
     async function authenticate(req, _res, next) {
@@ -394,11 +394,23 @@ function registerMcpOperationRoutes(app, deps) {
         purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, emitEntityEvent:deps.emitEntityEvent,
         taskMutation: (req, res, fn) => execution.execute(req, res, fn), taskSession: () => deps.audit?.current()?.session,
         getWorkspaceStorageUserId: workspace => workspace.isDefault ? String(workspace.userId) : `${workspace.userId}_ws_${workspace._id}` }));
+    if (deps.getCodexRouter) app.use('/api/mcp/codex', authenticate, requireScope('read'), (req, res, next) => {
+        if (req.mcpContext.grant.source === 'team_chat_read' || String(req.cachedWorkspace.userId) !== String(req.user.id)) return next(new OperationError('FORBIDDEN', null, 'Личный Codex доступен только владельцу.', 403));
+        const allowed = req.method === 'GET' ? /^\/(?:status|chats(?:\/[a-f\d-]{36})?|jobs\/[a-zA-Z0-9:%_-]{1,300}|files\/[a-f\d-]{36}\/content)$/.test(req.path)
+          : req.method === 'POST' && /^\/(?:chats|chats\/[a-f\d-]{36}\/(?:jobs|files\/import))$/.test(req.path);
+        if (!allowed) return next(new OperationError('FORBIDDEN', null, 'Действие Codex недоступно через MCP.', 403));
+        if (req.method !== 'GET' && !(req.path.endsWith('/jobs') && req.body.kind === 'history') && !req.mcpContext.grant.scopes.includes('create')) return next(new OperationError('FORBIDDEN', null, 'Нет разрешения на отправку в Codex.', 403));
+        req.codexMcp = true;
+        req.codexMutation = (request, output, fn) => execution.execute(request, output, fn);
+        const json = res.json.bind(res);
+        res.json = body => json({ ...body, workspaceId: String(req.cachedWorkspace._id), actorId: String(req.user.id) });
+        return deps.getCodexRouter()(req, res, next);
+    });
     if (deps.getTeamChatRouter) app.use('/api/mcp/team-chat', authenticate, requireScope('read'), (req, res, next) => {
         if (req.mcpContext.grant.source === 'team_chat_read' || String(req.cachedWorkspace.userId) !== String(req.user.id)) return next(new OperationError('FORBIDDEN', null, 'Используйте свой коннектор рабочего чата.', 403));
         const { allowedMcpRoute } = require('../team-chat/mcp-access.cjs');
         if (!allowedMcpRoute(req.method, req.path)) return next(new OperationError('FORBIDDEN', null, 'Действие недоступно через MCP.', 403));
-        const scope = req.path.endsWith('/decision') ? 'update' : { POST: 'create', PATCH: 'update' }[req.method];
+        const scope = /\/(?:decision|reaction|read|restore)$/.test(req.path) ? 'update' : { POST: 'create', PATCH: 'update', DELETE: 'delete' }[req.method];
         if (req.method !== 'GET' && !req.mcpContext.grant.scopes.includes(scope)) return next(new OperationError('FORBIDDEN', null, 'Нет разрешения на изменения.', 403));
         req.teamMcpOwner = true;
         req.teamMutation = (request, output, fn) => execution.execute(request, output, fn);

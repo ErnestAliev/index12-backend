@@ -11,7 +11,8 @@ function requestExecution(req) {
 const requestScope = req => ({ actorId: String(req.user.id || req.user._id), workspaceId: String(req.user.currentWorkspaceId) });
 function toolName(req) {
   const p = routePath(req);
-  if (p.includes('/team-chat/')) return 'index12_chat_' + (p.endsWith('/decision') ? 'decide' : p.includes('/tasks') ? req.method === 'POST' ? 'create_task' : 'update_task' : req.method === 'POST' ? 'send_message' : 'edit_message');
+  if (p.includes('/codex/')) return 'index12_codex_' + (p.endsWith('/files/import') ? 'upload_file' : p.endsWith('/jobs') ? 'send_message' : 'create_chat');
+  if (p.includes('/team-chat/')) return 'index12_chat_' + (p.endsWith('/files/import') ? 'upload_file' : p.endsWith('/reaction') ? 'react' : p.endsWith('/read') ? 'mark_read' : p.endsWith('/forward') ? 'forward_message' : p.endsWith('/restore') ? 'restore_task' : p.endsWith('/decision') ? 'decide' : p.includes('/tasks') ? req.method === 'DELETE' ? 'delete_task' : req.method === 'POST' ? 'create_task' : 'update_task' : req.method === 'DELETE' ? 'delete_message' : req.method === 'POST' ? 'send_message' : 'edit_message');
   if (p.endsWith('/copy')) return 'index12_copy_operation';
   if (p.includes('/business/tasks')) return `index12_${req.method === 'POST' ? 'create' : req.method === 'DELETE' ? 'delete' : 'update'}_task`;
   if (p.includes('/initial-balance')) return 'index12_update_account_initial_balance';

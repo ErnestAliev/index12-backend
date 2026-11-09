@@ -3,7 +3,7 @@ const { createHash } = require("node:crypto");
 const { Types } = require("mongoose");
 const { text, fail } = require("./domain.cjs");
 const { taskAccess } = require('./mcp-access.cjs');
-const { fileBuffer } = require("../codex/files.cjs");
+const { fileBuffer, fileMeta, TOTAL_LIMIT } = require("../codex/files.cjs");
 const emojis = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const version = (row) => Number(row.version || 0);
 const revisionFilter = (v) =>
@@ -76,13 +76,26 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       if (row.authorId !== req.team.actorId)
         fail("Можно изменить только своё сообщение", 403);
       expected(req, row);
-      const content = text(req.body.text || "", 10000, false);
-      if (!content && !row.attachments?.length) fail("Введите текст сообщения");
-      if (content === row.text)
+      const content = Object.hasOwn(req.body, 'text') ? text(req.body.text || '', 10000, false) : row.text || '';
+      let attachments = row.attachments || [];
+      if (Object.hasOwn(req.body, 'fileIds')) {
+        const ids = req.body.fileIds;
+        if (!Array.isArray(ids) || ids.length > 5 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^(?:[a-f\d-]{36}|forward:[a-f\d]{64})$/i.test(id))) fail('Проверьте файлы');
+        attachments = [];
+        for (const id of ids) {
+          const file = await coll('Files').findOne({ _id: id, workspaceId: row.workspaceId });
+          if (!file || (file.actorId !== req.team.actorId && !row.attachments?.some(f => f.fileId === id))) fail('Файл недоступен', 404);
+          attachments.push(fileMeta(file));
+        }
+        if (attachments.reduce((size, file) => size + file.size, 0) > TOTAL_LIMIT) fail('Общий размер файлов — до 25 МБ');
+      }
+      if (!content && !attachments.length) fail("Введите текст сообщения или прикрепите файл");
+      if (content === row.text && JSON.stringify(attachments) === JSON.stringify(row.attachments || []))
         return res.json({ messageId: row._id, replayed: true });
       const updated = await update(req, row, {
         $set: {
           text: content,
+          attachments,
           contentVersion: Number(row.contentVersion || 0) + 1,
           editedAt: new Date(),
         },
@@ -91,12 +104,14 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           editHistory: {
             actorId: req.team.actorId,
             text: row.text,
+            attachments: row.attachments || [],
             contentVersion: Number(row.contentVersion || 0),
             approval: row.approval || null,
             at: new Date(),
           },
         },
       });
+      if (attachments.length) await coll('Files').updateMany({ workspaceId: row.workspaceId, _id: { $in: attachments.map(f => f.fileId) } }, { $set: { linked: true }, $unset: { expiresAt: '' } });
       res.json({ messageId: updated._id });
     }),
   );
@@ -119,13 +134,16 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       )
         fail("Проверьте список сообщений");
       // Legacy clients acknowledged background data loads. Only visible-view acknowledgements count.
-      if (req.body.visibilityConfirmed !== true) return res.json({ read: 0 });
+      const explicitMcp = (req.team.mcp || req.teamMcpOwner) && req.body.explicitMcpRead === true;
+      if (req.body.visibilityConfirmed !== true && !explicitMcp) return res.json({ read: 0 });
+      const accessible = await coll('Tasks').find({ workspaceId: req.team.workspaceId, deletedAt: { $exists: false }, ...taskAccess(req.team) }, { projection: { _id: 1 } }).toArray();
       const rows = await coll("Messages")
         .find({
           _id: { $in: ids },
           workspaceId: req.team.workspaceId,
           authorId: { $ne: req.team.actorId },
           deletedAt: { $exists: false },
+          $or: [{ taskId: null }, { taskId: { $in: accessible.map(t => t._id) } }],
         })
         .toArray();
       if (!rows.length) return res.json({ read: 0 });
@@ -288,10 +306,13 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           : await Workspace.findById(targetId).lean();
       if (
         !target ||
+        ((req.team.mcp || req.teamMcpOwner) && targetId !== req.team.workspaceId) ||
         (targetId !== req.team.workspaceId &&
           String(target.userId) !== String(req.user?.id || req.user?._id || ""))
       )
         fail("Чат недоступен", 403);
+      const targetTaskId = req.body.targetTaskId || null;
+      if (targetTaskId && (typeof targetTaskId !== 'string' || !/^[a-f\d-]{36}$/i.test(targetTaskId) || !await coll('Tasks').findOne({ _id: targetTaskId, workspaceId: targetId, deletedAt: { $exists: false }, ...taskAccess(req.team) }))) fail('Задача недоступна', 404);
       const actorId =
         targetId === req.team.workspaceId
           ? req.team.actorId
@@ -304,6 +325,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
             version(row),
             targetId,
             actorId,
+            ...(targetTaskId ? [targetTaskId] : []),
           ]),
         )
         .digest("hex");
@@ -325,11 +347,10 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           linked: true,
         });
         if (!file) fail("Вложение больше недоступно", 404);
-        const fileId =
-          "forward:" +
-          createHash("sha256")
+        const hex = createHash("sha256")
             .update(messageId + ":" + targetId + ":" + actorId + ":" + file._id)
             .digest("hex");
+        const fileId = `${hex.slice(0,8)}-${hex.slice(8,12)}-5${hex.slice(13,16)}-8${hex.slice(17,20)}-${hex.slice(20,32)}`;
         await coll("Files").updateOne(
           { _id: fileId },
           {
@@ -351,6 +372,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
       const forwarded = {
         _id: messageId,
         workspaceId: targetId,
+        ...(targetTaskId ? { taskId: targetTaskId } : {}),
         authorId: actorId,
         authorName: req.team.name,
         text: row.text,
@@ -374,6 +396,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
         { ...req, team: { ...req.team, workspaceId: targetId } },
         {
           key: "message:" + messageId,
+          ...(targetTaskId ? { taskId: targetTaskId } : {}),
           title: "Chat · " + req.team.name,
           body: row.text || "Файл в чате",
         },
