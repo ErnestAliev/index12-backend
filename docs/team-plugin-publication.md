@@ -26,7 +26,18 @@ Plugin: `plugin_asdk_app_6af1518cea7c8191984a4567619dd69e`
 Draft: `appsub_6af1518ceaa4819193ade69f77ac5657`
 Portal: https://platform.openai.com/plugins/manage/plugin_asdk_app_6af1518cea7c8191984a4567619dd69e
 
-Status: Not submitted / Not published. Domain verification completed in the portal.
+Status: Ready for final submission / Not submitted / Not published.
+Domain verification completed. Metadata and MCP scans both show No findings;
+MCP configuration is Configured. Reviewer credentials and video URL are saved.
+The deployed MP4 returned HTTP 206 with valid video/mp4 byte-range playback.
+The final Submit for review dialog is open with the private context filled.
+
+The remaining step is the user's explicit confirmation of OpenAI's legal
+attestations: Developer Apps Terms and Plugin Guidelines; applicable-law
+compliance/responsibility; no money/crypto transfers or investment trades;
+necessary third-party content/API rights; suitability for under-18 users; no
+targeting under-13s or sharing their personal data with OpenAI. No attestation
+was checked and Submit was not clicked before that confirmation.
 The 2m42s walkthrough uses only the dedicated sample workspace. It is a real
 ChatGPT tab recording with idle frames removed; the original local recording
 is retained. Review URL: https://api.index12.com/plugins/index12-team/review-demo-20261109.mp4
