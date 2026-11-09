@@ -46,7 +46,7 @@ function publishedPluginUrl(value) {
 }
 // Bearer clients cannot reach account administration, passwords, subscriptions or cookies.
 function allowedMcpRoute(method, path) {
-  if (method === 'GET') return /^\/(?:mcp\/context|messages(?:\/[a-f\d-]{36})?|tasks(?:\/[a-f\d-]{36})?|search|files\/(?:[a-f\d-]{36}|forward:[a-f\d]{64})\/content)$/.test(path);
+  if (method === 'GET') return /^\/(?:mcp\/context|task-options|messages(?:\/[a-f\d-]{36})?|tasks(?:\/[a-f\d-]{36})?|search|files\/(?:[a-f\d-]{36}|forward:[a-f\d]{64})\/content)$/.test(path);
   if (method === 'POST') return /^\/(?:messages|tasks|files\/import|messages\/read|messages\/[a-f\d-]{36}\/(?:decision|reaction|forward)|tasks\/[a-f\d-]{36}\/restore)$/.test(path);
   if (method === 'PATCH') return /^\/(?:messages|tasks)\/[a-f\d-]{36}$/.test(path);
   if (method === 'DELETE') return /^\/(?:messages|tasks)\/[a-f\d-]{36}$/.test(path);

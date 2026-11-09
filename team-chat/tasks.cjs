@@ -2,6 +2,8 @@
 const { createHash } = require("node:crypto");
 const { fail, text } = require("./domain.cjs");
 const { taskAccess } = require('./mcp-access.cjs');
+const { validateReferences, valid } = require('./task-references.cjs');
+const { taskQuery, matchesTask } = require('./task-filters.cjs');
 const { deadlineFields } = require('./deadlines.cjs');
 const { dateOnly } = require("../business/task-domain.cjs");
 const { calendarTask } = require("../business/chat-calendar.cjs");
@@ -32,6 +34,8 @@ function taskInput(body) {
   if (!["open", "progress", "delayed", "done"].includes(status))
     fail("Выберите статус");
   const fileIds = body.fileIds || [];
+  if (body.projectId != null && !valid(body.projectId)) fail('Выберите проект из системы');
+  if (body.party != null && (!['companies', 'contractors', 'individuals'].includes(body.party.kind) || !valid(body.party.id))) fail('Выберите контрагента из системы');
   if (body.parentTaskId != null && !uuid(body.parentTaskId))
     fail("Проверьте родительскую задачу");
   if (
@@ -49,6 +53,8 @@ function taskInput(body) {
     dueTime,
     status,
     fileIds,
+    ...(Object.hasOwn(body, 'projectId') ? { projectId: body.projectId || null } : {}),
+    ...(Object.hasOwn(body, 'party') ? { party: body.party ? { kind: body.party.kind, id: body.party.id } : null } : {}),
     ...(body.parentTaskId ? { parentTaskId: body.parentTaskId } : {}),
   };
 }
@@ -271,7 +277,8 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
     "/tasks",
     wrap(async (req, res) => {
       if (req.query.deleted === 'true') return res.json({ tasks: await coll('Tasks').find({ ...filter(req), ...taskAccess(req.team), deletedAt: { $exists: true } }, { projection: { createHash: 0 } }).sort({ deletedAt: -1, _id: -1 }).limit(200).toArray() });
-      res.json({ tasks: await summaries(req) });
+      const query = taskQuery(req.query);
+      res.json({ tasks: (await summaries(req)).filter(task => matchesTask(task, query)) });
     }),
   );
   router.get(
@@ -290,8 +297,9 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         id = req.body.id;
       if (input.parentTaskId === id) fail("Задача не может быть своей подзадачей");
       if (input.parentTaskId) await load(req, input.parentTaskId);
+      const canonical = { ...input }; if (!canonical.projectId) delete canonical.projectId; if (!canonical.party) delete canonical.party;
       const fingerprint = createHash("sha256")
-        .update(JSON.stringify(input))
+        .update(JSON.stringify(canonical))
         .digest("hex");
       let row = await coll("Tasks").findOne({ _id: id });
       if (
@@ -304,9 +312,11 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         fail("Ключ задачи уже использован", 409);
       if (!row) {
         const { fileIds, ...data } = input;
+        await validateReferences(db(), req.team.scope, req.team.workspaceId, data);
         row = {
           _id: id,
           ...filter(req),
+          projectId: null, projectName: '', party: null, partyName: '',
           ...data,
           ...deadlineFields(data, null, req.team.actorId),
           assignees: await people(req, input.assigneeIds),
@@ -391,6 +401,10 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         ...req.body,
       });
       const { fileIds, ...data } = input;
+      // Preserve existing links on unrelated edits, even if an old catalogue entry was removed.
+      const refs = Object.fromEntries(['projectId', 'party'].filter(key => Object.hasOwn(req.body, key) && JSON.stringify(data[key] ?? null) !== JSON.stringify(old[key] ?? null)).map(key => [key, data[key]]));
+      await validateReferences(db(), req.team.scope, req.team.workspaceId, refs);
+      Object.assign(data, refs);
       Object.assign(data, deadlineFields(input, old, req.team.actorId));
       data.assignees = await people(req, input.assigneeIds);
       data.attachments = await attachments(req, fileIds, old);

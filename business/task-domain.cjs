@@ -24,6 +24,10 @@ function instant(value) {
 function taskInput(body, partial = false) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) fail('Некорректная задача');
   const out = {};
+  if (Object.hasOwn(body, 'projectId')) {
+    if (body.projectId !== null && !/^[a-f\d]{24}$/i.test(body.projectId || '')) fail('Выберите проект из системы');
+    out.projectId = body.projectId;
+  }
   if (!partial || Object.hasOwn(body, 'title')) {
     if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 300) fail('Укажите название задачи до 300 символов');
     out.title = body.title.trim();

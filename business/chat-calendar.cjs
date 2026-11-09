@@ -9,6 +9,7 @@ function calendarTask(task) {
     source: 'team-chat', sourceTaskId: task._id, workspaceId: task.workspaceId,
     ...(task.parentTaskId ? { parentTaskId: PREFIX + task.parentTaskId } : {}),
     title: task.description, description: task.description,
+    projectId: task.projectId || null, projectName: task.projectName || '', party: task.party || null, partyName: task.partyName || '',
     assigneeIds: task.assigneeIds || [], assignees: task.assignees || [],
     creatorId: task.creatorId, creatorName: task.creatorName,
     timing: task.timing, dueDate: task.dueDate || null, dueTime: task.dueTime || null,
@@ -18,9 +19,10 @@ function calendarTask(task) {
     version: task.version || 0, createdAt: task.createdAt, updatedAt: task.updatedAt,
   });
 }
-const projection = { parentTaskId: 1, _id: 1, workspaceId: 1, description: 1, assigneeIds: 1, assignees: 1, creatorId: 1, creatorName: 1, timing: 1, dueDate: 1, dueTime: 1, status: 1, version: 1, createdAt: 1, updatedAt: 1, attachments: 1, deletedAt: 1 };
-async function chatCalendar(db, workspace, range) {
+const projection = { projectId: 1, projectName: 1, party: 1, partyName: 1, parentTaskId: 1, _id: 1, workspaceId: 1, description: 1, assigneeIds: 1, assignees: 1, creatorId: 1, creatorName: 1, timing: 1, dueDate: 1, dueTime: 1, status: 1, version: 1, createdAt: 1, updatedAt: 1, attachments: 1, deletedAt: 1 };
+async function chatCalendar(db, workspace, range, projectId) {
   const workspaceId = String(workspace._id), filter = { workspaceId, deletedAt: { $exists: false } };
+  if (projectId) filter.projectId = projectId === '__none__' ? null : projectId;
   if (range) filter.$or = [{ dueDate: { $gte: range.from, $lte: range.to } }, { dueDate: null }];
   const [rows, staff, owner, settings] = await Promise.all([
     db.collection('teamChatTasks').find(filter, { projection }).sort({ createdAt: -1, _id: -1 }).limit(2001).toArray(),

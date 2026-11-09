@@ -31,7 +31,8 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
     if ((task.version || 0) !== expected) fail('Задача изменена. Обновите карточку перед сохранением', 409);
     return expected ? { version: expected } : { $or: [{ version: 0 }, { version: { $exists: false } }] };
   }
-  async function validateReferences(req, data, taskId) {
+  async function validateReferences(req, data, taskId, existing) {
+    if (Object.hasOwn(data, 'projectId') && (!existing || data.projectId !== existing.projectId)) data.projectName = data.projectId ? (await require('../team-chat/task-references.cjs').reference(db(), req.businessScope, identity(req).workspaceId, 'projects', data.projectId)).name : '';
     if (Object.hasOwn(data, 'party')) {
       const row = await partyFor(req, data.party); data.partyName = row?.name || '';
       data.companyId = data.party?.kind === 'companies' ? data.party.id : null;
@@ -66,6 +67,9 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
   router.get('/tasks', wrap(async (req, res) => {
     res.set('Cache-Control', 'private, no-store');
     const filter = active(req);
+    const projectId = req.query.projectId;
+    if (projectId && projectId !== '__none__' && !/^[a-f\d]{24}$/i.test(projectId)) fail('Выберите проект');
+    if (projectId) filter.projectId = projectId === '__none__' ? null : projectId;
     let range;
     if (req.query.from || req.query.to) {
       const from = dateOnly(req.query.from), to = dateOnly(req.query.to);
@@ -83,8 +87,8 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
       for (const party of parties) names.set(`${kind}:${party._id}`, party.name);
     }));
     const tasks = []; for (const row of rows.slice(0, 2000)) tasks.push(await view(req, row, names));
-    const chat = await chatCalendar(db(), req.cachedWorkspace, range);
-    const combined = [...tasks, ...chat.tasks].sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0) || b._id.localeCompare(a._id));
+    const chat = await chatCalendar(db(), req.cachedWorkspace, range, projectId);
+    const combined = [...tasks, ...chat.tasks].filter(task => !projectId || (projectId === '__none__' ? !task.projectId : task.projectId === projectId)).sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0) || b._id.localeCompare(a._id));
     res.json({ ...identity(req), tasks: combined.slice(0, 2000), people: chat.people, truncated: rows.length > 2000 || chat.truncated || combined.length > 2000 });
   }));
   router.get('/tasks/deleted', wrap(async (req, res) => {
@@ -119,7 +123,7 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
   }));
   router.patch('/tasks/:id', write(async (req, res) => {
     const existing = await taskFor(req), version = revision(existing, req.body.expectedVersion);
-    const data = scheduleInput(taskInput(req.body.changes || req.body, true), existing); await validateReferences(req, data, existing._id);
+    const data = scheduleInput(taskInput(req.body.changes || req.body, true), existing); await validateReferences(req, data, existing._id, existing);
     if (!Object.keys(data).length) fail('Нет изменений задачи');
     const scheduleChanged = ['dueDate', 'startsAt', 'endsAt', 'allDay', 'reminderOffsets', 'reminderDates', 'overdueReminders', 'overdueRepeatMinutes', 'status'].some(key => Object.hasOwn(data, key) && canonical(data[key]) !== canonical(existing[key]));
     const task = await coll('Tasks').findOneAndUpdate({ _id: existing._id, ...active(req), ...version }, { $set: { ...data, updatedAt: new Date() }, $inc: { version: 1, ...(scheduleChanged ? { reminderRevision: 1 } : {}) } }, { ...opts(), returnDocument: 'after' });

@@ -461,6 +461,7 @@ function createTeamChatRouter({
   recovery.registerOwner(router, { wrap, owner });
   access.registerOwner(router, { wrap, owner });
   registerConnectorRoutes(router, { db, wrap });
+  router.get('/task-options', wrap(async (req, res) => res.json(await require('./task-references.cjs').taskOptions(db(), req.team.scope, req.team.workspaceId, req.team))));
   router.get('/mcp/context', wrap(async (req, res) => {
     const people = await coll('Members').find({ workspaceId: req.team.workspaceId, status: { $in: ['active', 'invited'] } }, { projection: { _id: 1, name: 1, role: 1, position: 1 } }).toArray();
     const settings = await coll('Settings').findOne({ _id: req.team.workspaceId });
@@ -496,7 +497,7 @@ function createTeamChatRouter({
     onTasksChanged,
     currentSession: () => history?.current()?.session,
   });
-  async function messagePage(p, before, taskId = null) {
+  async function messagePage(p, before, taskId = null, query = {}) {
     const accessible = ownTasks(p) ? await coll('Tasks').find({ workspaceId: p.workspaceId, deletedAt: { $exists: false }, ...taskAccess(p) }, { projection: { _id: 1 } }).toArray() : null;
     const filter = { workspaceId: p.workspaceId },
       messageFilter = {
@@ -508,6 +509,14 @@ function createTeamChatRouter({
           ? { taskId }
           : { $or: [{ taskId: { $exists: false } }, { kind: "task" }] }),
       };
+    const filters = require('./task-filters.cjs').taskQuery(query);
+    if (!taskId && Object.keys(filters).some(key => !['status', 'displayStatus'].includes(key) || filters[key] !== 'all')) {
+      const taskSpecific = Object.keys(filters).some(key => key !== 'person' && !(['status', 'displayStatus'].includes(key) && filters[key] === 'all'));
+      const rows = await coll('Tasks').find({ workspaceId: p.workspaceId, deletedAt: { $exists: false }, ...taskAccess(p) }, { projection: { _id: 1, projectId: 1, party: 1, assigneeIds: 1, status: 1, dueDate: 1, dueTime: 1 } }).toArray();
+      const ids = rows.filter(task => require('./task-filters.cjs').matchesTask(task, filters)).map(task => task._id);
+      messageFilter.$and ||= [];
+      messageFilter.$and.push(taskSpecific ? { kind: 'task', taskId: { $in: ids } } : { $or: [{ kind: 'task', taskId: { $in: ids } }, { kind: { $ne: 'task' }, authorId: filters.person }] });
+    }
     if (before) {
       if (typeof before !== "string" || !/^[a-f\d-]{36}$/i.test(before))
         fail("Некорректная страница истории");
@@ -544,6 +553,7 @@ function createTeamChatRouter({
         req.team,
         req.query.before,
         req.query.taskId || null,
+        req.query,
       );
       const watched = String(req.query.messageIds || "")
         .split(",")
