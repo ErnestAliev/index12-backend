@@ -114,6 +114,8 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
       assert.equal(started.status, 302);
       const loginPage = await request(started.headers.get('location'), { session: role });
       assert.equal(loginPage.headers.get('referrer-policy'), 'same-origin');
+      assert.match(loginPage.headers.get('content-security-policy'), /form-action 'self' https:\/\/chatgpt\.com https:\/\/chat\.openai\.com;/);
+      assert.ok(!loginPage.headers.get('content-security-policy').includes("form-action *"));
       const page = await loginPage.text();
       assert.match(page, /autocomplete="current-password"/);
       assert.ok(!page.includes('Одноразовый код'));
