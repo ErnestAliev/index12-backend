@@ -10,7 +10,12 @@ test("file classification covers Office, PDF, image and media uploads with octet
   for (const [name, type] of Object.entries({
     "report.xlsx": "spreadsheet",
     "sheet.csv": "spreadsheet",
+    "export.tsv": "spreadsheet",
+    "legacy.xlsb": "spreadsheet",
+    "open.fods": "spreadsheet",
     "letter.docx": "document",
+    "notes.md": "document",
+    "data.json": "document",
     "scan.PDF": "pdf",
     "photo.heic": "image",
     "movie.mov": "video",
