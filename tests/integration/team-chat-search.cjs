@@ -57,6 +57,21 @@ module.exports = async ({ api, db, employee, scope }) => {
   assert.equal(result.data.total, 3);
   assert.equal(result.data.taskId, taskId);
   assert.equal(result.data.task._id, taskId);
+  // A task cover stores empty text; its current task body must still count.
+  const taskDescription = 'Снять показания счётчиков', coverId = taskId;
+  await db.collection('teamChatTasks').updateOne({_id:taskId},{$set:{description:taskDescription,attachments:[{fileId:randomUUID(),name:'Отчёт показаний.xlsx'}]}});
+  await db.collection('teamChatMessages').updateOne({_id:coverId},{$set:{text:''}});
+  for(const q of ['Показани','показани','ПОКАЗАНИ']) {
+    result=await api('/search?q='+encodeURIComponent(q),undefined,'GET',employee.auth);
+    assert.equal(result.data.total,1,q+': task body counts once, without counting its unrelated replies');
+    assert.equal(result.data.messageId,coverId);assert.equal(result.data.taskId,null);assert.equal(result.data.task.description,taskDescription);
+  }
+  result=await api('/search?q='+encodeURIComponent('Отчёт показаний.xlsx'),undefined,'GET',employee.auth);assert.equal(result.data.total,1);assert.equal(result.data.messageId,coverId);
+  result=await api('/search?q='+encodeURIComponent('Показани')+'&taskId='+taskId,undefined,'GET',employee.auth);assert.equal(result.data.total,0,'thread search does not duplicate task cover as a reply');
+  await db.collection('teamChatTasks').updateOne({_id:taskId},{$set:{description:'Актуальное изменённое описание',attachments:[]}});
+  await db.collection('teamChatMessages').updateOne({_id:coverId},{$set:{text:taskDescription}});
+  result=await api('/search?q='+encodeURIComponent('Показани'),undefined,'GET',employee.auth);assert.equal(result.data.total,0,'old cover text must not override the current task body');
+  result=await api('/search?q='+encodeURIComponent('изменённое описание'),undefined,'GET',employee.auth);assert.equal(result.data.total,1);
   await db
     .collection("teamChatTasks")
     .updateOne({ _id: taskId }, { $set: { deletedAt: new Date() } });

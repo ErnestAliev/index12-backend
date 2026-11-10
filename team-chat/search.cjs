@@ -30,7 +30,7 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
                   kind: { $nin: ["request", "task"] },
                 }
               : {}),
-            $or: [{ text: regex }, { "attachments.name": regex }],
+            $or: [{ text: regex }, { "attachments.name": regex }, ...(req.query.taskId ? [] : [{ kind: "task" }])],
           },
         },
         {
@@ -46,7 +46,7 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
                   $expr: { $eq: ["$_id", "$$task"] },
                 },
               },
-              { $project: { _id: 1 } },
+              { $project: { _id: 1, description: 1, "attachments.name": 1 } },
             ],
             as: "_searchTask",
           },
@@ -54,6 +54,14 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
         {
           $match: {
             $or: [{ taskId: null }, { "_searchTask.0": { $exists: true } }],
+          },
+        },
+        {
+          $match: {
+            $or: [
+              { kind: { $ne: "task" }, $or: [{ text: regex }, { "attachments.name": regex }] },
+              { kind: "task", $or: [{ "_searchTask.description": regex }, { "_searchTask.attachments.name": regex }] },
+            ],
           },
         },
       ];
