@@ -62,7 +62,10 @@ async function startFixture(options = {}) {
     const context = { require: require('node:module').createRequire(path.join(__dirname, '../../server.js')), changeHistory, isSystemWithdrawal, normalizeTransferData, app, mongoose, Date, Object, Set, Map, Math, Number, String, Array,
       captureMcpEntityHandler: (kind, handler) => (entityHandlers[kind] = handler),
       captureMcpHandler: (kind, handler) => (handlers[kind] = changeHistory.wrapHandler(handler)), mcpVersionFilter, mcpAuditEntry,
+      mcpEventHandlers: handlers,
       withRelatedOperationGuard,
+      createPurchaseService: require('../../utils/intercompanyPurchase').createPurchaseService,
+      includePurchasePeers: require('../../utils/intercompanyPurchase').includePurchasePeers,
       createSubcategoryModel, validateEventSubcategory, subcategorySnapshotFacet, withDaySlotLock, normalizeProjectScope, equalProjectShares,
       getCompositeUserId: async req => req.mcpContext ? (req.cachedWorkspace.isDefault ? String(req.cachedWorkspace.userId) : `${req.cachedWorkspace.userId}_ws_${req.cachedWorkspace._id}`) : req.user.id,
       getCurrentWorkspaceActorRole: req => req.workspaceRole || 'admin',
@@ -89,8 +92,8 @@ async function startFixture(options = {}) {
     run('function normalizeOptionalId(', 'function getWorkspaceStorageUserId(');
     run('const mergeLegacyInterCompanyTransfers =', "app.get('/api/events/all-for-export'");
     run("app.get('/api/events/all-for-export'", "app.get('/api/deals/all'");
-    run("app.get('/api/events',", "app.post('/api/events',");
-    run("app.post('/api/events',", '// 🟢 UPDATED: Use canEdit middleware');
+    run("app.get('/api/events',", "const purchaseService = createPurchaseService");
+    run("const purchaseService = createPurchaseService", '// 🟢 UPDATED: Use canEdit middleware');
     run("app.put('/api/events/:id'", '// 🟢 UPDATED: Allow managers');
     run("app.delete('/api/events/:id'", "app.post('/api/transfers'");
     run("app.post('/api/transfers'", "app.post('/api/import/operations'");

@@ -163,7 +163,12 @@ function createHistoryEngine({ mongoose }) {
       )
         continue;
       let snapshots = [item];
-      if (!item.after && op.transferGroupId) {
+      if (op.purchaseGroupId && (!item.before || !item.after)) {
+        const key = 'purchase:' + op.purchaseGroupId;
+        if (seenGroups.has(key)) continue;
+        seenGroups.add(key);
+        snapshots = changes.filter(x => (x.before || x.after)?.purchaseGroupId === op.purchaseGroupId && (!x.before || !x.after));
+      } else if (!item.after && op.transferGroupId) {
         if (seenGroups.has(op.transferGroupId)) continue;
         seenGroups.add(op.transferGroupId);
         snapshots = changes.filter(

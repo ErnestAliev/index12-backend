@@ -4,6 +4,7 @@ const { randomUUID } = require("node:crypto");
 const { isDeepStrictEqual } = require("node:util");
 const { workspaceAccess } = require("../utils/operationAccess");
 const { scopeQuery } = require("../mcp/finance.cjs");
+const { pairPosition } = require('../utils/intercompanyPurchase');
 const {
   clone,
   diff,
@@ -195,6 +196,7 @@ function createHistoryRouter({
             individualId: "Individual",
             contractorId: "Contractor",
             counterpartyIndividualId: "Individual",
+            counterpartyCompanyId: "Company",
             categoryId: "Category",
             subcategoryId: "Subcategory",
             projectId: "Project",
@@ -362,6 +364,7 @@ function createHistoryRouter({
       individualId: "Individual",
       contractorId: "Contractor",
       counterpartyIndividualId: "Individual",
+            counterpartyCompanyId: "Company",
       categoryId: "Category",
       subcategoryId: "Subcategory",
       projectId: "Project",
@@ -424,7 +427,7 @@ function createHistoryRouter({
       if (row.change.field === "project" && patch.splitMeta?.length)
         patch.projectIds = patch.splitMeta.map((s) => s.projectId);
       const related = [];
-      if (row.change.field === "date" && current.isSplitParent)
+      if (row.change.field === "date" && current.isSplitParent && !current.purchaseGroupId)
         related.push(
           ...(await Event.find({
             ...scope,
@@ -536,7 +539,7 @@ function createHistoryRouter({
         if (await Event.exists({ _id: snapshot._id }))
           fail("Одна из удалённых записей уже восстановлена.");
         await validateReferences(req, snapshot);
-        for (const field of ["offsetIncomeId", "relatedEventId", "parentOpId"])
+        for (const field of ["offsetIncomeId", "relatedEventId", "parentOpId", "purchasePeerId"])
           if (
             snapshot[field] &&
             !snapshots.some((s) => String(s._id) === String(snapshot[field])) &&
@@ -555,6 +558,15 @@ function createHistoryRouter({
         );
         const owner = parent || snapshot,
           slotKey = `${owner._id}:${snapshot.dateKey}`;
+        if (snapshot.purchaseGroupId) {
+          const pairKey = 'purchase:' + snapshot.purchaseGroupId + ':' + snapshot.dateKey;
+          if (!cells.has(pairKey)) {
+            const occupied = await Event.find({...scope,dateKey:snapshot.dateKey}).select('cellIndex').lean();
+            const expense = snapshots.find(row=>row.purchaseGroupId===snapshot.purchaseGroupId && row.type==='expense' && !row.isSplitChild);
+            cells.set(pairKey,pairPosition(occupied,expense?.cellIndex || 0));
+          }
+          data.cellIndex = cells.get(pairKey) + (owner.type === 'income' ? 1 : 0);
+        } else {
         if (!cells.has(slotKey))
           cells.set(
             slotKey,
@@ -565,6 +577,7 @@ function createHistoryRouter({
             ),
           );
         data.cellIndex = cells.get(slotKey);
+        }
         const restored = await new Event(data).save();
         emitToWorkspace(
           req,

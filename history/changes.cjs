@@ -80,7 +80,7 @@ const GROUPS = [
       "isWithdrawal",
     ],
   ],
-  ["contractor", ["contractorId", "counterpartyIndividualId"]],
+  ["contractor", ["contractorId", "counterpartyCompanyId", "counterpartyIndividualId"]],
   [
     "project",
     [
@@ -103,7 +103,11 @@ const EDIT_KEYS = GROUPS.flatMap(([, keys]) => keys);
 const logical = (value, key) =>
   value == null ? (key === "description" ? "" : null) : value;
 function operationChanges(before, after) {
-  return GROUPS.filter(([, keys]) =>
+  const purchase = before.purchaseGroupId || after.purchaseGroupId;
+  const groups = purchase ? GROUPS.filter(([field]) => !['account','route','contractor'].includes(field)).concat([
+    ['route', GROUPS.filter(([field]) => ['account','route','contractor'].includes(field)).flatMap(([,keys])=>keys)]
+  ]) : GROUPS;
+  return groups.filter(([, keys]) =>
     keys.some(
       (key) =>
         !isDeepStrictEqual(logical(before[key], key), logical(after[key], key)),

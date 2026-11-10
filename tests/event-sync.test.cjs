@@ -19,7 +19,7 @@ function loadHandler(method, endMarker, Event, route = '/api/events/:id') {
   let handler;
   const emitted = [];
   const rebuilds = [];
-  const app = { [method]: (_path, ...handlers) => { handler = handlers.at(-1); } };
+  const app = { [method]: (path, ...handlers) => { if (path === route) handler = handlers.at(-1); } };
   const context = {
     isSystemWithdrawal, normalizeTransferData,
     Account: { findOne: async () => ({ companyId: 'company' }) },

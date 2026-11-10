@@ -9,7 +9,7 @@ const ENTITY_COLLECTIONS = ['projects', 'categories', 'subcategories', 'contract
 const sid = value => value == null ? null : String(value._id || value);
 const ALL_PROJECTS = '__all_projects__';
 const MAX_ROWS = 250000;
-const FIELDS = Object.fromEntries(('_id date dateKey type amount description withdrawalRecipient categoryId subcategoryId accountId companyId individualId contractorId counterpartyIndividualId projectId projectScope isTransfer isWithdrawal transferGroupId transferPurpose transferReason fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId excludeFromTotals offsetIncomeId linkedParentId isSplitParent isSplitChild parentOpId isDeleted isWriteOff isWorkAct isRetailWriteOff retailWriteOff').split(' ').map(k => [k, 1]));
+const FIELDS = Object.fromEntries(('_id date dateKey type amount description withdrawalRecipient categoryId subcategoryId accountId companyId individualId contractorId counterpartyIndividualId counterpartyCompanyId purchaseGroupId purchasePeerId projectId projectScope isTransfer isWithdrawal transferGroupId transferPurpose transferReason fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId excludeFromTotals offsetIncomeId linkedParentId isSplitParent isSplitChild parentOpId isDeleted isWriteOff isWorkAct isRetailWriteOff retailWriteOff').split(' ').map(k => [k, 1]));
 
 class PublicError extends Error {}
 function day(value) {
@@ -181,7 +181,7 @@ function groupKey(e, by) {
   if (by === 'day') return e.day;
   if (by === 'month') return e.day.slice(0,7);
   if (by === 'project') return e.shared ? ALL_PROJECTS : sid(e.projectId) || '__unassigned__';
-  if (by === 'counterparty') return e.contractorId ? `contractor:${sid(e.contractorId)}` : e.counterpartyIndividualId ? `individual:${sid(e.counterpartyIndividualId)}` : '__unassigned__';
+  if (by === 'counterparty') return e.counterpartyCompanyId ? `company:${sid(e.counterpartyCompanyId)}` : e.contractorId ? `contractor:${sid(e.contractorId)}` : e.counterpartyIndividualId ? `individual:${sid(e.counterpartyIndividualId)}` : '__unassigned__';
   return sid(e[`${by}Id`]) || '__unassigned__';
 }
 const collections = { project:'projects',category:'categories',subcategory:'subcategories',contractor:'contractors',account:'accounts' };
@@ -192,7 +192,7 @@ function summary(snapshot, input = {}) {
   const groups = new Map();
   for (const e of rows) { const key = groupKey(e,groupBy); if (!groups.has(key)) groups.set(key, empty()); accumulate(groups.get(key),e); }
   const grouped = [...groups].map(([id,t]) => {
-    const name = id === ALL_PROJECTS ? 'Все проекты' : ['month','day'].includes(groupBy) ? id : groupBy === 'counterparty' && id !== '__unassigned__' ? label(snapshot,id.startsWith('contractor:') ? 'contractors' : 'individuals',id.split(':')[1],'Не указано') : label(snapshot,collections[groupBy],id === '__unassigned__' ? null : id,'Не указано');
+    const name = id === ALL_PROJECTS ? 'Все проекты' : ['month','day'].includes(groupBy) ? id : groupBy === 'counterparty' && id !== '__unassigned__' ? label(snapshot,id.startsWith('company:') ? 'companies' : id.startsWith('contractor:') ? 'contractors' : 'individuals',id.split(':')[1],'Не указано') : label(snapshot,collections[groupBy],id === '__unassigned__' ? null : id,'Не указано');
     return { id, name, ...renderTotals(t) };
   });
   const shared = f.projectId && f.projectId !== ALL_PROJECTS ? snapshot.rows.filter(e => e.shared && matches(e,{ ...f,projectId:ALL_PROJECTS })) : [];
@@ -218,7 +218,7 @@ function operation(snapshot,e,asOf) {
     description:String(e.description || '').slice(0,2000),
     project:e.shared ? { id:ALL_PROJECTS,name:'Все проекты' } : ref('projectId','projects','Без проекта'),
     category:ref('categoryId','categories','Без категории'),subcategory:ref('subcategoryId','subcategories','Без подкатегории'),
-    contractor:ref('contractorId','contractors','Не указан'),counterpartyIndividual:ref('counterpartyIndividualId','individuals','Не указан'),
+    counterpartyCompany:ref('counterpartyCompanyId','companies','Не указана'),purchaseGroupId:e.purchaseGroupId || null,purchasePeerId:sid(e.purchasePeerId),contractor:ref('contractorId','contractors','Не указан'),counterpartyIndividual:ref('counterpartyIndividualId','individuals','Не указан'),
     account:ref('accountId','accounts','Не указан'),fromAccount:ref('fromAccountId','accounts','Не указан'),toAccount:ref('toAccountId','accounts','Не указан'),
     company:ref('companyId','companies','Не указана'),individual:ref('individualId','individuals','Не указан'),
     fromCompany:ref('fromCompanyId','companies','Не указана'),toCompany:ref('toCompanyId','companies','Не указана'),fromIndividual:ref('fromIndividualId','individuals','Не указан'),toIndividual:ref('toIndividualId','individuals','Не указан'),

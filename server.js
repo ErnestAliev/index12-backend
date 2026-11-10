@@ -17,6 +17,7 @@ const crypto = require('crypto'); // 🟢 For invitation tokens
 const { withDaySlotLock } = require('./utils/daySlotLock');
 const { workspaceAccess } = require('./utils/operationAccess');
 const { withRelatedOperationGuard } = require('./utils/relatedOperationGuard');
+const { createPurchaseService, includePurchasePeers } = require('./utils/intercompanyPurchase');
 const { registerMcpOperationRoutes, mcpVersionFilter, mcpAuditEntry } = require('./utils/mcpOperations');
 const mcpEventHandlers = {};
 const mcpEntityHandlers = {};
@@ -379,6 +380,9 @@ const eventSchema = new mongoose.Schema({
     individualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
     contractorId: { type: mongoose.Schema.Types.ObjectId, ref: 'Contractor' },
     counterpartyIndividualId: { type: mongoose.Schema.Types.ObjectId, ref: 'Individual' },
+    counterpartyCompanyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', default: null },
+    purchaseGroupId: { type: String, default: null, index: true },
+    purchasePeerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', default: null },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project' },
     projectScope: { type: String, enum: ['selected', 'all'], default: 'selected' },
     isTransfer: { type: Boolean, default: false },
@@ -2097,7 +2101,7 @@ app.put('/api/projects/:id', isAuthenticated, async (req, res) => {
 });
 
 // 🟢 NEW: DELETE /api/projects/:id - Delete project
-app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
+app.delete('/api/projects/:id', isAuthenticated, changeHistory.wrapHandler(async (req, res) => {
     try {
         const { id } = req.params;
         const { deleteOperations } = req.query;
@@ -2110,11 +2114,14 @@ app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
             return res.status(404).json({ error: 'Project not found' });
         }
 
-        const relatedOps = await Event.find({
+        let relatedOps = await Event.find({
             userId,
             projectId: id,
             isDeleted: { $ne: true }
         });
+        if (deleteOperations === 'true') relatedOps = await includePurchasePeers(Event, relatedOps, userId);
+        else if (relatedOps.some(row=>row.purchaseGroupId && row.isSplitChild))
+            return res.status(409).json({message:'Проект используется в распределении связанной покупки. Сначала измените проекты в операции или удалите её вместе с проектом.'});
         const affectedDates = relatedOps.map((op) => op?.date).filter(Boolean);
         const relatedOpIds = relatedOps.map((op) => op?._id).filter(Boolean);
         let deletedOpsCount = 0;
@@ -2151,7 +2158,7 @@ app.delete('/api/projects/:id', isAuthenticated, async (req, res) => {
         console.error('Delete project error:', error);
         res.status(500).json({ error: 'Failed to delete project' });
     }
-});
+}));
 
 // 🟢 NEW: POST /api/projects/reorder - Bulk update order
 app.post('/api/projects/reorder', isAuthenticated, async (req, res) => {
@@ -2271,10 +2278,10 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
         const retailIdObj = retailInd ? retailInd._id : null;
 
         const aggregationResult = await Event.aggregate([
-            { $match: { userId: userId, date: { $lte: now } } }, // 🔥 FIX: Use string userId, not ObjectId
+            { $match: { userId: userId, date: { $lte: now }, $or: [{ purchaseGroupId: null }, { excludeFromTotals: { $ne: true } }] } }, // Paired project roots are represented by their monetary shares.
             {
                 $project: {
-                    type: 1, amount: 1, isTransfer: 1,
+                    type: 1, amount: 1, isTransfer: 1, purchaseGroupId: 1,
                     transferPurpose: 1, transferReason: 1, isWithdrawal: 1,
                     categoryId: 1, subcategoryId: 1, excludeFromTotals: 1, accountId: 1, fromAccountId: 1, toAccountId: 1,
                     companyId: 1, fromCompanyId: 1, toCompanyId: 1,
@@ -2348,7 +2355,7 @@ app.get('/api/snapshot', isAuthenticated, async (req, res) => {
                                                 else: [{ id: "$fromIndividualId", val: { $multiply: ["$absAmount", -1] } }, { id: "$toIndividualId", val: "$absAmount" }]
                                             }
                                         },
-                                        else: { $cond: { if: "$isWriteOff", then: [], else: [{ id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }, { id: "$counterpartyIndividualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }] } }
+                                        else: { $cond: { if: "$isWriteOff", then: [], else: [{ id: "$individualId", val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }, { id: { $cond: ["$purchaseGroupId", null, "$counterpartyIndividualId"] }, val: { $cond: [{ $eq: ["$type", "income"] }, "$absAmount", { $multiply: ["$absAmount", -1] }] } }] } }
                                     }
                                 }
                             }
@@ -2483,7 +2490,7 @@ app.get('/api/events/all-for-export', isAuthenticated, async (req, res) => {
         const events = await Event.find({ userId: userId })
             .lean()
             .sort({ date: 1 })
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId categoryIds subcategoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
+            .populate('accountId companyId contractorId counterpartyCompanyId counterpartyIndividualId projectId categoryId categoryIds subcategoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId');
         res.json(mergeLegacyInterCompanyTransfers(events));
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
@@ -2529,13 +2536,24 @@ app.get('/api/events', isAuthenticated, async (req, res) => {
         // 🟢 PERFORMANCE: .lean() используется для возврата простых объектов без накладных расходов Mongoose
         const events = await Event.find(query)
             .lean()
-            .populate('accountId companyId contractorId counterpartyIndividualId projectId categoryId categoryIds subcategoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
+            .populate('accountId companyId contractorId counterpartyCompanyId counterpartyIndividualId projectId categoryId categoryIds subcategoryId individualId fromAccountId toAccountId fromCompanyId toCompanyId fromIndividualId toIndividualId')
             .sort({ date: 1 });
 
         res.json(events);
     } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
+const purchaseService = createPurchaseService({ Event, Account, Company, Individual, Project, Category, Subcategory,
+    ensureAccess: ensureManagerCanAccessOperationAccounts, validateSubcategory: validateEventSubcategory,
+    dateKeyOf: _getDateKey, dayOfYearOf: _getDayOfYear, auditEntry: mcpAuditEntry });
+function publishPurchase(req, result) {
+    const previousIds = new Set(result.previous.map(row => String(row._id)));
+    for (const operation of result.operations) emitToWorkspace(req, req.user.currentWorkspaceId,
+        previousIds.has(String(operation._id)) ? 'operation_updated' : 'operation_added', operation,
+        { affectedDateKeys: [...new Set([...result.previous.map(row => row.dateKey), operation.dateKey])] });
+    for (const id of result.deletedIds) emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', id);
+    return { ...result.primary.toObject(), linkedOperations: result.operations.map(row => row.toObject()), deletedOperationIds: result.deletedIds };
+}
 app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), captureMcpHandler('create', async (req, res) => {
     try {
         let data = normalizeProjectScope(normalizeEventCategoryFields(req.body));
@@ -2545,6 +2563,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
         }
         delete data.changeHistory; delete data.createdVia; delete data.updatedVia; delete data.mcpRelationLocks;
         const userId = await getCompositeUserId(req); // 🟢 UPDATED: Use composite ID (async)
+        if (data.purchaseGroupId || data.purchasePeerId) return res.status(400).json({ message: 'Связь расхода и дохода создаётся только системой.' });
         await validateEventSubcategory(data, null, { Subcategory, userId: req.mcpContext?.scope?.userId || userId });
         await ensureManagerCanAccessOperationAccounts(req, data);
         let date, dateKey, dayOfYear;
@@ -2581,6 +2600,10 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             return res.status(400).json({ message: 'Missing date info' });
         }
 
+        if (data.purchaseAccountId) {
+            const result = await withDaySlotLock(userId, dateKey, () => purchaseService.save(req, userId, {...data, date}));
+            return res.status(201).json(publishPurchase(req, result));
+        }
         const newEvent = await withRelatedOperationGuard(Event, userId, data, () => withDaySlotLock(userId, dateKey, async () => {
             let cellIndex;
             if (data.isSplitChild) {
@@ -2617,7 +2640,7 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
             return newEvent;
         }));
 
-        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await newEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyCompanyId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         triggerContextPacketRebuildByDates({
             userId,
@@ -2636,6 +2659,10 @@ app.post('/api/events', isAuthenticated, checkWorkspacePermission(['admin', 'man
     }
 }));
 
+app.post('/api/intercompany-purchases', isAuthenticated, checkWorkspacePermission(['admin', 'manager']), (req, res, next) => {
+    if (!req.body.purchaseAccountId) return res.status(400).json({ message: 'Выберите счёт второй компании.' });
+    return mcpEventHandlers.create(req, res, next);
+});
 // 🟢 UPDATED: Use canEdit middleware
 app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEdit, captureMcpHandler('update', async (req, res) => {
     try {
@@ -2662,6 +2689,9 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
         if (!existingEvent) {
             return res.status(404).json({ message: 'Event not found' });
         }
+        if ((Object.hasOwn(updatedData, 'purchaseGroupId') && updatedData.purchaseGroupId !== existingEvent.purchaseGroupId) ||
+            (Object.hasOwn(updatedData, 'purchasePeerId') && String(updatedData.purchasePeerId || '') !== String(existingEvent.purchasePeerId || '')))
+            return res.status(400).json({ message: 'Нельзя изменять связь расхода и дохода.' });
         if (existingEvent.type === 'transfer' || updatedData.type === 'transfer') {
             updatedData = await normalizeTransferData(updatedData, {
                 previous: existingEvent.toObject(), findAccount: id => Account.findOne({ _id: id, ...(req.mcpContext?.scope || { userId: userIdQuery }) })
@@ -2701,6 +2731,11 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             updatedData.dayOfYear = _getDayOfYear(updatedData.date);
         }
 
+        if (existingEvent.purchaseGroupId || updatedData.purchaseAccountId) {
+            const result = await withDaySlotLock(userId, updatedData.dateKey || existingEvent.dateKey,
+                () => purchaseService.save(req, userId, updatedData, existingEvent));
+            return res.status(200).json(publishPurchase(req, result));
+        }
         // Editing a shared payment can restore explicit project allocations.
         const projectSelectionChanged = Object.prototype.hasOwnProperty.call(updatedData, 'projectId') || Object.prototype.hasOwnProperty.call(updatedData, 'projectIds');
         const rebuildProjectShares = updatedData.projectScope !== 'all' && !existingEvent.isSplitChild &&
@@ -2810,7 +2845,7 @@ app.put('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), canEd
             const children = await Event.find({ userId: userIdQuery, parentOpId: existingEvent._id, isSplitChild: true }).populate('categoryId categoryIds subcategoryId');
             for (const child of children) emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_updated', child);
         }
-        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
+        await updatedEvent.populate(['accountId', 'companyId', 'contractorId', 'counterpartyCompanyId', 'counterpartyIndividualId', 'projectId', 'categoryId', 'categoryIds', 'subcategoryId', 'individualId', 'fromAccountId', 'toAccountId', 'fromCompanyId', 'toCompanyId', 'fromIndividualId', 'toIndividualId']);
 
         triggerContextPacketRebuildByDates({
             userId,
@@ -2862,6 +2897,19 @@ app.delete('/api/events/:id', checkWorkspacePermission(['admin', 'manager']), ca
             if (eventToDelete.createdBy && eventToDelete.createdBy !== req.user.id) {
                 return res.status(403).json({ message: 'Managers can only delete their own operations' });
             }
+        }
+        if (eventToDelete.purchaseGroupId) {
+            const siblings = await Event.find({ userId: userIdQuery, purchaseGroupId: eventToDelete.purchaseGroupId }).lean();
+            if (req.workspaceRole === 'manager' && siblings.some(row => row.createdBy && String(row.createdBy) !== String(req.user.id)))
+                return res.status(403).json({ message: 'Managers can only delete their own operations' });
+            await ensureManagerCanAccessOperationAccounts(req, eventToDelete);
+            if (req.mcpContext && Number(eventToDelete.syncVersion || 0) !== req.mcpContext.expectedVersion)
+                return res.status(409).json({ message: 'Операция уже изменена. Прочитайте её заново.' });
+            const deletedOperationIds = siblings.map(row => String(row._id));
+            await Event.deleteMany({ userId: userIdQuery, purchaseGroupId: eventToDelete.purchaseGroupId });
+            emitToWorkspace(req, req.user.currentWorkspaceId, 'operation_deleted', String(id),
+                { deletedOperationIds, affectedDateKeys: [...new Set(siblings.map(row => row.dateKey))] });
+            return res.status(200).json({ ...eventToDelete.toObject(), deletedOperationIds });
         }
         // Proceed with regular delete
 
@@ -3324,7 +3372,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
         else if (model === Category) emitEventName = 'category';
     }
 
-    app.delete(`/api/${path}/:id`, isAuthenticated, async (req, res) => {
+    app.delete(`/api/${path}/:id`, isAuthenticated, changeHistory.wrapHandler(async (req, res) => {
         try {
             const { id } = req.params; const { deleteOperations } = req.query; const userId = await getCompositeUserId(req);
             const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
@@ -3355,7 +3403,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
             };
 
             if (deleteOperations === 'true') {
-                const relatedOps = await loadRelatedOps();
+                const relatedOps = await includePurchasePeers(Event, await loadRelatedOps(), userId);
                 affectedDates.push(...relatedOps.map((op) => op?.date).filter(Boolean));
 
                 const idsToDelete = relatedOps.map(op => op._id);
@@ -3397,7 +3445,7 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
 
             res.status(200).json({ message: 'Deleted', id, deletedOpsCount });
         } catch (err) { res.status(500).json({ message: err.message }); }
-    });
+    }));
 };
 
 generateCRUD(Account, 'accounts');
