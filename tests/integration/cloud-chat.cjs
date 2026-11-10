@@ -18,14 +18,18 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     const foreign = await Workspace.create({ name: 'Foreign', userId: String(stranger._id), isDefault: true });
     const db = mongoose.connection.db, scope = { actorId: String(actor._id), workspaceId: String(workspace._id) };
     chatRouter = require('../../team-chat/router.cjs').createTeamChatRouter({ db: () => db, Workspace, User, history: fixture.audit, getWorkspaceStorageUserId: workspace => String(workspace.userId), frontendUrl: new URL(fixture.apiUrl).origin });
-    let calls = 0, failAfterWrite = false, mode = 'calendar';
+    let calls = 0, failAfterWrite = false, mode = 'calendar', modelState={};
     const documentBytes = Buffer.from('%PDF-1.7\ngenerated ESF fixture'), generatedTaskId = randomUUID();
     const request = async (url, options) => {
-      if (!url.startsWith('https://api.openai.com/')) return fetch(url, options);
+      if (!url.startsWith('https://api.openai.com/')) {
+        if(mode.startsWith('model:') && url.includes('/api/mcp/business/tasks') && options.method==='POST') { modelState.backendWrites++; if(mode==='model:tool-error')return Response.json({error:{code:'FORBIDDEN',message:'Fixture denial'}},{status:403}); }
+        return fetch(url, options);
+      }
       if (url === 'https://api.openai.com/v1/containers/cntr_fixture/files/cfile_fixture') return Response.json({ path: '/mnt/data/ЭСФ.pdf' });
       if (url === 'https://api.openai.com/v1/containers/cntr_fixture/files/cfile_fixture/content') return new Response(documentBytes);
       assert.equal(url, 'https://api.openai.com/v1/responses'); calls++;
       const body = JSON.parse(options.body);
+      if(mode.startsWith('model:'))return require('./cloud-model-response.cjs').reply(mode,body,modelState);
       assert.equal(body.store, false); assert.ok(body.tools.some(t => t.name === 'index12_create_task')); assert.ok(body.tools.some(t => t.name === 'index12_onec_update_object')); assert.match(body.instructions,/Дата сообщения в Asia\/Almaty/);
       if (mode === 'generated') {
         assert.ok(body.tools.some(t => t.type === 'code_interpreter'));
@@ -78,6 +82,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     const second = await api('/chats/' + chat.id + '/jobs', { kind: 'send', requestId: randomUUID(), message: 'Создай ещё одну задачу.' }); const failed = await waitJob(second.job.id);
     assert.equal(failed.status, 'failed'); assert.equal(failed.result.execution.completed.length, 1); assert.ok(!failed.error.includes('private internal'));
     assert.equal(await db.collection('mcpCredentials').countDocuments({ source: 'cloud_chat', revokedAt: null }), 0);
+    await require('./cloud-model-response.cjs').verify({api,db,scope,waitJob,setMode:value=>{mode=value;modelState={calls:0,backendWrites:0,key:randomUUID()};},getState:()=>modelState});
     console.log('PASS: server chat without desktop worker, real MCP task writes and durable receipts, idempotent retries, cross-device history, tenant isolation, interrupted model response preserves writes, ephemeral credentials revoked');
   } finally {
     cloud?.stop(); if (cloud) for (let i = 0; cloud.running && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 20));
