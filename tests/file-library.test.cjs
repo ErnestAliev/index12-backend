@@ -9,6 +9,10 @@ const {
 test("file classification covers Office, PDF, image and media uploads with octet-stream MIME", () => {
   for (const [name, type] of Object.entries({
     "report.xlsx": "spreadsheet",
+    "table.MXL": "spreadsheet",
+    "page.html": "document",
+    "page.htm": "document",
+    "page.xhtml": "document",
     "sheet.csv": "spreadsheet",
     "export.tsv": "spreadsheet",
     "legacy.xlsb": "spreadsheet",

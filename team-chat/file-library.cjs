@@ -41,8 +41,8 @@ function fileType(file) {
     return "image";
   if (mime === "application/pdf" || extension === "pdf") return "pdf";
   if (
-    /spreadsheet|excel|csv/.test(mime) ||
-    ["xls", "xlsx", "xlsm", "xlsb", "csv", "tsv", "ods", "fods", "numbers"].includes(extension)
+    /spreadsheet|excel|csv|(?:vnd\.1c\.|x-)mxl/.test(mime) ||
+    ["xls", "xlsx", "xlsm", "xlsb", "csv", "tsv", "ods", "fods", "numbers", "mxl"].includes(extension)
   )
     return "spreadsheet";
   if (
@@ -56,7 +56,7 @@ function fileType(file) {
   )
     return "audio";
   return /word|text|presentation/.test(mime) ||
-    ["doc", "docx", "odt", "txt", "rtf", "ppt", "pptx", "md", "json", "xml", "log", "yaml", "yml", "html", "htm"].includes(extension)
+    ["doc", "docx", "odt", "txt", "rtf", "ppt", "pptx", "md", "json", "xml", "log", "yaml", "yml", "html", "htm", "xhtml"].includes(extension)
     ? "document"
     : "other";
 }
