@@ -2227,6 +2227,28 @@ app.get('/api/deals/all', isAuthenticated, async (req, res) => {
 // END INVITATION ROUTES
 // Cloud and desktop chat share scoped MCP authorization and durable execution.
 const cloudChat = new (require('./codex/cloud.cjs').CloudChat)({ db: () => mongoose.connection.db, User, Workspace });
+let shuttingDown = false;
+async function shutdownServer() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Leave time for persisting the interrupted execution before Render's
+    // default 30-second shutdown deadline. Never start another queued job.
+    const abort = setTimeout(() => cloudChat.stop(), 25000);
+    const force = setTimeout(() => process.exit(1), 29000);
+    try {
+        await cloudChat.shutdown();
+        server.closeAllConnections();
+        await new Promise(resolve => server.close(resolve));
+        await mongoose.disconnect();
+        clearTimeout(abort); clearTimeout(force);
+        process.exit(0);
+    } catch (error) {
+        console.error('[Shutdown]', error.name);
+        process.exit(1);
+    }
+}
+process.once('SIGTERM', shutdownServer);
+process.once('SIGINT', shutdownServer);
 const desktopRouter = require('./codex/router.cjs').createDesktopRouter({
     db: () => mongoose.connection.db, Workspace, isAuthenticated, cloudService: cloudChat, frontendUrl: FRONTEND_URL, allowedOrigins: ALLOWED_ORIGINS, history: changeHistory,
 });

@@ -33,6 +33,13 @@ class ExecutionStore {
     await this.ready();
     const row = { _id: job._id, actorId: job.actorId, workspaceId: job.workspaceId, chatId: job.chatId,
       workerId, ...(job.backend === 'cloud' ? { workerBackend: 'cloud' } : {}), requestHash: job.requestHash || null, state: 'running', active: true, revision: 0, createdAt: new Date(), threadId: null, turnId: null };
+    if (job.backend === 'cloud' && job.resumedFrom && job.restartCount === 1) {
+      const { _id, revision, createdAt, ...fields } = row;
+      const resumed = await this.runs().updateOne({ _id, actorId: job.actorId, workspaceId: job.workspaceId, chatId: job.chatId, workerId: job.resumedFrom, state: 'interrupted', active: false, 'error.code': 'SERVER_RESTARTED' }, {
+        $set: { ...fields, restartedAt: new Date() }, $inc: { revision: 1 }, $unset: { error: '', finishedAt: '' },
+      });
+      if (resumed.matchedCount) return row;
+    }
     await this.runs().insertOne(row);
     return row;
   }
@@ -77,7 +84,8 @@ class ExecutionStore {
   async stop(identity, scope, error) {
     if (!identity?.executionId) return;
     const safe = { code: error.code || error.detail?.code || 'TOOL_ERROR', message: error.message || error.detail?.message || 'Выполнение остановлено.' };
-    await this.runs().updateOne({ _id: identity.executionId, ...scope, state: 'running' }, { $set: { state: 'failed', active: false, error: safe, finishedAt: new Date() } });
+    const turn = Object.fromEntries(['threadId', 'turnId'].filter(key => identity[key]).map(key => [key, identity[key]]));
+    await this.runs().updateOne({ _id: identity.executionId, ...scope, ...turn, state: 'running' }, { $set: { state: 'failed', active: false, error: safe, finishedAt: new Date() } });
   }
   async finish(id, workerId, state = 'completed', error) {
     await this.runs().updateOne({ _id: id, workerId, state: 'running' }, { $set: { state, active: false, finishedAt: new Date(), ...(error ? { error } : {}) } });

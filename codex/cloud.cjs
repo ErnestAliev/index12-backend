@@ -29,26 +29,63 @@ class CloudChat {
     try { const row = await this.db().collection('cloudLeases').findOneAndUpdate({ _id: 'chat', $or: [{ instanceId: this.instanceId }, { seenAt: { $lt: new Date(Date.now() - 45000) } }] }, { $set: { instanceId: this.instanceId, seenAt: new Date() } }, { upsert: true, returnDocument: 'after' }); return !!row; } catch (error) { if (error.code === 11000) return false; throw error; }
   }
   async worker(scope) { return { _id: `${scope.actorId}:${scope.workspaceId}`, instanceId: this.instanceId, seenAt: new Date(), provider: 'cloud', projectName: 'INDEX12' }; }
+  async checkpoint(job, write = false) {
+    const result = await this.db().collection('desktopJobs').updateOne(
+      { _id: job._id, workerId: this.instanceId, status: 'running', active: true },
+      { $set: { checkpointAt: new Date(), ...(write ? { replaySafe: false } : {}) } },
+    );
+    if (!result.matchedCount) throw Error('Обработка передана другому серверу.');
+  }
   async recover() {
     for await (const job of this.db().collection('desktopJobs').find({ backend: 'cloud', status: 'running', active: true, workerId: { $ne: this.instanceId } })) {
-      const executions = new ExecutionStore(this.db()); await executions.finish(job._id, job.workerId, 'interrupted', { code: 'SERVER_RESTARTED', message: 'Сервер был перезапущен. Проверьте сохранённые действия перед повтором.' }).catch(() => {});
-      const report = await executions.report(job._id, this.scope(job)); const completed = report.events.map(e => receipt({ tool: e.tool, result: { structuredContent: e.result } })).filter(Boolean);
-      await this.db().collection('desktopJobs').updateOne({ _id: job._id, workerId: job.workerId, status: 'running' }, { $set: { active: false, status: 'failed', error: 'Сервер был перезапущен. Сохранённые действия доступны в журнале.', result: { execution: executionReport({ code: 'SERVER_RESTARTED', message: 'Проверьте журнал перед повтором.' }, completed) }, expiresAt: new Date(Date.now() + 86400000) } });
+      const db = this.db(), scope = this.scope(job);
+      if (await db.collection('cloudWorkers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}`, instanceId: job.workerId, seenAt: { $gt: new Date(Date.now() - 45000) } })) continue;
+      const executions = new ExecutionStore(db), report = await executions.report(job._id, scope);
+      const credentials = { source: 'cloud_chat', 'execution.executionId': job._id, 'execution.turnId': report.run?.turnId || job._id, revokedAt: null };
+      // Persisted before every write tool and before saving the answer. Missing
+      // flags on older jobs are deliberately unsafe; never replay uncertain writes.
+      if (job.replaySafe === true && (job.restartCount || 0) < 1 && !report.events.length && (!report.run || report.run.state === 'running')) {
+        const requeued = await db.collection('desktopJobs').updateOne({ _id: job._id, workerId: job.workerId, status: 'running', active: true, replaySafe: true }, {
+          $set: { status: 'queued', resumedFrom: job.workerId, workerId: null, recoveredAt: new Date() }, $inc: { restartCount: 1 },
+        });
+        if (requeued.matchedCount) {
+          await executions.finish(job._id, job.workerId, 'interrupted', { code: 'SERVER_RESTARTED', message: 'Чтение будет восстановлено после смены обработчика.' });
+          await db.collection('mcpCredentials').updateMany(credentials, { $set: { revokedAt: new Date() } });
+          continue;
+        }
+      }
+      await executions.finish(job._id, job.workerId, 'interrupted', { code: 'SERVER_RESTARTED', message: 'Обработчик запроса отключился. Проверьте сохранённые действия перед повтором.' });
+      const settled = await executions.report(job._id, scope);
+      const completed = settled.events.map(e => receipt({ tool: e.tool, result: { structuredContent: e.result } })).filter(Boolean);
+      await db.collection('mcpCredentials').updateMany(credentials, { $set: { revokedAt: new Date() } });
+      await db.collection('desktopJobs').updateOne({ _id: job._id, workerId: job.workerId, status: 'running' }, { $set: { active: false, status: 'failed', error: 'Обработка прервалась при смене сервера. Сохранённые действия доступны в журнале.', result: { execution: executionReport({ code: 'SERVER_RESTARTED', message: 'Проверьте журнал перед повтором.' }, completed) }, expiresAt: new Date(Date.now() + 86400000) } });
     }
   }
   start() { if (!this.configured || this.timer) return; this.stopped = false; this.timer = setInterval(() => this.kick(), this.pollMs); this.timer.unref(); this.kick(); }
-  stop() { this.stopped = true; clearInterval(this.timer); this.timer = null; this.controller?.abort(); }
-  kick() { if (!this.configured || this.running || this.stopped) return; this.running = true; void this.drain().catch(error => console.error('[Cloud chat]', error.name)).finally(() => { this.running = false; }); }
+  stop({ drain = false } = {}) { this.stopped = true; clearInterval(this.timer); this.timer = null; if (!drain) this.controller?.abort(); }
+  async shutdown() {
+    this.stop({ drain: true });
+    await this.task;
+    await this.db().collection('cloudLeases').deleteOne({ _id: 'chat', instanceId: this.instanceId });
+  }
+  kick() { if (!this.configured || this.running || this.stopped) return; this.running = true; this.task = this.drain().catch(error => console.error('[Cloud chat]', error.name)).finally(() => { this.running = false; }); }
   async drain() {
     if (!await this.lease()) return;
     await this.recover();
     while (!this.stopped) {
-      const job = await this.db().collection('desktopJobs').findOneAndUpdate({ backend: 'cloud', active: true, status: 'queued' }, { $set: { status: 'running', workerId: this.instanceId, startedAt: new Date() } }, { sort: { createdAt: 1 }, returnDocument: 'after' }); if (!job) break;
+      const job = await this.db().collection('desktopJobs').findOneAndUpdate({ backend: 'cloud', active: true, status: 'queued' }, { $set: { status: 'running', workerId: this.instanceId, startedAt: new Date(), replaySafe: true } }, { sort: { createdAt: 1 }, returnDocument: 'after' }); if (!job) break;
+      if (this.stopped) {
+        await this.db().collection('desktopJobs').updateOne({ _id: job._id, workerId: this.instanceId, status: 'running' }, { $set: { status: 'queued' }, $unset: { workerId: '' } });
+        break;
+      }
       const scope = this.scope(job), worker = await this.worker(scope); await this.db().collection('cloudWorkers').updateOne({ _id: worker._id }, { $set: worker }, { upsert: true });
       this.controller = new AbortController(); const deadline = setTimeout(() => this.controller.abort(), 10 * 60000); deadline.unref();
       const heartbeat = setInterval(() => { void Promise.all([this.lease().then(held => { if (!held) this.controller?.abort(); }), this.db().collection('cloudWorkers').updateOne({ _id: worker._id, instanceId: this.instanceId }, { $set: { seenAt: new Date() } })]).catch(() => this.controller?.abort()); }, 10000); heartbeat.unref();
       try { const result = await this.run(job, this.controller.signal); await this.db().collection('desktopJobs').updateOne({ _id: job._id, workerId: this.instanceId, active: true }, { $set: { status: 'completed', active: false, result, expiresAt: new Date(Date.now() + 86400000) }, $unset: { message: '', attachments: '' } }); }
       catch (error) {
+        // A deployment may exhaust its shutdown grace while only reading. Leave
+        // that job for the next lease owner; ordinary errors still stop the turn.
+        if (this.stopped && this.controller.signal.aborted && await this.db().collection('desktopJobs').findOne({ _id: job._id, workerId: this.instanceId, active: true, replaySafe: true })) continue;
         const executions = new ExecutionStore(this.db()); await executions.finish(job._id, this.instanceId, 'interrupted', error.detail || { code: 'CLOUD_ERROR', message: error.message }).catch(() => {});
         const report = await executions.report(job._id, scope); const completed = report.events.map(e => receipt({ tool: e.tool, result: { structuredContent: e.result } })).filter(Boolean);
         await this.db().collection('desktopJobs').updateOne({ _id: job._id, workerId: this.instanceId, active: true }, { $set: { status: 'failed', active: false, error: error.message, result: { execution: executionReport(report.run?.error || error.detail || { code: 'CLOUD_ERROR', message: error.message }, completed) }, expiresAt: new Date(Date.now() + 86400000) } });
@@ -80,7 +117,7 @@ class CloudChat {
     await this.importHistory(chat, scope);
     if (job.kind === 'history') return this.history(chat._id, scope, job.cursor);
     const executions = new ExecutionStore(db); await executions.open(job, this.instanceId);
-    const threadId = `cloud:${chat._id}`, turnId = job._id; await executions.bind(job._id, this.instanceId, threadId, turnId);
+    const threadId = `cloud:${chat._id}`, turnId = job.restartCount ? `${job._id}:restart:${job.restartCount}` : job._id; await executions.bind(job._id, this.instanceId, threadId, turnId);
     const previous = await this.history(chat._id, scope);
     const canWrite = access.role === 'admin' || access.role === 'manager' && access.accountIds?.length;
     const policy = canWrite && await db.collection('mcpCredentials').findOne({ actorId: scope.actorId, workspaceId: scope.workspaceId, source: { $in: ['local_operator', 'remote_oauth'] }, confirmationMode: 'direct', revokedAt: null, expiresAt: { $gt: new Date() } });
@@ -103,7 +140,7 @@ class CloudChat {
       await db.collection('desktopFiles').insertOne(file); generated.set(key, fileMeta(file));
       return { desktopFileId: file._id };
     };
-    const runtime = createMcpRuntime({ config, database: async () => db, request: this.request, resolveContainerFile, runtimeEnv: { INDEX12_MCP_EXECUTION_MODE: 'durable' }, executionMeta: { 'x-codex-turn-metadata': { thread_id: threadId, turn_id: turnId } }, elicit: async params => { const answer = await broker.ask({ method: 'mcpServer/elicitation/request', params: { ...params, serverName: 'INDEX12' } }, job, signal); if (answer.failure) await executions.stop({ executionId: job._id, threadId, turnId }, scope, answer.failure); return answer.result; } });
+    const runtime = createMcpRuntime({ config, database: async () => db, request: this.request, resolveContainerFile, runtimeEnv: { INDEX12_MCP_EXECUTION_MODE: 'durable' }, executionMeta: { 'x-codex-turn-metadata': { thread_id: threadId, turn_id: turnId } }, elicit: async params => { await this.checkpoint(job, true); const answer = await broker.ask({ method: 'mcpServer/elicitation/request', params: { ...params, serverName: 'INDEX12' } }, job, signal); if (answer.failure) await executions.stop({ executionId: job._id, threadId, turnId }, scope, answer.failure); return answer.result; } });
     const uploaded = [];
     try {
       const content = [{ type: 'input_text', text: job.message || 'Изучи приложенные файлы.' }];
@@ -132,6 +169,7 @@ class CloudChat {
         for (const call of calls) {
           if (!runtime.definitions.has(call.name) || !INDEX12_TOOLS.includes(call.name)) throw Error('Запрошен недоступный инструмент.');
           let args; try { args = JSON.parse(call.arguments); } catch { throw Error('Некорректные параметры инструмента.'); }
+          await this.checkpoint(job, runtime.definitions.get(call.name).write);
           const result = await runtime.invoke(call.name, args); if (result?.isError) { const error = Error(result.structuredContent?.error?.message || 'Инструмент INDEX12 отклонил запрос.'); error.detail = result.structuredContent?.error; throw error; }
           const resources = (result.content || []).filter(part => part.type === 'resource' && part.resource?.blob);
           if (resources.length) {
@@ -153,6 +191,7 @@ class CloudChat {
         }
       }
       if (!text) throw Error('Достигнут лимит шагов. Проверьте выполненные действия и уточните запрос.');
+      await this.checkpoint(job, true);
       const artifacts = [];
       for (const item of finalResponse?.output || []) if (item.type === 'message') for (const part of item.content || []) for (const annotation of part.annotations || []) if (annotation.type === 'container_file_citation' && containers.has(annotation.container_id)) {
         await resolveContainerFile({ containerId: annotation.container_id, containerFileId: annotation.file_id, name: safeName(annotation.filename) || 'Отчёт' });
