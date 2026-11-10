@@ -1,6 +1,6 @@
 "use strict";
 const { fail, text } = require("./domain.cjs");
-const { taskAccess } = require('./mcp-access.cjs');
+const { taskAccess } = require("./mcp-access.cjs");
 const escape = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
   router.get(
@@ -27,10 +27,14 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
             ...(req.query.taskId
               ? {
                   taskId: req.query.taskId,
-                  kind: { $nin: ["request", "task"] },
+                  kind: { $ne: "request" },
                 }
               : {}),
-            $or: [{ text: regex }, { "attachments.name": regex }, ...(req.query.taskId ? [] : [{ kind: "task" }])],
+            $or: [
+              { text: regex },
+              { "attachments.name": regex },
+              { kind: "task" },
+            ],
           },
         },
         {
@@ -46,7 +50,7 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
                   $expr: { $eq: ["$_id", "$$task"] },
                 },
               },
-              { $project: { _id: 1, description: 1, "attachments.name": 1 } },
+              { $project: { _id: 1, description: 1, attachments: 1 } },
             ],
             as: "_searchTask",
           },
@@ -59,23 +63,173 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
         {
           $match: {
             $or: [
-              { kind: { $ne: "task" }, $or: [{ text: regex }, { "attachments.name": regex }] },
-              { kind: "task", $or: [{ "_searchTask.description": regex }, { "_searchTask.attachments.name": regex }] },
+              {
+                kind: { $ne: "task" },
+                $or: [{ text: regex }, { "attachments.name": regex }],
+              },
+              {
+                kind: "task",
+                $or: [
+                  ...(req.query.taskId
+                    ? []
+                    : [{ "_searchTask.description": regex }]),
+                  { "_searchTask.attachments.name": regex },
+                ],
+              },
             ],
           },
         },
       ];
+      if (req.query.taskId)
+        pipeline.push({
+          $set: {
+            kind: {
+              $cond: [{ $eq: ["$kind", "task"] }, "task-files", "$kind"],
+            },
+            text: { $cond: [{ $eq: ["$kind", "task"] }, "", "$text"] },
+            attachments: {
+              $cond: [
+                { $eq: ["$kind", "task"] },
+                { $arrayElemAt: ["$_searchTask.attachments", 0] },
+                "$attachments",
+              ],
+            },
+          },
+        });
+      else
+        pipeline.push(
+          // Prefer a match in the current task body to matches in its discussion.
+          {
+            $set: {
+              _searchPriority: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: [{ $ifNull: ["$taskId", null] }, null] },
+                      { $ne: ["$kind", "task"] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+          { $sort: { _searchPriority: 1, createdAt: 1, _id: 1 } },
+          {
+            $group: {
+              _id: { $ifNull: ["$taskId", "$_id"] },
+              _searchDocument: { $first: "$$ROOT" },
+              _searchInsideCount: { $sum: "$_searchPriority" },
+            },
+          },
+          {
+            $lookup: {
+              from: "teamChatMessages",
+              let: { task: "$_searchDocument.taskId" },
+              pipeline: [
+                {
+                  $match: {
+                    workspaceId,
+                    kind: "task",
+                    deletedAt: { $exists: false },
+                    $expr: { $eq: ["$taskId", "$$task"] },
+                  },
+                },
+                { $limit: 1 },
+              ],
+              as: "_searchCover",
+            },
+          },
+          {
+            $replaceWith: {
+              $mergeObjects: [
+                {
+                  $cond: [
+                    { $eq: ["$_searchDocument._searchPriority", 1] },
+                    { $arrayElemAt: ["$_searchCover", 0] },
+                    "$_searchDocument",
+                  ],
+                },
+                {
+                  _searchPriority: "$_searchDocument._searchPriority",
+                  _searchInsideCount: "$_searchInsideCount",
+                  _searchInside: {
+                    $cond: [
+                      { $eq: ["$_searchDocument._searchPriority", 1] },
+                      {
+                        $cond: [
+                          {
+                            $regexMatch: {
+                              input: { $ifNull: ["$_searchDocument.text", ""] },
+                              regex,
+                            },
+                          },
+                          "$_searchDocument.text",
+                          {
+                            $ifNull: [
+                              {
+                                $arrayElemAt: [
+                                  {
+                                    $map: {
+                                      input: {
+                                        $filter: {
+                                          input: {
+                                            $ifNull: [
+                                              "$_searchDocument.attachments",
+                                              [],
+                                            ],
+                                          },
+                                          as: "file",
+                                          cond: {
+                                            $regexMatch: {
+                                              input: {
+                                                $ifNull: ["$$file.name", ""],
+                                              },
+                                              regex,
+                                            },
+                                          },
+                                        },
+                                      },
+                                      as: "file",
+                                      in: "$$file.name",
+                                    },
+                                  },
+                                  0,
+                                ],
+                              },
+                              "",
+                            ],
+                          },
+                        ],
+                      },
+                      "",
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+          // A deleted/missing cover must never open an orphaned discussion.
+          { $match: { _id: { $exists: true } } },
+        );
       const [count] = await coll("Messages")
         .aggregate([...pipeline, { $count: "total" }], { maxTimeMS: 5000 })
         .toArray();
       const total = count?.total || 0;
       if (!total) return res.json({ total: 0, index: -1, messages: [] });
-      const index = Math.min(requested ?? total - 1, total - 1);
+      const index = Math.min(requested ?? 0, total - 1);
       const [target] = await coll("Messages")
         .aggregate(
           [
             ...pipeline,
-            { $sort: { createdAt: 1, _id: 1 } },
+            {
+              $sort: {
+                ...(req.query.taskId ? {} : { _searchPriority: 1 }),
+                createdAt: 1,
+                _id: 1,
+              },
+            },
             { $skip: index },
             { $limit: 1 },
             {
@@ -86,6 +240,27 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
         )
         .toArray();
       if (!target) fail("Сообщение изменилось. Повторите поиск", 409);
+      const insideCount = target._searchInsideCount || 0;
+      const insideText = target._searchInside || "";
+      const offset = Math.max(
+        0,
+        insideText.toLocaleLowerCase().indexOf(query.toLocaleLowerCase()) - 45,
+      );
+      let taskMatch =
+        target.kind === "task" && insideCount
+          ? {
+              taskId: target.taskId,
+              count: insideCount,
+              preview: insideText
+                ? (offset ? "…" : "") +
+                  insideText.slice(offset, offset + 180) +
+                  (insideText.length > offset + 180 ? "…" : "")
+                : "",
+            }
+          : null;
+      delete target._searchPriority;
+      delete target._searchInsideCount;
+      delete target._searchInside;
       const scopeTaskId =
         target.taskId && target.kind !== "task" ? target.taskId : null;
       const filter = {
@@ -122,11 +297,27 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
           .toArray(),
         target.taskId ? tasks.summaries(req, [target.taskId]) : [],
       ]);
+      const taskFiles =
+        target.kind === "task"
+          ? (summaries[0]?.attachments || []).filter((file) =>
+              regex.test(file.name || ""),
+            )
+          : [];
+      if (taskFiles.length)
+        taskMatch = {
+          taskId: target.taskId,
+          count: insideCount + taskFiles.length,
+          preview: taskFiles
+            .map((file) => file.name)
+            .join(" / ")
+            .slice(0, 180),
+        };
       const liveIds = await coll("Tasks")
         .find(
           {
             workspaceId,
             deletedAt: { $exists: false },
+            ...taskAccess(req.team),
             _id: {
               $in: [...older, ...newer]
                 .filter((m) => m.kind === "task")
@@ -148,6 +339,7 @@ function registerSearchRoutes(router, { coll, wrap, tasks, decorate }) {
         taskId: scopeTaskId,
         messages,
         task: summaries[0] || null,
+        taskMatch,
       });
     }),
   );
