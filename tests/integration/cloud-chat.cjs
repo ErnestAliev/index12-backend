@@ -44,7 +44,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
       if (failAfterWrite) return Response.json({ error: { message: 'private internal error' } }, { status: 500 });
       return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Задача создана.', annotations: [] }] }] });
     };
-    cloud = new CloudChat({ db: () => db, User, Workspace, env: { INDEX12_CLOUD_CHAT_ENABLED: 'true', INDEX12_CLOUD_CHAT_ACTOR_IDS: scope.actorId, OPENAI_API_KEY: 'fake-test-key', MCP_PUBLIC_ORIGIN: new URL(fixture.apiUrl).origin }, request });
+    cloud = new CloudChat({ db: () => db, User, Workspace, env: { INDEX12_CLOUD_CHAT_ENABLED: 'true', INDEX12_CLOUD_CHAT_ACTOR_IDS: scope.actorId, OPENAI_API_KEY: 'fake-test-key', MCP_PUBLIC_ORIGIN: new URL(fixture.apiUrl).origin }, request, modelTimeoutMs: 1000 });
     const app = express(); app.use(express.json()); app.use((req, _res, next) => { req.user = { _id: req.headers['x-test-user'] || scope.actorId, currentWorkspaceId: req.headers['x-test-workspace'] || scope.workspaceId }; next(); });
     app.use('/assistant', createDesktopRouter({ db: () => db, Workspace, isAuthenticated: (_q, _s, next) => next(), cloudService: cloud }));
     http = app.listen(0, '127.0.0.1'); await once(http, 'listening');
