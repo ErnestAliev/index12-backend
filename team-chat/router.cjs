@@ -121,6 +121,8 @@ function createTeamChatRouter({
         _id: -1,
       }),
       coll("Files").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      coll("FileMetadata").createIndex({ workspaceId: 1, fileId: 1 }),
+      coll("FileViews").createIndex({ workspaceId: 1, fileId: 1 }),
       coll("Attempts").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
     ]).catch((e) => {
       indexes = null;
@@ -796,6 +798,7 @@ function createTeamChatRouter({
       res.json({ member });
     }),
   );
+  require('./file-library.cjs').registerFileLibrary(router, { db, wrap, notify });
   router.post('/files/import', wrap(async (req, res) => {
     const result = await importFile(req.body, {
       db: db(), collection: coll('Files'), scope: { workspaceId: req.team.workspaceId, actorId: req.team.actorId }, team: req.team,
@@ -817,6 +820,7 @@ function createTeamChatRouter({
         _id: randomUUID(),
         workspaceId: req.team.workspaceId,
         actorId: req.team.actorId,
+        createdAt: new Date(),
         name,
         mimeType:
           req.body.subarray(0, 5).toString() === "%PDF-"

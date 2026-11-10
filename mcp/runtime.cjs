@@ -31,7 +31,7 @@ const filters={
   projectId:z.union([id,z.literal('__all_projects__')]).optional(),categoryId:id.optional(),subcategoryId:id.optional(),contractorId:id.optional(),counterpartyIndividualId:id.optional(),accountId:id.optional(),kind:z.enum(['income','expense','transfer']).optional(),
 };
 const instructions = instructionsOverride ?? (INSTRUCTIONS + '\n' + require('../team-chat/mcp-tools.cjs').CHAT_INSTRUCTIONS + '\n' + require('../codex/mcp-tools.cjs').CODEX_INSTRUCTIONS);
-const server=new McpServer({name:'index12',version:'4.4.0'},{instructions});
+const server=new McpServer({name:'index12',version:'4.5.0'},{instructions});
 const toolHandlers=new Map(), definitions=new Map();
 function register(name,description,shape,run,options={}) {
   if (toolFilter && !toolFilter(name)) return;

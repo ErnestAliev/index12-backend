@@ -207,6 +207,7 @@ const { hashPassword } = require('../../team-chat/domain.cjs');
       assert.equal(await db.collection('mcpActions').countDocuments({ workspaceId }), 2);
       await require('./chat-projects.cjs')({ runtime, db, employeeClient, workspaceId, ownerId, people, otherId });
       await require('./chat-mcp-files.cjs')({ runtime, db, employeeClient, directorToken: director.access_token, managerToken: manager.access_token, request, ownerId, workspaceId, ownId, otherId, commonId, privateMessageId, people, headers });
+      await require('./chat-file-library.cjs')({runtime,db,employeeClient,request,workspaceId,ownerId,people,headers,ownId,otherId});
     } finally { await runtime.close(); }
     const refreshBody = { grant_type: 'refresh_token', client_id: registered.client_id, refresh_token: employee.refresh_token, resource: metadata.resource };
     const refreshed = await request('/team-mcp/token', { method: 'POST', form: true, body: refreshBody }); assert.equal(refreshed.status, 200);
