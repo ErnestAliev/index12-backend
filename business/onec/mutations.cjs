@@ -4,8 +4,8 @@ const { z } = require("zod");
 const { scopeQuery } = require("../../mcp/finance.cjs");
 const { digest } = require("../../codex/executionStore.cjs");
 const { ReadClient } = require("./read-client.cjs");
-const { validateData } = require("./purchases.cjs");
-const { fault } = require("./purchase-domain.cjs");
+const { isReferenceObject, validateObjectData, validateCustomerInvoice } = require('./object-data.cjs');
+const { fault, ZERO } = require("./purchase-domain.cjs");
 const common = {
   companyId: z.string().regex(/^[a-f\d]{24}$/i),
   collection: z.string().min(1).max(200),
@@ -29,6 +29,7 @@ const updateSchema = z
   .strict();
 const postingSchema = z.object({ ...common, post: z.boolean() }).strict();
 const deletionSchema = z.object({ ...common, marked: z.boolean() }).strict();
+const createSchema = z.object({ companyId: common.companyId, collection: common.collection, operationId: common.operationId, data: updateSchema.shape.data }).strict();
 const same = (a, b) =>
   typeof a === "number" || typeof b === "number"
     ? Number.isFinite(Number(a)) && Number(a) === Number(b)
@@ -37,7 +38,11 @@ const same = (a, b) =>
         /^\d{4}-\d\d-\d\dT/.test(a) &&
         /^\d{4}-\d\d-\d\dT/.test(b)
       ? a.slice(0, 19) === b.slice(0, 19)
-      : digest(a ?? null) === digest(b ?? null);
+      : Array.isArray(a) && Array.isArray(b)
+        ? a.length === b.length && b.every((row,index) => same(a[index],row))
+        : a && b && typeof a === 'object' && typeof b === 'object'
+          ? Object.entries(b).every(([key,value]) => same(a[key],value))
+          : digest(a ?? null) === digest(b ?? null);
 const matches = (object, changes) =>
   Object.entries(changes).every(([key, value]) => same(object[key], value));
 function registerOnecMutationRoutes(
@@ -124,8 +129,9 @@ function registerOnecMutationRoutes(
       fault("COMPANY_NOT_FOUND", "Компания не найдена в рабочей области", 404);
     if (
       row.onecSync?.collection !== "Catalog_Организации" ||
+      !row.onecSync?.ref ||
       row.onecSync.connectionKey !== connectionKey() ||
-      row.onecSync.ref !== org
+      org !== undefined && row.onecSync.ref !== org
     )
       fault(
         "ONEC_ORGANIZATION_MISMATCH",
@@ -146,7 +152,7 @@ function registerOnecMutationRoutes(
     object,
     changedFields: Object.keys(row.changes),
     ...(reconciled ? { reconciled: true } : {}),
-    ...(row.action === "posting"
+    ...(row.action === "posting" || row.action === 'create'
       ? { atomicVersionCheck: false }
       : { atomicVersionCheck: true }),
   });
@@ -197,6 +203,7 @@ function registerOnecMutationRoutes(
       ["СчетКонтрагента_Key", object.Контрагент_Key, "Catalog_Контрагенты"],
     ]) {
       if (!Object.hasOwn(changes, field)) continue;
+      if (changes[field] === ZERO) continue;
       const bank = (
         await client.get({
           collection: "Catalog_БанковскиеСчета",
@@ -214,7 +221,7 @@ function registerOnecMutationRoutes(
           409,
         );
     }
-    if (changes.ДоговорКонтрагента_Key) {
+    if (changes.ДоговорКонтрагента_Key && changes.ДоговорКонтрагента_Key !== ZERO) {
       const contract = (
         await client.get({
           collection: "Catalog_ДоговорыКонтрагентов",
@@ -270,7 +277,7 @@ function registerOnecMutationRoutes(
       operationId: input.operationId,
       companyId: input.companyId,
       collection: input.collection,
-      objectId: input.id,
+      objectId: action === 'create' ? randomUUID() : input.id,
       expectedVersion: input.expectedVersion,
       requestHash: hash,
       action,
@@ -316,35 +323,41 @@ function registerOnecMutationRoutes(
     let sent = false;
     try {
       const set = await client.schema(input.collection);
-      if (
-        !input.collection.startsWith("Document_") ||
-        set.keys.length !== 1 ||
-        set.keys[0] !== "Ref_Key"
-      )
+      const document = input.collection.startsWith('Document_'), creating = action === 'create';
+      if (!isReferenceObject(set) || action === 'posting' && !document)
         fault(
           "UNSUPPORTED_ONEC_OBJECT",
-          "Выберите опубликованный документ 1С с ключом Ref_Key",
+          "Выберите опубликованный ссылочный объект 1С с ключом Ref_Key; проведение доступно только документам",
         );
-      const object = (
+      const anchor = await company(req,input.companyId);
+      const has = name => set.properties.some(p => p.name === name);
+      if (creating) {
+        try {
+          await client.get({collection:input.collection,id:row.objectId});
+          fault('ONEC_ID_COLLISION','Назначенная ссылка 1С уже занята',409);
+        } catch (e) { if (e.code !== 'HTTP_404') throw e; }
+      }
+      const object = creating ? { Ref_Key:row.objectId, ...(has('Posted')?{Posted:false}:{}), ...(has('DeletionMark')?{DeletionMark:false}:{}), ...(has('Организация_Key')?{Организация_Key:anchor.onecSync.ref}:{}) } : (
         await client.get({ collection: input.collection, id: input.id })
       ).object;
       if (
-        typeof object.Posted !== "boolean" ||
-        typeof object.DeletionMark !== "boolean"
+        has('Posted') && typeof object.Posted !== "boolean" ||
+        has('DeletionMark') && typeof object.DeletionMark !== "boolean" ||
+        action === 'deletion' && !has('DeletionMark')
       )
         fault(
           "ONEC_STATE_UNAVAILABLE",
           "Публикация не вернула состояние проведения и удаления документа",
           409,
         );
-      if (object.Ref_Key !== input.id)
+      if (object.Ref_Key !== row.objectId)
         fault("ONEC_IDENTITY_MISMATCH", "1С вернула другой документ", 409);
       const linked = await company(
         req,
         input.companyId,
         object.Организация_Key,
       );
-      if (object.DataVersion !== input.expectedVersion)
+      if (!creating && object.DataVersion !== input.expectedVersion)
         fault(
           "VERSION_CONFLICT",
           "Документ 1С изменился. Прочитайте его заново; новая версия автоматически не подставлялась",
@@ -361,7 +374,7 @@ function registerOnecMutationRoutes(
       const org = (
         await client.get({
           collection: "Catalog_Организации",
-          id: object.Организация_Key,
+          id: linked.onecSync.ref,
         })
       ).object;
       if (
@@ -376,24 +389,31 @@ function registerOnecMutationRoutes(
           409,
         );
       row.changes =
-        action === "update"
-          ? await validateData(
+        action === "update" || creating
+          ? await validateObjectData(
               client,
               input.collection,
               input.data,
-              new Map(),
-              false,
-              { update: true },
+              { create: creating },
             )
           : action === "posting"
             ? { Posted: input.post }
             : { DeletionMark: input.marked };
-      if (action === "update") await references(client, object, row.changes);
+      if (creating) {
+        if (has('Date') && !row.changes.Date) fault('MISSING_ONEC_FIELD','Укажите дату создаваемого документа');
+        if (has('Description') && !row.changes.Description?.trim()) fault('MISSING_ONEC_FIELD','Укажите наименование создаваемого объекта');
+        if (has('Организация_Key') && row.changes.Организация_Key && row.changes.Организация_Key !== object.Организация_Key) fault('ONEC_ORGANIZATION_MISMATCH','Выбрана другая организация 1С',409);
+        row.changes = { ...row.changes, ...(has('Организация_Key')?{Организация_Key:object.Организация_Key}:{}), ...(has('Posted')?{Posted:false}:{}), ...(has('DeletionMark')?{DeletionMark:false}:{}) };
+      }
+      const candidate = { ...object, ...row.changes };
+      if ((creating || action === 'update') && has('Организация_Key')) await references(client,candidate,candidate);
+      if (creating || Object.keys(row.changes).some(k => ['Контрагент_Key','ДоговорКонтрагента_Key','ВалютаДокумента_Key','Товары','Услуги','ОС','СуммаДокумента','УчитыватьНДС','СуммаВключаетНДС'].includes(k))) await validateCustomerInvoice(input.collection,candidate,client);
+      if (candidate.Owner_Type === 'StandardODATA.Catalog_Организации' && candidate.Owner !== anchor.onecSync.ref) fault('ONEC_ORGANIZATION_MISMATCH','Владелец записи относится к другой организации',409);
       row.beforeVersion = object.DataVersion;
       row.before = Object.fromEntries(
         Object.keys(row.changes).map((field) => [field, object[field] ?? null]),
       );
-      row.organizationRef = object.Организация_Key;
+      row.organizationRef = object.Организация_Key || null;
       await records().updateOne(
         { _id: row._id, leaseId: row.leaseId },
         {
@@ -405,7 +425,7 @@ function registerOnecMutationRoutes(
           },
         },
       );
-      if (matches(object, row.changes))
+      if (!creating && matches(object, row.changes))
         return res.json({ ...(await finish(row, object)), unchanged: true });
       await guard(req);
       await company(req, input.companyId, object.Организация_Key);
@@ -421,7 +441,8 @@ function registerOnecMutationRoutes(
       if (!claim.modifiedCount)
         fault("ONEC_MUTATION_STOPPED", "Изменение остановлено до записи", 409);
       sent = true;
-      if (action === "posting")
+      if (creating) await client.create(input.collection,row.objectId,row.changes);
+      else if (action === "posting")
         await client.setPosted(
           input.collection,
           input.id,
@@ -436,11 +457,11 @@ function registerOnecMutationRoutes(
           input.expectedVersion,
         );
       const after = (
-        await client.get({ collection: input.collection, id: input.id })
+        await client.get({ collection: input.collection, id: row.objectId })
       ).object;
       if (
-        after.Ref_Key !== input.id ||
-        after.Организация_Key !== row.organizationRef ||
+        after.Ref_Key !== row.objectId ||
+        (after.Организация_Key || null) !== row.organizationRef ||
         !matches(after, row.changes)
       )
         fault(
@@ -496,6 +517,7 @@ function registerOnecMutationRoutes(
       execute(req, res, client, "update", updateSchema),
     ),
   );
+  router.post('/onec/object',use((req,res,client) => execute(req,res,client,'create',createSchema)));
   router.post(
     "/onec/posting",
     use((req, res, client) =>
@@ -539,13 +561,16 @@ function registerOnecMutationRoutes(
         );
         return res.json(pending({ ...row, state: "rejected" }));
       }
-      const object = (
-        await client.get({ collection: row.collection, id: row.objectId })
-      ).object;
+      let object;
+      try { object = (await client.get({collection:row.collection,id:row.objectId})).object; }
+      catch (e) {
+        if (row.action === 'create' && e.code === 'HTTP_404') return res.json({...pending({...row,state:'uncertain'}),missing:true});
+        throw e;
+      }
       await company(req, row.companyId, object.Организация_Key);
       if (
         object.Ref_Key === row.objectId &&
-        object.Организация_Key === row.organizationRef &&
+        (object.Организация_Key || null) === row.organizationRef &&
         matches(object, row.changes)
       )
         return res.json(await finish(row, object, true));
@@ -567,5 +592,6 @@ module.exports = {
   updateSchema,
   postingSchema,
   deletionSchema,
+  createSchema,
   matches,
 };

@@ -3,7 +3,7 @@
 const WRITE_CAPABILITIES = {
   index12_chat_upload_file: 'create', index12_chat_attach_files: 'update', index12_chat_react: 'update', index12_chat_mark_read: 'update', index12_chat_forward_message: 'create', index12_chat_delete_message: 'delete', index12_chat_delete_task: 'delete', index12_chat_restore_task: 'update',
   index12_chat_send_message: 'create', index12_chat_create_task: 'create', index12_chat_update_task: 'update', index12_chat_edit_message: 'update', index12_chat_decide: 'update',
-  index12_onec_update_object: 'updateOnecObjects', index12_onec_set_posted: 'updateOnecObjects', index12_onec_set_deletion_mark: 'deleteOnecObjects',
+  index12_onec_create_object: 'createOnecObjects', index12_onec_update_object: 'updateOnecObjects', index12_onec_set_posted: 'updateOnecObjects', index12_onec_set_deletion_mark: 'deleteOnecObjects',
   index12_execute_purchase:'createOnecPurchase', index12_upload_purchase_pdf:'createOnecPurchase', index12_cancel_purchase_plan:'createOnecPurchase',
   index12_create_task: 'createTasks', index12_update_task: 'updateTasks', index12_delete_task: 'deleteTasks',
   index12_update_account_initial_balance: 'updateAccountInitialBalance',

@@ -9,10 +9,19 @@ function parseMetadata(xml) {
   const tree = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '', removeNSPrefix: true }).parse(xml);
   const schemas = array(tree.Edmx?.DataServices?.Schema), types = new Map(), sets = [];
   if (!schemas.length) fail('INVALID_METADATA', 'Ожидались метаданные OData 1С');
+  const associations = new Map(), names = new Map();
+  for (const schema of schemas) {
+    for (const association of array(schema.Association)) associations.set(`${schema.Namespace}.${association.Name}`, association);
+    for (const container of array(schema.EntityContainer)) for (const set of array(container.EntitySet)) names.set(set.EntityType, set.Name);
+  }
   for (const schema of schemas) for (const type of array(schema.EntityType)) types.set(`${schema.Namespace}.${type.Name}`, {
     keys: array(type.Key?.PropertyRef).map(p => p.Name),
-    properties: array(type.Property).map(p => ({ name: p.Name, type: p.Type })),
-    navigation: array(type.NavigationProperty).map(p => ({ name: p.Name, relationship: p.Relationship }))
+    properties: array(type.Property).map(p => ({ name: p.Name, type: p.Type, ...(p.MaxLength ? { maxLength: p.MaxLength } : {}) })),
+    navigation: array(type.NavigationProperty).map(p => {
+      const end = array(associations.get(p.Relationship)?.End).find(e => e.Role === p.ToRole);
+      const target = names.get(end?.Type);
+      return { name: p.Name, relationship: p.Relationship, ...(target ? { target } : {}) };
+    })
   });
   for (const schema of schemas) for (const container of array(schema.EntityContainer)) for (const set of array(container.EntitySet)) {
     if (types.has(set.EntityType)) sets.push({ name: set.Name, ...types.get(set.EntityType) });

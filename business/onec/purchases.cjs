@@ -88,11 +88,11 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
   }
   router.get('/onec/status',use(async(req,res,client)=>{
     const sets=await client.metadata(), access={};
-    for(const collection of [INVOICE,PAYMENT]) {
+    for(const collection of [INVOICE,PAYMENT,'Document_СчетНаОплатуПокупателю']) {
       try{await client.query({collection,top:1,select:'Ref_Key'});access[collection]={published:true,read:true,create:'not_tested'};}
       catch(error){access[collection]={published:sets.some(s=>s.name===collection),read:false,code:error.code,create:'not_tested'};}
     }
-    res.json({...identity(req),connected:true,remote:true,macRequired:false,access,workflow:['supplier_invoice','outgoing_payment_order','closing_documents_task'],invoicePdfAttachment:false,pdfStorage:'INDEX12 calendar task',writesEnabled:env.ONEC_PURCHASE_WRITES==='true',posting:env.ONEC_PURCHASE_WRITES==='true',objectUpdates:env.ONEC_PURCHASE_WRITES==='true',deletionMark:env.ONEC_PURCHASE_WRITES==='true',versionCheck:'DataVersion / If-Match',bankPayments:false});
+    res.json({...identity(req),connected:true,remote:true,macRequired:false,access,workflow:['supplier_invoice','outgoing_payment_order','closing_documents_task','customer_invoice','generic_reference_objects'],referenceObjectCount:sets.filter(require('./object-data.cjs').isReferenceObject).length,objectCreation:env.ONEC_PURCHASE_WRITES==='true',deletionConfirmation:'always_in_mcp',invoicePdfAttachment:false,pdfStorage:'INDEX12 calendar task',writesEnabled:env.ONEC_PURCHASE_WRITES==='true',posting:env.ONEC_PURCHASE_WRITES==='true',objectUpdates:env.ONEC_PURCHASE_WRITES==='true',deletionMark:env.ONEC_PURCHASE_WRITES==='true',versionCheck:'DataVersion / If-Match',bankPayments:false});
   }));
   router.get('/onec/schema',use(async(req,res,client)=>{
     const collection=req.query.collection; const sets=await client.metadata();

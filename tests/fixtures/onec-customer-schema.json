@@ -1,0 +1,223 @@
+[
+  {
+    "name": "Document_СчетНаОплатуПокупателю",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Number",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Date",
+        "type": "Edm.DateTime"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Posted",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "Автор_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "АдресДоставки",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ВалютаДокумента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ДоговорКонтрагента_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "КодНазначенияПлатежа",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Комментарий",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Контрагент_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "КратностьВзаиморасчетов",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "КурсВзаиморасчетов",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Организация_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Ответственный_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Склад_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СтруктурнаяЕдиница",
+        "type": "Edm.String"
+      },
+      {
+        "name": "СуммаВключаетАкциз",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СуммаВключаетНДС",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СуммаДокумента",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "ТипЦен_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "УчитыватьНДС",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "УчитыватьАкциз",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "СтруктурноеПодразделение_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Товары",
+        "type": "Collection(StandardODATA.Document_СчетНаОплатуПокупателю_Товары_RowType)"
+      },
+      {
+        "name": "Услуги",
+        "type": "Collection(StandardODATA.Document_СчетНаОплатуПокупателю_Услуги_RowType)"
+      },
+      {
+        "name": "ОС",
+        "type": "Collection(StandardODATA.Document_СчетНаОплатуПокупателю_ОС_RowType)"
+      },
+      {
+        "name": "СтруктурнаяЕдиница_Type",
+        "type": "Edm.String"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Автор",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Автор"
+      },
+      {
+        "name": "ВалютаДокумента",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_ВалютаДокумента"
+      },
+      {
+        "name": "ДоговорКонтрагента",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_ДоговорКонтрагента"
+      },
+      {
+        "name": "Контрагент",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Контрагент"
+      },
+      {
+        "name": "Организация",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Организация"
+      },
+      {
+        "name": "Ответственный",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Ответственный"
+      },
+      {
+        "name": "Склад",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Склад"
+      },
+      {
+        "name": "ТипЦен",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_ТипЦен"
+      },
+      {
+        "name": "СтруктурноеПодразделение",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_СтруктурноеПодразделение"
+      }
+    ]
+  },
+  {
+    "name": "Document_СчетНаОплатуПокупателю_Услуги",
+    "keys": [
+      "Ref_Key",
+      "LineNumber"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "LineNumber",
+        "type": "Edm.Int64"
+      },
+      {
+        "name": "Содержание",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Количество",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Цена",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Сумма",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "СтавкаНДС_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "СуммаНДС",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Номенклатура_Key",
+        "type": "Edm.Guid"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "СтавкаНДС",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Услуги_СтавкаНДС"
+      },
+      {
+        "name": "Номенклатура",
+        "relationship": "StandardODATA.Document_СчетНаОплатуПокупателю_Услуги_Номенклатура"
+      }
+    ]
+  }
+]
