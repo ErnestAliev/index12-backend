@@ -14,7 +14,7 @@ function abortable(work, signal) {
     Promise.resolve().then(() => { signal.throwIfAborted(); return work(); }).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
 }
-async function readResponse(response, signal, progress) {
+async function readResponse(response, signal, progress, onEvent) {
   const stream = /text\/event-stream/i.test(response.headers.get('content-type') || '');
   const reader = response.body?.getReader();
   if (!reader) throw transportError('MODEL_STREAM_INTERRUPTED', 'Соединение с моделью прервалось до получения полного ответа.');
@@ -26,6 +26,7 @@ async function readResponse(response, signal, progress) {
     let item;
     try { item = JSON.parse(data); } catch { throw transportError('MODEL_STREAM_INVALID', 'Модель вернула повреждённый поток ответа.'); }
     if (item.type === 'error') throw transportError('MODEL_STREAM_FAILED', 'OpenAI прервал формирование ответа. Проверьте журнал выполненных действий.');
+    onEvent(item);
     // Only technical lifecycle information leaves the transport, never deltas or arguments.
     const stage = terminal.has(item.type) ? item.type.slice(9) : item.type === 'response.created' ? 'created' : 'generating';
     await progress({ stage, ...(typeof item.response?.id === 'string' ? { responseId: item.response.id.slice(0, 200) } : {}) });
@@ -65,7 +66,7 @@ async function readResponse(response, signal, progress) {
   }
 }
 
-async function modelResponse({ request, url, options, signal, timeoutMs = MODEL_TIMEOUT_MS, progress = async () => {} }) {
+async function modelResponse({ request, url, options, signal, timeoutMs = MODEL_TIMEOUT_MS, progress = async () => {}, onEvent = () => {} }) {
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(transportError('MODEL_TIMEOUT', 'Модель не успела сформировать ответ за отведённое время. Проверьте журнал выполненных действий перед повтором.')), timeoutMs);
   const combined = AbortSignal.any([signal, deadline.signal]);
@@ -78,7 +79,7 @@ async function modelResponse({ request, url, options, signal, timeoutMs = MODEL_
       throw transportError('MODEL_HTTP_ERROR', message);
     }
     await progress({ stage: 'receiving', requestId: (response.headers.get('x-request-id') || '').slice(0, 200) });
-    const result = await readResponse(response, combined, progress);
+    const result = await readResponse(response, combined, progress, onEvent);
     combined.throwIfAborted();
     return result;
   } catch (error) {

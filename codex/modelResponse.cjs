@@ -31,6 +31,6 @@ function responseDiagnostic(response,requestId,allowed=[]) {
 }
 function canRegenerate(error,replaySafe,used) {
   if(replaySafe!==true || used)return false;
-  return ['MODEL_INVALID_TOOL_JSON','MODEL_INVALID_TOOL_ARGUMENTS','MODEL_TOOL_INCOMPLETE'].includes(error.detail?.code) || error.detail?.code==='MODEL_RESPONSE_INCOMPLETE' && error.detail.reason==='max_output_tokens';
+  return ['MODEL_INVALID_TOOL_JSON','MODEL_INVALID_TOOL_ARGUMENTS','MODEL_TOOL_INCOMPLETE','MODEL_INLINE_FILE_DATA'].includes(error.detail?.code) || error.detail?.code==='MODEL_RESPONSE_INCOMPLETE' && error.detail.reason==='max_output_tokens';
 }
 module.exports={plannedCalls,responseDiagnostic,canRegenerate};

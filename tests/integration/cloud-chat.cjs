@@ -19,7 +19,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     const db = mongoose.connection.db, scope = { actorId: String(actor._id), workspaceId: String(workspace._id) };
     chatRouter = require('../../team-chat/router.cjs').createTeamChatRouter({ db: () => db, Workspace, User, history: fixture.audit, getWorkspaceStorageUserId: workspace => String(workspace.userId), frontendUrl: new URL(fixture.apiUrl).origin });
     let calls = 0, failAfterWrite = false, mode = 'calendar', modelState={};
-    const documentBytes = Buffer.from('%PDF-1.7\ngenerated ESF fixture'), generatedTaskId = randomUUID();
+    const documentBytes = Buffer.from('%PDF-1.7\ngenerated ESF fixture'); let generatedTaskId;
     const request = async (url, options) => {
       if (!url.startsWith('https://api.openai.com/')) {
         if(mode.startsWith('model:') && url.includes('/api/mcp/business/tasks') && options.method==='POST') { modelState.backendWrites++; if(mode==='model:tool-error')return Response.json({error:{code:'FORBIDDEN',message:'Fixture denial'}},{status:403}); }
@@ -27,15 +27,17 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
       }
       if (url === 'https://api.openai.com/v1/containers/cntr_fixture/files/cfile_fixture') return Response.json({ path: '/mnt/data/ЭСФ.pdf' });
       if (url === 'https://api.openai.com/v1/containers/cntr_fixture/files/cfile_fixture/content') return new Response(documentBytes);
+      if (url.startsWith('https://api.openai.com/v1/containers/cntr_fixture/files?')) return Response.json({ data: [{ id: 'cfile_fixture', container_id: 'cntr_fixture', path: '/mnt/data/ЭСФ.pdf' }], has_more: false });
       assert.equal(url, 'https://api.openai.com/v1/responses'); calls++;
       const body = JSON.parse(options.body);
       if(mode.startsWith('model:'))return require('./cloud-model-response.cjs').reply(mode,body,modelState);
       assert.equal(body.store, false); assert.ok(body.tools.some(t => t.name === 'index12_create_task')); assert.ok(body.tools.some(t => t.name === 'index12_onec_update_object')); assert.match(body.instructions,/Дата сообщения в Asia\/Almaty/);
-      if (mode === 'generated') {
+      if (mode.startsWith('generated')) {
         assert.ok(body.tools.some(t => t.type === 'code_interpreter'));
+        assert.equal(body.tools.find(t=>t.name==='index12_chat_upload_file').parameters.properties.dataBase64,undefined);
         if (body.input.at(-1).type !== 'function_call_output') return Response.json({ status: 'completed', output: [
           { type: 'code_interpreter_call', id: 'python-fixture', container_id: 'cntr_fixture', status: 'completed' },
-          { type: 'function_call', call_id: 'generated-upload', name: 'index12_chat_upload_file', arguments: JSON.stringify({ id: randomUUID(), containerId: 'cntr_fixture', containerFileId: 'cfile_fixture' }) },
+          { type: 'function_call', call_id: 'generated-upload', name: 'index12_chat_upload_file', arguments: JSON.stringify({ id: randomUUID(), containerId: 'cntr_fixture', ...(mode==='generated-path'?{containerPath:'/mnt/data/ЭСФ.pdf'}:{containerFileId:'cfile_fixture'}) }) },
         ] });
         if (body.input.at(-1).call_id === 'generated-upload') return Response.json({ status: 'completed', output: [{ type: 'function_call', call_id: 'generated-attach', name: 'index12_chat_attach_files', arguments: JSON.stringify({ id: generatedTaskId, expectedVersion: 0, fileIds: [JSON.parse(body.input.at(-1).output).file.fileId] }) }] });
         return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Документ прикреплён.', annotations: [] }] }] });
@@ -65,7 +67,8 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     assert.equal((await api('/chats/' + chat.id, null, { 'x-test-user': String(stranger._id), 'x-test-workspace': String(foreign._id) })).status, 404);
     assert.equal((await api('/status', null, { 'x-test-user': String(stranger._id), 'x-test-workspace': scope.workspaceId })).status, 403);
     assert.equal((await api('/status', null, { 'x-test-user': String(stranger._id), 'x-test-workspace': String(foreign._id) })).connected, false);
-    mode = 'generated';
+    for (mode of ['generated','generated-path']) {
+    generatedTaskId = randomUUID();
     await db.collection('teamChatTasks').insertOne({ _id: generatedTaskId, workspaceId: scope.workspaceId, creatorId: 'owner:' + scope.actorId, creatorName: 'Cloud owner', assigneeIds: ['owner:' + scope.actorId], assignees: [], description: 'Документ в рабочем чате', timing: 'none', dueDate: null, dueTime: null, status: 'open', attachments: [], version: 0, createdAt: new Date() });
     const generatedChat = (await api('/chats', {})).chat;
     const generatedJob = await api('/chats/' + generatedChat.id + '/jobs', { kind: 'send', requestId: randomUUID(), message: 'Создай документ и прикрепи к задаче рабочего чата.' });
@@ -77,6 +80,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     assert.equal(attached.mimeType, 'application/pdf'); assert.equal(attached.name, 'ЭСФ.pdf');
     assert.deepEqual(Buffer.from((await db.collection('teamChatFiles').findOne({ _id: attached.fileId })).data.buffer), documentBytes);
     assert.equal(generatedResult.result.history.messages.at(-1).attachments[0].name, 'ЭСФ.pdf');
+    }
     mode = 'calendar';
     failAfterWrite = true;
     const second = await api('/chats/' + chat.id + '/jobs', { kind: 'send', requestId: randomUUID(), message: 'Создай ещё одну задачу.' }); const failed = await waitJob(second.job.id);

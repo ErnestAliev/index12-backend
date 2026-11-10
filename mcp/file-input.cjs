@@ -15,20 +15,22 @@ function createFileInput({
       ? {
           containerId: z.string().min(1).max(200).optional(),
           containerFileId: z.string().min(1).max(200).optional(),
+          containerPath: z.string().min(1).max(1000).optional(),
         }
       : {}),
   };
   async function prepare(args) {
-    const { localPath, containerId, containerFileId, ...body } = args;
+    const { localPath, containerId, containerFileId, containerPath, ...body } = args;
     const count = [
       localPath,
       containerFileId,
+      containerPath,
       body.file,
       body.dataBase64,
       body.desktopFileId,
       body.chatFileId,
     ].filter((v) => v !== undefined).length;
-    if (count !== 1 || !!containerId !== !!containerFileId)
+    if (count !== 1 || !!containerId !== !!(containerFileId || containerPath))
       throw new Error("Укажите ровно один источник файла");
     if (localPath) {
       if (!allowLocalFiles)
@@ -71,12 +73,13 @@ function createFileInput({
       } finally {
         await handle.close();
       }
-    } else if (containerFileId)
+    } else if (containerFileId || containerPath)
       Object.assign(
         body,
         await resolveContainerFile({
           containerId,
           containerFileId,
+          ...(containerPath ? { containerPath } : {}),
           name: body.name,
           mimeType: body.mimeType,
         }),
