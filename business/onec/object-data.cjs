@@ -70,11 +70,13 @@ async function validateCustomerInvoice(collection, object, client) {
   const rows = [...(object.Товары||[]),...(object.Услуги||[]),...(object.ОС||[])];
   if (!rows.length) fault('MISSING_INVOICE_ROWS','Заполните товары или услуги счёта покупателю');
   let total = 0;
+  const rates = new Map();
   for (const row of rows) {
     if (!(Number(row.Количество)>0) || !(Number(row.Цена)>=0) || cents(Number(row.Сумма)) !== Math.round(Number(row.Количество)*Number(row.Цена)*100)) fault('INVALID_LINE_TOTAL','Количество, цена и сумма строки счёта не сходятся');
     if (object.УчитыватьНДС && (!row.СтавкаНДС_Key || row.СтавкаНДС_Key === ZERO || row.СуммаНДС === undefined)) fault('MISSING_VAT','Для строки нужны ставка и сумма НДС');
     if (object.УчитыватьНДС) {
-      const rate = (await client.get({collection:'Catalog_СтавкиНДС',id:row.СтавкаНДС_Key})).object;
+      if (!rates.has(row.СтавкаНДС_Key)) rates.set(row.СтавкаНДС_Key,(await client.get({collection:'Catalog_СтавкиНДС',id:row.СтавкаНДС_Key})).object);
+      const rate = rates.get(row.СтавкаНДС_Key);
       const percent = Number(rate.Ставка);
       if (rate.DeletionMark || rate.Ставка == null || rate.Ставка === '' || !Number.isFinite(percent) || percent < 0 || percent > 100) fault('INVALID_VAT','Ставка НДС не подтверждена справочником 1С');
       const expected = object.СуммаВключаетНДС ? Number(row.Сумма)*percent/(100+percent) : Number(row.Сумма)*percent/100;

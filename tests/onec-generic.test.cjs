@@ -23,6 +23,7 @@ test('customer invoice checks mandatory fields, line totals and VAT against the 
  await assert.rejects(()=>validateCustomerInvoice(collection,{...invoice,Услуги:[{...row,СуммаНДС:30}]},client),e=>e.code==='INVALID_VAT');
  await assert.rejects(()=>validateCustomerInvoice(collection,{...invoice,Услуги:[]},client),e=>e.code==='MISSING_INVOICE_ROWS');
  await assert.rejects(()=>validateCustomerInvoice(collection,{...invoice,ВалютаДокумента_Key:undefined},client),e=>e.code==='MISSING_ONEC_FIELD');
+ let rateReads=0;await validateCustomerInvoice(collection,{...invoice,СуммаДокумента:23200,Услуги:Array.from({length:100},()=>({...row}))},{get:async()=>{rateReads++;return {object:{Ставка:16}};}});assert.equal(rateReads,1,'one fresh rate read per distinct rate, not per row');
 });
 test('deletion always requires a fresh object and explicit positive confirmation, including direct credentials',async()=>{
  const id=randomUUID(),requests=[],input={companyId:'aaaaaaaaaaaaaaaaaaaaaaaa',collection:'Catalog_Custom',id,expectedVersion:'AAAAAAAAAAA=',operationId:randomUUID(),marked:true};
