@@ -133,6 +133,30 @@ const { startFixture } = require("./subcategories.cjs");
     assert.ok(
       !catalog.tools.some((t) => t.name === "index12_codex_send_message"),
     );
+    // Repeated owner requests must re-read sources. A model's reused read-plan
+    // label cannot conflict with old code or replay a stale account snapshot.
+    const readPlan={idempotencyKey:'task-review-reused-key',summary:'Прочитать счёт',
+      steps:[{id:'account',tool:'index12_get_account'}],
+      code:`return await step('account',{id:'${account._id}'});`};
+    const firstRead=await call('orchestration_prepare',readPlan);
+    assert.equal(firstRead.readOnly,true);
+    const firstResult=await call('orchestration_execute',{planId:firstRead.planId});
+    const initial=firstResult.result.account.initialBalance;
+    // Simulate a completed read from before this fix, using the old key index.
+    await db.collection('orchestrationPlans').updateOne({_id:firstRead.planId},{$set:{creationKey:require('../../codex/executionStore.cjs').digest(readPlan.idempotencyKey)},$unset:{readOnly:''}});
+    await fixture.models.Account.updateOne({_id:account._id},{$set:{initialBalance:1234}});
+    const repeatedRead=await call('orchestration_prepare',readPlan);
+    assert.notEqual(repeatedRead.planId,firstRead.planId);
+    const currentRead=await call('orchestration_execute',{planId:repeatedRead.planId});
+    assert.equal(Number(currentRead.result.account.initialBalance),1234);
+    const revisedRead=await call('orchestration_prepare',{...readPlan,summary:'Перечитать актуальный счёт',code:readPlan.code+'\n// new read program'});
+    assert.notEqual(revisedRead.planId,repeatedRead.planId);
+    assert.equal((await call('orchestration_execute',{planId:revisedRead.planId})).state,'completed');
+    const previousRead=await call('orchestration_status',{planId:firstRead.planId});
+    assert.equal(previousRead.result.account.initialBalance,initial,'original evidence is immutable');
+    assert.equal(previousRead.readOnly,true,'legacy plans are classified from their real tools');
+    assert.equal(await db.collection('events').countDocuments(),0);
+    await fixture.models.Account.updateOne({_id:account._id},{$set:{initialBalance:1000}});
     const expense = {
       type: "expense",
       accountId: String(account._id),
@@ -172,6 +196,7 @@ const { startFixture } = require("./subcategories.cjs");
     `,
     };
     const prepared = await call("orchestration_prepare", plan);
+    assert.equal(prepared.readOnly,false,'one write keeps strict idempotency for the entire plan');
     assert.equal(
       await db.collection("events").countDocuments(),
       0,

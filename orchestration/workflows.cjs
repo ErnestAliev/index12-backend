@@ -158,8 +158,12 @@ class Workflows {
   async prepare(input) {
     const permission = await this.authorize(),
       plan = validatePlan(input, this.definitions);
+    const readOnly = plan.steps.every(step => this.definitions.get(step.tool)?.write === false);
     const { plans, calls } = await this.collections(),
-      creationKey = digest(plan.idempotencyKey),
+      // Read plans have no accounting side effects. A new preparation must read
+      // current data, even when a model repeats its label or rewrites the code.
+      // Plans containing any write retain the original immutable identity.
+      creationKey = digest(readOnly ? ['read',plan.idempotencyKey,randomUUID()] : plan.idempotencyKey),
       requestHash = digest(plan);
     const row = {
       _id: randomUUID(),
@@ -167,6 +171,7 @@ class Workflows {
       creationKey,
       requestHash,
       permission,
+      readOnly,
       plan,
       state: "prepared",
       version: 0,
@@ -218,6 +223,7 @@ class Workflows {
   view(row, calls, replayed = false) {
     return {
       planId: row._id,
+      readOnly: row.readOnly ?? row.plan.steps.every(step => this.definitions.get(step.tool)?.write === false),
       summary: row.plan.summary,
       state: row.state,
       version: row.version,
@@ -274,6 +280,7 @@ class Workflows {
     return {
       plans: page.map((row) => ({
         planId: row._id,
+        readOnly: row.readOnly ?? row.plan.steps.every(step => this.definitions.get(step.tool)?.write === false),
         summary: row.plan.summary,
         state: row.state,
         version: row.version,

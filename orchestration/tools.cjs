@@ -111,7 +111,7 @@ function registerOrchestrationTools(
   );
   register(
     "index12_orchestration_prepare",
-    "Сохранить план многошаговой задачи: summary, JavaScript code, steps с зависимостями. Не выполняет бизнес-операции и не выдаёт новых прав. Возвращает planId. Сохраняй idempotencyKey при повторе.",
+    "Сохранить план многошаговой задачи: summary, JavaScript code, steps с зависимостями. Не выполняет бизнес-операции и не выдаёт новых прав. Возвращает planId и readOnly. Для плана только с чтениями каждый prepare создаёт свежий запуск, даже с прежним ключом; не используй старый завершённый план для нового чтения. Для любого плана с записью idempotencyKey постоянный, код и параметры неизменяемы. Перед пересмотром записи прочитай прежний status/reconcile, не обходи защиту новым ключом.",
     planSchema,
     (_s, args, extra) => service(extra).prepare(args),
     { apiOnly: true, orchestrates: true },
