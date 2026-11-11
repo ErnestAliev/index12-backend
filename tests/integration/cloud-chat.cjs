@@ -18,7 +18,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     const foreign = await Workspace.create({ name: 'Foreign', userId: String(stranger._id), isDefault: true });
     const db = mongoose.connection.db, scope = { actorId: String(actor._id), workspaceId: String(workspace._id) };
     chatRouter = require('../../team-chat/router.cjs').createTeamChatRouter({ db: () => db, Workspace, User, history: fixture.audit, getWorkspaceStorageUserId: workspace => String(workspace.userId), frontendUrl: new URL(fixture.apiUrl).origin });
-    let calls = 0, failAfterWrite = false, mode = 'calendar', modelState={};
+    let calls = 0, failAfterWrite = false, mode = 'calendar', modelState={}, longReadCount=0;
     const documentBytes = Buffer.from('%PDF-1.7\ngenerated ESF fixture'); let generatedTaskId;
     const request = async (url, options) => {
       if (!url.startsWith('https://api.openai.com/')) {
@@ -31,6 +31,11 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
       assert.equal(url, 'https://api.openai.com/v1/responses'); calls++;
       const body = JSON.parse(options.body);
       if(mode.startsWith('model:'))return require('./cloud-model-response.cjs').reply(mode,body,modelState);
+      if(mode==='long-read-workflow') {
+        if(longReadCount++<20)return Response.json({status:'completed',output:[{type:'function_call',call_id:'long-read-'+longReadCount,name:'index12_chat_task_options',arguments:'{}'}]});
+        if(body.input.at(-1)?.call_id!=='long-create')return Response.json({status:'completed',output:[{type:'function_call',call_id:'long-create',name:'index12_create_task',arguments:JSON.stringify({title:'Task after twenty reads',idempotencyKey:'long-read-workflow-task'})}]});
+        return Response.json({status:'completed',output:[{type:'message',role:'assistant',content:[{type:'output_text',text:'Справочники прочитаны, задача создана.',annotations:[]}]}]});
+      }
       assert.equal(body.store, false); assert.ok(body.tools.some(t => t.name === 'index12_create_task')); assert.ok(body.tools.some(t => t.name === 'index12_onec_update_object')); assert.match(body.instructions,/Дата сообщения в Asia\/Almaty/);
       if (mode === 'workflow') {
         assert.ok(body.tools.some(t => t.name === 'index12_orchestration_execute'));
@@ -116,6 +121,15 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     assert.equal(workflowResult.result.completed.filter(item => item.tool === 'index12_chat_create_task').length, 1);
     assert.equal((await db.collection('mcpExecutions').findOne({ _id: workflowJob.job.id })).state, 'completed');
     assert.equal((await db.collection('orchestrationPlans').findOne({ 'plan.idempotencyKey': 'cloud-workflow-fixture' })).state, 'completed');
+    mode = 'long-read-workflow';
+    const longChat = (await api('/chats', {})).chat;
+    const longJob = await api('/chats/'+longChat.id+'/jobs',{kind:'send',requestId:randomUUID(),message:'Прочитай справочники и создай задачу после проверки.'});
+    const longResult = await waitJob(longJob.job.id);
+    assert.equal(longResult.status,'completed',JSON.stringify(longResult));
+    assert.equal(longResult.result.text,'Справочники прочитаны, задача создана.');
+    assert.equal(longResult.result.completed.length,1);
+    assert.equal(await db.collection('businessTasks').countDocuments({title:'Task after twenty reads'}),1);
+    assert.ok((await db.collection('desktopJobs').findOne({_id:longJob.job.id})).modelResponses.length>16);
     mode = 'calendar';
     failAfterWrite = true;
     const second = await api('/chats/' + chat.id + '/jobs', { kind: 'send', requestId: randomUUID(), message: 'Создай ещё одну задачу.' }); const failed = await waitJob(second.job.id);

@@ -2,7 +2,7 @@
 const { randomUUID, createHash } = require('node:crypto');
 const { scopeQuery } = require('../../mcp/finance.cjs');
 const { ReadClient } = require('./read-client.cjs');
-const { downloadPdf, pdfBytes } = require('./purchase-files.cjs');
+const { downloadPurchaseSource, purchaseSourceBytes } = require('./purchase-files.cjs');
 const { fileBuffer, fileMeta } = require('../../codex/files.cjs');
 const { digest } = require('../../codex/executionStore.cjs');
 const { publicTask, dateOnly } = require('../task-domain.cjs');
@@ -47,7 +47,7 @@ async function validateData(client,collection,input,cache=new Map(), nested=fals
   }
   return result;
 }
-function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.env,guard=async()=>{},clientFactory=()=>new ReadClient(env),download=downloadPdf,onTasksChanged=()=>{}}) {
+function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.env,guard=async()=>{},clientFactory=()=>new ReadClient(env),download=downloadPurchaseSource,onTasksChanged=()=>{}}) {
   const plans=()=>db().collection('onecPurchases'), files=()=>db().collection('onecPurchaseFiles');
   let indexes;
   const ready=()=>indexes ||= Promise.all([
@@ -64,7 +64,7 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     }catch(error){
       if(error.code===11000)return res.status(409).json({error:{code:'PURCHASE_ALREADY_EXISTS',message:'Такой счёт уже включён в цепочку. Получите purchase_status по idempotencyKey; не создавайте новый план.'}});
       if(error.public)return res.status(error.status||error.statusCode||400).json({error:{code:error.code,message:error.message,...(error.details?{details:error.details}:{})}});
-      if(error.code && /^(HTTP_|NETWORK_|INVALID_|NOT_PUBLISHED|RESPONSE_)/.test(error.code))return res.status(424).json({error:{code:`ONEC_${error.code}`,message:error.message}});
+      if(error.code && /^(HTTP_|NETWORK_|INVALID_|NOT_PUBLISHED|RESPONSE_)/.test(error.code))return res.status(424).json({error:{code:`ONEC_${error.code}`,message:error.message,...(error.details?{details:error.details}:{})}});
       next(error);
     }
   };
@@ -87,7 +87,7 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     return {company,supplier,org,contractor};
   }
   router.get('/onec/status',use(async(req,res,client)=>{
-    const sets=await client.metadata(), access={};
+    const sets=await client.metadata({refresh:true}), access={};
     for(const collection of [INVOICE,PAYMENT,'Document_СчетНаОплатуПокупателю']) {
       try{await client.query({collection,top:1,select:'Ref_Key'});access[collection]={published:true,read:true,create:'not_tested'};}
       catch(error){access[collection]={published:sets.some(s=>s.name===collection),read:false,code:error.code,create:'not_tested'};}
@@ -95,7 +95,7 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     res.json({...identity(req),connected:true,remote:true,macRequired:false,access,workflow:['supplier_invoice','outgoing_payment_order','closing_documents_task','customer_invoice','generic_reference_objects'],referenceObjectCount:sets.filter(require('./object-data.cjs').isReferenceObject).length,objectCreation:env.ONEC_PURCHASE_WRITES==='true',deletionConfirmation:'always_in_mcp',invoicePdfAttachment:false,pdfStorage:'INDEX12 calendar task',writesEnabled:env.ONEC_PURCHASE_WRITES==='true',posting:env.ONEC_PURCHASE_WRITES==='true',objectUpdates:env.ONEC_PURCHASE_WRITES==='true',deletionMark:env.ONEC_PURCHASE_WRITES==='true',versionCheck:'DataVersion / If-Match',bankPayments:false});
   }));
   router.get('/onec/schema',use(async(req,res,client)=>{
-    const collection=req.query.collection; const sets=await client.metadata();
+    const collection=req.query.collection; const sets=await client.metadata({refresh:req.query.refresh==='true'});
     res.json({...identity(req),...(collection?{schema:await client.schema(collection)}:{collections:sets.filter(s=>!req.query.search||s.name.toLowerCase().includes(String(req.query.search).toLowerCase())).map(s=>({name:s.name,keys:s.keys})),count:sets.length})});
   }));
   router.post('/onec/query',use(async(req,res,client)=>{
@@ -105,27 +105,27 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
   }));
   router.get('/onec/object',use(async(req,res,client)=>res.json({...identity(req),...await client.get({collection:req.query.collection,id:req.query.id})})));
   router.post('/onec/purchase-pdf',use(async(req,res)=>{
-    if([req.body.desktopFileId,req.body.chatFileId,req.body.file].filter(Boolean).length!==1)fault('FILE_REQUIRED','Передайте один оригинальный PDF');
+    if([req.body.desktopFileId,req.body.chatFileId,req.body.file].filter(Boolean).length!==1)fault('FILE_REQUIRED','Передайте один оригинальный PDF или согласованное изображение счёта');
     const source=req.body.desktopFileId||req.body.chatFileId||req.body.file?.file_id;
     if(typeof source!=='string'||!source||source.length>1000)fault('INVALID_FILE_ID','Нужен идентификатор исходного файла');
     const sourceKey=digest([req.body.desktopFileId?'desktop':req.body.chatFileId?'team-chat':'chatgpt',source]);
-    const view=row=>({...identity(req),pdfId:row._id,name:row.name,size:row.size,sha256:row.sha256,storedIn:'INDEX12',attachedToOnec:false});
+    const view=row=>({...identity(req),pdfId:row._id,name:row.name,mimeType:row.mimeType,size:row.size,sha256:row.sha256,storedIn:'INDEX12',attachedToOnec:false});
     const previous=await files().findOne({...identity(req),sourceKey});if(previous)return res.json({...view(previous),replayed:true});
     let pdf;
     if(req.body.desktopFileId) {
       if(typeof req.body.desktopFileId!=='string'||!GUID.test(req.body.desktopFileId))fault('INVALID_FILE_ID','Некорректный ID исходного файла');
       const row=await db().collection('desktopFiles').findOne({_id:req.body.desktopFileId,...identity(req)});
       if(!row)fault('FILE_UNAVAILABLE','Исходный файл не найден в ваших файлах INDEX12',404);
-      pdf=pdfBytes(fileBuffer(row),row.name);
+      pdf=purchaseSourceBytes(fileBuffer(row),row.name,req.body.mediaPermission);
     } else if(req.body.chatFileId) {
       if (!GUID.test(req.body.chatFileId) || identity(req).actorId !== String(req.cachedWorkspace.userId)) fault('FILE_UNAVAILABLE','Файл рабочего чата недоступен',403);
       let row;
       try { row = await require('../../utils/fileImport.cjs').accessibleChatFile(db(), { workspaceId: identity(req).workspaceId, actorId: 'owner:' + req.cachedWorkspace.userId, owner: true }, req.body.chatFileId); }
       catch { fault('FILE_UNAVAILABLE','Файл рабочего чата недоступен',404); }
-      pdf=pdfBytes(fileBuffer(row),row.name);
+      pdf=purchaseSourceBytes(fileBuffer(row),row.name,req.body.mediaPermission);
     } else if(req.body.file) {
-      try{pdf=await download(req.body.file);}catch{fault('PDF_DOWNLOAD_FAILED','Не удалось получить оригинальный PDF. Передайте файл заново; ссылка могла истечь',424);}
-    } else fault('FILE_REQUIRED','Передайте оригинальный PDF');
+      try{pdf=await download(req.body.file,{mediaPermission:req.body.mediaPermission});}catch(error){if(error.public)throw error;fault('PDF_DOWNLOAD_FAILED','Не удалось получить оригинал счёта. Передайте файл заново; ссылка могла истечь',424);}
+    } else fault('FILE_REQUIRED','Передайте оригинальный PDF или согласованное изображение счёта');
     await guard(req); const row={_id:randomUUID(),...identity(req),sourceKey,...pdf,sha256:createHash('sha256').update(pdf.data).digest('hex'),createdAt:new Date(),expiresAt:new Date(Date.now()+7*86400000)};
     try{await files().insertOne(row);}catch(error){if(error.code!==11000)throw error;return res.json({...view(await files().findOne({...identity(req),sourceKey})),replayed:true});}
     res.json(view(row));
@@ -187,12 +187,12 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     const taskLink=new URL(env.FRONTEND_URL||'https://index12.com');taskLink.searchParams.set('calendarTask',taskId);taskLink.searchParams.set('calendarWorkspace',identity(req).workspaceId);
     const sourceTaskLink=input.sourceTaskId?new URL(env.FRONTEND_URL||'https://index12.com'):null;
     if(sourceTaskLink){sourceTaskLink.searchParams.set('teamChat',identity(req).workspaceId);sourceTaskLink.searchParams.set('task',input.sourceTaskId);}
-    const comment=`INDEX12 purchase ${planId}. Закрывающие документы: ${taskLink}. ${pdf?'Оригинал PDF сохранён в задаче INDEX12.':'Оригинальный PDF не передан.'}`;
+    const comment=`INDEX12 purchase ${planId}. Закрывающие документы: ${taskLink}. ${pdf?'Оригинал счёта сохранён в задаче INDEX12.':'Оригинал счёта не передан.'}`;
     const invoiceId=randomUUID(),paymentId=randomUUID();
     const common={Организация_Key:refs.org.Ref_Key,Контрагент_Key:input.supplierRef};
     const invoiceData={...invoice,...common,Комментарий:[invoice.Комментарий,comment].filter(Boolean).join('\n')};
     const paymentData={...payment,...common,ВидОперации:'ОплатаПоставщику',ВалютаДокумента_Key:invoice.ВалютаДокумента_Key,СуммаДокумента:invoice.СуммаДокумента,ДокументОснование:invoiceId,ДокументОснование_Type:`StandardODATA.${INVOICE}`,Комментарий:[payment.Комментарий,comment].filter(Boolean).join('\n'),РасшифровкаПлатежа:[{...split,LineNumber:'1',ДоговорКонтрагента_Key:invoice.ДоговорКонтрагента_Key,СуммаПлатежа:invoice.СуммаДокумента,СуммаВзаиморасчетов:invoice.СуммаДокумента,СуммаНДС:vatTotal/100,...(vatRates[0]?{СтавкаНДС_Key:vatRates[0]}:{}),КурсВзаиморасчетов:1,КратностьВзаиморасчетов:'1',СчетНаОплату_Key:invoiceId}]};
-    const row={_id:planId,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey,requestHash,invoiceIdentity:invoiceIdentity(connectionKey(),input,refs.org.Ref_Key),input,organizationRef:refs.org.Ref_Key,taskId,taskLink:String(taskLink),sourceTaskLink:sourceTaskLink?String(sourceTaskLink):null,companyName:refs.company.name,supplierName:refs.supplier.name,sourceProjectId:sourceTask?.projectId || null,sourceProjectName:sourceTask?.projectName || '',schedule,invoiceData,paymentData,steps:{invoice:{id:invoiceId,collection:INVOICE,state:'pending'},payment:{id:paymentId,collection:PAYMENT,state:'pending'},task:{id:taskId,state:'pending'}},plan:[{step:'invoice',action:'Создать непроведённый счёт поставщика',number:invoice.НомерВходящегоДокумента,date:invoice.ДатаВходящегоДокумента,amount:invoice.СуммаДокумента,company:refs.company.name,supplier:refs.supplier.name},{step:'payment',action:'Создать непроведённое исходящее поручение на основании счёта',bankAccountRef:payment.СчетОрганизации_Key},{step:'task',action:'Запросить закрывающие документы',date:schedule.dueDate,legal:schedule.legal}],pdf:pdf?{id:pdf._id,name:pdf.name,size:pdf.size,sha256:pdf.sha256,storedIn:'INDEX12 task',attachedToOnec:false}:null,state:'prepared',executionIds:[],createdAt:new Date(),updatedAt:new Date()};
+    const row={_id:planId,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey,requestHash,invoiceIdentity:invoiceIdentity(connectionKey(),input,refs.org.Ref_Key),input,organizationRef:refs.org.Ref_Key,taskId,taskLink:String(taskLink),sourceTaskLink:sourceTaskLink?String(sourceTaskLink):null,companyName:refs.company.name,supplierName:refs.supplier.name,sourceProjectId:sourceTask?.projectId || null,sourceProjectName:sourceTask?.projectName || '',schedule,invoiceData,paymentData,steps:{invoice:{id:invoiceId,collection:INVOICE,state:'pending'},payment:{id:paymentId,collection:PAYMENT,state:'pending'},task:{id:taskId,state:'pending'}},plan:[{step:'invoice',action:'Создать непроведённый счёт поставщика',number:invoice.НомерВходящегоДокумента,date:invoice.ДатаВходящегоДокумента,amount:invoice.СуммаДокумента,company:refs.company.name,supplier:refs.supplier.name},{step:'payment',action:'Создать непроведённое исходящее поручение на основании счёта',bankAccountRef:payment.СчетОрганизации_Key},{step:'task',action:'Запросить закрывающие документы',date:schedule.dueDate,legal:schedule.legal}],pdf:pdf?{id:pdf._id,name:pdf.name,mimeType:pdf.mimeType,size:pdf.size,sha256:pdf.sha256,storedIn:'INDEX12 task',attachedToOnec:false}:null,state:'prepared',executionIds:[],createdAt:new Date(),updatedAt:new Date()};
     row.active=true;
     await guard(req);await plans().insertOne(row);
     if(pdf)await files().updateOne({_id:pdf._id,...identity(req)},{$unset:{expiresAt:''},$set:{purchaseId:planId}});

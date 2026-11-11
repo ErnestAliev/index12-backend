@@ -195,6 +195,17 @@ module.exports = async ({
     Buffer.from(resource.content[0].resource.blob, "base64"),
     bytes,
   );
+  // A task image stays metadata-only until the current user has allowed its inspection.
+  const photoId = randomUUID(), photoBytes = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), Buffer.from('synthetic task source')]);
+  await call('index12_chat_upload_file', { id: photoId, name: 'invoice.png', mimeType: 'image/png', dataBase64: photoBytes.toString('base64') });
+  await call('index12_chat_send_message', { id: randomUUID(), taskId: ownId, text: 'Счёт', fileIds: [photoId] });
+  const pendingPhoto = await employeeClient.callTool({ name: 'index12_chat_read_file', arguments: { id: photoId } });
+  assert.equal(pendingPhoto.structuredContent.mediaPermissionRequired, true);
+  assert.equal(pendingPhoto.structuredContent.file.name, 'invoice.png');
+  assert.ok(!pendingPhoto.content.some(part => part.type === 'resource'));
+  const permittedPhoto = await employeeClient.callTool({ name: 'index12_chat_read_file', arguments: { id: photoId, mediaPermission: 'user_confirmed' } });
+  assert.deepEqual(Buffer.from(permittedPhoto.content[0].resource.blob, 'base64'), photoBytes);
+
   assert.equal(
     (
       await call("index12_chat_forward_message", {

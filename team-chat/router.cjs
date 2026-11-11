@@ -866,6 +866,7 @@ function createTeamChatRouter({
   );
   router.get('/files/:id/content', wrap(async (req, res) => {
     const row = await accessibleChatFile(db(), req.team, req.params.id);
+    if (req.query.metadataOnly === 'true') return res.json({ file: fileMeta(row) });
     res.json({ file: { ...fileMeta(row), dataBase64: fileBuffer(row).toString('base64') } });
   }));
   router.post(

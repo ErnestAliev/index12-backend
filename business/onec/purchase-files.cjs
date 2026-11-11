@@ -2,7 +2,8 @@
 const https = require('node:https');
 const dns = require('node:dns/promises');
 const { BlockList, isIP } = require('node:net');
-const { safeName, FILE_LIMIT } = require('../../codex/files.cjs');
+const { safeName, FILE_LIMIT, imageMime } = require('../../codex/files.cjs');
+const { hasMediaPermission } = require('../../utils/taskMediaPolicy.cjs');
 const denied = new BlockList();
 for (const [ip, prefix] of [['0.0.0.0',8],['10.0.0.0',8],['100.64.0.0',10],['127.0.0.0',8],['169.254.0.0',16],['172.16.0.0',12],['192.0.0.0',24],['192.0.2.0',24],['192.168.0.0',16],['198.18.0.0',15],['198.51.100.0',24],['203.0.113.0',24],['224.0.0.0',4],['240.0.0.0',4]]) denied.addSubnet(ip,prefix,'ipv4');
 for (const [ip, prefix] of [['::',128],['::1',128],['64:ff9b::',96],['100::',64],['2001::',32],['2001:db8::',32],['2002::',16],['fc00::',7],['fe80::',10],['ff00::',8]]) denied.addSubnet(ip,prefix,'ipv6');
@@ -10,6 +11,13 @@ const publicAddress = ip => !!isIP(ip) && !ip.toLowerCase().startsWith('::ffff:'
 function pdfBytes(data, name) {
   if (!Buffer.isBuffer(data) || !data.length || data.length > FILE_LIMIT || data.toString('ascii',0,5) !== '%PDF-') throw Error('Нужен оригинальный PDF до 10 МБ');
   return { data, name: safeName(name) || 'Счёт.pdf', mimeType: 'application/pdf', size: data.length };
+}
+function purchaseSourceBytes(data, name, mediaPermission) {
+  if (Buffer.isBuffer(data) && data.toString('ascii', 0, 5) === '%PDF-') return pdfBytes(data, name);
+  const mimeType = Buffer.isBuffer(data) && data.length > 0 && data.length <= FILE_LIMIT ? imageMime(data) : null;
+  if (!mimeType) throw Object.assign(new Error('Нужен оригинальный PDF или изображение PNG/JPEG/WebP/GIF до 10 МБ'), { code: 'INVALID_PURCHASE_SOURCE', status: 400, public: true });
+  if (!hasMediaPermission(mediaPermission)) throw Object.assign(new Error('Для счёта на изображении требуется явная команда пользователя или его согласие на просмотр'), { code: 'MEDIA_PERMISSION_REQUIRED', status: 400, public: true });
+  return { data, name: safeName(name) || 'Счёт.' + ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' })[mimeType], mimeType, size: data.length };
 }
 // Never send application credentials; pin the resolved public address to avoid
 // DNS rebinding. Temporary ChatGPT URLs are not stored in MongoDB or logs.
@@ -30,4 +38,5 @@ async function downloadFile(file, { resolve=dns.lookup, request=https.get }={}) 
   return data;
 }
 async function downloadPdf(file, options) { return pdfBytes(await downloadFile(file, options), file.file_name); }
-module.exports={downloadPdf,downloadFile,pdfBytes,publicAddress};
+async function downloadPurchaseSource(file, { mediaPermission, ...options } = {}) { return purchaseSourceBytes(await downloadFile(file, options), file.file_name, mediaPermission); }
+module.exports={downloadPdf,downloadFile,pdfBytes,purchaseSourceBytes,downloadPurchaseSource,publicAddress};
