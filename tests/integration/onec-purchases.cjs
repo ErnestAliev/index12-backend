@@ -5,7 +5,7 @@ const {ReadClient}=require('../../business/onec/read-client.cjs');
 const {createMcpRuntime}=require('../../mcp/runtime.cjs');
 const {INVOICE,PAYMENT}=require('../../business/onec/purchase-domain.cjs');
 const {ExecutionStore}=require('../../codex/executionStore.cjs');
-const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('../fixtures/onec-customer-schema.json'),...require('../fixtures/onec-bank-schema.json')];
+const schemas=[...new Map([...require('../fixtures/onec-purchase-schema.json'),...require('../fixtures/onec-customer-schema.json'),...require('../fixtures/onec-bank-schema.json'),...require('../fixtures/onec-invoice-workflow-schema.json')].map(s=>[s.name,s])).values()];
 (async()=>{
   const env={ONEC_BASE_URL:'https://onec.example.invalid/odata/standard.odata/',ONEC_USERNAME:'fixture',ONEC_PASSWORD:'fixture-password',ONEC_PURCHASE_WRITES:'true'};
   const original=Object.fromEntries(Object.keys(env).concat('ONEC_WORKSPACE_ID').map(k=>[k,process.env[k]]));Object.assign(process.env,env);
@@ -48,17 +48,19 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
     if(mode==='deny-invoice'&&collection===INVOICE)return new Response('{}',{status:401});
     const filter=url.searchParams.get('$filter')||'',number=/НомерВходящегоДокумента eq '([^']+)'/.exec(filter)?.[1];
     let rows=number?[...records.entries()].filter(([k,v])=>k.startsWith(collection+':')&&v.НомерВходящегоДокумента===number).map(([,v])=>v):[];
-    if(!number && ['Catalog_Контрагенты','Catalog_Валюты','Catalog_Банки','Catalog_БанковскиеСчета','Catalog_СтавкиНДС'].includes(collection)) {
+    if(!number && /^(Catalog_|ChartOfAccounts_)/.test(collection)) {
       rows=[...records.entries()].filter(([key])=>key.startsWith(collection+':')).map(([,row])=>row);
-      for(const field of ['БуквенныйКод','БИК','НомерСчета']) {const value=new RegExp(field+" eq '([^']+)'").exec(filter)?.[1];if(value)rows=rows.filter(row=>row[field]===value);}
+      for(const field of ['БуквенныйКод','БИК','НомерСчета','Description','Owner_Key','Организация_Key','ВалютаВзаиморасчетов_Key','ИдентификационныйКодЛичности']) {const value=new RegExp(field+" eq (?:guid)?'([^']+)'").exec(filter)?.[1];if(value)rows=rows.filter(row=>row[field]===value);}
       const skip=Number(url.searchParams.get('$skip')||0),top=Number(url.searchParams.get('$top')||200);rows=rows.slice(skip,skip+top);
     }
     assert.ok(!url.search.includes('+'),'OData spaces must be encoded as %20');return Response.json({value:rows});
   }
   const clientFactory=()=>{const c=new ReadClient(process.env,transport);c.sets=schemas;return c;};
-  let fixture,runtime;
+  let fixture,runtime,chatRouter,nativeAvailable=true,printCalls=0;
   try{
-    fixture=await startFixture({purchaseClientFactory:clientFactory});const db=mongoose.connection.db;
+    const printClientFactory=()=>({capabilities:async()=>({available:nativeAvailable,...(nativeAvailable?{form:{collection:'Document_СчетНаОплатуПокупателю',id:'СчетНаОплату',version:'fixture-1'}}:{code:'NATIVE_PRINT_NOT_CONFIGURED'})}),print:async()=>{printCalls++;return Buffer.from('%PDF-1.7\nfixture native print bytes');}});
+    fixture=await startFixture({purchaseClientFactory:clientFactory,printClientFactory,getTeamChatRouter:()=>chatRouter});const db=mongoose.connection.db;
+    chatRouter=require('../../team-chat/router.cjs').createTeamChatRouter({db:()=>db,...fixture.identityModels,history:fixture.audit,getWorkspaceStorageUserId:w=>String(w.userId),frontendUrl:new URL(fixture.apiUrl).origin});
     const actor=await fixture.identityModels.User.create({name:'Purchase owner',email:'purchase@example.invalid'}),workspace=await fixture.identityModels.Workspace.create({name:'Purchase',userId:String(actor._id),isDefault:true});
     const scope={actorId:String(actor._id),workspaceId:String(workspace._id)};process.env.ONEC_WORKSPACE_ID=scope.workspaceId;
     const companyId=new mongoose.Types.ObjectId(),contractorId=new mongoose.Types.ObjectId(),connectionKey=createHash('sha256').update(env.ONEC_BASE_URL).digest('hex');
@@ -75,6 +77,7 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
     const desktopUpload=await call('index12_upload_purchase_pdf',{desktopFileId});assert.equal(desktopUpload.sha256,createHash('sha256').update(originalPdf).digest('hex'));
     assert.equal((await call('index12_upload_purchase_pdf',{desktopFileId})).pdfId,desktopUpload.pdfId);
     const sourceTaskId=randomUUID(),chatFileId=randomUUID(),projectId=new mongoose.Types.ObjectId().toString();
+    await fixture.models.Project.create({_id:projectId,name:'Проект',userId:scope.actorId});
     await db.collection('teamChatTasks').insertOne({_id:sourceTaskId,workspaceId:scope.workspaceId,description:'Оплатить дератизацию',projectId,projectName:'Проект',status:'open',attachments:[{fileId:chatFileId}]});
     await db.collection('teamChatFiles').insertOne({_id:chatFileId,workspaceId:scope.workspaceId,actorId:'employee',name:'Supplier.pdf',mimeType:'application/pdf',size:originalPdf.length,data:originalPdf});
     const upload=await call('index12_upload_purchase_pdf',{chatFileId});
@@ -122,6 +125,7 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
     assert.equal((await api('purchases/execute',{planToken:toRevise.planToken})).error.code,'PURCHASE_CANCELLED');
     assert.equal((await api('purchases/cancel',{planToken:prepared.planToken})).error.code,'PURCHASE_CANNOT_CANCEL');
     await require('./invoice-templates.cjs')({call,api,db,scope,companyId:String(companyId),contractorId:String(contractorId),refs,records,posts,setMode:v=>mode=v,tokenHash,sourceTaskId,pdfId:upload.pdfId,fixture});
+    await require('./invoice-workflow.cjs')({call,api,db,scope,companyId:String(companyId),refs,records,posts,commands,setMode:v=>mode=v,sourceTaskId,fixture,tokenHash,pdfId:upload.pdfId,setPrinting:v=>nativeAvailable=v,printCalls:()=>printCalls});
     await require('./onec-generic.cjs')({call,api,db,scope,companyId:String(companyId),refs,records,posts,patches,setMode:v=>mode=v,tokenHash});
     await require('./onec-mutations.cjs')({call,api,db,scope,companyId:String(companyId),paymentId:result.steps.payment.id||result.steps.payment.ref||payment.Ref_Key,records,patches,commands,setMode:v=>mode=v,tokenHash});
     await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:['read']}});assert.equal((await api('purchases/execute',{planToken:prepared.planToken})).status,403);

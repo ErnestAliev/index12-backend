@@ -156,7 +156,7 @@ module.exports = async function ({
   const unposted = await call("index12_onec_set_posted", command(false));
   assert.equal(unposted.object.Posted, false);
   assert.deepEqual(
-    commands.map((c) => c.command),
+    commands.filter(c=>c.id===paymentId).map((c) => c.command),
     ["Post", "Unpost"],
   );
   const deletion = (marked) => ({

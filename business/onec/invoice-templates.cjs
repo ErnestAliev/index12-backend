@@ -6,7 +6,8 @@ const { fault, ZERO, cents } = require('./purchase-domain.cjs');
 const { dateOnly, publicTask } = require('../task-domain.cjs');
 const { digest } = require('../../codex/executionStore.cjs');
 const { validateCustomerInvoice, validateObjectData } = require('./object-data.cjs');
-const { waitingFollowup } = require('./invoice-followup.cjs');
+const { waitingFollowup, accountingPaidFollowup } = require('./invoice-followup.cjs');
+const {prepareWorkflow,materializeWorkflow,paymentData,localTimestamp}=require('./invoice-workflow.cjs');
 const { scopeQuery } = require('../../mcp/finance.cjs');
 const { fileMeta, fileBuffer } = require('../../codex/files.cjs');
 const { lookupRegistry } = require('../providers.cjs');
@@ -20,6 +21,10 @@ const partyInput = z.object({name:z.string().trim().min(1).max(200),taxId:z.stri
   isIndividualEntrepreneur:z.boolean().optional(),kbe:z.string().regex(/^\d{2}$/).optional(),
   iban:z.string().regex(/^KZ[A-Z0-9]{18}$/).optional(),bic:z.string().regex(/^[A-Z0-9]{8,11}$/).optional()}).strict();
 const prepareSchema = z.object({companyId:z.string().regex(/^[a-f\d]{24}$/i),direction:z.enum(['supplier','customer']),
+  workflow:z.enum(['invoice_only','supplier_payment','customer_invoice']).optional().describe('supplier_payment — полная покупка с номенклатурой, «Без договора», оплаченной и проведённой платёжкой; customer_invoice — счёт покупателю с номенклатурой. invoice_only — прежний режим без поручения.'),
+  payerIban:z.string().regex(/^KZ[A-Z0-9]{18}$/).optional().describe('Банковский счёт своей компании, соответствующий выбранному счёту INDEX12. Если не задан — основной банковский счёт организации 1С.'),
+  expenseDate:day.optional().describe('Дата расхода INDEX12. Без значения — день подготовки в Asia/Almaty; дата платёжного поручения всегда определяется при его создании.'),
+  projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
   counterparty:partyInput,date:day,number:z.string().trim().min(1).max(100).optional(),currency:z.enum(['KZT']).default('KZT'),
   knp:z.preprocess(value=>value===''?undefined:value,z.string().regex(/^\d{3}$/).optional()),contractRef:z.preprocess(value=>value===''?null:value,z.string().uuid().nullable().optional()),
   useVat:z.boolean().describe('НДС из исходного счёта: true при наличии НДС, false при «без НДС». Налоговый режим покупателя не определяет НДС поставщика.'),
@@ -57,12 +62,17 @@ async function loadTemplate(db,client,connectionKey,direction) {
   await templates.updateOne({_id:key},{$set:row},{upsert:true});return row;
 }
 async function resolveParty(client,template,party) {
+  const select=`Ref_Key,Description,НаименованиеПолное,${template.taxField}`;
+  const exact=await client.query({collection:'Catalog_Контрагенты',filter:`${template.taxField} eq ${literal(party.taxId)} and DeletionMark eq false and IsFolder eq false`,select,top:2,skip:0});
+  const matches=exact.rows.filter(row=>String(row[template.taxField]||'').trim()===party.taxId);
+  if(matches.length>1||matches.length&&exact.hasMore)fault('DUPLICATE_COUNTERPARTY','В 1С несколько контрагентов с этим БИН/ИИН',409);
+  if(matches.length===1)return matches[0];
   // Read projected identities in pages: also catch an old card with no tax ID or
   // a different spelling/case before creating a new party. No guessed OData field.
   let found=null; const names=[];
   for(let skip=0;skip<=100000;skip+=200) {
     const result=await client.query({collection:'Catalog_Контрагенты',filter:'DeletionMark eq false and IsFolder eq false',
-      select:`Ref_Key,Description,НаименованиеПолное,${template.taxField}`,orderBy:'Ref_Key',top:200,skip});
+      select,orderBy:'Ref_Key',top:200,skip});
     for(const row of result.rows) {
       if(String(row[template.taxField]||'').trim()===party.taxId) {
         if(found && found.Ref_Key!==row.Ref_Key)fault('DUPLICATE_COUNTERPARTY','В 1С несколько контрагентов с этим БИН/ИИН',409);
@@ -96,7 +106,7 @@ function documentData(input,currencyRef) {
   } else if(input.number) invoice.Number=input.number;
   return invoice;
 }
-function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutations,env=process.env,guard=async()=>{},clientFactory=()=>new ReadClient(env),onTasksChanged=()=>{}}) {
+function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutations,env=process.env,guard=async()=>{},clientFactory=()=>new ReadClient(env),onTasksChanged=()=>{},onContractorChanged=()=>{},printClientFactory=()=>new (require('./native-print.cjs').NativePrintClient)(env)}) {
   const identity=req=>({actorId:String(req.user.id||req.user._id),workspaceId:String(req.cachedWorkspace._id)});
   const connectionKey=()=>createHash('sha256').update(env.ONEC_BASE_URL.replace(/\/?$/,'/')).digest('hex');
   const plans=()=>db().collection('onecInvoicePlans');
@@ -107,8 +117,8 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(e.public||/^(HTTP_|NETWORK_|INVALID_|NOT_PUBLISHED|RESPONSE_)/.test(e.code||''))return res.status(e.status||424).json({error:{code:e.code,message:e.message,...(e.details?{details:e.details}:{})}});next(e);}};
   const view = row => ({planToken:row._id,state:row.state,completed:row.state==='completed',direction:row.input.direction,
     template:row.template,companyId:row.input.companyId,counterpartyRef:row.partyRef||null,amount:row.input.amount,
-    contractRef:row.input.contractRef||null,knp:row.input.knp||'859',vat:row.vat||null,steps:row.steps,taskId:row.taskId||null,
-    bankEnabled:false,bankPaymentSent:false,documentsPosted:false,error:row.error||null});
+    workflow:row.input.workflow||'invoice_only',expenseDate:row.expenseDate||null,sourceProjectId:row.sourceProjectId||null,contractRef:row.workflow?.contractRef||row.input.contractRef||null,knp:row.input.knp||'859',vat:row.vat||null,steps:row.steps,taskId:row.taskId||null,
+    bankEnabled:false,bankPaymentSent:false,bankSettlementConfirmed:false,documentsPosted:row.steps.posting?.state==='completed',accountingPaid:row.steps.payment?.state==='completed',error:row.error||null});
   router.get('/onec/counterparty-lookup',use(async(req,res)=>{
     const taxId=z.string().regex(/^\d{12}$/).parse(req.query.taxId),legalForm=z.enum(['ip','llp','person']).parse(req.query.legalForm);
     if(legalForm!=='llp')return res.json({...identity(req),available:false,mode:'manual',reason:'Реестр юрлиц не используется для ИП и физлиц'});
@@ -143,6 +153,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(!party&&input.contractRef&&input.contractRef!==ZERO)fault('CONTRACT_MISMATCH','Нельзя привязать существующий договор к новому контрагенту',409);
     const normalized = await normalizeInvoiceVat(input,client);
     const data=documentData(normalized,currencies.rows[0].Ref_Key);
+    const workflow=await prepareWorkflow(client,normalized,{org,currencyRef:currencies.rows[0].Ref_Key,partyRef:party?.Ref_Key,documentData:data});
     const newPartyData=party?null:partyData(input.counterparty,template.taxField);
     if(newPartyData && input.counterparty.residenceCountryCode) {
       const country=await client.query({collection:'Catalog_КлассификаторСтранМира',filter:`КодАльфа2 eq ${literal(input.counterparty.residenceCountryCode)} and DeletionMark eq false`,top:2});
@@ -165,14 +176,16 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     }
     const source=input.sourceTaskId?await db().collection('teamChatTasks').findOne({_id:input.sourceTaskId,workspaceId:identity(req).workspaceId,deletedAt:{$exists:false}}):null;
     if(input.sourceTaskId && (!source||String(req.cachedWorkspace.userId)!==identity(req).actorId))fault('SOURCE_TASK_UNAVAILABLE','Исходная рабочая задача недоступна',404);
+    const project=input.projectId?await db().collection('projects').findOne({_id:new (require('mongoose').Types.ObjectId)(input.projectId),...scopeQuery(req.businessScope,identity(req).workspaceId)}):null;
+    if(input.projectId&&!project)fault('PROJECT_UNAVAILABLE','Проект недоступен в рабочей области',404);
     if(input.pdfId&&!await db().collection('onecPurchaseFiles').findOne({_id:input.pdfId,...identity(req)}))fault('FILE_UNAVAILABLE','Оригинал счёта недоступен',404);
     await plans().createIndex({creationKey:1},{unique:true});
     await plans().createIndex({workspaceId:1,connectionKey:1,invoiceIdentity:1},{unique:true});
     const invoiceIdentity=digest([org.Ref_Key,input.direction,input.counterparty.taxId,input.number||input.idempotencyKey,input.date]);
     const row={_id:randomUUID(),followupTaskId:input.direction==='supplier'?randomUUID():null,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey:key,requestHash:digest(input),invoiceIdentity,input,
-      organizationRef:org.Ref_Key,companyName:company.name,sourceProjectId:source?.projectId||null,sourceProjectName:source?.projectName||'',
+      organizationRef:org.Ref_Key,companyName:company.name,expenseDate:input.expenseDate||localTimestamp().slice(0,10),sourceProjectId:project?String(project._id):source?.projectId||null,sourceProjectName:project?.name||source?.projectName||'',
       template:{id:template._id,schemaFingerprint:template.schemaFingerprint,version:template.version,transport:template.transport},taxField:template.taxField,
-      partyRef:party?.Ref_Key||null,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,vat:{included:normalized.vatIncluded,amount:normalized.vatAmount??0,lines:normalized.lines.map(line=>({rateRef:line.vatRateRef||null,percent:line.vatPercent??null,amount:line.vatAmount}))},state:'prepared',
+      partyRef:party?.Ref_Key||null,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,workflow,vat:{included:normalized.vatIncluded,amount:normalized.vatAmount??0,lines:normalized.lines.map(line=>({rateRef:line.vatRateRef||null,percent:line.vatPercent??null,amount:line.vatAmount}))},state:'prepared',
       steps:{party:{operationId:stableUuid([connectionKey(),identity(req).workspaceId,input.counterparty.taxId,'party'])},bank:{operationId:randomUUID()},partyBank:{operationId:randomUUID()},invoice:{operationId:randomUUID()}},createdAt:new Date()};
     if(party)row.steps.party={...row.steps.party,state:'completed',id:party.Ref_Key};
     await guard(req);
@@ -180,7 +193,60 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     res.json({...identity(req),...view(row),plan:['Сопоставить или создать контрагента без дублей','Сохранить реквизиты банковского счёта в 1С (без подключения к банку)','Создать непроведённый счёт целиком по шаблону'],invoice:data});
   }));
   router.get('/onec/invoices/status',use(async(req,res)=>res.json({...identity(req),...view(await getPlan(req))})));
+  router.get('/onec/invoices/print-capabilities',use(async(req,res)=>res.json({...identity(req),...await printClientFactory().capabilities()})));
+  router.get('/onec/invoices/pdf',use(async(req,res,client)=>{
+    const row=await getPlan(req);
+    if(row.state!=='completed'||row.input.direction!=='customer')fault('CUSTOMER_INVOICE_NOT_READY','Для печати нужен сохранённый счёт покупателю',409);
+    await mutations.company(req,row.input.companyId,row.organizationRef);
+    const [invoice]=await Promise.all([
+      client.get({collection:DIRECTIONS.customer,id:row.steps.invoice.id}).then(r=>r.object),
+    ]);
+    if(invoice.DeletionMark||invoice.Организация_Key!==row.organizationRef||invoice.Контрагент_Key!==row.partyRef||invoice.ВалютаДокумента_Key!==row.currencyRef||cents(invoice.СуммаДокумента)!==cents(row.input.amount))fault('INVOICE_CHANGED','Сохранённый счёт изменён, требуется сверка перед отправкой',409);
+    const printer=printClientFactory(),capabilities=await printer.capabilities();
+    if(!capabilities.available)fault('NATIVE_PRINT_NOT_CONFIGURED','Не подключена штатная печать 1С. Счёт сохранён; повторно создавать его нельзя.',503);
+    const cacheKey=digest([row.connectionKey,row.workspaceId,row.organizationRef,invoice.Ref_Key,invoice.DataVersion,capabilities.form]);
+    const cache=db().collection('onecInvoicePrintFiles'),cached=await cache.findOne({_id:cacheKey});
+    let bytes=cached?fileBuffer(cached):await printer.print({invoiceRef:invoice.Ref_Key,organizationRef:row.organizationRef,dataVersion:invoice.DataVersion,form:capabilities.form});
+    if(!cached)await cache.updateOne({_id:cacheKey},{$setOnInsert:{_id:cacheKey,workspaceId:row.workspaceId,organizationRef:row.organizationRef,invoiceRef:invoice.Ref_Key,dataVersion:invoice.DataVersion,form:capabilities.form,data:bytes,createdAt:new Date()}},{upsert:true});
+    res.set('Cache-Control','private, no-store');res.json({...identity(req),planToken:row._id,invoiceRef:invoice.Ref_Key,number:invoice.Number,amount:invoice.СуммаДокумента,
+      printSource:'ONEC_NATIVE',file:{name:`Счёт-${String(invoice.Number).replace(/[^\p{L}\p{N}._-]/gu,'_')}.pdf`,mimeType:'application/pdf',dataBase64:bytes.toString('base64')}});
+  }));
   async function save(row,values) {Object.assign(row,values);await plans().updateOne({_id:row._id},{$set:values});}
+  async function syncParty(req,client,row,contractorId) {
+    if(row.contractorId&&row.contractorId!==contractorId)fault('COUNTERPARTY_LINK_CONFLICT','План уже связан с другой карточкой INDEX12',409);
+    const contractor=await Contractor.findOne({_id:contractorId,...scopeQuery(req.businessScope,identity(req).workspaceId)}).lean();
+    if(!contractor||contractor.identificationNumber!==row.input.counterparty.taxId)fault('COUNTERPARTY_LINK_CONFLICT','Карточка INDEX12 не совпадает с БИН/ИИН счёта',409);
+    if(row.partySyncedAt)return contractor;
+    if(!req.mcpContext?.grant?.scopes?.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для синхронизации реквизитов нужно право update',403);
+    await guard(Object.assign(Object.create(req),{onecInvoiceNeedsUpdate:true}));
+    if(contractor.onecSync?.ref&&(contractor.onecSync.ref!==row.partyRef||contractor.onecSync.connectionKey!==row.connectionKey))fault('COUNTERPARTY_LINK_CONFLICT','Карточка связана с другой записью или базой 1С',409);
+    const duplicate=await Contractor.findOne({_id:{$ne:contractor._id},...scopeQuery(req.businessScope,row.workspaceId),'onecSync.ref':row.partyRef}).lean();
+    if(duplicate)fault('COUNTERPARTY_LINK_CONFLICT','Эта запись 1С уже связана с другой карточкой INDEX12',409);
+    const party=(await client.get({collection:'Catalog_Контрагенты',id:row.partyRef})).object;
+    if(party.DeletionMark||String(party[row.taxField]||'').trim()!==row.input.counterparty.taxId)fault('COUNTERPARTY_IDENTITY_CHANGED','БИН/ИИН карточки 1С изменён',409);
+    const {profileInput}=require('../company-profile.cjs');
+    const fields=profileInput({legalName:party.НаименованиеПолное||party.Description,...(party.КБЕ?{kbe:party.КБЕ}:{})});
+    for(const [target,source] of [['legalAddress','ЮридическийАдрес'],['phone','Телефон'],['email','ЭлектроннаяПочта']])if(typeof party[source]==='string'&&party[source].trim())fields[target]=party[source].trim();
+    if(row.steps.bank?.id) {
+      const bank=(await client.get({collection:'Catalog_БанковскиеСчета',id:row.steps.bank.id})).object;
+      if(bank.Owner!==row.partyRef||bank.DeletionMark)fault('BANK_ACCOUNT_MISMATCH','Банковский счёт контрагента изменён',409);
+      const info=(await client.get({collection:'Catalog_Банки',id:bank.Банк_Key})).object;
+      const entry={iban:bank.НомерСчета,bankName:info.Description||'',bic:info.БИК||'',currency:row.input.currency};
+      fields.bankAccounts=[entry,...(contractor.bankAccounts||[]).filter(b=>b.iban!==entry.iban)];
+    }
+    const checkedAt=new Date().toISOString(),sync={source:'1С',collection:'Catalog_Контрагенты',ref:row.partyRef,connectionKey:row.connectionKey,
+      name:party.Description||'',identificationNumber:row.input.counterparty.taxId,checkedAt,missing:fields.legalAddress||contractor.legalAddress?[]:['legalAddress'],warnings:[]};
+    const version=contractor.profileVersion||0,filter=version?{profileVersion:version}:{$or:[{profileVersion:0},{profileVersion:{$exists:false}}]};
+    const saved=await Contractor.findOneAndUpdate({_id:contractor._id,userId:contractor.userId,workspaceId:contractor.workspaceId??null,identificationNumber:row.input.counterparty.taxId,...filter},{$set:{...fields,onecSync:sync},$inc:{profileVersion:1}},{new:true,runValidators:true}).lean();
+    if(!saved)fault('PROFILE_VERSION_CONFLICT','Карточка INDEX12 изменена во время сверки',409);
+    await save(row,{contractorId,partySyncedAt:checkedAt});onContractorChanged(req,saved);return saved;
+  }
+  router.post('/onec/invoices/sync-party',use(async(req,res,client)=>{
+    const row=await getPlan(req),contractorId=z.string().regex(/^[a-f\d]{24}$/i).parse(req.body.contractorId);
+    if(row.state!=='completed')fault('INVOICE_NOT_READY','Сначала завершите создание документов',409);
+    const contractor=await syncParty(req,client,row,contractorId);
+    res.json({...identity(req),planToken:row._id,contractorId:String(contractor._id),synced:true});
+  }));
   async function create(req,client,row,step,collection,data) {
     if(row.steps[step].state==='completed')return row.steps[step].id;
     let result;const response={status(){return this;},json(value){result=value;return this;}};
@@ -193,7 +259,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   router.post('/onec/invoices/execute',use(async(req,res,client)=>{
     if(env.ONEC_PURCHASE_WRITES!=='true'||!req.mcpContext?.grant?.scopes?.includes('imports:direct'))fault('DIRECT_AUTHORIZATION_REQUIRED','Нужно прямое разрешение на создание документов',403);
     const row=await getPlan(req);if(row.state==='completed')return res.json({...identity(req),...view(row),replayed:true});
-    if(row.partyData && row.input.counterparty.iban && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для привязки основного банковского счёта новой карточки нужно право update',403);
+    if((row.workflow || row.partyData && row.input.counterparty.iban) && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для полной цепочки документов и синхронизации карточки нужно право update',403);
     await guard(req);await mutations.company(req,row.input.companyId,row.organizationRef);
     const lease=randomUUID(),claimed=await plans().findOneAndUpdate({_id:row._id,$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{lease,leaseUntil:new Date(Date.now()+180000),state:'running'}},{returnDocument:'after'});
     if(!claimed)return res.status(202).json({...identity(req),...view(row),inProgress:true});Object.assign(row,claimed);
@@ -239,9 +305,14 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
           if(!result.completed)fault('INVOICE_STEP_UNCONFIRMED','Привязка банковского счёта не подтверждена; сверяйте onec_mutation_status',409,{step:'partyBank',operationId:row.steps.partyBank.operationId});
         }
       }
+      const workflowCreate=async(step,collection,data)=>{
+        if(!row.steps[step]){row.steps[step]={operationId:stableUuid([row.connectionKey,row.workspaceId,row.input.companyId,collection,data])};await save(row,{steps:row.steps});}
+        return create(req,client,row,step,collection,data);
+      };
+      await materializeWorkflow(row,{client,create:workflowCreate,save:values=>save(row,values)});
       const followupLink=new URL(env.FRONTEND_URL||'https://index12.com');followupLink.searchParams.set('calendarTask',row.followupTaskId||'');followupLink.searchParams.set('calendarWorkspace',row.workspaceId);
       const collection=DIRECTIONS[row.input.direction], data={...row.documentData,Контрагент_Key:row.partyRef,
-        Комментарий:`INDEX12 invoice plan ${row._id}. ${row.input.contractRef?'Договор указан в источнике.':'Без договора.'} ${row.input.sourceTaskId?'Исходная задача: '+row.input.sourceTaskId+'.':''} ${row.followupTaskId?'Закрывающие документы: '+String(followupLink):''}`};
+        Комментарий:`INDEX12 invoice plan ${row._id}. ${row.input.contractRef?'Договор указан в источнике.':'Без договора.'} ${row.sourceProjectName?'Проект: '+row.sourceProjectName+'.':''} ${row.input.sourceTaskId?'Исходная задача: '+row.input.sourceTaskId+'.':''} ${row.followupTaskId?'Закрывающие документы: '+String(followupLink):''}`};
       if(row.steps.invoice.state!=='completed') {
         let filter=`Организация_Key eq guid'${row.organizationRef}' and Контрагент_Key eq guid'${row.partyRef}' and DeletionMark eq false`;
         filter+=row.input.direction==='supplier'?` and НомерВходящегоДокумента eq ${literal(row.input.number)} and ДатаВходящегоДокумента eq datetime'${row.documentData.ДатаВходящегоДокумента}'`:
@@ -253,6 +324,21 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
           if(duplicates.rows.some(item=>item.Ref_Key!==known))fault('ONEC_INVOICE_ALREADY_EXISTS','Такой счёт уже есть в 1С. Нужна сверка и привязка, дубль не создан',409,{references:duplicates.rows.map(item=>item.Ref_Key)});
         }
         await create(req,client,row,'invoice',collection,data);
+      }
+      if(row.workflow?.payment) {
+        // Persist the first creation timestamp. A retry tomorrow keeps the same
+        // document/date and must reconcile its original mutation key.
+        if(!row.paymentCreatedAt)await save(row,{paymentCreatedAt:localTimestamp()});
+        await workflowCreate('payment','Document_ПлатежноеПоручениеИсходящее',paymentData(row));
+        if(row.steps.posting?.state!=='completed') {
+          const object=(await client.get({collection:'Document_ПлатежноеПоручениеИсходящее',id:row.steps.payment.id})).object;
+          if(object.Оплачено!==true)fault('PAYMENT_PAID_MARK_MISMATCH','Флаг «Оплачено» платёжного поручения не сохранён',409);
+          if(!row.steps.posting){row.steps.posting={operationId:randomUUID(),expectedVersion:object.DataVersion};await save(row,{steps:row.steps});}
+          let result;const response={status(){return this;},json(value){result=value;return this;}};
+          await mutations.posting(Object.assign(Object.create(req),{onecInvoiceNeedsUpdate:true,body:{companyId:row.input.companyId,collection:'Document_ПлатежноеПоручениеИсходящее',id:row.steps.payment.id,expectedVersion:row.steps.posting.expectedVersion,operationId:row.steps.posting.operationId,post:true}}),response,client);
+          row.steps.posting={...row.steps.posting,state:result.completed?'completed':result.state,id:row.steps.payment.id};await save(row,{steps:row.steps});
+          if(!result.completed)fault('INVOICE_STEP_UNCONFIRMED','Проведение не подтверждено; сверьте onec_mutation_status с прежним ключом',409,{step:'posting',operationId:row.steps.posting.operationId});
+        }
       }
       await save(row,{state:'completed',error:null});
       if(row.input.pdfId)await db().collection('onecPurchaseFiles').updateOne({_id:row.input.pdfId,...identity(req)},{$unset:{expiresAt:''}});
@@ -267,6 +353,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const operation=await Event.findOne({_id:operationId,...scopeQuery(req.businessScope,identity(req).workspaceId)}).lean();
     const contractor=operation && await Contractor.findOne({_id:operation.contractorId,...scopeQuery(req.businessScope,identity(req).workspaceId)}).lean();
     if(!operation||operation.type!=='expense'||String(operation.companyId)!==row.input.companyId||cents(Math.abs(operation.amount))!==cents(row.input.amount)||contractor?.identificationNumber!==row.input.counterparty.taxId)fault('OPERATION_MISMATCH','Расход INDEX12 не соответствует счёту',409);
+    if(row.workflow)await syncParty(req,client,row,String(contractor._id));
     const tasks=db().collection('businessTasks'),sourceKey=`onec-invoice:${row._id}`;
     const existing=await tasks.findOne({scope:row.scope,sourceKey});if(existing){if(existing.evidence.operationId!==operationId)fault('OPERATION_LINK_CONFLICT','Этот счёт уже связан с другим расходом INDEX12',409);return res.json({...identity(req),task:publicTask(existing),replayed:true});}
     await guard(req);const taskId=row.followupTaskId||randomUUID(),attachments=[];
@@ -278,8 +365,8 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const sourceLink=new URL(env.FRONTEND_URL||'https://index12.com');sourceLink.searchParams.set('teamChat',row.workspaceId);if(row.input.sourceTaskId)sourceLink.searchParams.set('task',row.input.sourceTaskId);
     const task={_id:taskId,scope:row.scope,workspaceId:row.workspaceId,createdBy:row.actorId,projectId:row.sourceProjectId,projectName:row.sourceProjectName,
       companyId:null,party:{kind:'contractors',id:String(contractor._id)},partyName:contractor.name,title:`Закрывающие документы: ${contractor.name}`.slice(0,300),
-      description:`${row.companyName}. Счёт №${row.input.number} от ${row.input.date}, ${row.input.amount} ${row.input.currency}.\nПосле подтверждения оплаты оператором: запросить АВР → получить и подтвердить АВР → при необходимости запросить и получить ЭСФ.\nСоздание счёта не подтверждает оплату. До подтверждения оплаты напоминания отключены.\n${row.input.lines.map(line=>line.description).join('; ')}`,
-      status:'open',...waitingFollowup(),links:row.input.sourceTaskId?[{title:'Исходная рабочая задача',url:String(sourceLink)}]:[],attachments,
+      description:`${row.companyName}. Счёт №${row.input.number} от ${row.input.date}, ${row.input.amount} ${row.input.currency}.\n${row.steps.posting?.state==='completed'?'Платёжное поручение проведено с отметкой «Оплачено» по правилу владельца. Выгрузка и исполнение в банке вручную. Запросить АВР → получить и подтвердить АВР → при необходимости запросить и получить ЭСФ.':'После подтверждения оплаты оператором: запросить АВР → получить и подтвердить АВР → при необходимости запросить и получить ЭСФ. До подтверждения оплаты напоминания отключены.'}\n${row.input.lines.map(line=>line.description).join('; ')}`,
+      status:'open',...(row.steps.posting?.state==='completed'?accountingPaidFollowup(row.actorId):waitingFollowup()),links:row.input.sourceTaskId?[{title:'Исходная рабочая задача',url:String(sourceLink)}]:[],attachments,
       source:'onec_invoice',sourceKey,evidence:{invoicePlanId:row._id,invoiceRef:row.steps.invoice.id,companyId:row.input.companyId,contractorId:String(contractor._id),operationId,sourceTaskId:row.input.sourceTaskId||null},version:0,reminderRevision:0,createdAt:new Date(),updatedAt:new Date()};
     await tasks.createIndex({scope:1,sourceKey:1},{unique:true,partialFilterExpression:{sourceKey:{$type:'string'}}});
     await tasks.updateOne({scope:row.scope,sourceKey},{$setOnInsert:task},{upsert:true});const saved=await tasks.findOne({scope:row.scope,sourceKey});

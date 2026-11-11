@@ -381,7 +381,7 @@ function registerMcpOperationRoutes(app, deps) {
         if (req.method === 'POST' && /^\/tasks\/[^/]+\/invoice-followup$/.test(req.path)) return requireScope('update')(req,res,next);
         const scope = { POST: 'create', PATCH: 'update', DELETE: 'delete' }[req.method];
         if (req.method === 'POST' && ['/onec/query','/onec/purchases/prepare','/onec/invoices/prepare'].includes(req.path)) return next();
-        if (!scope || !(/^\/tasks(?:\/[^/]+)?$/.test(req.path) || req.method === 'POST' && ['/onec/purchase-pdf','/onec/purchases/execute','/onec/purchases/cancel','/onec/invoices/execute','/onec/invoices/followup'].includes(req.path))) return res.status(403).json({ message: 'Изменение недоступно через MCP' });
+        if (!scope || !(/^\/tasks(?:\/[^/]+)?$/.test(req.path) || req.method === 'POST' && ['/onec/purchase-pdf','/onec/purchases/execute','/onec/purchases/cancel','/onec/invoices/execute','/onec/invoices/followup','/onec/invoices/sync-party'].includes(req.path))) return res.status(403).json({ message: 'Изменение недоступно через MCP' });
         return requireScope(scope)(req, res, next);
     }, require('../business/router.cjs').createBusinessRouter({ db, Company: deps.Company, Contractor: deps.Contractor, Individual: deps.Individual, Event:deps.Event, purchaseGuard: async req => {
         await execution.guard(req, null, true);
@@ -394,7 +394,7 @@ function registerMcpOperationRoutes(app, deps) {
         if (req.onecInvoiceNeedsUpdate && !grant.scopes.includes('update')) fail('FORBIDDEN',null,'Право изменения реквизитов контрагента 1С отозвано.',403);
         if ((req.path.endsWith('/execute') || req.path === '/onec/invoices/followup') && !['create','imports:direct'].every(scope=>grant.scopes.includes(scope))) fail('FORBIDDEN',null,'Разрешение на создание документов 1С отозвано.',403);
     }, isAuthenticated: (_req, _res, next) => next(), checkWorkspacePermission,
-        purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, emitEntityEvent:deps.emitEntityEvent,
+        purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, printClientFactory:deps.printClientFactory, emitEntityEvent:deps.emitEntityEvent,
         taskMutation: (req, res, fn) => execution.execute(req, res, fn), taskSession: () => deps.audit?.current()?.session,
         getWorkspaceStorageUserId: workspace => workspace.isDefault ? String(workspace.userId) : `${workspace.userId}_ws_${workspace._id}` }));
     if (deps.getCodexRouter) app.use('/api/mcp/codex', authenticate, requireScope('read'), (req, res, next) => {

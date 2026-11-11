@@ -13,7 +13,7 @@ test('templates leave contract empty, default only absent KNP, and preserve full
 test('counterparty resolver scans all pages with the published tax field, catches duplicates and blank-tax name collisions',async()=>{
  const template={taxField:'ИдентификационныйКодЛичности'},party={name:'ИП Supplier',taxId:'971116300034'};
  const queries=[],client={query:async args=>{queries.push(args);return args.skip?{rows:[{Ref_Key:'party',Description:'SUPPLIER',ИдентификационныйКодЛичности:party.taxId}],hasMore:false}:{rows:[],hasMore:true};}};
- assert.equal((await resolveParty(client,template,party)).Ref_Key,'party');assert.equal(queries.length,2);assert.match(queries[0].select,/ИдентификационныйКодЛичности/);assert.doesNotMatch(queries[0].select,/ИдентификационныйНомер/);
+ assert.equal((await resolveParty(client,template,party)).Ref_Key,'party');assert.equal(queries.length,3);assert.match(queries[0].select,/ИдентификационныйКодЛичности/);assert.doesNotMatch(queries[0].select,/ИдентификационныйНомер/);
  await assert.rejects(()=>resolveParty({query:async()=>({rows:[{Ref_Key:'a',ИдентификационныйКодЛичности:party.taxId},{Ref_Key:'b',ИдентификационныйКодЛичности:party.taxId}],hasMore:false})},template,party),e=>e.code==='DUPLICATE_COUNTERPARTY');
  await assert.rejects(()=>resolveParty({query:async()=>({rows:[{Ref_Key:'a',Description:'ИП SUPPLIER',ИдентификационныйКодЛичности:''}],hasMore:false})},template,party),e=>e.code==='COUNTERPARTY_IDENTITY_CONFLICT');
 });

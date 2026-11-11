@@ -8,7 +8,7 @@ const { lookupProfile, listCandidates } = require('./onec/profile.cjs');
 const { today, dateOnly, taskInput } = require('./task-domain.cjs');
 const { registerTaskRoutes } = require('./task-routes.cjs');
 const { registerReminderRoutes } = require('./reminders.cjs');
-function createBusinessRouter({ db, Company, Contractor, Individual, Event, taskMutation, taskSession, purchaseGuard, purchaseClientFactory, purchaseDownload, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
+function createBusinessRouter({ db, Company, Contractor, Individual, Event, taskMutation, taskSession, purchaseGuard, purchaseClientFactory, purchaseDownload, printClientFactory, getWorkspaceStorageUserId, isAuthenticated, checkWorkspacePermission, emitEntityEvent = () => {}, env = process.env, registryLookup = lookupRegistry, debtLookup = fetchTaxDebt, onecLookup = lookupProfile, onecCandidates = listCandidates, reportError = error => console.error('[Business API]', error.name, error.code || error.status || 500) }) {
   const router = express.Router();
   // Invalidate only; calendar contents still require an authenticated, scoped read.
   const onTasksChanged = req => emitEntityEvent(req, req.businessScope, 'calendar_changed', { workspaceId: String(req.cachedWorkspace._id) });
@@ -199,7 +199,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
   }));
   require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload, onTasksChanged });
   const mutations = require('./onec/mutations.cjs').registerOnecMutationRoutes(router, { db, Company, env, guard:purchaseGuard, clientFactory:purchaseClientFactory });
-  require('./onec/invoice-templates.cjs').registerInvoiceTemplateRoutes(router, { db, Company, Contractor, Event, mutations, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, onTasksChanged });
+  require('./onec/invoice-templates.cjs').registerInvoiceTemplateRoutes(router, { db, Company, Contractor, Event, mutations, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, onTasksChanged, printClientFactory, onContractorChanged:(req,entity)=>emitEntityEvent(req,entity.userId,'contractor_updated',entity) });
   registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Individual, taskMutation, taskSession, onTasksChanged });
   registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {

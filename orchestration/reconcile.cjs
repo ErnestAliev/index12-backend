@@ -24,6 +24,25 @@ function actionRequest(tool, args) {
   return route && digest([route[0], "/api/mcp" + route[1], route[2]]);
 }
 async function reconcileCall({ call, db, scope, invoke }) {
+  if(call.tool==='index12_process_invoice') {
+    const {ObjectId}=require('mongoose').mongo;
+    if(!ObjectId.isValid(call.args.companyId))return null;
+    const company=await db.collection('companies').findOne({_id:new ObjectId(call.args.companyId)});
+    if(!company?.onecSync?.connectionKey||!company.onecSync.ref)return null;
+    const row=await db.collection('onecInvoicePlans').findOne({...scope,connectionKey:company.onecSync.connectionKey,organizationRef:company.onecSync.ref,'input.companyId':call.args.companyId,'input.idempotencyKey':call.args.idempotencyKey,'input.direction':call.args.direction,state:'completed'});
+    if(!row?.partySyncedAt)return null;
+    const {stableUuid}=require('../business/onec/invoice-templates.cjs');
+    if(row.input.direction==='supplier') {
+      if(row.steps.posting?.state!=='completed'||!row.taskId)return null;
+      const task=await db.collection('businessTasks').findOne({_id:row.taskId,workspaceId:scope.workspaceId,'evidence.invoicePlanId':row._id});
+      if(!task)return null;
+      return {result:{completed:true,planToken:row._id,direction:'supplier',amount:row.input.amount,operationId:task.evidence.operationId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,documentsPosted:true,accountingPaid:true,bankPaymentSent:false,bankSettlementConfirmed:false,taskId:task._id,followupStage:task.invoiceFollowup.stage},evidence:{source:'onecInvoicePlans+businessTasks',planToken:row._id}};
+    }
+    const message=await db.collection('teamChatMessages').findOne({_id:stableUuid([row._id,'invoice-message']),workspaceId:scope.workspaceId,taskId:row.input.sourceTaskId,deletedAt:{$exists:false}});
+    const fileId=stableUuid([row._id,'invoice-pdf']);
+    if(!message?.attachments?.some(f=>f.fileId===fileId))return null;
+    return {result:{completed:true,planToken:row._id,direction:'customer',invoiceRef:row.steps.invoice.id,amount:row.input.amount,fileId,messageId:message._id,delivered:true,printSource:'ONEC_NATIVE',bankPaymentSent:false},evidence:{source:'onecInvoicePlans+teamChatMessages',planToken:row._id}};
+  }
   const requestHash = actionRequest(call.tool, call.args);
   if (requestHash) {
     const saved = await db
