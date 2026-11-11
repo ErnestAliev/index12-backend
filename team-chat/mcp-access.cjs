@@ -5,7 +5,7 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
 const financialRole = role => ['manager', 'director'].includes(role);
 const ownTasks = team => team.mcp === true && !team.owner && !financialRole(team.role);
-const taskAccess = team => ownTasks(team) ? { $or: [{ creatorId: team.actorId }, { assigneeIds: team.actorId }] } : {};
+const taskAccess = team => ownTasks(team) ? { $or: [{ creatorId: team.actorId }, { assigneeIds: team.actorId },{approvalActorIds:team.actorId}] } : {};
 const collection = (db, name) => db().collection('teamChatMcp' + name);
 async function memberAccess({ db, Workspace }, grant) {
   const member = await db().collection('teamChatMembers').findOne({ _id: grant.actorId, workspaceId: grant.workspaceId, status: 'active' }, { projection: { password: 0, passwordBox: 0 } });

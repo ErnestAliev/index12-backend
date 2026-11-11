@@ -873,7 +873,7 @@ function createTeamChatRouter({
     "/messages",
     wrap(async (req, res) => {
       const id = text(req.body.id, 80),
-        content = text(req.body.text || "", 10000, false),
+        content = text(req.body.text || "", 10000, false)||(Object.hasOwn(req.body,'approvalRecipientIds')?'Согласование':''),
         ids = req.body.fileIds || [];
       if (
         !/^[a-f\d-]{36}$/i.test(id) ||
@@ -883,7 +883,9 @@ function createTeamChatRouter({
       )
         fail("Введите сообщение или прикрепите файл");
       const taskId = req.body.taskId || null;
-      if (taskId) await tasks.load(req, taskId);
+      const task=taskId?await tasks.load(req,taskId):null;
+      const approvalIds=Object.hasOwn(req.body,'approvalRecipientIds')?require('./approvals.cjs').recipientIds(req.body.approvalRecipientIds):null;
+      if(approvalIds&&!taskId)fail('Согласование можно добавить только внутри задачи');
       const old = await coll("Messages").findOne({ _id: id });
       if (
         old &&
@@ -979,6 +981,7 @@ function createTeamChatRouter({
         updatedAt: new Date(),
         version: 0,
         contentVersion: 0,
+        ...(approvalIds?{kind:'approval_request',approvalRequest:old?.approvalRequest||await require('./approvals.cjs').approvalRequest({coll,User,team:req.team,ids:approvalIds,task})}:{}),
         ...(replyTo ? { replyTo } : {}),
         ...(mentioned.length
           ? {
@@ -996,6 +999,9 @@ function createTeamChatRouter({
           old.text !== row.text ||
           (old.taskId || null) !== taskId ||
           old.kind === "task" ||
+          (approvalIds&&old.deletedAt) ||
+          (old.kind==='approval_request')!==!!approvalIds ||
+          (approvalIds&&JSON.stringify(old.approvalRequest?.recipients.map(p=>p.actorId))!==JSON.stringify(approvalIds)) ||
           (old.replyTo?.messageId || null) !== (replyTo?.messageId || null) ||
           JSON.stringify(old.mentions || []) !==
             JSON.stringify(row.mentions || []) ||
@@ -1006,7 +1012,17 @@ function createTeamChatRouter({
         return res.json({ message: old, replayed: true });
       }
       try {
-        await coll("Messages").insertOne(row);
+        if(approvalIds){
+          const shared=history?.current()?.session,session=shared||db().client.startSession();
+          try{
+            const work=async()=>{
+              const granted=await coll('Tasks').updateOne({_id:taskId,workspaceId:req.team.workspaceId,deletedAt:{$exists:false},...taskAccess(req.team)},{$addToSet:{approvalActorIds:{$each:approvalIds}},$inc:{approvalRevision:1}},{session});
+              if(!granted.matchedCount)fail('Задача недоступна',404);
+              await coll('Messages').insertOne(row,{session});
+            };
+            if(shared)await work();else await session.withTransaction(work);
+          }finally{if(!shared)await session.endSession();}
+        }else await coll("Messages").insertOne(row);
       } catch (e) {
         if (e.code === 11000)
           fail("Сообщение уже отправлено. Обновите чат", 409);
@@ -1020,7 +1036,10 @@ function createTeamChatRouter({
         },
         { $set: { linked: true }, $unset: { expiresAt: "" } },
       );
-      notify(req, {
+      if(approvalIds){
+        notify(req);
+        for(const event of require('./approvals.cjs').approvalNotifications(row,task.description))notify(req,event);
+      }else notify(req, {
         key: "message:" + row._id,
         title: req.team.workspace.name + " · " + req.team.name,
         body: row.text || "Файл в чате",

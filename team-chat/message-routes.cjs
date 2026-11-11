@@ -71,7 +71,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     "/messages/:id",
     wrap(async (req, res) => {
       const row = await load(req);
-      if (["request", "task"].includes(row.kind))
+      if (["request", "task",'approval_request'].includes(row.kind))
         fail("Откройте карточку для изменения", 409);
       if (row.authorId !== req.team.actorId)
         fail("Можно изменить только своё сообщение", 403);
@@ -226,7 +226,19 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
   router.post(
     "/messages/:id/decision",
     wrap(async (req, res) => {
-      const row = await load(req);
+      let row = await load(req);
+      if(row.kind==='approval_request'){
+        if(!Number.isInteger(req.body.expectedVersion)||req.body.expectedVersion<0||req.body.expectedVersion>version(row))fail('Сообщение изменилось. Откройте его заново',409);
+        const note=text(req.body.note||'',1000,false);
+        for(let attempt=0;attempt<4;attempt++){
+          const decision=require('./approvals.cjs').decideApproval(row.approvalRequest,req.team.actorId,req.body.action,note);
+          if(decision.replayed){await decorate(req,[row]);return res.json({message:row,messageId:row._id,replayed:true});}
+          let updated;
+          try{updated=await update(req,row,{$set:{approvalRequest:decision.request}});}catch(error){if(error.status===409&&attempt<3){row=await load(req);continue;}throw error;}
+          notify(req,{key:`approval-decision:${row._id}:${req.team.actorId}`,title:req.team.name+' · '+(req.body.action==='approve'?'Согласовано':'Отклонено'),body:row.text,taskId:row.taskId,messageId:row._id,onlyActor:row.authorId});
+          await decorate(req,[updated]);return res.json({message:updated,messageId:updated._id});
+        }
+      }
       expected(req, row);
       if (["request", "task"].includes(row.kind))
         fail("Используйте согласование в карточке заявки", 409);

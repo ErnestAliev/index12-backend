@@ -204,6 +204,7 @@ const { startFixture } = require("./subcategories.cjs");
       director = await join("Director", "+77010000002", "director");
     await require("./team-chat-search.cjs")({ api, db, employee, scope });
     await require("./team-chat-actions.cjs")({ api, db, employee, director });
+    await require('./team-chat-approvals.cjs')({api,db,employee,director,scope});
     await require("./team-chat-replies.cjs")({ api, db, employee });
     await require("./team-chat-tasks.cjs")({ api, db, employee, director, scope, origin, cookie, inviteToken });
     await require("./team-chat-calendar.cjs")({ api, db, employee, director, scope, origin, cookie, token });
