@@ -116,6 +116,10 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const row=await plans().findOne({_id:planToken,...identity(req),connectionKey:connectionKey()});
     if(!row)fault('INVOICE_PLAN_NOT_FOUND','План не найден в текущей базе и рабочей области',404);return row;
   }
+  router.get('/onec/invoices/templates',use(async(req,res,client)=>{
+    const templates=await Promise.all(Object.keys(DIRECTIONS).map(direction=>loadTemplate(db(),client,connectionKey(),direction)));
+    res.json({...identity(req),templates:templates.map(row=>({id:row._id,direction:row.direction,collection:row.collection,version:row.version,schemaFingerprint:row.schemaFingerprint,checkedAt:row.checkedAt,transport:row.transport})),supported:{currency:['KZT'],lines:['services']},bankEnabled:false});
+  }));
   router.post('/onec/invoices/prepare',use(async(req,res,client)=>{
     const input=prepareSchema.parse(req.body),key=digest([identity(req),connectionKey(),input.idempotencyKey]);
     const old=await plans().findOne({creationKey:key});

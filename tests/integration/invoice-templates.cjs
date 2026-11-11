@@ -3,6 +3,8 @@ const assert=require('node:assert/strict'),{randomUUID}=require('node:crypto');
 const {ZERO}=require('../../business/onec/purchase-domain.cjs');
 module.exports=async({call,api,db,scope,companyId,contractorId,refs,records,posts,setMode,tokenHash,sourceTaskId,pdfId,fixture})=>{
   const bank=randomUUID();records.set('Catalog_Банки:'+bank,{Ref_Key:bank,DeletionMark:false,Description:'Fixture bank',БИК:'CASPKZKA'});
+  assert.equal((await call('index12_onec_invoice_templates',{})).templates.length,2);
+  assert.equal(posts.filter(row=>row.collection==='Document_СчетНаОплатуПокупателю').length,0,'warming templates creates no invoices');
   const input=(direction,number)=>({direction,companyId,counterparty:{name:'ИП Template Supplier',taxId:'971116300034',isIndividualEntrepreneur:true,kbe:'19',iban:'KZ43722S000046963946',bic:'CASPKZKA'},date:'2026-11-08',number,useVat:false,amount:100000,
     lines:[{description:'Hydrodynamic cleaning (30 m)',quantity:1,price:100000,amount:100000}],sourceTaskId,pdfId,idempotencyKey:'template-fixture-'+direction+number});
   assert.equal((await call('index12_counterparty_lookup',{taxId:'250340021816',legalForm:'llp'})).mode,'manual');
