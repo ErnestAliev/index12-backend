@@ -930,13 +930,25 @@ app.get('/auth/dev-login', async (req, res) => {
 
 // 🟢 UPDATED: Save invite token to session before OAuth
 app.get('/auth/google', (req, res, next) => {
+    const destination = require('./team-chat/auth-return.cjs').chatAuthReturn(req.query.returnTo, ALLOWED_ORIGINS);
+    if (destination) req.session.chatReturnTo = { url: destination, savedAt: Date.now() };
+    else delete req.session.chatReturnTo;
     if (req.query.inviteToken) {
         req.session.inviteToken = req.query.inviteToken;
     }
     passport.authenticate('google', { scope: ['profile', 'email'] })(req, res, next);
 });
 
-app.get('/auth/google/callback', (req, res, next) => passport.authenticate('google', { failureRedirect: `${FRONTEND_URL}/login-failed`, keepSessionInfo: !!req.session.mcpOAuth })(req, res, next), (req, res) => { res.redirect(req.session.mcpOAuth?.id ? `/mcp/connect?request=${encodeURIComponent(req.session.mcpOAuth.id)}` : FRONTEND_URL); });
+app.get('/auth/google/callback', (req, res, next) => passport.authenticate('google', {
+    failureRedirect: `${FRONTEND_URL}/login-failed`,
+    keepSessionInfo: !!req.session.mcpOAuth || !!req.session.chatReturnTo,
+})(req, res, next), (req, res) => {
+    const saved = req.session.chatReturnTo;
+    delete req.session.chatReturnTo;
+    const destination = saved && Date.now() - saved.savedAt < 30 * 60 * 1000
+        ? require('./team-chat/auth-return.cjs').chatAuthReturn(saved.url, ALLOWED_ORIGINS) : null;
+    res.redirect(req.session.mcpOAuth?.id ? `/mcp/connect?request=${encodeURIComponent(req.session.mcpOAuth.id)}` : destination || FRONTEND_URL);
+});
 app.get('/api/auth/me', async (req, res) => {
     try {
         console.log('🔐 [GET /api/auth/me] Authentication check started');
