@@ -1,0 +1,43 @@
+'use strict';
+const assert=require('node:assert/strict'),{randomUUID}=require('node:crypto');
+const {ZERO}=require('../../business/onec/purchase-domain.cjs');
+module.exports=async({call,api,db,scope,companyId,contractorId,refs,records,posts,setMode,tokenHash,sourceTaskId,pdfId,fixture})=>{
+  const bank=randomUUID();records.set('Catalog_Банки:'+bank,{Ref_Key:bank,DeletionMark:false,Description:'Fixture bank',БИК:'CASPKZKA'});
+  const input=(direction,number)=>({direction,companyId,counterparty:{name:'ИП Template Supplier',taxId:'971116300034',isIndividualEntrepreneur:true,kbe:'19',iban:'KZ43722S000046963946',bic:'CASPKZKA'},date:'2026-11-08',number,useVat:false,amount:100000,
+    lines:[{description:'Hydrodynamic cleaning (30 m)',quantity:1,price:100000,amount:100000}],sourceTaskId,pdfId,idempotencyKey:'template-fixture-'+direction+number});
+  assert.equal((await call('index12_counterparty_lookup',{taxId:'250340021816',legalForm:'llp'})).mode,'manual');
+  const before=posts.length,prepared=await call('index12_onec_prepare_invoice',input('supplier','T-01'));
+  assert.equal((await call('index12_onec_invoice_status',{planToken:prepared.planToken})).state,'prepared');
+  assert.equal(posts.length,before);assert.equal(prepared.contractRef,null);assert.equal(prepared.knp,'859');
+  assert.equal((await call('index12_onec_prepare_invoice',input('supplier','T-01'))).planToken,prepared.planToken);
+  assert.equal((await api('invoices/prepare',{...input('supplier','T-01'),amount:1})).error.code,'IDEMPOTENCY_CONFLICT');
+  const attempts=await Promise.all([call('index12_onec_execute_invoice',{planToken:prepared.planToken}),call('index12_onec_execute_invoice',{planToken:prepared.planToken})]);
+  const complete=attempts.find(row=>row.completed);assert.ok(complete,JSON.stringify(attempts));assert.equal(posts.length,before+3,'party, bank catalog, full invoice; no payment order');
+  const object=records.get('Document_СчетНаОплатуПоставщика:'+complete.steps.invoice.id);assert.equal(object.ДоговорКонтрагента_Key,ZERO);assert.equal(object.КодНазначенияПлатежа,'859');assert.equal(object.Услуги[0].Сумма,100000);assert.equal(object.Posted,false);const party=records.get('Catalog_Контрагенты:'+complete.counterpartyRef);assert.equal(party.ЮрФизЛицо,'ФизЛицо');assert.equal(party.ИндивидуальныйПредпринимательАдвокатЧастныйНотариус,true);
+  assert.equal((await call('index12_onec_execute_invoice',{planToken:prepared.planToken})).replayed,true);assert.equal(posts.length,before+3);
+  const localParty=await fixture.models.Contractor.create({name:'ИП Template Supplier',identificationNumber:'971116300034',userId:scope.actorId});
+  const account=await fixture.models.Account.create({name:'Invoice account',userId:scope.actorId,companyId});
+  const category=await fixture.models.Category.create({name:'Обслуживание',userId:scope.actorId,type:'expense'});
+  const subcategory=await fixture.models.Subcategory.create({name:'Канализация',userId:scope.actorId,parentCategoryId:category._id,nameKey:'канализация'});
+  const operation=await call('index12_create_operation',{companyId,type:'expense',date:'2026-11-11',idempotencyKey:'template-expense-fixture',accountId:String(account._id),categoryId:String(category._id),subcategoryId:String(subcategory._id),contractorId:String(localParty._id),amount:'100000',description:'Fixture invoice'});
+  const linked=await call('index12_invoice_link_expense',{planToken:prepared.planToken,operationId:operation.operation.id||operation.operation._id});
+  assert.equal(linked.task.invoiceFollowup.stage,'waiting_payment');assert.equal(linked.task.startsAt,null);assert.equal(linked.task.reminderOffsets.length,0);assert.equal(linked.task.attachments[0].fileId,pdfId);
+  assert.equal((await call('index12_invoice_link_expense',{planToken:prepared.planToken,operationId:operation.operation.id||operation.operation._id})).task._id,linked.task._id);
+  const update=await call('index12_invoice_followup',{id:linked.task._id,expectedVersion:0,action:'payment_confirmed',confirmed:true});assert.equal(update.task.invoiceFollowup.stage,'request_avr');assert.ok(update.task.startsAt);
+  const bad=await api('../tasks/'+linked.task._id+'/invoice-followup',{expectedVersion:0,action:'avr_requested'});assert.equal(bad.status,409,'stale versions cannot skip an operator stage');
+  // Outgoing stays isolated in this fixture: reuse party and bank, create only the invoice.
+  const customer=await call('index12_onec_prepare_invoice',input('customer','OUT-01'));assert.equal(customer.counterpartyRef,complete.counterpartyRef);
+  const out=await call('index12_onec_execute_invoice',{planToken:customer.planToken});assert.equal(out.completed,true,JSON.stringify(out));assert.equal(posts.length,before+4);assert.equal(out.bankEnabled,false);
+  assert.equal(await db.collection('onecInvoiceTemplates').countDocuments(),2);
+  assert.equal((await api('invoices/followup',{planToken:customer.planToken,operationId:operation.operation.id||operation.operation._id})).error.code,'INVOICE_NOT_READY');
+  // A lost POST response must use the same mutation ID and then the same invoice plan.
+  const lost=await call('index12_onec_prepare_invoice',input('supplier','T-02'));setMode('timeout:Document_СчетНаОплатуПоставщика');
+  const partial=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(partial.state,'partial');assert.equal(partial.steps.invoice.state,'uncertain');
+  const sent=posts.length;await call('index12_onec_mutation_status',{operationId:partial.steps.invoice.operationId});
+  const resumed=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(resumed.completed,true,JSON.stringify(resumed));assert.equal(posts.length,sent);
+  const scopes=(await db.collection('mcpCredentials').findOne({_id:tokenHash})).scopes;
+  await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:['read']}});
+  assert.equal((await api('invoices/execute',{planToken:prepared.planToken})).status,403);
+  await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes}});
+  console.log('PASS: two persisted invoice templates, optional contract/KNP, automatic party+bank data, no payment connector, single staged AVR/ESF task, repeats/concurrency and uncertain-write reconciliation');
+};

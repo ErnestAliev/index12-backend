@@ -378,9 +378,10 @@ function registerMcpOperationRoutes(app, deps) {
         if (req.method === 'GET') return next();
         if (req.method === 'POST' && req.path === '/onec/object') return requireScope('create')(req,res,next);
         if ((req.method === 'PATCH' && ['/onec/object','/onec/deletion-mark'].includes(req.path)) || (req.method === 'POST' && req.path === '/onec/posting')) return requireScope(req.path === '/onec/deletion-mark' ? 'delete' : 'update')(req,res,next);
+        if (req.method === 'POST' && /^\/tasks\/[^/]+\/invoice-followup$/.test(req.path)) return requireScope('update')(req,res,next);
         const scope = { POST: 'create', PATCH: 'update', DELETE: 'delete' }[req.method];
-        if (req.method === 'POST' && ['/onec/query','/onec/purchases/prepare'].includes(req.path)) return next();
-        if (!scope || !(/^\/tasks(?:\/[^/]+)?$/.test(req.path) || req.method === 'POST' && ['/onec/purchase-pdf','/onec/purchases/execute','/onec/purchases/cancel'].includes(req.path))) return res.status(403).json({ message: 'Изменение недоступно через MCP' });
+        if (req.method === 'POST' && ['/onec/query','/onec/purchases/prepare','/onec/invoices/prepare'].includes(req.path)) return next();
+        if (!scope || !(/^\/tasks(?:\/[^/]+)?$/.test(req.path) || req.method === 'POST' && ['/onec/purchase-pdf','/onec/purchases/execute','/onec/purchases/cancel','/onec/invoices/execute','/onec/invoices/followup'].includes(req.path))) return res.status(403).json({ message: 'Изменение недоступно через MCP' });
         return requireScope(scope)(req, res, next);
     }, require('../business/router.cjs').createBusinessRouter({ db, Company: deps.Company, Contractor: deps.Contractor, Individual: deps.Individual, Event:deps.Event, purchaseGuard: async req => {
         await execution.guard(req, null, true);
@@ -390,7 +391,7 @@ function registerMcpOperationRoutes(app, deps) {
         if (!grant?.scopes?.includes('read') || access?.role !== 'admin') fail('FORBIDDEN',null,'Доступ к цепочке 1С отозван.',403);
         const editScope = req.path === '/onec/object' && req.method === 'POST' ? 'create' : ['/onec/object','/onec/posting'].includes(req.path) ? 'update' : req.path === '/onec/deletion-mark' ? 'delete' : null;
         if (editScope && !grant.scopes.includes(editScope)) fail('FORBIDDEN',null,'Право изменения документов 1С отозвано.',403);
-        if (req.path.endsWith('/execute') && !['create','imports:direct'].every(scope=>grant.scopes.includes(scope))) fail('FORBIDDEN',null,'Разрешение на создание документов 1С отозвано.',403);
+        if ((req.path.endsWith('/execute') || req.path === '/onec/invoices/followup') && !['create','imports:direct'].every(scope=>grant.scopes.includes(scope))) fail('FORBIDDEN',null,'Разрешение на создание документов 1С отозвано.',403);
     }, isAuthenticated: (_req, _res, next) => next(), checkWorkspacePermission,
         purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, emitEntityEvent:deps.emitEntityEvent,
         taskMutation: (req, res, fn) => execution.execute(req, res, fn), taskSession: () => deps.audit?.current()?.session,

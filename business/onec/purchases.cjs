@@ -33,6 +33,7 @@ async function validateData(client,collection,input,cache=new Map(), nested=fals
       result[key]=[]; for(const row of value) result[key].push(await validateData(client,`${collection}_${key}`,row,cache,true,options)); continue;
     }
     if(type==='Edm.Guid') {
+      if(key==='ДоговорКонтрагента_Key' && value===ZERO){result[key]=value;continue;}
       if(typeof value!=='string'||!GUID.test(value)||value===ZERO)fault('INVALID_ONEC_REFERENCE',`Проверьте ссылку ${key}`);
       const target=referenceCollections[key];
       // No guessed GUIDs: every supplied reference must have a known collection.
@@ -145,8 +146,8 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     const existingIdentity=invoiceIdentity(connectionKey(),input,refs.org.Ref_Key);
     const existingPlan=await plans().findOne({workspaceId:identity(req).workspaceId,invoiceIdentity:existingIdentity,active:true});
     if(existingPlan)fault('PURCHASE_ALREADY_EXISTS','Такой счёт уже включён в цепочку. Используйте существующий planToken',409,{...(existingPlan.actorId===identity(req).actorId?{planToken:existingPlan._id}:{})});
-    const invoice=await validateData(client,INVOICE,input.invoice,cache), payment=await validateData(client,PAYMENT,input.payment,cache);
-    for(const key of ['Date','НомерВходящегоДокумента','ДатаВходящегоДокумента','ВалютаДокумента_Key','ДоговорКонтрагента_Key','СуммаДокумента','УчитыватьНДС','СуммаВключаетНДС'])if(invoice[key]===undefined||invoice[key]==='')fault('MISSING_ONEC_FIELD',`В счёте отсутствует ${key}`);
+    const invoice=await validateData(client,INVOICE,{...input.invoice,ДоговорКонтрагента_Key:input.invoice.ДоговорКонтрагента_Key||ZERO,КодНазначенияПлатежа:input.invoice.КодНазначенияПлатежа||'859'},cache), payment=await validateData(client,PAYMENT,{...input.payment,КодНазначенияПлатежа:input.payment.КодНазначенияПлатежа||'859'},cache);
+    for(const key of ['Date','НомерВходящегоДокумента','ДатаВходящегоДокумента','ВалютаДокумента_Key','СуммаДокумента','УчитыватьНДС','СуммаВключаетНДС'])if(invoice[key]===undefined||invoice[key]==='')fault('MISSING_ONEC_FIELD',`В счёте отсутствует ${key}`);
     for(const key of ['Date','СчетОрганизации_Key','СчетКонтрагента_Key','НазначениеПлатежа','КодНазначенияПлатежа'])if(!payment[key])fault('MISSING_ONEC_FIELD',`В поручении отсутствует ${key}`);
     const amount=cents(invoice.СуммаДокумента);if(amount<=0)fault('INVALID_AMOUNT','Сумма покупки должна быть положительной');
     const rows=[...(invoice.Товары||[]),...(invoice.Услуги||[])];if(!rows.length)fault('MISSING_INVOICE_ROWS','Заполните товары или услуги счёта');
@@ -163,13 +164,13 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     }
     if(payment.СуммаДокумента!==undefined&&cents(payment.СуммаДокумента)!==amount)fault('AMOUNT_MISMATCH','Суммы счёта и поручения различаются');
     const contract=cache.get(`Catalog_ДоговорыКонтрагентов:${invoice.ДоговорКонтрагента_Key}`);
-    if(contract.Owner_Key!==input.supplierRef||contract.Организация_Key!==refs.org.Ref_Key)fault('CONTRACT_MISMATCH','Договор относится к другой организации или поставщику',409);
+    if(contract && (contract.Owner_Key!==input.supplierRef||contract.Организация_Key!==refs.org.Ref_Key))fault('CONTRACT_MISMATCH','Договор относится к другой организации или поставщику',409);
     for(const [key,owner,type] of [['СчетОрганизации_Key',refs.org.Ref_Key,'StandardODATA.Catalog_Организации'],['СчетКонтрагента_Key',input.supplierRef,'StandardODATA.Catalog_Контрагенты']]) {
       const bank=cache.get(`Catalog_БанковскиеСчета:${payment[key]}`);
       if(bank.Owner!==owner||bank.Owner_Type!==type||bank.ВалютаДенежныхСредств_Key!==invoice.ВалютаДокумента_Key)fault('BANK_ACCOUNT_MISMATCH','Счёт банка принадлежит другой компании/поставщику или имеет другую валюту',409);
     }
     if(payment.ВалютаДокумента_Key&&payment.ВалютаДокумента_Key!==invoice.ВалютаДокумента_Key)fault('CURRENCY_MISMATCH','Валюты документов различаются');
-    if(contract.ВалютаВзаиморасчетов_Key!==invoice.ВалютаДокумента_Key)fault('CURRENCY_MISMATCH','Валюта договора отличается; расчёт валютной покупки требует отдельной настройки');
+    if(contract && contract.ВалютаВзаиморасчетов_Key!==invoice.ВалютаДокумента_Key)fault('CURRENCY_MISMATCH','Валюта договора отличается; расчёт валютной покупки требует отдельной настройки');
     if(payment.РасшифровкаПлатежа?.length>1)fault('UNSUPPORTED_PAYMENT_SPLIT','Для одной покупки нужна одна строка расшифровки платежа');
     const split=payment.РасшифровкаПлатежа?.[0]||{};
     if(split.ДоговорКонтрагента_Key&&split.ДоговорКонтрагента_Key!==invoice.ДоговорКонтрагента_Key)fault('CONTRACT_MISMATCH','В расшифровке указан другой договор');
@@ -258,7 +259,7 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
       const file={_id:row.pdf.id,scope:row.scope,uploadedBy:row.actorId,name:pdf.name,mimeType:pdf.mimeType,size:pdf.size,data:fileBuffer(pdf),createdAt:new Date()};
       await db().collection('businessTaskFiles').updateOne({_id:file._id,scope:row.scope},{$setOnInsert:file,$addToSet:{taskIds:row.taskId},$unset:{expiresAt:''}},{upsert:true});attachments.push(fileMeta(file));
     }
-    const task={_id:row.taskId,scope:row.scope,workspaceId:row.workspaceId,createdBy:row.actorId,projectId:row.sourceProjectId||null,projectName:row.sourceProjectName||'',companyId:null,party:{kind:'contractors',id:row.input.contractorId},partyName:row.supplierName,title:`Запросить закрывающие документы: ${row.supplierName}`.slice(0,300),description:`${row.companyName}: счёт №${row.input.invoice.НомерВходящегоДокумента} от ${row.input.invoice.ДатаВходящегоДокумента.slice(0,10)}, ${row.input.invoice.СуммаДокумента}. ${row.input.payment.НазначениеПлатежа}\nЗапросить акт выполненных работ/накладную и ЭСФ, если применимо. Подготовка поручения не подтверждает оплату.\n1С: счёт ${row.steps.invoice.id}; поручение ${row.steps.payment.id}.\n${row.schedule.legal.note}`,status:'open',...row.schedule,links:[{title:'Цепочка покупки',url:row.taskLink},...(row.sourceTaskLink?[{title:'Исходная рабочая задача',url:row.sourceTaskLink}]:[])],attachments,source:'onec_purchase',sourceKey,evidence:{purchaseId:row._id,companyId:row.input.companyId,contractorId:row.input.contractorId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,operationId:row.input.operationId||null,sourceTaskId:row.input.sourceTaskId||null,legal:row.schedule.legal},version:0,reminderRevision:0,createdAt:new Date(),updatedAt:new Date()};
+    const task={_id:row.taskId,scope:row.scope,workspaceId:row.workspaceId,createdBy:row.actorId,projectId:row.sourceProjectId||null,projectName:row.sourceProjectName||'',companyId:null,party:{kind:'contractors',id:row.input.contractorId},partyName:row.supplierName,title:`Запросить закрывающие документы: ${row.supplierName}`.slice(0,300),description:`${row.companyName}: счёт №${row.input.invoice.НомерВходящегоДокумента} от ${row.input.invoice.ДатаВходящегоДокумента.slice(0,10)}, ${row.input.invoice.СуммаДокумента}. ${row.input.payment.НазначениеПлатежа}\nПосле явного подтверждения оплаты оператором: запросить АВР → получить АВР → подтвердить АВР → при необходимости запросить и получить ЭСФ. До подтверждения оплаты напоминания отключены. Подготовка поручения не подтверждает оплату.\n1С: счёт ${row.steps.invoice.id}; поручение ${row.steps.payment.id}.\n${row.schedule.legal.note}`,status:'open',...row.schedule,...require('./invoice-followup.cjs').waitingFollowup(),links:[{title:'Цепочка покупки',url:row.taskLink},...(row.sourceTaskLink?[{title:'Исходная рабочая задача',url:row.sourceTaskLink}]:[])],attachments,source:'onec_purchase',sourceKey,evidence:{purchaseId:row._id,companyId:row.input.companyId,contractorId:row.input.contractorId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,operationId:row.input.operationId||null,sourceTaskId:row.input.sourceTaskId||null,legal:row.schedule.legal},version:0,reminderRevision:0,createdAt:new Date(),updatedAt:new Date()};
     const inserted = await tasks.updateOne({scope:row.scope,sourceKey},{$setOnInsert:task},{upsert:true});
     if (inserted.upsertedCount) onTasksChanged(req);
     await saveStep(row,'task',{state:'completed',verifiedAt:new Date()});

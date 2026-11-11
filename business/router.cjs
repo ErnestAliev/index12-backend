@@ -198,7 +198,8 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
     setImmediate(() => sync(scope, req).catch(() => {}));
   }));
   require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload, onTasksChanged });
-  require('./onec/mutations.cjs').registerOnecMutationRoutes(router, { db, Company, env, guard:purchaseGuard, clientFactory:purchaseClientFactory });
+  const mutations = require('./onec/mutations.cjs').registerOnecMutationRoutes(router, { db, Company, env, guard:purchaseGuard, clientFactory:purchaseClientFactory });
+  require('./onec/invoice-templates.cjs').registerInvoiceTemplateRoutes(router, { db, Company, Contractor, Event, mutations, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, onTasksChanged });
   registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Individual, taskMutation, taskSession, onTasksChanged });
   registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {

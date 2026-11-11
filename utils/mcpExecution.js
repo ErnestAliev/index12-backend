@@ -1,7 +1,7 @@
 'use strict';
 const { ExecutionStore, digest, executionError } = require('../codex/executionStore.cjs');
 const routePath = req => req.originalUrl.split('?')[0];
-const isMutation = req => req.method !== 'GET' && /^(?:\/api\/mcp\/(operations|transfers)(\/[^/]+(?:\/copy)?)?|\/api\/mcp\/accounts\/[^/]+\/initial-balance|\/api\/mcp\/business\/tasks(?:\/[^/]+)?)$/.test(routePath(req));
+const isMutation = req => req.method !== 'GET' && /^(?:\/api\/mcp\/(operations|transfers)(\/[^/]+(?:\/copy)?)?|\/api\/mcp\/accounts\/[^/]+\/initial-balance|\/api\/mcp\/business\/tasks(?:\/[^/]+(?:\/invoice-followup)?)?)$/.test(routePath(req));
 function requestExecution(req) {
   const executionId = req.headers['x-index12-execution-id'], threadId = req.headers['x-index12-thread-id'], turnId = req.headers['x-index12-turn-id'];
   if (![executionId, threadId, turnId].some(Boolean)) return null;
@@ -14,6 +14,7 @@ function toolName(req) {
   if (p.includes('/codex/')) return 'index12_codex_' + (p.endsWith('/files/import') ? 'upload_file' : p.endsWith('/jobs') ? 'send_message' : 'create_chat');
   if (p.includes('/team-chat/')) return 'index12_chat_' + (p.endsWith('/files/import') ? 'upload_file' : p.endsWith('/reaction') ? 'react' : p.endsWith('/read') ? 'mark_read' : p.endsWith('/forward') ? 'forward_message' : p.endsWith('/restore') ? 'restore_task' : p.endsWith('/decision') ? 'decide' : p.includes('/tasks') ? req.method === 'DELETE' ? 'delete_task' : req.method === 'POST' ? 'create_task' : 'update_task' : req.method === 'DELETE' ? 'delete_message' : req.method === 'POST' ? 'send_message' : 'edit_message');
   if (p.endsWith('/copy')) return 'index12_copy_operation';
+  if (p.endsWith('/invoice-followup')) return 'index12_invoice_followup';
   if (p.includes('/business/tasks')) return `index12_${req.method === 'POST' ? 'create' : req.method === 'DELETE' ? 'delete' : 'update'}_task`;
   if (p.includes('/initial-balance')) return 'index12_update_account_initial_balance';
   if (req.method === 'DELETE') return 'index12_delete_operation';

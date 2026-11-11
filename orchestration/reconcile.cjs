@@ -18,6 +18,7 @@ function actionRequest(tool, args) {
     index12_create_task: ["POST", "/business/tasks", args],
     index12_update_task: ["PATCH", `/business/tasks/${id}`, body],
     index12_delete_task: ["DELETE", `/business/tasks/${id}`, body],
+    index12_invoice_followup: ["POST", `/business/tasks/${id}/invoice-followup`, body],
   };
   const route = routes[tool];
   return route && digest([route[0], "/api/mcp" + route[1], route[2]]);
@@ -45,6 +46,10 @@ async function reconcileCall({ call, db, scope, invoke }) {
   } else if (call.tool === "index12_execute_purchase") {
     tool = "index12_purchase_status";
     args = { planToken: call.args.planToken };
+  }
+  if (call.tool === 'index12_onec_execute_invoice' || call.tool === 'index12_invoice_link_expense') {
+    const response = await invoke('index12_onec_invoice_status',{planToken:call.args.planToken}), result = resultData(response);
+    if (!resultFailure(response) && result?.completed === true && (call.tool !== 'index12_invoice_link_expense' || result.taskId)) return {result,evidence:{source:'index12_onec_invoice_status',planToken:call.args.planToken}};
   }
   if (tool) {
     const response = await invoke(tool, args),

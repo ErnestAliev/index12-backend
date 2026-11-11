@@ -62,9 +62,10 @@ async function validateObjectData(client, collection, input, { create = false, d
   }
   return result;
 }
-async function validateCustomerInvoice(collection, object, client) {
+async function validateCustomerInvoice(collection, object, client, { allowUnresolvedCounterparty = false } = {}) {
   if (collection !== 'Document_СчетНаОплатуПокупателю') return;
-  for (const key of ['Date','Организация_Key','Контрагент_Key','ДоговорКонтрагента_Key','ВалютаДокумента_Key','УчитыватьНДС','СуммаВключаетНДС','СуммаДокумента']) {
+  for (const key of ['Date','Организация_Key','Контрагент_Key','ВалютаДокумента_Key','УчитыватьНДС','СуммаВключаетНДС','СуммаДокумента']) {
+    if (key === 'Контрагент_Key' && allowUnresolvedCounterparty) continue;
     if (object[key] === undefined || object[key] === '' || object[key] === ZERO) fault('MISSING_ONEC_FIELD',`В счёте покупателю отсутствует ${key}`);
   }
   const rows = [...(object.Товары||[]),...(object.Услуги||[]),...(object.ОС||[])];

@@ -5,7 +5,7 @@ const {ReadClient}=require('../../business/onec/read-client.cjs');
 const {createMcpRuntime}=require('../../mcp/runtime.cjs');
 const {INVOICE,PAYMENT}=require('../../business/onec/purchase-domain.cjs');
 const {ExecutionStore}=require('../../codex/executionStore.cjs');
-const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('../fixtures/onec-customer-schema.json')];
+const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('../fixtures/onec-customer-schema.json'),...require('../fixtures/onec-bank-schema.json')];
 (async()=>{
   const env={ONEC_BASE_URL:'https://onec.example.invalid/odata/standard.odata/',ONEC_USERNAME:'fixture',ONEC_PASSWORD:'fixture-password',ONEC_PURCHASE_WRITES:'true'};
   const original=Object.fromEntries(Object.keys(env).concat('ONEC_WORKSPACE_ID').map(k=>[k,process.env[k]]));Object.assign(process.env,env);
@@ -14,7 +14,7 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
   const version=()=>{const b=Buffer.alloc(8);b.writeBigUInt64LE(BigInt(++versionCounter));return b.toString("base64");};
   const put=(collection,ref,data)=>records.set(`${collection}:${ref}`,{Ref_Key:ref,DeletionMark:false,...data});
   put('Catalog_Организации',refs.org,{ИдентификационныйНомер:'250340021816'});put('Catalog_Контрагенты',refs.supplier,{ИдентификационныйКодЛичности:'830612300086'});
-  put('Catalog_Валюты',refs.currency,{Description:'KZT'});put('Catalog_СтавкиНДС',refs.vat,{Description:'Без НДС',Ставка:0});
+  put('Catalog_Валюты',refs.currency,{Description:'KZT',БуквенныйКод:'KZT'});put('Catalog_СтавкиНДС',refs.vat,{Description:'Без НДС',Ставка:0});
   put('Catalog_ДоговорыКонтрагентов',refs.contract,{Owner_Key:refs.supplier,Организация_Key:refs.org,ВалютаВзаиморасчетов_Key:refs.currency});
   for(const [ref,owner,type] of [[refs.ourBank,refs.org,'Организации'],[refs.theirBank,refs.supplier,'Контрагенты']])put('Catalog_БанковскиеСчета',ref,{Owner:owner,Owner_Type:`StandardODATA.Catalog_${type}`,ВалютаДенежныхСредств_Key:refs.currency});
   async function transport(url,options){
@@ -40,14 +40,19 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
       if(mode===`drop:${collection}`){mode=null;throw Error('Lost request before server acceptance');}
       if(mode===`reject:${collection}`)return new Response('{}',{status:403});
       if(mode===`delay:${collection}`)await new Promise(resolve=>setTimeout(resolve,100));
-      put(collection,data.Ref_Key,{...data,Number:`fixture-${posts.length}`,Posted:false,DataVersion:version()});
+      put(collection,data.Ref_Key,{...data,Number:data.Number||`fixture-${posts.length}`,Posted:false,DataVersion:version()});
       if(mode===`timeout:${collection}`){mode=null;throw Error('Simulated lost response with secret that must never escape');}
       return Response.json(records.get(`${collection}:${data.Ref_Key}`));
     }
     if(match){const object=records.get(`${collection}:${match[2]}`);return object?Response.json(object):new Response('{}',{status:404});}
     if(mode==='deny-invoice'&&collection===INVOICE)return new Response('{}',{status:401});
     const filter=url.searchParams.get('$filter')||'',number=/НомерВходящегоДокумента eq '([^']+)'/.exec(filter)?.[1];
-    const rows=number?[...records.entries()].filter(([k,v])=>k.startsWith(collection+':')&&v.НомерВходящегоДокумента===number).map(([,v])=>v):[];
+    let rows=number?[...records.entries()].filter(([k,v])=>k.startsWith(collection+':')&&v.НомерВходящегоДокумента===number).map(([,v])=>v):[];
+    if(!number && ['Catalog_Контрагенты','Catalog_Валюты','Catalog_Банки','Catalog_БанковскиеСчета'].includes(collection)) {
+      rows=[...records.entries()].filter(([key])=>key.startsWith(collection+':')).map(([,row])=>row);
+      for(const field of ['БуквенныйКод','БИК','НомерСчета']) {const value=new RegExp(field+" eq '([^']+)'").exec(filter)?.[1];if(value)rows=rows.filter(row=>row[field]===value);}
+      const skip=Number(url.searchParams.get('$skip')||0),top=Number(url.searchParams.get('$top')||200);rows=rows.slice(skip,skip+top);
+    }
     assert.ok(!url.search.includes('+'),'OData spaces must be encoded as %20');return Response.json({value:rows});
   }
   const clientFactory=()=>{const c=new ReadClient(process.env,transport);c.sets=schemas;return c;};
@@ -116,6 +121,7 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
     const revised=await call('index12_prepare_purchase',{...input('21'),idempotencyKey:'purchase-fixture-21-revised'});assert.notEqual(revised.planToken,toRevise.planToken);
     assert.equal((await api('purchases/execute',{planToken:toRevise.planToken})).error.code,'PURCHASE_CANCELLED');
     assert.equal((await api('purchases/cancel',{planToken:prepared.planToken})).error.code,'PURCHASE_CANNOT_CANCEL');
+    await require('./invoice-templates.cjs')({call,api,db,scope,companyId:String(companyId),contractorId:String(contractorId),refs,records,posts,setMode:v=>mode=v,tokenHash,sourceTaskId,pdfId:upload.pdfId,fixture});
     await require('./onec-generic.cjs')({call,api,db,scope,companyId:String(companyId),refs,records,posts,patches,setMode:v=>mode=v,tokenHash});
     await require('./onec-mutations.cjs')({call,api,db,scope,companyId:String(companyId),paymentId:result.steps.payment.id||result.steps.payment.ref||payment.Ref_Key,records,patches,commands,setMode:v=>mode=v,tokenHash});
     await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:['read']}});assert.equal((await api('purchases/execute',{planToken:prepared.planToken})).status,403);

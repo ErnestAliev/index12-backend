@@ -1,0 +1,165 @@
+[
+  {
+    "name": "Catalog_Банки",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Parent_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "IsFolder",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "КоррСчет",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Город",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Адрес",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Телефоны",
+        "type": "Edm.String"
+      },
+      {
+        "name": "РНН",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодВПлатежнойСистеме",
+        "type": "Edm.String"
+      },
+      {
+        "name": "ПроцентКомиссии",
+        "type": "Edm.Double"
+      },
+      {
+        "name": "Контрагент_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "ИдентификационныйНомер",
+        "type": "Edm.String"
+      },
+      {
+        "name": "БИК",
+        "type": "Edm.String"
+      },
+      {
+        "name": "БИКДоРеформыБанковскихСчетов",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодВПлатежнойСистемеДоРеформыБанковскихСчетов",
+        "type": "Edm.String"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "Parent",
+        "relationship": "StandardODATA.Catalog_Банки_Parent",
+        "target": "Catalog_Банки"
+      },
+      {
+        "name": "Контрагент",
+        "relationship": "StandardODATA.Catalog_Банки_Контрагент",
+        "target": "Catalog_Контрагенты"
+      }
+    ]
+  },
+  {
+    "name": "Catalog_КлассификаторСтранМира",
+    "keys": [
+      "Ref_Key"
+    ],
+    "properties": [
+      {
+        "name": "Ref_Key",
+        "type": "Edm.Guid"
+      },
+      {
+        "name": "Predefined",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "PredefinedDataName",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DataVersion",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Description",
+        "type": "Edm.String"
+      },
+      {
+        "name": "Code",
+        "type": "Edm.String"
+      },
+      {
+        "name": "DeletionMark",
+        "type": "Edm.Boolean"
+      },
+      {
+        "name": "НаименованиеПолное",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодАльфа2",
+        "type": "Edm.String"
+      },
+      {
+        "name": "КодАльфа3",
+        "type": "Edm.String"
+      },
+      {
+        "name": "УчастникТаможенногоСоюза_Key",
+        "type": "Edm.Guid"
+      }
+    ],
+    "navigation": [
+      {
+        "name": "УчастникТаможенногоСоюза",
+        "relationship": "StandardODATA.Catalog_КлассификаторСтранМира_УчастникТаможенногоСоюза",
+        "target": "Catalog_СтраныУчастникиТаможенногоСоюза"
+      }
+    ]
+  }
+]

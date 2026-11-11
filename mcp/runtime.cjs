@@ -79,7 +79,7 @@ async function apiCall(method, route, body) {
   const base=new URL(config.apiUrl);
   if (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['127.0.0.1','localhost','[::1]'].includes(base.hostname))) throw new finance.PublicError('Для API MCP требуется HTTPS или локальный адрес HTTP.');
   let response;
-  try {response=await request(`${base.origin}${base.pathname.replace(/\/$/,'')}/api/mcp/${route}`,{method,headers:{Authorization:`Bearer ${config.apiToken}`,'Content-Type':'application/json','X-Index12-Workspace-ID':config.workspaceId,'X-Index12-Actor-ID':config.actorId || config.ownerId,...executionHeaders()},body:body === undefined ? undefined : JSON.stringify(body),redirect:'error',signal:AbortSignal.any([AbortSignal.timeout((route.startsWith('business/onec/purchases/execute') || method !== 'GET' && /^business\/onec\/(object|posting|deletion-mark)$/.test(route)) ? 120000 : 30000), ...(activeSignal ? [activeSignal] : [])])});}
+  try {response=await request(`${base.origin}${base.pathname.replace(/\/$/,'')}/api/mcp/${route}`,{method,headers:{Authorization:`Bearer ${config.apiToken}`,'Content-Type':'application/json','X-Index12-Workspace-ID':config.workspaceId,'X-Index12-Actor-ID':config.actorId || config.ownerId,...executionHeaders()},body:body === undefined ? undefined : JSON.stringify(body),redirect:'error',signal:AbortSignal.any([AbortSignal.timeout(((route.startsWith('business/onec/purchases/execute') || route.startsWith('business/onec/invoices/execute')) || method !== 'GET' && /^business\/onec\/(object|posting|deletion-mark)$/.test(route)) ? 120000 : 30000), ...(activeSignal ? [activeSignal] : [])])});}
   catch(cause) {const error=new Error();error.detail={code:cause.name==='AbortError'?'CANCELLED':'CONNECTION_ERROR',field:null,message:'Не удалось получить ответ API INDEX12. Результат записи не подтверждён; проверьте операцию перед повтором.'};throw error;}
   let result; try {result=await response.json();} catch {const error=new Error();error.detail={code:'API_ERROR',field:null,message:'API MCP вернул некорректный ответ. Результат записи не подтверждён.'};throw error;}
   if (!response.ok) {const error=new Error();error.detail=typeof result.error==='object'&&result.error?.code ? result.error : {code:({401:'UNAUTHORIZED',403:'FORBIDDEN',409:'VERSION_CONFLICT'})[response.status]||'API_ERROR',field:null,message:'Запрос не выполнен API INDEX12.'};throw error;}
@@ -137,6 +137,7 @@ const fileInput = require('./file-input.cjs').createFileInput({ allowLocalFiles,
 require('../team-chat/mcp-tools.cjs').registerChatTools(register, chatApiCall || ((method, path, body) => apiCall(method, 'team-chat' + path, body)), fileInput);
 require('../codex/mcp-tools.cjs').registerCodexTools(register, apiCall, fileInput);
 require('./purchases.cjs').registerPurchaseTools(register,apiCall,(params,extra)=>elicit ? elicit(params) : server.server.elicitInput(params,{relatedRequestId:extra?.requestId,timeout:300000}));
+require('./invoice-templates.cjs').registerInvoiceTemplateTools(register,apiCall);
 const taskId = z.string().uuid();
 const calendarReadId = z.union([taskId, z.string().regex(/^chat:[a-f\d-]{36}$/i)]);
 const taskFields = {

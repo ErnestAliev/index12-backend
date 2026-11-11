@@ -1,6 +1,7 @@
 'use strict';
 
 const WRITE_CAPABILITIES = {
+  index12_onec_execute_invoice:'createOnecPurchase', index12_invoice_link_expense:'createOnecPurchase', index12_invoice_followup:'updateTasks',
   index12_orchestration_prepare: 'read', index12_orchestration_execute: 'read',
   index12_chat_upload_file: 'create', index12_chat_attach_files: 'update', index12_chat_react: 'update', index12_chat_mark_read: 'update', index12_chat_forward_message: 'create', index12_chat_delete_message: 'delete', index12_chat_delete_task: 'delete', index12_chat_restore_task: 'update',
   index12_chat_send_message: 'create', index12_chat_create_task: 'create', index12_chat_update_task: 'update', index12_chat_edit_message: 'update', index12_chat_decide: 'update',
@@ -17,6 +18,7 @@ const INDEX12_TOOLS = ['index12_onec_mutation_status','index12_onec_status','ind
 INDEX12_TOOLS.push(...require('../team-chat/mcp-tools.cjs').CHAT_TOOLS.filter(name => !INDEX12_TOOLS.includes(name)));
 INDEX12_TOOLS.push('index12_orchestration_catalog', 'index12_orchestration_status', 'index12_orchestration_list', 'index12_orchestration_reconcile');
 INDEX12_TOOLS.push('index12_invoice_defaults', 'index12_invoice_rules');
+INDEX12_TOOLS.push('index12_counterparty_lookup', 'index12_onec_prepare_invoice', 'index12_onec_invoice_status');
 
 async function readMcpAccess(binding, request = fetch) {
   const base = new URL(binding.apiUrl);

@@ -116,6 +116,12 @@ class ExecutionStore {
       const steps=Object.fromEntries(Object.entries(item.steps||{}).filter(([,step])=>step.state==='completed'));
       if(Object.keys(steps).length)events.push({tool:'index12_execute_purchase',type:'completed',result:{planToken:item._id,completed:item.state==='completed',partial:item.state!=='completed',steps,error:item.error||null}});
     }
+    const invoices = await this.db.collection('onecInvoicePlans').find({...scope,$or:[{executionIds:id},{followupExecutionIds:id}]}).toArray();
+    for (const item of invoices) {
+      const steps=Object.fromEntries(Object.entries(item.steps||{}).filter(([,step])=>step.state==='completed'));
+      if(Object.keys(steps).length) events.push({tool:'index12_onec_execute_invoice',type:'completed',result:{planToken:item._id,completed:item.state==='completed',partial:item.state!=='completed',steps,error:item.error||null}});
+      if(item.taskId && item.followupExecutionIds?.includes(id)) events.push({tool:'index12_invoice_link_expense',type:'completed',result:{planToken:item._id,taskId:item.taskId}});
+    }
     const mutations = await this.db.collection('onecObjectMutations').find({ executionIds:id, ...scope, state:'completed' }).toArray();
     for (const item of mutations) events.push({ tool: item.action === 'create' ? 'index12_onec_create_object' : item.action === 'posting' ? 'index12_onec_set_posted' : item.action === 'deletion' ? 'index12_onec_set_deletion_mark' : 'index12_onec_update_object', type:'completed', result:item.result });
     return { run, events };

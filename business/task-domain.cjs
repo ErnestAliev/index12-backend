@@ -99,6 +99,7 @@ function publicTask(task, now = Date.now()) {
   return { ...value, version: task.version || 0, allDay: task.allDay ?? !task.startsAt, reminderOffsets: task.reminderOffsets || [], reminderDates: task.reminderDates || [], links: task.links || [], attachments: task.attachments || [], displayStatus: taskState(task, now), timezone: TZ };
 }
 function reminderEvent(task, now = Date.now()) {
+  if (task.invoiceFollowup?.stage === 'waiting_payment') return null;
   if (task.status === 'done' || task.deletedAt) return null;
   const start = task.startsAt ? Date.parse(task.startsAt) : task.dueDate ? Date.parse(localInstant(task.dueDate, '09:00')) : null;
   const end = task.endsAt ? Date.parse(task.endsAt) : task.dueDate ? Date.parse(localInstant(task.dueDate, '23:59')) + 60000 : null;

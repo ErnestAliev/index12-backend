@@ -1708,31 +1708,38 @@
     "navigation": [
       {
         "name": "Parent",
-        "relationship": "StandardODATA.Catalog_Контрагенты_Parent"
+        "relationship": "StandardODATA.Catalog_Контрагенты_Parent",
+        "target": "Catalog_Контрагенты"
       },
       {
         "name": "ГоловнойКонтрагент",
-        "relationship": "StandardODATA.Catalog_Контрагенты_ГоловнойКонтрагент"
+        "relationship": "StandardODATA.Catalog_Контрагенты_ГоловнойКонтрагент",
+        "target": "Catalog_Контрагенты"
       },
       {
         "name": "ОсновноеКонтактноеЛицо",
-        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновноеКонтактноеЛицо"
+        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновноеКонтактноеЛицо",
+        "target": "Catalog_КонтактныеЛица"
       },
       {
         "name": "ОсновнойБанковскийСчет",
-        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновнойБанковскийСчет"
+        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновнойБанковскийСчет",
+        "target": "Catalog_БанковскиеСчета"
       },
       {
         "name": "ОсновнойДоговорКонтрагента",
-        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновнойДоговорКонтрагента"
+        "relationship": "StandardODATA.Catalog_Контрагенты_ОсновнойДоговорКонтрагента",
+        "target": "Catalog_ДоговорыКонтрагентов"
       },
       {
         "name": "СтранаРезидентства",
-        "relationship": "StandardODATA.Catalog_Контрагенты_СтранаРезидентства"
+        "relationship": "StandardODATA.Catalog_Контрагенты_СтранаРезидентства",
+        "target": "Catalog_КлассификаторСтранМира"
       },
       {
         "name": "ФизЛицо",
-        "relationship": "StandardODATA.Catalog_Контрагенты_ФизЛицо"
+        "relationship": "StandardODATA.Catalog_Контрагенты_ФизЛицо",
+        "target": "Catalog_ФизическиеЛица"
       }
     ]
   },
@@ -2165,43 +2172,53 @@
     "navigation": [
       {
         "name": "Банк",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_Банк"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_Банк",
+        "target": "Catalog_Банки"
       },
       {
         "name": "БанкДляРасчетов",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_БанкДляРасчетов"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_БанкДляРасчетов",
+        "target": "Catalog_Банки"
       },
       {
         "name": "ВалютаДенежныхСредств",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_ВалютаДенежныхСредств"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_ВалютаДенежныхСредств",
+        "target": "Catalog_Валюты"
       },
       {
         "name": "ДоговорКонтрагента",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_ДоговорКонтрагента"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_ДоговорКонтрагента",
+        "target": "Catalog_ДоговорыКонтрагентов"
       },
       {
         "name": "СтатьяДвиженияДенежныхСредств",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СтатьяДвиженияДенежныхСредств"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СтатьяДвиженияДенежныхСредств",
+        "target": "Catalog_СтатьиДвиженияДенежныхСредств"
       },
       {
         "name": "СтавкаНДС",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СтавкаНДС"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СтавкаНДС",
+        "target": "Catalog_СтавкиНДС"
       },
       {
         "name": "СчетЗатратБУ",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетЗатратБУ"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетЗатратБУ",
+        "target": "ChartOfAccounts_Типовой"
       },
       {
         "name": "СчетЗатратНУ",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетЗатратНУ"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетЗатратНУ",
+        "target": "ChartOfAccounts_Налоговый"
       },
       {
         "name": "НДСВидПоступления",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_НДСВидПоступления"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_НДСВидПоступления",
+        "target": "Catalog_ВидыПоступления"
       },
       {
         "name": "СчетУчетаНДС",
-        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетУчетаНДС"
+        "relationship": "StandardODATA.Catalog_БанковскиеСчета_СчетУчетаНДС",
+        "target": "ChartOfAccounts_Типовой"
       }
     ]
   }

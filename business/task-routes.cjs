@@ -130,6 +130,15 @@ function registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Indiv
     if (!task) fail('Задача изменена. Обновите карточку перед сохранением', 409);
     await retainFiles(req, task); onTasksChanged(req); res.json(await result(req, task));
   }));
+  router.post('/tasks/:id/invoice-followup', write(async (req, res) => {
+    const existing = await taskFor(req), version = revision(existing, req.body.expectedVersion);
+    const data = require('./onec/invoice-followup.cjs').followupTransition(existing, req.body, identity(req).actorId);
+    const task = await coll('Tasks').findOneAndUpdate({ _id:existing._id, ...active(req), ...version }, {
+      $set:{...data,updatedAt:new Date()}, $inc:{version:1,reminderRevision:1},
+    }, {...opts(),returnDocument:'after'});
+    if (!task) fail('Задача изменена. Обновите карточку перед сохранением',409);
+    onTasksChanged(req); res.json(await result(req,task));
+  }));
   router.delete('/tasks/:id', write(async (req, res) => {
     const existing = await taskFor(req, true);
     if (existing.deletedAt && existing.deletedVersion === req.body.expectedVersion) return res.json({ ...identity(req), id: existing._id, version: existing.version, deleted: true, alreadyDeleted: true });
