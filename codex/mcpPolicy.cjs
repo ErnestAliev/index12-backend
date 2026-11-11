@@ -1,6 +1,7 @@
 'use strict';
 
 const WRITE_CAPABILITIES = {
+  index12_orchestration_prepare: 'read', index12_orchestration_execute: 'read',
   index12_chat_upload_file: 'create', index12_chat_attach_files: 'update', index12_chat_react: 'update', index12_chat_mark_read: 'update', index12_chat_forward_message: 'create', index12_chat_delete_message: 'delete', index12_chat_delete_task: 'delete', index12_chat_restore_task: 'update',
   index12_chat_send_message: 'create', index12_chat_create_task: 'create', index12_chat_update_task: 'update', index12_chat_edit_message: 'update', index12_chat_decide: 'update',
   index12_onec_create_object: 'createOnecObjects', index12_onec_update_object: 'updateOnecObjects', index12_onec_set_posted: 'updateOnecObjects', index12_onec_set_deletion_mark: 'deleteOnecObjects',
@@ -14,6 +15,7 @@ const WRITE_CAPABILITIES = {
 const INDEX12_TOOLS = ['index12_onec_mutation_status','index12_onec_status','index12_onec_schema','index12_onec_query','index12_onec_get_object','index12_prepare_purchase','index12_purchase_status','index12_status', 'index12_list_tasks', 'index12_get_task', 'index12_read_task_file', 'index12_find_entities', 'index12_financial_summary', 'index12_list_operations', 'index12_account_balances', 'index12_get_operation', 'index12_get_account', 'index12_company_profile', ...Object.keys(WRITE_CAPABILITIES), 'index12_prepare_import'];
 
 INDEX12_TOOLS.push(...require('../team-chat/mcp-tools.cjs').CHAT_TOOLS.filter(name => !INDEX12_TOOLS.includes(name)));
+INDEX12_TOOLS.push('index12_orchestration_catalog', 'index12_orchestration_status', 'index12_orchestration_list', 'index12_orchestration_reconcile');
 
 async function readMcpAccess(binding, request = fetch) {
   const base = new URL(binding.apiUrl);

@@ -32,6 +32,17 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
       const body = JSON.parse(options.body);
       if(mode.startsWith('model:'))return require('./cloud-model-response.cjs').reply(mode,body,modelState);
       assert.equal(body.store, false); assert.ok(body.tools.some(t => t.name === 'index12_create_task')); assert.ok(body.tools.some(t => t.name === 'index12_onec_update_object')); assert.match(body.instructions,/Дата сообщения в Asia\/Almaty/);
+      if (mode === 'workflow') {
+        assert.ok(body.tools.some(t => t.name === 'index12_orchestration_execute'));
+        const previous = body.input.at(-1);
+        if (previous.type !== 'function_call_output') return Response.json({ status: 'completed', output: [{ type: 'function_call', call_id: 'prepare-workflow', name: 'index12_orchestration_prepare', arguments: JSON.stringify({
+          idempotencyKey: 'cloud-workflow-fixture', summary: 'Сводка, календарь и рабочая задача', steps: [{ id: 'read', tool: 'index12_status' }, { id: 'people', tool: 'index12_chat_status' }, { id: 'task', tool: 'index12_create_task', dependsOn: ['read'] }, { id: 'chat', tool: 'index12_chat_create_task', dependsOn: ['task', 'people'] }],
+          code: "const [source,people] = await Promise.all([step('read', {}),step('people',{})]); const task = await step('task', {title:'Cloud workflow task'}); const chat = await step('chat',{description:'Cloud work chat task',assigneeIds:[people.identity.actorId],timing:'none'}); return {taskId:task.id,chatTaskId:chat.task._id,sourceAt:source.fetchedAt};",
+        }) }] });
+        if (previous.call_id === 'prepare-workflow') return Response.json({ status: 'completed', output: [{ type: 'function_call', call_id: 'execute-workflow', name: 'index12_orchestration_execute', arguments: JSON.stringify({ planId: JSON.parse(previous.output).planId }) }] });
+        assert.equal(JSON.parse(previous.output).state, 'completed');
+        return Response.json({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'План выполнен.', annotations: [] }] }] });
+      }
       if (mode.startsWith('generated')) {
         assert.ok(body.tools.some(t => t.type === 'code_interpreter'));
         assert.equal(body.tools.find(t=>t.name==='index12_chat_upload_file').parameters.properties.dataBase64,undefined);
@@ -81,6 +92,30 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     assert.deepEqual(Buffer.from((await db.collection('teamChatFiles').findOne({ _id: attached.fileId })).data.buffer), documentBytes);
     assert.equal(generatedResult.result.history.messages.at(-1).attachments[0].name, 'ЭСФ.pdf');
     }
+    mode = 'workflow';
+    const workflowChat = (await api('/chats', {})).chat;
+    const workflowJob = await api('/chats/' + workflowChat.id + '/jobs', { kind: 'send', requestId: randomUUID(), message: 'Проверь сводку и создай задачу.' });
+    let answeredSteps = 0;
+    for (let i = 0; i < 300; i++) {
+      const observed = (await api('/jobs/' + workflowJob.job.id)).job;
+      if (!['queued','running'].includes(observed.status)) break;
+      const pending = observed.pendingRequests?.[0];
+      if (pending) {
+        assert.equal((await db.collection('orchestrationSteps').countDocuments({ write: true })), answeredSteps, 'a write waits for its own concrete confirmation');
+        assert.match(JSON.stringify(pending.prompt), /Cloud workflow task|Cloud work chat task/);
+        assert.equal((await api('/jobs/' + workflowJob.job.id + '/requests/' + pending.id + '/answer', { action: 'accept', values: { approve: true } })).received, true);
+        answeredSteps++;
+      }
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    assert.equal(answeredSteps, 2);
+    const workflowResult = await waitJob(workflowJob.job.id);
+    assert.equal(workflowResult.status, 'completed', JSON.stringify(workflowResult));
+    assert.equal(workflowResult.result.text, 'План выполнен.');
+    assert.equal(workflowResult.result.completed.filter(item => item.tool === 'index12_create_task').length, 1);
+    assert.equal(workflowResult.result.completed.filter(item => item.tool === 'index12_chat_create_task').length, 1);
+    assert.equal((await db.collection('mcpExecutions').findOne({ _id: workflowJob.job.id })).state, 'completed');
+    assert.equal((await db.collection('orchestrationPlans').findOne({ 'plan.idempotencyKey': 'cloud-workflow-fixture' })).state, 'completed');
     mode = 'calendar';
     failAfterWrite = true;
     const second = await api('/chats/' + chat.id + '/jobs', { kind: 'send', requestId: randomUUID(), message: 'Создай ещё одну задачу.' }); const failed = await waitJob(second.job.id);

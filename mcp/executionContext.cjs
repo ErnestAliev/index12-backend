@@ -3,13 +3,13 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { ExecutionStore, scopeOf } = require('../codex/executionStore.cjs');
 const context = new AsyncLocalStorage();
 let queue = Promise.resolve();
-async function withExecution({ db, binding, meta, durable, write }, action) {
+async function withExecution({ db, binding, meta, durable, write, signal }, action) {
   const store = new ExecutionStore(db), scope = scopeOf(binding);
   const identity = durable ? await store.fromMetadata(meta, scope) : null;
   const run = async () => {
     try {
       if (identity && write) await store.assertRunning(identity, scope);
-      return await context.run({ identity, scope, store }, action);
+      return await context.run({ identity, scope, store, signal }, action);
     } catch (error) {
       if (identity) await store.stop(identity, scope, error.detail || error);
       throw error;
@@ -28,4 +28,5 @@ async function stopExecution(error) {
   const ctx = context.getStore();
   if (ctx?.identity) await ctx.store.stop(ctx.identity, ctx.scope, error);
 }
-module.exports = { withExecution, executionHeaders, stopExecution };
+const executionSignal = () => context.getStore()?.signal;
+module.exports = { withExecution, executionHeaders, stopExecution, executionSignal };

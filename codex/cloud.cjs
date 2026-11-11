@@ -162,7 +162,7 @@ class CloudChat {
       await db.collection('desktopFiles').insertOne(file); generated.set(key, fileMeta(file));
       return { desktopFileId: file._id };
     };
-    const runtime = createMcpRuntime({ config, database: async () => db, request: this.request, resolveContainerFile, runtimeEnv: { INDEX12_MCP_EXECUTION_MODE: 'durable' }, executionMeta: { 'x-codex-turn-metadata': { thread_id: threadId, turn_id: turnId } }, elicit: async params => { await this.checkpoint(job, true); const answer = await broker.ask({ method: 'mcpServer/elicitation/request', params: { ...params, serverName: 'INDEX12' } }, job, signal); if (answer.failure) await executions.stop({ executionId: job._id, threadId, turnId }, scope, answer.failure); return answer.result; } });
+    const runtime = createMcpRuntime({ config, database: async () => db, request: this.request, resolveContainerFile, signal, beforeOrchestrationStep: tool => this.checkpoint(job, tool.write), runtimeEnv: { INDEX12_MCP_EXECUTION_MODE: 'durable' }, executionMeta: { 'x-codex-turn-metadata': { thread_id: threadId, turn_id: turnId } }, elicit: async (params, requestSignal = signal) => { await this.checkpoint(job, true); const answer = await broker.ask({ method: 'mcpServer/elicitation/request', params: { ...params, serverName: 'INDEX12' } }, job, requestSignal); if (answer.failure) await executions.stop({ executionId: job._id, threadId, turnId }, scope, answer.failure); return answer.result; } });
     const uploaded = [];
     try {
       const content = [{ type: 'input_text', text: job.message || 'Изучи приложенные файлы.' }];
