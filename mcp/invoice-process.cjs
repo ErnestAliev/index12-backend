@@ -13,7 +13,7 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     if([v.pdfId,v.chatFileId,v.desktopFileId].filter(Boolean).length>1)ctx.addIssue({code:z.ZodIssueCode.custom,path:['pdfId'],message:'Передайте один источник оригинала'});
     if(v.direction==='customer'&&!v.sourceTaskId)ctx.addIssue({code:z.ZodIssueCode.custom,path:['sourceTaskId'],message:'Нужна исходная рабочая задача для возврата счёта в её обсуждение'});
   });
-  register('index12_process_invoice','Выполнить целиком один из двух сценариев по ясному поручению: supplier — расход INDEX12 → счёт поставщика → платёжное поручение текущим днём, Оплачено=true и проведение → синхронизация контрагента → одна задача АВР/ЭСФ; customer — счёт покупателю → штатный PDF 1С → сообщение с PDF в обсуждение исходной задачи. Нормализуй исходные данные один раз и передай все строки; сервер сам сопоставляет реальные справочники. К банку не обращается. Для поставщика category/subcategory — по одному слову. Договор отсутствует — запись «Без договора» без вопросов, КНП=859 при отсутствии. Входящий НДС только из счёта, исходящий из настроек продавца/поручения. Только прямой режим. Повторять те же параметры и idempotencyKey: результат сохраняется по этапам. При partial остановиться, сообщить planToken и подтверждённые шаги, неопределённую запись сверять со старым operationId.',schema,async(snapshot,args,extra)=>{
+  register('index12_process_invoice','Выполнить целиком один из двух сценариев по ясному поручению: supplier — расход INDEX12 → счёт поставщика → платёжное поручение текущим днём, Оплачено=true и проведение → синхронизация контрагента → одна задача АВР/ЭСФ; customer — счёт покупателю → PDF (штатная печать, либо шаблон INDEX12 по сохранённому счёту 1С) → сообщение с PDF в обсуждение исходной задачи. Нормализуй исходные данные один раз и передай все строки; сервер сам сопоставляет реальные справочники. К банку не обращается. Для поставщика category/subcategory — по одному слову. Договор отсутствует — запись «Без договора» без вопросов, КНП=859 при отсутствии. Входящий НДС только из счёта, исходящий из настроек продавца/поручения. Только прямой режим. Повторять те же параметры и idempotencyKey: результат сохраняется по этапам. При partial остановиться, сообщить planToken и подтверждённые шаги, неопределённую запись сверять со старым operationId.',schema,async(snapshot,args,extra)=>{
     const call=async(name,input)=>{
       const result=await invoke(name,input,extra),value=result?.structuredContent;
       if(result?.isError||!value)throw Object.assign(new Error(value?.error?.message||'Не получен результат шага'),{detail:value?.error||{code:'INVOICE_STEP_FAILED',message:'Не получен результат шага'}});
@@ -21,7 +21,6 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     };
     const access=await apiCall('GET','status');
     if(access.confirmationMode!=='direct')throw Object.assign(new Error(),{detail:{code:'DIRECT_AUTHORIZATION_REQUIRED',message:'Полный сценарий требует установленного оператором прямого режима MCP'}});
-    if(args.direction==='customer'){const printing=await apiCall('GET','business/onec/invoices/print-capabilities');if(!printing.available)return {completed:false,state:'blocked',direction:'customer',...printing,error:{code:printing.code||'NATIVE_PRINT_NOT_CONFIGURED',message:printing.message||'Не подключена штатная печать 1С; финансовых записей нет.'}};}
     const {accountId,projectId,category,subcategory,chatFileId,desktopFileId,mediaPermission,requestText,...input}=args;
     if(projectId&&!snapshot.entities.projects.has(projectId))throw Object.assign(new Error(),{detail:{code:'PROJECT_NOT_FOUND',message:'Проект недоступен в рабочей области'}});
     if(projectId)input.projectId=projectId;
@@ -30,6 +29,14 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     if(chatFileId||desktopFileId){const file=await call('index12_upload_purchase_pdf',{...(chatFileId?{chatFileId}:{desktopFileId}),...(mediaPermission?{mediaPermission}:{})});input.pdfId=file.pdfId;fingerprint=file.sha256;}
     input.workflow=input.direction==='supplier'?'supplier_payment':'customer_invoice';
     const prepared=await call('index12_onec_prepare_invoice',input),planToken=prepared.planToken;
+    if(args.direction==='customer'&&!prepared.printReady){
+      const printing=await apiCall('GET','business/onec/invoices/print-capabilities?'+new URLSearchParams({companyId:args.companyId}));
+      if(!printing.available){
+        const invoiceCreated=prepared.steps.invoice.state==='completed';
+        const message=invoiceCreated?'Счёт уже сохранён в 1С, печать недоступна. Повторно создавать счёт нельзя.':'Печать не подключена; финансовых записей нет.';
+        return {completed:false,state:'blocked',planToken,direction:'customer',...printing,invoiceCreated,invoiceRef:prepared.steps.invoice.id||null,message,error:{code:printing.code||'NATIVE_PRINT_NOT_CONFIGURED',message}};
+      }
+    }
     const operation=args.direction==='supplier'?{type:'expense',amount:String(args.amount),date:prepared.expenseDate,accountId:defaults.account.id,companyId:args.companyId,
       ...((projectId||prepared.sourceProjectId)?{projectId:projectId||prepared.sourceProjectId,projectScope:'selected'}:{}),description:`${args.lines.map(l=>l.description).join('; ')}. Счёт №${args.number} от ${args.date}`.slice(0,10000)}:undefined;
     const local=await call('index12_prepare_import',{idempotencyKey:`invoice:${planToken}`,contractor:{name:args.counterparty.name,identificationNumber:args.counterparty.taxId},

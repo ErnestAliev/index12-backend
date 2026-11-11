@@ -41,7 +41,7 @@ async function reconcileCall({ call, db, scope, invoke }) {
     const message=await db.collection('teamChatMessages').findOne({_id:stableUuid([row._id,'invoice-message']),workspaceId:scope.workspaceId,taskId:row.input.sourceTaskId,deletedAt:{$exists:false}});
     const fileId=stableUuid([row._id,'invoice-pdf']);
     if(!message?.attachments?.some(f=>f.fileId===fileId))return null;
-    return {result:{completed:true,planToken:row._id,direction:'customer',invoiceRef:row.steps.invoice.id,amount:row.input.amount,fileId,messageId:message._id,delivered:true,printSource:'ONEC_NATIVE',bankPaymentSent:false},evidence:{source:'onecInvoicePlans+teamChatMessages',planToken:row._id}};
+    return {result:{completed:true,planToken:row._id,direction:'customer',invoiceRef:row.steps.invoice.id,amount:row.input.amount,fileId,messageId:message._id,delivered:true,printSource:row.printArtifact?.source||'ONEC_NATIVE',bankPaymentSent:false},evidence:{source:'onecInvoicePlans+teamChatMessages',planToken:row._id}};
   }
   const requestHash = actionRequest(call.tool, call.args);
   if (requestHash) {
