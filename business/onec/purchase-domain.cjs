@@ -11,7 +11,7 @@ const purchaseSchema=z.object({
   companyId:id, contractorId:id, supplierRef:guid,
   invoice:data.describe('Реальные поля счёта 1С из onec_schema: Date, НомерВходящегоДокумента, ДатаВходящегоДокумента, ВалютаДокумента_Key, ДоговорКонтрагента_Key, СуммаДокумента, УчитыватьНДС, СуммаВключаетНДС, Товары/Услуги. Организация и поставщик задаются сервером.'),
   payment:data.describe('Поля поручения из onec_schema: Date, СчетОрганизации_Key, СчетКонтрагента_Key, НазначениеПлатежа, КодНазначенияПлатежа; при необходимости реальные счета учёта и статья ДДС. Связи и сумма заполняются сервером.'),
-  pdfId:z.string().uuid().optional(), operationId:id.optional(),
+  pdfId:z.string().uuid().optional(), operationId:id.optional(), sourceTaskId:z.string().uuid().optional(),
   serviceDate:day.optional().describe('Фактическая дата поставки/подписания акта, если подтверждена. Дата счёта не является датой оборота.'),
   serviceMonth:z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional().describe('Месяц услуги из счёта YYYY-MM; для напоминания, не подтверждает дату оборота.'),
   closingDate:day.optional().describe('Дата запроса закрывающих; по умолчанию 25-е месяца поставки или ближайшее будущее время, если дата прошла.'),

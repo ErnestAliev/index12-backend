@@ -54,8 +54,8 @@ async function startFixture(options = {}) {
       next();
     });
     const userId = 'subcategory-test-owner';
-    let browserActor = userId;
-    app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, workspaceRole: 'admin', role: 'admin' }; req.workspaceRole = 'admin'; next(); });
+    let browserActor = userId, browserRole = 'admin';
+    app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, workspaceRole: browserRole, role: browserRole }; req.workspaceRole = browserRole; next(); });
     const emitted = [];
     const handlers = {};
     const entityHandlers = {};
@@ -121,7 +121,7 @@ async function startFixture(options = {}) {
       const response = await fetch(`${apiUrl}${endpoint}`, { method, headers: { 'Content-Type': 'application/json', ...(owner ? { 'x-test-owner': owner } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, data: await response.json() };
     }
-    return { close, app, apiUrl, models, audit: changeHistory, entityHandlers, userId, request, emitted, identityModels: context.identityModels, dropNextMcpResponse: () => { dropResponse = true; }, setBrowserActor: id => { browserActor = id; } };
+    return { close, app, apiUrl, models, audit: changeHistory, entityHandlers, userId, request, emitted, identityModels: context.identityModels, dropNextMcpResponse: () => { dropResponse = true; }, setBrowserActor: id => { browserActor = id; }, setBrowserRole: role => { browserRole = role; } };
   } catch (error) { await close(); throw error; }
 }
 

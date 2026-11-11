@@ -255,6 +255,7 @@ const accountSchema = new mongoose.Schema({
     order: { type: Number, default: 0 },
     initialBalance: { type: Number, default: 0 },
     isExcluded: { type: Boolean, default: false },
+    isDefaultForExpenses: { type: Boolean, default: false },
     isCashRegister: { type: Boolean, default: false },
     taxRegime: { type: String, default: null }, // none | our | simplified (used for cash registers)
     taxPercent: { type: Number, default: null },
@@ -3263,6 +3264,8 @@ const generateCRUD = (model, path, emitEventName = null) => {
 
             // 🟢 Account-specific fields (including companyId/individualId for linking)
             if (path === 'accounts') {
+                createData = require('./utils/invoicePolicy.cjs').accountFlag(createData);
+                if (createData.isDefaultForExpenses && getCurrentWorkspaceActorRole(req) !== 'admin') return res.status(403).json({ message: 'Счета по умолчанию настраивает администратор.' });
                 createData.initialBalance = req.body.initialBalance || 0;
                 createData.syncVersion = 0;
                 createData.changeHistory = [];
@@ -3353,6 +3356,15 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
     app.put(`/api/${path}/batch-update`, isAuthenticated, async (req, res) => {
         try {
             const items = req.body; const userId = await getCompositeUserId(req);
+            if (model === Account) {
+                // Validate the whole batch before starting any writes.
+                const normalized = items.map(item => require('./utils/invoicePolicy.cjs').accountFlag(item));
+                if (getCurrentWorkspaceActorRole(req) !== 'admin') {
+                    const previous = await model.find({ _id: { $in: items.map(item => item._id) }, userId }).lean();
+                    const flags = new Map(previous.map(item => [String(item._id), !!item.isDefaultForExpenses]));
+                    if (normalized.some(item => Object.hasOwn(item, 'isDefaultForExpenses') && flags.has(String(item._id)) && item.isDefaultForExpenses !== flags.get(String(item._id)))) return res.status(403).json({ message: 'Счета по умолчанию настраивает администратор.' });
+                }
+            }
             const updatePromises = items.map(item => {
                 const updateData = { ...item }; delete updateData._id; delete updateData.userId;
                 if (model === Company || model === Contractor) {
@@ -3361,6 +3373,7 @@ const generateBatchUpdate = (model, path, emitEventName = null) => {
                     return model.findOneAndUpdate({ _id: item._id, userId }, { $set: updateData, $inc: { profileVersion: 1 } }, { new: true, runValidators: true });
                 }
                 if (model === Account) {
+                    Object.assign(updateData, require('./utils/invoicePolicy.cjs').accountFlag(updateData));
                     delete updateData.syncVersion; delete updateData.changeHistory; delete updateData.__v;
                     delete updateData.workspaceId;
                     return model.findOneAndUpdate({ _id: item._id, userId }, { $set: updateData, $inc: { syncVersion: 1 } }, { new: true });

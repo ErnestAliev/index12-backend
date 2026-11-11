@@ -76,7 +76,8 @@ async function loadSnapshot(db, config) {
   const entities = {};
   for (const collection of ENTITY_COLLECTIONS) {
     const projection = { _id: 1, name: 1, parentCategoryId: 1, type: 1 };
-    if (collection === 'accounts') Object.assign(projection, { initialBalance: 1, isExcluded: 1, companyId: 1, individualId: 1 });
+    if (collection === 'accounts') Object.assign(projection, { initialBalance: 1, isExcluded: 1, companyId: 1, individualId: 1, isDefaultForExpenses: 1, isCashRegister: 1, order: 1 });
+    if (collection === 'companies') projection.identificationNumber = 1;
     const rows = await db.collection(collection).find(query, { projection, maxTimeMS: 30000 }).limit(MAX_ROWS + 1).toArray();
     if (rows.length > MAX_ROWS) throw new PublicError('Слишком большая выборка справочника; частичный результат не возвращается.');
     entities[collection] = new Map(rows.filter(row => collection !== 'accounts' || !access.accountIds || access.accountIds.includes(sid(row._id))).map(row => [sid(row._id), { ...row, _id: sid(row._id), parentCategoryId: sid(row.parentCategoryId) }]));

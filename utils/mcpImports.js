@@ -23,7 +23,11 @@ function makeImportSchema(createSchema) {
         operation: createSchema.omit({ idempotencyKey: true }).optional(),
         documentFingerprint: z.string().regex(/^[a-f\d]{64}$/i).transform(v => v.toLowerCase()).optional(),
         sourceDocument: z.string().trim().min(1).max(200).optional(),
-    }).strict().refine(v => v.contractor || v.category || v.subcategory || v.operation, 'Укажите хотя бы одну запись для согласования.');
+        namingPolicy: z.literal('single_word').optional(),
+    }).strict().refine(v => v.contractor || v.category || v.subcategory || v.operation, 'Укажите хотя бы одну запись для согласования.').superRefine((value, ctx) => {
+        if (value.namingPolicy !== 'single_word') return;
+        for (const key of ['category', 'subcategory']) if (value[key] && !require('./invoicePolicy.cjs').singleWord(value[key].name)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, 'name'], message: 'Название должно состоять из одного слова.' });
+    });
 }
 function signPlan(payload, key) {
     const encoded = Buffer.from(canonical(payload)).toString('base64url');
@@ -114,6 +118,13 @@ function registerMcpImportRoutes(app, deps, context) {
         if (input.contractor) items.push(await resolveEntity(req, 'contractor', input.contractor));
         let operation = input.operation ? { ...input.operation } : null;
         if (operation) {
+            if (input.namingPolicy === 'single_word') {
+                for (const [field, model] of [['categoryId', Category], ['subcategoryId', Subcategory]]) if (operation[field]) {
+                    const entity = await model.findOne({ _id: operation[field], ...scope(req) }).lean();
+                    if (!entity || !require('./invoicePolicy.cjs').singleWord(entity.name)) fail('VALIDATION_ERROR', `operation.${field}`, 'Для счёта выберите категорию и подкатегорию из одного слова.');
+                }
+                if ((!input.category && !operation.categoryId) || (!input.subcategory && !operation.subcategoryId)) fail('VALIDATION_ERROR', 'category', 'Для счёта обязательны одна категория и одна подкатегория.');
+            }
             if (input.subcategory && !categoryItem && !operation.categoryId) operation.categoryId = input.subcategory.parentCategoryId;
             for (const [kind, field] of [['category','categoryId'],['subcategory','subcategoryId'],['contractor','contractorId']]) if (input[kind] && operation[field]) fail('VALIDATION_ERROR', `operation.${field}`, 'Укажите либо существующий ID, либо согласуемый справочник, а не оба варианта.');
             if (input.contractor && operation.counterpartyIndividualId) fail('VALIDATION_ERROR', 'operation.counterpartyIndividualId', 'Нельзя одновременно выбрать физлицо-контрагента и создать контрагента.');

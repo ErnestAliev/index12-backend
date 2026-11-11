@@ -105,10 +105,10 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
   }));
   router.get('/onec/object',use(async(req,res,client)=>res.json({...identity(req),...await client.get({collection:req.query.collection,id:req.query.id})})));
   router.post('/onec/purchase-pdf',use(async(req,res)=>{
-    if(!!req.body.desktopFileId===!!req.body.file)fault('FILE_REQUIRED','Передайте один оригинальный PDF');
-    const source=req.body.desktopFileId||req.body.file?.file_id;
+    if([req.body.desktopFileId,req.body.chatFileId,req.body.file].filter(Boolean).length!==1)fault('FILE_REQUIRED','Передайте один оригинальный PDF');
+    const source=req.body.desktopFileId||req.body.chatFileId||req.body.file?.file_id;
     if(typeof source!=='string'||!source||source.length>1000)fault('INVALID_FILE_ID','Нужен идентификатор исходного файла');
-    const sourceKey=digest([req.body.desktopFileId?'desktop':'chatgpt',source]);
+    const sourceKey=digest([req.body.desktopFileId?'desktop':req.body.chatFileId?'team-chat':'chatgpt',source]);
     const view=row=>({...identity(req),pdfId:row._id,name:row.name,size:row.size,sha256:row.sha256,storedIn:'INDEX12',attachedToOnec:false});
     const previous=await files().findOne({...identity(req),sourceKey});if(previous)return res.json({...view(previous),replayed:true});
     let pdf;
@@ -116,6 +116,12 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
       if(typeof req.body.desktopFileId!=='string'||!GUID.test(req.body.desktopFileId))fault('INVALID_FILE_ID','Некорректный ID исходного файла');
       const row=await db().collection('desktopFiles').findOne({_id:req.body.desktopFileId,...identity(req)});
       if(!row)fault('FILE_UNAVAILABLE','Исходный файл не найден в ваших файлах INDEX12',404);
+      pdf=pdfBytes(fileBuffer(row),row.name);
+    } else if(req.body.chatFileId) {
+      if (!GUID.test(req.body.chatFileId) || identity(req).actorId !== String(req.cachedWorkspace.userId)) fault('FILE_UNAVAILABLE','Файл рабочего чата недоступен',403);
+      let row;
+      try { row = await require('../../utils/fileImport.cjs').accessibleChatFile(db(), { workspaceId: identity(req).workspaceId, actorId: 'owner:' + req.cachedWorkspace.userId, owner: true }, req.body.chatFileId); }
+      catch { fault('FILE_UNAVAILABLE','Файл рабочего чата недоступен',404); }
       pdf=pdfBytes(fileBuffer(row),row.name);
     } else if(req.body.file) {
       try{pdf=await download(req.body.file);}catch{fault('PDF_DOWNLOAD_FAILED','Не удалось получить оригинальный PDF. Передайте файл заново; ссылка могла истечь',424);}
@@ -132,6 +138,8 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
   router.post('/onec/purchases/prepare',use(async(req,res,client)=>{
     const parsed=purchaseSchema.safeParse(req.body);if(!parsed.success)fault('INVALID_PURCHASE','Проверьте поля плана покупки',400,{issues:parsed.error.issues.map(i=>({path:i.path.join('.'),message:i.message}))});
     const input=parsed.data, creationKey=digest(input.idempotencyKey), requestHash=digest(input);
+    const sourceTask = input.sourceTaskId ? await db().collection('teamChatTasks').findOne({ _id: input.sourceTaskId, workspaceId: identity(req).workspaceId, deletedAt: { $exists: false } }) : null;
+    if (input.sourceTaskId && (!sourceTask || identity(req).actorId !== String(req.cachedWorkspace.userId))) fault('SOURCE_TASK_UNAVAILABLE','Исходная рабочая задача недоступна',404);
     const previous=await plans().findOne({...identity(req),creationKey});if(previous){if(previous.requestHash!==requestHash)fault('IDEMPOTENCY_CONFLICT','Ключ плана уже использован с другими полями',409);return res.json({...identity(req),...purchaseView(previous),replayed:true});}
     const refs=await parties(req,input,client), cache=new Map();
     const existingIdentity=invoiceIdentity(connectionKey(),input,refs.org.Ref_Key);
@@ -177,12 +185,14 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
     input.invoice=invoice;input.payment=payment;
     const schedule=closingSchedule(input), taskId=randomUUID(), planId=randomUUID();
     const taskLink=new URL(env.FRONTEND_URL||'https://index12.com');taskLink.searchParams.set('calendarTask',taskId);taskLink.searchParams.set('calendarWorkspace',identity(req).workspaceId);
+    const sourceTaskLink=input.sourceTaskId?new URL(env.FRONTEND_URL||'https://index12.com'):null;
+    if(sourceTaskLink){sourceTaskLink.searchParams.set('teamChat',identity(req).workspaceId);sourceTaskLink.searchParams.set('task',input.sourceTaskId);}
     const comment=`INDEX12 purchase ${planId}. Закрывающие документы: ${taskLink}. ${pdf?'Оригинал PDF сохранён в задаче INDEX12.':'Оригинальный PDF не передан.'}`;
     const invoiceId=randomUUID(),paymentId=randomUUID();
     const common={Организация_Key:refs.org.Ref_Key,Контрагент_Key:input.supplierRef};
     const invoiceData={...invoice,...common,Комментарий:[invoice.Комментарий,comment].filter(Boolean).join('\n')};
     const paymentData={...payment,...common,ВидОперации:'ОплатаПоставщику',ВалютаДокумента_Key:invoice.ВалютаДокумента_Key,СуммаДокумента:invoice.СуммаДокумента,ДокументОснование:invoiceId,ДокументОснование_Type:`StandardODATA.${INVOICE}`,Комментарий:[payment.Комментарий,comment].filter(Boolean).join('\n'),РасшифровкаПлатежа:[{...split,LineNumber:'1',ДоговорКонтрагента_Key:invoice.ДоговорКонтрагента_Key,СуммаПлатежа:invoice.СуммаДокумента,СуммаВзаиморасчетов:invoice.СуммаДокумента,СуммаНДС:vatTotal/100,...(vatRates[0]?{СтавкаНДС_Key:vatRates[0]}:{}),КурсВзаиморасчетов:1,КратностьВзаиморасчетов:'1',СчетНаОплату_Key:invoiceId}]};
-    const row={_id:planId,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey,requestHash,invoiceIdentity:invoiceIdentity(connectionKey(),input,refs.org.Ref_Key),input,organizationRef:refs.org.Ref_Key,taskId,taskLink:String(taskLink),companyName:refs.company.name,supplierName:refs.supplier.name,schedule,invoiceData,paymentData,steps:{invoice:{id:invoiceId,collection:INVOICE,state:'pending'},payment:{id:paymentId,collection:PAYMENT,state:'pending'},task:{id:taskId,state:'pending'}},plan:[{step:'invoice',action:'Создать непроведённый счёт поставщика',number:invoice.НомерВходящегоДокумента,date:invoice.ДатаВходящегоДокумента,amount:invoice.СуммаДокумента,company:refs.company.name,supplier:refs.supplier.name},{step:'payment',action:'Создать непроведённое исходящее поручение на основании счёта',bankAccountRef:payment.СчетОрганизации_Key},{step:'task',action:'Запросить закрывающие документы',date:schedule.dueDate,legal:schedule.legal}],pdf:pdf?{id:pdf._id,name:pdf.name,size:pdf.size,sha256:pdf.sha256,storedIn:'INDEX12 task',attachedToOnec:false}:null,state:'prepared',executionIds:[],createdAt:new Date(),updatedAt:new Date()};
+    const row={_id:planId,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey,requestHash,invoiceIdentity:invoiceIdentity(connectionKey(),input,refs.org.Ref_Key),input,organizationRef:refs.org.Ref_Key,taskId,taskLink:String(taskLink),sourceTaskLink:sourceTaskLink?String(sourceTaskLink):null,companyName:refs.company.name,supplierName:refs.supplier.name,sourceProjectId:sourceTask?.projectId || null,sourceProjectName:sourceTask?.projectName || '',schedule,invoiceData,paymentData,steps:{invoice:{id:invoiceId,collection:INVOICE,state:'pending'},payment:{id:paymentId,collection:PAYMENT,state:'pending'},task:{id:taskId,state:'pending'}},plan:[{step:'invoice',action:'Создать непроведённый счёт поставщика',number:invoice.НомерВходящегоДокумента,date:invoice.ДатаВходящегоДокумента,amount:invoice.СуммаДокумента,company:refs.company.name,supplier:refs.supplier.name},{step:'payment',action:'Создать непроведённое исходящее поручение на основании счёта',bankAccountRef:payment.СчетОрганизации_Key},{step:'task',action:'Запросить закрывающие документы',date:schedule.dueDate,legal:schedule.legal}],pdf:pdf?{id:pdf._id,name:pdf.name,size:pdf.size,sha256:pdf.sha256,storedIn:'INDEX12 task',attachedToOnec:false}:null,state:'prepared',executionIds:[],createdAt:new Date(),updatedAt:new Date()};
     row.active=true;
     await guard(req);await plans().insertOne(row);
     if(pdf)await files().updateOne({_id:pdf._id,...identity(req)},{$unset:{expiresAt:''},$set:{purchaseId:planId}});
@@ -248,7 +258,7 @@ function registerPurchaseRoutes(router,{db,Company,Contractor,Event,env=process.
       const file={_id:row.pdf.id,scope:row.scope,uploadedBy:row.actorId,name:pdf.name,mimeType:pdf.mimeType,size:pdf.size,data:fileBuffer(pdf),createdAt:new Date()};
       await db().collection('businessTaskFiles').updateOne({_id:file._id,scope:row.scope},{$setOnInsert:file,$addToSet:{taskIds:row.taskId},$unset:{expiresAt:''}},{upsert:true});attachments.push(fileMeta(file));
     }
-    const task={_id:row.taskId,scope:row.scope,workspaceId:row.workspaceId,createdBy:row.actorId,companyId:null,party:{kind:'contractors',id:row.input.contractorId},partyName:row.supplierName,title:`Запросить закрывающие документы: ${row.supplierName}`.slice(0,300),description:`${row.companyName}: счёт №${row.input.invoice.НомерВходящегоДокумента} от ${row.input.invoice.ДатаВходящегоДокумента.slice(0,10)}, ${row.input.invoice.СуммаДокумента}. ${row.input.payment.НазначениеПлатежа}\nЗапросить акт выполненных работ/накладную и ЭСФ, если применимо. Подготовка поручения не подтверждает оплату.\n1С: счёт ${row.steps.invoice.id}; поручение ${row.steps.payment.id}.\n${row.schedule.legal.note}`,status:'open',...row.schedule,links:[{title:'Цепочка покупки',url:row.taskLink}],attachments,source:'onec_purchase',sourceKey,evidence:{purchaseId:row._id,companyId:row.input.companyId,contractorId:row.input.contractorId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,operationId:row.input.operationId||null,legal:row.schedule.legal},version:0,reminderRevision:0,createdAt:new Date(),updatedAt:new Date()};
+    const task={_id:row.taskId,scope:row.scope,workspaceId:row.workspaceId,createdBy:row.actorId,projectId:row.sourceProjectId||null,projectName:row.sourceProjectName||'',companyId:null,party:{kind:'contractors',id:row.input.contractorId},partyName:row.supplierName,title:`Запросить закрывающие документы: ${row.supplierName}`.slice(0,300),description:`${row.companyName}: счёт №${row.input.invoice.НомерВходящегоДокумента} от ${row.input.invoice.ДатаВходящегоДокумента.slice(0,10)}, ${row.input.invoice.СуммаДокумента}. ${row.input.payment.НазначениеПлатежа}\nЗапросить акт выполненных работ/накладную и ЭСФ, если применимо. Подготовка поручения не подтверждает оплату.\n1С: счёт ${row.steps.invoice.id}; поручение ${row.steps.payment.id}.\n${row.schedule.legal.note}`,status:'open',...row.schedule,links:[{title:'Цепочка покупки',url:row.taskLink},...(row.sourceTaskLink?[{title:'Исходная рабочая задача',url:row.sourceTaskLink}]:[])],attachments,source:'onec_purchase',sourceKey,evidence:{purchaseId:row._id,companyId:row.input.companyId,contractorId:row.input.contractorId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,operationId:row.input.operationId||null,sourceTaskId:row.input.sourceTaskId||null,legal:row.schedule.legal},version:0,reminderRevision:0,createdAt:new Date(),updatedAt:new Date()};
     const inserted = await tasks.updateOne({scope:row.scope,sourceKey},{$setOnInsert:task},{upsert:true});
     if (inserted.upsertedCount) onTasksChanged(req);
     await saveStep(row,'task',{state:'completed',verifiedAt:new Date()});

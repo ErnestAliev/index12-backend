@@ -16,6 +16,7 @@ const INDEX12_TOOLS = ['index12_onec_mutation_status','index12_onec_status','ind
 
 INDEX12_TOOLS.push(...require('../team-chat/mcp-tools.cjs').CHAT_TOOLS.filter(name => !INDEX12_TOOLS.includes(name)));
 INDEX12_TOOLS.push('index12_orchestration_catalog', 'index12_orchestration_status', 'index12_orchestration_list', 'index12_orchestration_reconcile');
+INDEX12_TOOLS.push('index12_invoice_defaults', 'index12_invoice_rules');
 
 async function readMcpAccess(binding, request = fetch) {
   const base = new URL(binding.apiUrl);
