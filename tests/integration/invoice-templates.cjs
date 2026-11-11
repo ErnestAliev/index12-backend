@@ -37,6 +37,12 @@ module.exports=async({call,api,db,scope,companyId,contractorId,refs,records,post
   const partial=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(partial.state,'partial');assert.equal(partial.steps.invoice.state,'uncertain');
   const sent=posts.length;await call('index12_onec_mutation_status',{operationId:partial.steps.invoice.operationId});
   const resumed=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(resumed.completed,true,JSON.stringify(resumed));assert.equal(posts.length,sent);
+  const vatRef=randomUUID();records.set('Catalog_СтавкиНДС:'+vatRef,{Ref_Key:vatRef,Ставка:'16',Description:'16%',DeletionMark:false,ДляОсвобожденногоОборота:false,МестоРеализацииНеРК:false});
+  const vatInput={...input('supplier','VAT-01'),useVat:true,vatAmount:14400,amount:104400,lines:[{description:'Fixture taxable service',quantity:1,price:104400,amount:104400}]};
+  const beforeVat=posts.length,vatPlan=await call('index12_onec_prepare_invoice',vatInput);
+  assert.equal(posts.length,beforeVat,'preparing VAT performs no financial writes');assert.equal(vatPlan.vat.included,true);assert.equal(vatPlan.vat.lines[0].percent,16);assert.equal(vatPlan.invoice.Услуги[0].СуммаНДС,14400);assert.equal(vatPlan.invoice.Услуги[0].СтавкаНДС_Key,vatRef);
+  const vatInvoice=await call('index12_onec_execute_invoice',{planToken:vatPlan.planToken});assert.equal(vatInvoice.completed,true,JSON.stringify(vatInvoice));
+  const savedVat=records.get('Document_СчетНаОплатуПоставщика:'+vatInvoice.steps.invoice.id);assert.equal(savedVat.СуммаДокумента,104400);assert.equal(savedVat.СуммаВключаетНДС,true);assert.equal(savedVat.Услуги[0].СуммаНДС,14400);
   const scopes=(await db.collection('mcpCredentials').findOne({_id:tokenHash})).scopes;
   await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:['read']}});
   assert.equal((await api('invoices/execute',{planToken:prepared.planToken})).status,403);

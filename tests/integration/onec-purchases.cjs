@@ -48,7 +48,7 @@ const schemas=[...require('../fixtures/onec-purchase-schema.json'),...require('.
     if(mode==='deny-invoice'&&collection===INVOICE)return new Response('{}',{status:401});
     const filter=url.searchParams.get('$filter')||'',number=/НомерВходящегоДокумента eq '([^']+)'/.exec(filter)?.[1];
     let rows=number?[...records.entries()].filter(([k,v])=>k.startsWith(collection+':')&&v.НомерВходящегоДокумента===number).map(([,v])=>v):[];
-    if(!number && ['Catalog_Контрагенты','Catalog_Валюты','Catalog_Банки','Catalog_БанковскиеСчета'].includes(collection)) {
+    if(!number && ['Catalog_Контрагенты','Catalog_Валюты','Catalog_Банки','Catalog_БанковскиеСчета','Catalog_СтавкиНДС'].includes(collection)) {
       rows=[...records.entries()].filter(([key])=>key.startsWith(collection+':')).map(([,row])=>row);
       for(const field of ['БуквенныйКод','БИК','НомерСчета']) {const value=new RegExp(field+" eq '([^']+)'").exec(filter)?.[1];if(value)rows=rows.filter(row=>row[field]===value);}
       const skip=Number(url.searchParams.get('$skip')||0),top=Number(url.searchParams.get('$top')||200);rows=rows.slice(skip,skip+top);

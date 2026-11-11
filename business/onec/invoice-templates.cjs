@@ -10,6 +10,7 @@ const { waitingFollowup } = require('./invoice-followup.cjs');
 const { scopeQuery } = require('../../mcp/finance.cjs');
 const { fileMeta, fileBuffer } = require('../../codex/files.cjs');
 const { lookupRegistry } = require('../providers.cjs');
+const { normalizeInvoiceVat } = require('./invoice-vat.cjs');
 const DIRECTIONS = {supplier:'Document_СчетНаОплатуПоставщика',customer:'Document_СчетНаОплатуПокупателю'};
 const literal = value => `'${String(value).replace(/'/g,"''")}'`;
 const day = z.string().refine(value => {try{return !!dateOnly(value);}catch{return false;}},'Дата YYYY-MM-DD');
@@ -21,9 +22,13 @@ const partyInput = z.object({name:z.string().trim().min(1).max(200),taxId:z.stri
 const prepareSchema = z.object({companyId:z.string().regex(/^[a-f\d]{24}$/i),direction:z.enum(['supplier','customer']),
   counterparty:partyInput,date:day,number:z.string().trim().min(1).max(100).optional(),currency:z.enum(['KZT']).default('KZT'),
   knp:z.preprocess(value=>value===''?undefined:value,z.string().regex(/^\d{3}$/).optional()),contractRef:z.preprocess(value=>value===''?null:value,z.string().uuid().nullable().optional()),
-  useVat:z.boolean(),vatIncluded:z.boolean().default(false),amount:money.refine(value=>value>0),
+  useVat:z.boolean().describe('НДС из исходного счёта: true при наличии НДС, false при «без НДС». Налоговый режим покупателя не определяет НДС поставщика.'),
+  vatIncluded:z.boolean().optional().describe('true — НДС уже входит в цены/суммы строк, false — начисляется сверху. Без значения сервер сверит суммы строк с итогом.'),
+  vatPercent:z.number().finite().min(0).max(100).optional().describe('Процент из счёта или явного подтверждения пользователя, например 16. Сервер сам найдёт GUID ставки 1С.'),
+  vatAmount:money.optional().describe('Общая сумма НДС из счёта, например 14400 при итоге 104400. При одной строке сервер сопоставит её ставку и сумму НДС автоматически.'),
+  amount:money.refine(value=>value>0),
   lines:z.array(z.object({description:z.string().trim().min(1).max(1000),quantity:z.number().finite().positive(),price:money,amount:money,
-    vatRateRef:z.string().uuid().optional(),vatAmount:money.optional(),itemRef:z.string().uuid().optional()}).strict()).min(1).max(100),
+    vatRateRef:z.string().uuid().optional(),vatPercent:z.number().finite().min(0).max(100).optional(),vatAmount:money.optional(),itemRef:z.string().uuid().optional()}).strict()).min(1).max(100),
   sourceTaskId:z.string().uuid().optional(),pdfId:z.string().uuid().optional(),
   idempotencyKey:z.string().min(8).max(160)}).strict();
 const normalizeName = name => name.normalize('NFKC').toLowerCase().replace(/^(ип|тоо)\s+/u,'').replace(/[^\p{L}\p{N}]/gu,'');
@@ -81,9 +86,9 @@ function partyData(input,taxField) {
 }
 function documentData(input,currencyRef) {
   const invoice={Date:`${input.date}T00:00:00`,ВалютаДокумента_Key:currencyRef,ДоговорКонтрагента_Key:input.contractRef||ZERO,
-    КодНазначенияПлатежа:input.knp||'859',СуммаДокумента:input.amount,УчитыватьНДС:input.useVat,СуммаВключаетНДС:input.vatIncluded,
+    КодНазначенияПлатежа:input.knp||'859',СуммаДокумента:input.amount,УчитыватьНДС:input.useVat,СуммаВключаетНДС:input.vatIncluded??false,
     КурсВзаиморасчетов:1,КратностьВзаиморасчетов:'1',Услуги:input.lines.map((line,index)=>({LineNumber:String(index+1),
-      Содержание:line.description,Количество:line.quantity,Цена:line.price,Сумма:line.amount,СуммаНДС:line.vatAmount||0,
+      Содержание:line.description,Количество:line.quantity,Цена:line.price,Сумма:line.amount,...(line.vatAmount!==undefined?{СуммаНДС:line.vatAmount}:input.useVat?{}:{СуммаНДС:0}),
       ...(line.vatRateRef?{СтавкаНДС_Key:line.vatRateRef}:{}),...(line.itemRef?{Номенклатура_Key:line.itemRef}:{})}))};
   if(input.direction==='supplier') {
     if(!input.number)fault('INVOICE_NUMBER_REQUIRED','Нужен номер входящего счёта');
@@ -102,7 +107,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(e.public||/^(HTTP_|NETWORK_|INVALID_|NOT_PUBLISHED|RESPONSE_)/.test(e.code||''))return res.status(e.status||424).json({error:{code:e.code,message:e.message,...(e.details?{details:e.details}:{})}});next(e);}};
   const view = row => ({planToken:row._id,state:row.state,completed:row.state==='completed',direction:row.input.direction,
     template:row.template,companyId:row.input.companyId,counterpartyRef:row.partyRef||null,amount:row.input.amount,
-    contractRef:row.input.contractRef||null,knp:row.input.knp||'859',steps:row.steps,taskId:row.taskId||null,
+    contractRef:row.input.contractRef||null,knp:row.input.knp||'859',vat:row.vat||null,steps:row.steps,taskId:row.taskId||null,
     bankEnabled:false,bankPaymentSent:false,documentsPosted:false,error:row.error||null});
   router.get('/onec/counterparty-lookup',use(async(req,res)=>{
     const taxId=z.string().regex(/^\d{12}$/).parse(req.query.taxId),legalForm=z.enum(['ip','llp','person']).parse(req.query.legalForm);
@@ -123,7 +128,12 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   router.post('/onec/invoices/prepare',use(async(req,res,client)=>{
     const input=prepareSchema.parse(req.body),key=digest([identity(req),connectionKey(),input.idempotencyKey]);
     const old=await plans().findOne({creationKey:key});
-    if(old){if(old.requestHash!==digest(input))fault('IDEMPOTENCY_CONFLICT','Ключ уже использован с другим счётом',409);return res.json({...identity(req),...view(old),replayed:true});}
+    if(old){
+      // Older schemas materialized the omitted vatIncluded field as false.
+      const legacyInput={...input,...(input.vatIncluded===undefined&&old.input.vatIncluded===false?{vatIncluded:false}:{})};
+      if(old.requestHash!==digest(input)&&old.requestHash!==digest(legacyInput))fault('IDEMPOTENCY_CONFLICT','Ключ уже использован с другим счётом',409);
+      return res.json({...identity(req),...view(old),replayed:true});
+    }
     const company=await mutations.company(req,input.companyId);
     const org=(await client.get({collection:'Catalog_Организации',id:company.onecSync.ref})).object;
     if(org.DeletionMark||company.identificationNumber && String(org.ИдентификационныйНомер||'').trim()!==company.identificationNumber)fault('IDENTITY_MISMATCH','БИН организации не совпадает с карточкой INDEX12',409);
@@ -131,7 +141,8 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const [party,currencies]=await Promise.all([resolveParty(client,template,input.counterparty),client.query({collection:'Catalog_Валюты',filter:`БуквенныйКод eq ${literal(input.currency)} and DeletionMark eq false`,top:2})]);
     if(currencies.rows.length!==1)fault('CURRENCY_AMBIGUOUS','Валюта счёта не найдена однозначно',409);
     if(!party&&input.contractRef&&input.contractRef!==ZERO)fault('CONTRACT_MISMATCH','Нельзя привязать существующий договор к новому контрагенту',409);
-    const data=documentData(input,currencies.rows[0].Ref_Key);
+    const normalized = await normalizeInvoiceVat(input,client);
+    const data=documentData(normalized,currencies.rows[0].Ref_Key);
     const newPartyData=party?null:partyData(input.counterparty,template.taxField);
     if(newPartyData && input.counterparty.residenceCountryCode) {
       const country=await client.query({collection:'Catalog_КлассификаторСтранМира',filter:`КодАльфа2 eq ${literal(input.counterparty.residenceCountryCode)} and DeletionMark eq false`,top:2});
@@ -161,7 +172,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const row={_id:randomUUID(),followupTaskId:input.direction==='supplier'?randomUUID():null,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey:key,requestHash:digest(input),invoiceIdentity,input,
       organizationRef:org.Ref_Key,companyName:company.name,sourceProjectId:source?.projectId||null,sourceProjectName:source?.projectName||'',
       template:{id:template._id,schemaFingerprint:template.schemaFingerprint,version:template.version,transport:template.transport},taxField:template.taxField,
-      partyRef:party?.Ref_Key||null,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,state:'prepared',
+      partyRef:party?.Ref_Key||null,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,vat:{included:normalized.vatIncluded,amount:normalized.vatAmount??0,lines:normalized.lines.map(line=>({rateRef:line.vatRateRef||null,percent:line.vatPercent??null,amount:line.vatAmount}))},state:'prepared',
       steps:{party:{operationId:stableUuid([connectionKey(),identity(req).workspaceId,input.counterparty.taxId,'party'])},bank:{operationId:randomUUID()},partyBank:{operationId:randomUUID()},invoice:{operationId:randomUUID()}},createdAt:new Date()};
     if(party)row.steps.party={...row.steps.party,state:'completed',id:party.Ref_Key};
     await guard(req);
