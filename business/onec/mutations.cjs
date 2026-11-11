@@ -588,7 +588,8 @@ function registerOnecMutationRoutes(
   );
   // Reuse the same permissions, validation, journal and uncertain-write handling
   // from higher level invoice recipes. Do not implement a second POST transport.
-  return { create: (req,res,client) => execute(req,res,client,'create',createSchema), company };
+  return { create: (req,res,client) => execute(req,res,client,'create',createSchema),
+    update: (req,res,client) => execute(req,res,client,'update',updateSchema), company };
 }
 module.exports = {
   registerOnecMutationRoutes,

@@ -158,7 +158,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
       organizationRef:org.Ref_Key,companyName:company.name,sourceProjectId:source?.projectId||null,sourceProjectName:source?.projectName||'',
       template:{id:template._id,schemaFingerprint:template.schemaFingerprint,version:template.version,transport:template.transport},taxField:template.taxField,
       partyRef:party?.Ref_Key||null,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,state:'prepared',
-      steps:{party:{operationId:stableUuid([connectionKey(),identity(req).workspaceId,input.counterparty.taxId,'party'])},bank:{operationId:randomUUID()},invoice:{operationId:randomUUID()}},createdAt:new Date()};
+      steps:{party:{operationId:stableUuid([connectionKey(),identity(req).workspaceId,input.counterparty.taxId,'party'])},bank:{operationId:randomUUID()},partyBank:{operationId:randomUUID()},invoice:{operationId:randomUUID()}},createdAt:new Date()};
     if(party)row.steps.party={...row.steps.party,state:'completed',id:party.Ref_Key};
     await guard(req);
     try{await plans().insertOne(row);}catch(e){if(e.code===11000){const duplicate=await plans().findOne({workspaceId:row.workspaceId,connectionKey:row.connectionKey,invoiceIdentity:row.invoiceIdentity});fault('INVOICE_PLAN_EXISTS','Этот счёт уже подготовлен. Используйте прежний план, не создавайте дубль',409,duplicate?.actorId===row.actorId?{planToken:duplicate._id}:undefined);}throw e;}
@@ -178,6 +178,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   router.post('/onec/invoices/execute',use(async(req,res,client)=>{
     if(env.ONEC_PURCHASE_WRITES!=='true'||!req.mcpContext?.grant?.scopes?.includes('imports:direct'))fault('DIRECT_AUTHORIZATION_REQUIRED','Нужно прямое разрешение на создание документов',403);
     const row=await getPlan(req);if(row.state==='completed')return res.json({...identity(req),...view(row),replayed:true});
+    if(row.partyData && row.input.counterparty.iban && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для привязки основного банковского счёта новой карточки нужно право update',403);
     await guard(req);await mutations.company(req,row.input.companyId,row.organizationRef);
     const lease=randomUUID(),claimed=await plans().findOneAndUpdate({_id:row._id,$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{lease,leaseUntil:new Date(Date.now()+180000),state:'running'}},{returnDocument:'after'});
     if(!claimed)return res.status(202).json({...identity(req),...view(row),inProgress:true});Object.assign(row,claimed);
@@ -207,6 +208,21 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
           const bank=matches.rows[0];if(bank.Owner!==row.partyRef||bank.Owner_Type!=='StandardODATA.Catalog_Контрагенты'||bank.Банк_Key!==row.bankRef||bank.ВалютаДенежныхСредств_Key!==row.currencyRef)fault('BANK_ACCOUNT_MISMATCH','IBAN связан с другим контрагентом, банком или валютой',409);
           await save(row,{steps:{...row.steps,bank:{...row.steps.bank,state:'completed',id:bank.Ref_Key}}});
         } else await create(req,client,row,'bank','Catalog_БанковскиеСчета',{Description:party.iban,НомерСчета:party.iban,Owner:row.partyRef,Owner_Type:'StandardODATA.Catalog_Контрагенты',Банк_Key:row.bankRef,ВалютаДенежныхСредств_Key:row.currencyRef});
+      }
+      if(row.partyData && party.iban && row.steps.partyBank?.state!=='completed') {
+        const card=(await client.get({collection:'Catalog_Контрагенты',id:row.partyRef})).object;
+        const main=card.ОсновнойБанковскийСчет_Key;
+        if(main && main!==ZERO && main!==row.steps.bank.id)fault('PRIMARY_BANK_ACCOUNT_CHANGED','Основной банковский счёт новой карточки уже изменён. Нужна сверка',409);
+        row.steps.partyBank ||= {operationId:randomUUID()};
+        if(main===row.steps.bank.id && !row.steps.partyBank.expectedVersion) {
+          row.steps.partyBank={...row.steps.partyBank,state:'completed',id:row.partyRef};await save(row,{steps:row.steps});
+        } else {
+          row.steps.partyBank.expectedVersion ||= card.DataVersion;await save(row,{steps:row.steps});
+          let result;const response={status(){return this;},json(value){result=value;return this;}};
+          await mutations.update(Object.assign(Object.create(req),{onecInvoiceNeedsUpdate:true,body:{companyId:row.input.companyId,collection:'Catalog_Контрагенты',id:row.partyRef,expectedVersion:row.steps.partyBank.expectedVersion,operationId:row.steps.partyBank.operationId,data:{ОсновнойБанковскийСчет_Key:row.steps.bank.id}}}),response,client);
+          row.steps.partyBank={...row.steps.partyBank,state:result.completed?'completed':result.state,id:row.partyRef};await save(row,{steps:row.steps});
+          if(!result.completed)fault('INVOICE_STEP_UNCONFIRMED','Привязка банковского счёта не подтверждена; сверяйте onec_mutation_status',409,{step:'partyBank',operationId:row.steps.partyBank.operationId});
+        }
       }
       const followupLink=new URL(env.FRONTEND_URL||'https://index12.com');followupLink.searchParams.set('calendarTask',row.followupTaskId||'');followupLink.searchParams.set('calendarWorkspace',row.workspaceId);
       const collection=DIRECTIONS[row.input.direction], data={...row.documentData,Контрагент_Key:row.partyRef,

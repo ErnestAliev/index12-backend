@@ -391,6 +391,7 @@ function registerMcpOperationRoutes(app, deps) {
         if (!grant?.scopes?.includes('read') || access?.role !== 'admin') fail('FORBIDDEN',null,'Доступ к цепочке 1С отозван.',403);
         const editScope = req.path === '/onec/object' && req.method === 'POST' ? 'create' : ['/onec/object','/onec/posting'].includes(req.path) ? 'update' : req.path === '/onec/deletion-mark' ? 'delete' : null;
         if (editScope && !grant.scopes.includes(editScope)) fail('FORBIDDEN',null,'Право изменения документов 1С отозвано.',403);
+        if (req.onecInvoiceNeedsUpdate && !grant.scopes.includes('update')) fail('FORBIDDEN',null,'Право изменения реквизитов контрагента 1С отозвано.',403);
         if ((req.path.endsWith('/execute') || req.path === '/onec/invoices/followup') && !['create','imports:direct'].every(scope=>grant.scopes.includes(scope))) fail('FORBIDDEN',null,'Разрешение на создание документов 1С отозвано.',403);
     }, isAuthenticated: (_req, _res, next) => next(), checkWorkspacePermission,
         purchaseClientFactory:deps.purchaseClientFactory, purchaseDownload:deps.purchaseDownload, emitEntityEvent:deps.emitEntityEvent,
