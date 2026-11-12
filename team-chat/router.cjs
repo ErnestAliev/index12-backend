@@ -331,10 +331,9 @@ function createTeamChatRouter({
       if (req.headers.authorization && !req.teamMcpOwner) {
         if (!allowedMcpRoute(req.method, req.path)) fail('Действие недоступно через MCP', 403);
         const token = /^Bearer (\S+)$/.exec(req.headers.authorization)?.[1];
-        const { grant, member, workspace } = await verifyChatToken({ db, Workspace }, token);
+        const { grant, member, workspace, access } = await verifyChatToken({ db, Workspace }, token);
         if (req.method !== 'GET' && !grant.scopes.includes('index12:write')) fail('Коннектор подключён только для чтения', 403);
-        const settings = await coll('Settings').findOne({ _id: member.workspaceId });
-        req.team = { ...member, access: permissions.connectorAccess(member, settings || {}, grant), actorId: member._id, owner: false, workspace, mcp: true, installationConfirmed: true, scope: String(getWorkspaceStorageUserId(workspace)) };
+        req.team = { ...member, access, actorId: member._id, owner: false, workspace, mcp: true, installationConfirmed: true, scope: String(getWorkspaceStorageUserId(workspace)) };
         return next();
       }
       const persistentId = await sessions.memberId(req, res);

@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { defaults, effectiveAccess, connectorAccess, validateAccess, validateRoles, toolArea, apiArea } = require('../team-chat/permissions.cjs');
+const { defaults, effectiveAccess, connectorAccess, validateAccess, validateOverrides, validateRoles, toolArea, apiArea } = require('../team-chat/permissions.cjs');
 test('owner access is independent of role and overrides', () => {
   for (const role of Object.keys(defaults)) assert.deepEqual(effectiveAccess({ owner: true, role, access: { chat: false, system: false, codex: false, onec: false } }), { chat: true, system: true, onec: true, codex: true, calendar: true });
 });
@@ -11,11 +11,17 @@ test('role inheritance and personal overrides separate 1C, system data and Codex
   assert.deepEqual(effectiveAccess({ role: 'employee', access: { ...settings.roleAccess.employee, onec: false, system: true } }, settings), { chat: true, system: true, codex: false, onec: false, calendar: false });
   assert.equal(effectiveAccess({ role: 'manager' }).codex, false);
 });
-test('live revocations apply immediately; added rights require new OAuth consent', () => {
+test('grants and revocations apply to existing connections, independently of old snapshots', () => {
   const grant = { access: { chat: true, system: true, codex: false, onec: false, calendar: false } };
-  assert.deepEqual(connectorAccess({ role: 'manager', access: { chat: true, system: false, codex: true, onec: true } }, {}, grant), { chat: true, system: false, codex: false, onec: false, calendar: false });
+  assert.deepEqual(connectorAccess({ role: 'manager', access: { chat: true, system: false, codex: true, onec: true } }, {}, grant), { chat: true, system: false, codex: false, onec: true, calendar: false });
   assert.equal(connectorAccess({ role: 'manager' }, {}, { financeAllowed: true }).system, false);
-  assert.equal(connectorAccess({ role: 'employee', access: { ...defaults.employee, onec: true } }, {}, {}).onec, false);
+  assert.equal(connectorAccess({ role: 'employee', access: { onec: true } }, {}, {}).onec, true);
+  assert.equal(connectorAccess({ role: 'employee' }, { roleAccess: { employee: { system: true } } }, { access: { system: false } }).system, true);
+});
+test('one personal toggle preserves inherited role rights and rejects private/invalid fields', () => {
+  assert.deepEqual(validateOverrides({ system: true }), { system: true });
+  assert.deepEqual(effectiveAccess({ role: 'employee', access: { system: true } }, { roleAccess: { employee: { chat: true, onec: true } } }), { chat: true, system: true, onec: true, codex: false, calendar: false });
+  for (const value of [null, [], { system: 'true' }, { calendar: true }, { codex: true }]) assert.throws(() => validateOverrides(value));
 });
 test('request validation rejects privilege-shaped strings and unknown keys', () => {
   for (const value of [null, [], { ...defaults.employee, onec: 'true' }, { ...defaults.employee, admin: true }, { chat: true }]) assert.throws(() => validateAccess(value));

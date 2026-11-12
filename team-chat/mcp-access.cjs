@@ -13,7 +13,7 @@ async function memberAccess({ db, Workspace }, grant) {
   const workspace = member && await Workspace.findById(member.workspaceId).lean();
   if (!member || !workspace || String(workspace.userId) !== grant.ownerId || (member.authEpoch || 0) !== (grant.authEpoch || 0)) fail('Доступ к коннектору отозван. Подключитесь заново', 401);
   const settings = await db().collection('teamChatSettings').findOne({ _id: grant.workspaceId });
-  return { member, workspace, access: connectorAccess(member, settings || {}, grant) };
+  return { member, workspace, access: connectorAccess(member, settings || {}) };
 }
 async function verifyChatToken(deps, token) {
   if (!/^idxchat_[A-Za-z0-9_-]{43}$/.test(token || '')) fail('Войдите через MCP-коннектор чата', 401);

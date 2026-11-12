@@ -23,8 +23,8 @@ module.exports = async ({
   assert.equal((await api('/me', undefined, 'GET')).data.permissions.access.codex, true, 'owner keeps all rights even with the employee display role');
   assert.equal((await api('/me', undefined, 'GET', employee.auth)).data.permissions.access.onec, true, 'role settings are read live');
   let staff = await db.collection('teamChatMembers').findOne({ _id: employee.member._id });
-  assert.equal((await api('/access/employees/' + staff._id, { role: staff.role, expectedVersion: staff.version, access: { chat: true, system: true, onec: false } }, 'PATCH')).status, 200);
-  assert.equal((await api('/me', undefined, 'GET', employee.auth)).data.permissions.access.onec, false, 'personal override replaces inherited access');
+  assert.equal((await api('/access/employees/' + staff._id, { role: staff.role, expectedVersion: staff.version, access: { system: true } }, 'PATCH')).status, 200);
+  assert.equal((await api('/me', undefined, 'GET', employee.auth)).data.permissions.access.onec, true, 'a personal toggle preserves other inherited rights');
   staff = await db.collection('teamChatMembers').findOne({ _id: staff._id });
   assert.equal((await api('/access/employees/' + staff._id, { role: staff.role, expectedVersion: staff.version, access: null }, 'PATCH')).status, 200);
   assert.equal((await api('/settings', { roleAccess: {}, ownerRole: 'manager' }, 'PATCH')).status, 200);

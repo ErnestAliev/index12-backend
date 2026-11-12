@@ -9,6 +9,10 @@ function validateAccess(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key)) || keys.some(key => typeof value[key] !== 'boolean')) fail('Проверьте права доступа');
   return Object.fromEntries(keys.map(key => [key, value[key]]));
 }
+function validateOverrides(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key) || typeof value[key] !== 'boolean')) fail('Проверьте права доступа');
+  return Object.fromEntries(Object.entries(value));
+}
 function validateRoles(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(role => !Object.hasOwn(roles, role))) fail('Проверьте права ролей');
   return Object.fromEntries(Object.entries(value).map(([role, access]) => [role, validateAccess(access)]));
@@ -33,10 +37,10 @@ function apiArea(path) {
   if (/^\/api\/mcp\/business\/onec(?:\/|$)/.test(path)) return 'onec';
   return 'system';
 }
-function connectorAccess(member, settings, grant) {
+function connectorAccess(member, settings) {
+  // OAuth binds the employee, workspace and read/write scopes. The owner controls
+  // data areas live; connection-time snapshots are audit data, not another ACL.
   const live = effectiveAccess(member, settings);
-  // New grants record the consented areas. Old grants retain their original ceiling.
-  const consent = grant.access || { chat: true, system: grant.financeAllowed === true, onec: grant.financeAllowed === true, codex: false };
-  return { ...Object.fromEntries(keys.map(key => [key, live[key] === true && consent[key] === true])), codex: false, calendar: false };
+  return { ...Object.fromEntries(keys.map(key => [key, live[key] === true])), codex: false, calendar: false };
 }
-module.exports = { defaults, validateAccess, validateRoles, roleAccess, effectiveAccess, connectorAccess, toolArea, apiArea };
+module.exports = { defaults, validateAccess, validateOverrides, validateRoles, roleAccess, effectiveAccess, connectorAccess, toolArea, apiArea };
