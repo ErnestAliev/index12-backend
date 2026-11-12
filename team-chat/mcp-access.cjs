@@ -24,12 +24,16 @@ async function revokeConnection(db, id) {
   await collection(db, 'Tokens').updateMany({ connectionId: id }, { $set: { revokedAt: new Date() } });
   await collection(db, 'Refresh').updateMany({ connectionId: id }, { $set: { revokedAt: new Date() } });
 }
-function registerConnectorRoutes(router, { db, wrap }) {
+function registerConnectorRoutes(router, { db, wrap, invites, sessions }) {
   const c = name => collection(db, name);
   const serverUrl = new URL('/team-mcp', process.env.MCP_PUBLIC_ORIGIN || process.env.RENDER_EXTERNAL_URL || 'https://index12-backend.onrender.com').href;
   router.get('/mcp/connection', wrap(async (req, res) => {
-    const connections = await c('Connections').find({ actorId: req.team.actorId, workspaceId: req.team.workspaceId, authEpoch: req.team.authEpoch || 0, revokedAt: null }, { projection: { _id: 1, clientName: 1, createdAt: 1, scopes: 1, financeAllowed: 1 } }).sort({ createdAt: -1 }).toArray();
-    res.json({ serverUrl, pluginUrl: publishedPluginUrl(process.env.TEAM_CHAT_PLUGIN_URL), fullData: financialRole(req.team.role), connections });
+    const [connections,chatUrl,devices] = await Promise.all([
+      c('Connections').find({ actorId: req.team.actorId, workspaceId: req.team.workspaceId, authEpoch: req.team.authEpoch || 0, revokedAt: null }, { projection: { _id: 1, clientName: 1, createdAt: 1, scopes: 1, financeAllowed: 1 } }).sort({ createdAt: -1 }).toArray(),
+      invites.memberLoginUrl(req.team), sessions.devices(req.team),
+    ]);
+    res.set('Cache-Control','private, no-store');
+    res.json({ serverUrl, pluginUrl: publishedPluginUrl(process.env.TEAM_CHAT_PLUGIN_URL), fullData: financialRole(req.team.role), connections, chatUrl, devices });
   }));
   router.delete('/mcp/connections/:id', wrap(async (req, res) => {
     const row = await c('Connections').findOne({ _id: req.params.id, actorId: req.team.actorId, workspaceId: req.team.workspaceId });

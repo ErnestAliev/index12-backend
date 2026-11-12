@@ -161,6 +161,12 @@ function createInvites({ coll, Workspace, frontendUrl, env = process.env }) {
     if (!updated) fail("Приглашение уже изменилось. Обновите список", 409);
     return meta(updated);
   }
-  return { lookup, list, create, change, seal, open };
+  async function memberLoginUrl(team) {
+    const row = await coll('Invites').findOne({workspaceId:team.workspaceId,entryForMemberId:team.actorId,namedLogin:true},{sort:{createdAt:-1}});
+    if (!row?.tokenBox) return null;
+    try { return frontendUrl + '/team/' + open(row.tokenBox,row); }
+    catch { return null; }
+  }
+  return { lookup, list, create, change, seal, open, memberLoginUrl };
 }
 module.exports = { createInvites };

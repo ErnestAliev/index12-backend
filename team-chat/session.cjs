@@ -2,6 +2,11 @@
 const { randomBytes, createHash } = require("node:crypto");
 const COOKIE = "index12_team";
 const LIFETIME = 365 * 86400000;
+const deviceKind = (req) =>
+  /Android|iPhone|iPad|iPod|Mobile/i.test(req.headers["user-agent"] || "") ||
+  req.headers["sec-ch-ua-mobile"] === "?1"
+    ? "mobile"
+    : "desktop";
 function createChatSessions({
   coll,
   production = process.env.NODE_ENV === "production",
@@ -33,6 +38,9 @@ function createChatSessions({
       authEpoch,
       expiresAt: new Date(Date.now() + LIFETIME),
       renewedAt: new Date(),
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+      deviceKind: deviceKind(req),
     });
     setCookie(res, token);
   }
@@ -44,17 +52,26 @@ function createChatSessions({
       expiresAt: { $gt: new Date() },
     });
     if (!session) return null;
-    if (Date.now() - new Date(session.renewedAt).getTime() > 3600000) {
-      await coll("Sessions").updateOne(
-        { _id: session._id },
-        {
-          $set: {
-            expiresAt: new Date(Date.now() + LIFETIME),
-            renewedAt: new Date(),
-          },
-        },
-      );
+    const updates = {};
+    if (
+      !session.deviceKind ||
+      !session.lastSeenAt ||
+      Date.now() - new Date(session.lastSeenAt).getTime() > 300000
+    ) {
+      updates.lastSeenAt = new Date();
+      updates.deviceKind = session.deviceKind || deviceKind(req);
     }
+    if (
+      !session.renewedAt ||
+      Date.now() - new Date(session.renewedAt).getTime() > 3600000
+    ) {
+      updates.expiresAt = new Date(Date.now() + LIFETIME);
+      updates.renewedAt = new Date();
+    }
+    if (Object.keys(updates).length) {
+      await coll("Sessions").updateOne({ _id: session._id }, { $set: updates });
+    }
+    req.teamSessionDeviceKind = updates.deviceKind || session.deviceKind;
     req.teamSessionEpoch = session.authEpoch || 0;
     req.teamSessionInstalled = session.installed === true;
     setCookie(res, token);
@@ -69,11 +86,63 @@ function createChatSessions({
     const token = tokenFrom(req);
     if (!token) return false;
     const result = await coll("Sessions").updateOne(
-      { _id: key(token), memberId: req.team.actorId, authEpoch: req.team.authEpoch || 0, expiresAt: { $gt: new Date() } },
-      { $set: { installed: true, installedAt: new Date() } },
+      {
+        _id: key(token),
+        memberId: req.team.actorId,
+        authEpoch: req.team.authEpoch || 0,
+        expiresAt: { $gt: new Date() },
+      },
+      {
+        $set: {
+          installed: true,
+          installedAt: new Date(),
+          lastSeenAt: new Date(),
+        },
+      },
     );
     return result.matchedCount === 1;
   }
-  return { issue, memberId, clear, confirmInstalled };
+  async function observeDevice(req, kind) {
+    const token = tokenFrom(req);
+    if (
+      !token ||
+      req.team.owner ||
+      !["mobile", "desktop"].includes(kind) ||
+      req.teamSessionDeviceKind === kind
+    )
+      return;
+    await coll("Sessions").updateOne(
+      {
+        _id: key(token),
+        memberId: req.team.actorId,
+        authEpoch: req.team.authEpoch || 0,
+        expiresAt: { $gt: new Date() },
+      },
+      { $set: { deviceKind: kind, lastSeenAt: new Date() } },
+    );
+  }
+  async function devices(team) {
+    if (team.owner) return [];
+    const rows = await coll("Sessions")
+      .find(
+        {
+          memberId: team.actorId,
+          authEpoch: team.authEpoch || 0,
+          expiresAt: { $gt: new Date() },
+        },
+        { projection: { deviceKind: 1, lastSeenAt: 1, renewedAt: 1 } },
+      )
+      .toArray();
+    const groups = new Map();
+    for (const row of rows) {
+      if (!["mobile", "desktop"].includes(row.deviceKind)) continue;
+      const lastSeenAt = row.lastSeenAt || row.renewedAt;
+      const previous = groups.get(row.deviceKind);
+      if (!previous || new Date(lastSeenAt) > new Date(previous.lastSeenAt))
+        groups.set(row.deviceKind, { kind: row.deviceKind, lastSeenAt });
+    }
+    return [...groups.values()];
+  }
+  return { issue, memberId, clear, confirmInstalled, observeDevice, devices };
 }
 module.exports = { createChatSessions };

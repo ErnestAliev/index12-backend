@@ -103,6 +103,7 @@ function createTeamChatRouter({
         { expireAfterSeconds: 0 },
       ),
       coll("Sessions").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+      coll("Sessions").createIndex({ memberId: 1, authEpoch: 1, expiresAt: 1 }),
       access.ensureIndexes(),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
       coll("Messages").createIndex({ workspaceId: 1, "replyTo.messageId": 1 }),
@@ -404,6 +405,7 @@ function createTeamChatRouter({
     "/me",
     wrap(async (req, res) => {
       const p = req.team;
+      await sessions.observeDevice(req,req.query.deviceKind);
       res.json(identity(p));
     }),
   );
@@ -462,7 +464,7 @@ function createTeamChatRouter({
   };
   recovery.registerOwner(router, { wrap, owner });
   access.registerOwner(router, { wrap, owner });
-  registerConnectorRoutes(router, { db, wrap });
+  registerConnectorRoutes(router, { db, wrap, invites, sessions });
   router.get('/task-options', wrap(async (req, res) => res.json(await require('./task-references.cjs').taskOptions(db(), req.team.scope, req.team.workspaceId, req.team))));
   router.get('/mcp/context', wrap(async (req, res) => {
     const people = await coll('Members').find({ workspaceId: req.team.workspaceId, status: { $in: ['active', 'invited'] } }, { projection: { _id: 1, name: 1, role: 1, position: 1 } }).toArray();
