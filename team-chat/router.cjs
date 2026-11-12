@@ -45,7 +45,7 @@ function createTeamChatRouter({
     } });
   };
   const sessions = require("./session.cjs").createChatSessions({ coll });
-  const push = require("./push.cjs").createChatPush({ coll, Workspace });
+  const push = require("./push.cjs").createChatPush({ coll, Workspace, frontendUrl });
   router.startPush = () => push.start();
   const identity = (p) => ({
     workspaceId: p.workspaceId,

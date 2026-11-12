@@ -6,3 +6,8 @@ test('owner OAuth preserves exact chat/task/message on the originating allowed f
  for(const origin of origins)for(const path of ['/','/mobile'])assert.equal(chatAuthReturn(origin+path+query,origins),origin+path+query);
  for(const value of ['https://evil.test/'+query,'https://index12.com.evil.test/'+query,'https://user:pass@index12.com/'+query,'//index12.com/'+query,'https://index12.com/other'+query,'https://index12.com/'+query+'#hash','https://index12.com/'+query+'&redirect=https://evil.test','https://index12.com/?teamChat=bad','https://index12.com/?teamChat='+'a'.repeat(24)+'&task=bad'])assert.equal(chatAuthReturn(value,origins),null,value);
 });
+test('owner OAuth retains a release destination and rejects malformed versions',()=>{
+ const origin='https://index12.com',base=origin+'/?teamChat='+'a'.repeat(24)+'&release=';
+ assert.equal(chatAuthReturn(base+'b'.repeat(40),[origin]),base+'b'.repeat(40));
+ assert.equal(chatAuthReturn(base+'bad',[origin]),null);
+});

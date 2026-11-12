@@ -21,10 +21,12 @@ function createChatPush({
   coll,
   Workspace,
   env = process.env,
+  frontendUrl,
   send = webpush.sendNotification,
 }) {
   const keys = pushKeys(env),
     configured = !!(keys.publicKey && keys.privateKey);
+  const releases=require('./releases.cjs').createReleaseNotifier({coll,enqueue,frontendUrl});
   let indexes,
     running = false,
     scanning = false,
@@ -163,7 +165,7 @@ function createChatPush({
   };
   function start() {
     if (!configured || timer) return;
-    const tick = () => { kick(); void scanDeadlines().catch(() => console.error('[Team chat] Deadline scan unavailable')); };
+    const tick = () => { kick(); void scanDeadlines().catch(() => console.error('[Team chat] Deadline scan unavailable')); void releases.scan().catch(()=>console.error('[Team chat] Release scan unavailable')); };
     timer = setInterval(tick, 15000);
     timer.unref();
     tick();
@@ -179,12 +181,13 @@ function createChatPush({
     testId,
     taskId,
     messageId,
+    releaseVersion,
     deadline,
   }) {
     if (!configured) return 0;
     await ready();
     const targets = await coll("PushSubscriptions")
-      .find({ workspaceId, actorId: onlyActor || { $ne: actorId } })
+      .find({ workspaceId, actorId: onlyActor || { $ne: actorId },...(releaseVersion?{clientVersion:{$ne:releaseVersion}}:{}) })
       .toArray();
     for (const target of targets) {
       const id = hash(target._id + ":" + key);
@@ -202,6 +205,7 @@ function createChatPush({
               testId,
               taskId,
               messageId,
+              ...(releaseVersion?{releaseVersion}:{}),
             },
             allowPending,
             ...(deadline ? { deadline } : {}),
@@ -266,6 +270,7 @@ function createChatPush({
               actorId: req.team.actorId,
               subscription,
               url,
+              ...(/^[a-f\d]{40}$/i.test(req.body.clientVersion||'')?{clientVersion:req.body.clientVersion.toLowerCase()}:{}),
               updatedAt: new Date(),
             },
           },
