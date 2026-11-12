@@ -63,7 +63,7 @@ function fixture() {
         : { find: () => ({ toArray: async () => targets }) },
     fetch: async (url, options) => {
       assert.equal(url, "https://frontend.test/app-release.json");
-      assert.equal(options.redirect, "error");
+      assert.equal(options.redirect, "manual");
       return { ok: true, text: async () => JSON.stringify(manifest) };
     },
     enqueue: async (job) => {
@@ -119,4 +119,32 @@ test("a failed queue can resume after its lease without marking the release deli
   await f.notifier.scan();
   assert.equal(f.jobs.size, 2);
   assert.ok(f.rows.get("a".repeat(40)).announcedAt);
+});
+test("release feed follows only its canonical www alias with a bounded redirect chain", async () => {
+  for (const redirect of [
+    "https://www.frontend.test/app-release.json",
+    "https://evil.test/app-release.json",
+    "http://frontend.test/app-release.json",
+    "https://frontend.test/other",
+  ]) {
+    const reads = [];
+    const notifier = createReleaseNotifier({
+      frontendUrl: "https://frontend.test",
+      coll() {
+        throw Error("No valid manifest expected");
+      },
+      enqueue() {},
+      fetch: async (url) => {
+        reads.push(url);
+        return reads.length === 1
+          ? { status: 307, headers: { get: () => redirect } }
+          : { ok: false };
+      },
+    });
+    await notifier.scan();
+    assert.equal(
+      reads.length,
+      redirect.startsWith("https://www.frontend.test/") ? 2 : 1,
+    );
+  }
 });

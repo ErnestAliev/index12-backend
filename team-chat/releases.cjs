@@ -29,12 +29,37 @@ function createReleaseNotifier({
     running = true;
     lastAttempt = now();
     try {
-      const response = await fetcher(endpoint, {
-        redirect: "error",
-        cache: "no-store",
-        signal: AbortSignal.timeout(8000),
-        headers: { accept: "application/json" },
-      });
+      // The apex domain redirects to www in production. Follow only that
+      // canonical alias, never an arbitrary redirect or a different resource.
+      let address = new URL(endpoint),
+        response;
+      const original = address,
+        signal = AbortSignal.timeout(8000);
+      for (let hop = 0; hop < 3; hop++) {
+        response = await fetcher(address.href, {
+          redirect: "manual",
+          cache: "no-store",
+          signal,
+          headers: { accept: "application/json" },
+        });
+        if (![301, 302, 303, 307, 308].includes(response.status)) break;
+        const location = response.headers.get("location");
+        if (!location) return;
+        const next = new URL(location, address);
+        if (
+          next.protocol !== "https:" ||
+          next.hostname.replace(/^www\./, "") !==
+            original.hostname.replace(/^www\./, "") ||
+          next.port !== original.port ||
+          next.pathname !== "/app-release.json" ||
+          next.search ||
+          next.hash ||
+          next.username ||
+          next.password
+        )
+          return;
+        address = next;
+      }
       if (!response.ok) return;
       const text = await response.text();
       if (text.length > 2048) return;
