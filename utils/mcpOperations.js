@@ -97,11 +97,14 @@ function registerMcpOperationRoutes(app, deps) {
             if (!match) fail('UNAUTHORIZED', null, 'Требуется токен MCP INDEX12.', 401);
             let grant;
             if (match[1].startsWith('idxchat_')) {
-                const { verifyChatToken, financialRole } = require('../team-chat/mcp-access.cjs');
+                const { verifyChatToken } = require('../team-chat/mcp-access.cjs');
+                const { apiArea } = require('../team-chat/permissions.cjs');
                 let current;
                 try { current = await verifyChatToken({ db, Workspace }, match[1]); } catch { fail('UNAUTHORIZED', null, 'Подключение сотрудника истекло или отозвано.', 401); }
-                if (!financialRole(current.member.role) || !current.grant.financeAllowed) fail('FORBIDDEN', null, 'Финансовые данные доступны управляющему и руководителю после подтверждения прав при подключении.', 403);
-                if (req.method !== 'GET' && !(req.method === 'POST' && req.originalUrl.split('?')[0] === '/api/mcp/business/onec/query')) fail('FORBIDDEN', null, 'Финансовый доступ сотрудника предназначен для чтения.', 403);
+                const path = req.originalUrl.split('?')[0], area = apiArea(path);
+                if (!current.access[area] || /^\/api\/mcp\/(?:team-chat|codex|business\/tasks)(?:\/|$)/.test(path)) fail('FORBIDDEN', null, 'Владелец не предоставил доступ к этому разделу.', 403);
+                const readQuery = req.method === 'POST' && path === '/api/mcp/business/onec/query';
+                if (req.method !== 'GET' && !readQuery) fail('FORBIDDEN', null, 'Доступ к данным INDEX12 и 1С предназначен только для чтения.', 403);
                 grant = { ...current.grant, actorId: current.grant.ownerId, scopes: ['read'], source: 'team_chat_read' };
             } else grant = await db().collection('mcpCredentials').findOne({ _id: hashToken(match[1]), revokedAt: null, expiresAt: { $gt: new Date() } });
             if (!grant) fail('UNAUTHORIZED', null, 'Токен MCP истёк или отозван.', 401);
@@ -398,7 +401,7 @@ function registerMcpOperationRoutes(app, deps) {
         taskMutation: (req, res, fn) => execution.execute(req, res, fn), taskSession: () => deps.audit?.current()?.session,
         getWorkspaceStorageUserId: workspace => workspace.isDefault ? String(workspace.userId) : `${workspace.userId}_ws_${workspace._id}` }));
     if (deps.getCodexRouter) app.use('/api/mcp/codex', authenticate, requireScope('read'), (req, res, next) => {
-        if (req.mcpContext.grant.source === 'team_chat_read' || String(req.cachedWorkspace.userId) !== String(req.user.id)) return next(new OperationError('FORBIDDEN', null, 'Личный Codex доступен только владельцу.', 403));
+        if (req.mcpContext.grant.source === 'team_chat_read' || String(req.cachedWorkspace.userId) !== String(req.user.id)) return next(new OperationError('FORBIDDEN', null, 'Владелец не предоставил доступ к Codex.', 403));
         const allowed = req.method === 'GET' ? /^\/(?:status|chats(?:\/[a-f\d-]{36})?|jobs\/[a-zA-Z0-9:%_-]{1,300}|files\/[a-f\d-]{36}\/content)$/.test(req.path)
           : req.method === 'POST' && /^\/(?:chats|chats\/[a-f\d-]{36}\/(?:jobs|files\/import))$/.test(req.path);
         if (!allowed) return next(new OperationError('FORBIDDEN', null, 'Действие Codex недоступно через MCP.', 403));

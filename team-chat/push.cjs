@@ -84,7 +84,7 @@ function createChatPush({
             target.workspaceId === job.workspaceId
           ) {
             const deadlineTask = job.deadline ? await coll('Tasks').findOne({ _id: job.deadline.taskId, workspaceId: job.workspaceId, status: { $ne: 'done' }, deletedAt: { $exists: false }, deadlineAt: { $lte: new Date() }, deadlineActorId: job.actorId, deadlineRevision: job.deadline.revision }) : null;
-            if ((!job.deadline || deadlineTask) && await permitted(target, job.allowPending)) {
+            if ((!job.deadline || deadlineTask) && (!job.payload.releaseVersion || target.clientVersion !== job.payload.releaseVersion) && await permitted(target, job.allowPending)) {
               await send(
                 target.subscription,
                 JSON.stringify({
@@ -277,6 +277,9 @@ function createChatPush({
           { upsert: true },
         );
         start();
+        // A newly bound owner/device may have missed the original release campaign.
+        const latest = await coll('Releases').find({ announcedAt: { $exists: true } }).sort({ builtAt: -1 }).limit(1).toArray();
+        if (latest[0] && latest[0].version !== req.body.clientVersion) await enqueue({ workspaceId: req.team.workspaceId, actorId: 'system-updates', onlyActor: req.team.actorId, key: 'release:' + latest[0].version, title: 'INDEX12 обновлён', body: 'Доступны обновления. Нажмите «Обновить».', releaseVersion: latest[0].version });
         res.json({ enabled: true });
       }),
     );

@@ -4,6 +4,7 @@ const { EventEmitter } = require("node:events");
 const { randomUUID, randomBytes, createHash } = require("node:crypto");
 const { Types } = require("mongoose");
 const { importFile, accessibleChatFile } = require('../utils/fileImport.cjs');
+const permissions = require('./permissions.cjs');
 const { verifyChatToken, allowedMcpRoute, registerConnectorRoutes, taskAccess, ownTasks } = require('./mcp-access.cjs');
 const {
   roles,
@@ -56,7 +57,8 @@ function createTeamChatRouter({
     role: p.role,
     status: p.status === "active" && p.requireInstalledApp && !p.installationConfirmed ? "installation_required" : p.status,
     owner: p.owner,
-    permissions: { manageMembers: p.owner === true },
+    permissions: { manageMembers: p.owner === true, access: p.access || permissions.effectiveAccess(p) },
+    ...(p.owner ? { roleAccess: p.roleAccess || permissions.roleAccess() } : {}),
     roles,
   });
   const wrap = (fn) => (req, res, next) =>
@@ -331,7 +333,8 @@ function createTeamChatRouter({
         const token = /^Bearer (\S+)$/.exec(req.headers.authorization)?.[1];
         const { grant, member, workspace } = await verifyChatToken({ db, Workspace }, token);
         if (req.method !== 'GET' && !grant.scopes.includes('index12:write')) fail('Коннектор подключён только для чтения', 403);
-        req.team = { ...member, actorId: member._id, owner: false, workspace, mcp: true, installationConfirmed: true, scope: String(getWorkspaceStorageUserId(workspace)) };
+        const settings = await coll('Settings').findOne({ _id: member.workspaceId });
+        req.team = { ...member, access: permissions.connectorAccess(member, settings || {}, grant), actorId: member._id, owner: false, workspace, mcp: true, installationConfirmed: true, scope: String(getWorkspaceStorageUserId(workspace)) };
         return next();
       }
       const persistentId = await sessions.memberId(req, res);
@@ -398,6 +401,9 @@ function createTeamChatRouter({
           await sessions.issue(req, res, member._id, member.authEpoch || 0);
       }
       req.team.scope = String(getWorkspaceStorageUserId(workspace));
+      const accessSettings = await coll('Settings').findOne({ _id: req.team.workspaceId });
+      req.team.access = permissions.effectiveAccess(req.team, accessSettings || {});
+      if (req.team.owner) req.team.roleAccess = permissions.roleAccess(accessSettings || {});
       next();
     }),
   );
@@ -471,8 +477,12 @@ function createTeamChatRouter({
     const settings = await coll('Settings').findOne({ _id: req.team.workspaceId });
     const user = await User.findById(req.team.workspace.userId).select('name').lean();
     people.unshift({ _id: 'owner:' + req.team.workspace.userId, name: settings?.ownerName || user?.name || 'Владелец', role: settings?.ownerRole || 'manager' });
-    res.json({ identity: identity(req.team), people, timezone: 'Asia/Almaty', taskAccess: ownTasks(req.team) ? 'own' : 'all', financialAccess: req.team.owner || ['manager', 'director'].includes(req.team.role) ? 'read' : 'none', questionHistoryStored: false });
+    res.json({ identity: identity(req.team), people, timezone: 'Asia/Almaty', taskAccess: ownTasks(req.team) ? 'own' : 'all', financialAccess: req.team.access.system ? 'read' : 'none', onecAccess: req.team.access.onec ? 'read' : 'none', questionHistoryStored: false });
   }));
+  router.use((req, res, next) => {
+    if (!req.team.owner && req.team.access.chat === false && /^\/(?:messages|tasks|files|search|task-options)(?:\/|$)/.test(req.path)) return res.status(403).json({ message: 'Доступ к рабочему чату отключён владельцем' });
+    next();
+  });
   router.get(
     "/events",
     wrap(async (req, res) => {
@@ -593,6 +603,7 @@ function createTeamChatRouter({
   router.get(
     "/state",
     wrap(async (req, res) => {
+      if (!req.team.owner && req.team.access.chat === false) return res.json({ identity: identity(req.team), messages: [], tasks: [], members: [], people: [], deletedMessageIds: [] });
       const checkedAt = new Date();
       const p = req.team,
         filter = { workspaceId: p.workspaceId };
@@ -741,6 +752,7 @@ function createTeamChatRouter({
       }
       if (Object.hasOwn(req.body, "ownerName")) changes.ownerName = text(req.body.ownerName, 100);
       if (Object.hasOwn(req.body, "ownerPosition")) changes.ownerPosition = text(req.body.ownerPosition, 160, false);
+      if (Object.hasOwn(req.body, 'roleAccess')) changes.roleAccess = permissions.validateRoles(req.body.roleAccess);
       if (!Object.keys(changes).length) fail("Укажите данные профиля чата");
       await coll("Settings").updateOne(
         { _id: req.team.workspaceId },
@@ -748,7 +760,7 @@ function createTeamChatRouter({
         { upsert: true },
       );
       notify(req);
-      const profile = { ...req.team, role: changes.ownerRole || req.team.role, name: changes.ownerName || req.team.name, position: changes.ownerPosition ?? req.team.position ?? "" };
+      const profile = { ...req.team, role: changes.ownerRole || req.team.role, name: changes.ownerName || req.team.name, position: changes.ownerPosition ?? req.team.position ?? "", ...(changes.roleAccess ? { roleAccess: permissions.roleAccess({ roleAccess: changes.roleAccess }) } : {}) };
       res.json({
         ok: true,
         identity: identity(profile),
@@ -1066,7 +1078,7 @@ function createTeamChatRouter({
         fail("Можно удалить только своё сообщение", 403);
       if (!row.deletedAt) {
         const version = Number(row.version || 0);
-        if ((req.team.mcp || req.teamMcpOwner || req.body.expectedVersion !== undefined) && req.body.expectedVersion !== version) fail('Сообщение изменилось. Прочитайте его заново', 409);
+        if ((req.team.mcp || req.teamMcpOwner || req.body?.expectedVersion !== undefined) && req.body?.expectedVersion !== version) fail('Сообщение изменилось. Прочитайте его заново', 409);
         const result = await coll('Messages').updateOne({ _id: row._id, workspaceId: row.workspaceId, deletedAt: { $exists: false }, ...(version === 0 ? { $or: [{ version: 0 }, { version: { $exists: false } }] } : { version }) }, { $set: { deletedAt: new Date(), deletedBy: req.team.actorId }, $inc: { version: 1 } });
         if (!result.modifiedCount) fail('Сообщение изменилось. Прочитайте его заново', 409);
       }

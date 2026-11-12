@@ -1,6 +1,7 @@
 'use strict';
 const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const { roles, text, fail, hashPassword, verifyPassword } = require('./domain.cjs');
+const { validateAccess } = require('./permissions.cjs');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const loginKey = value => text(value, 100).normalize('NFKC').replace(/\s+/g, ' ').toLocaleLowerCase('ru');
 const publicMember = ({ password, passwordBox, ...member }) => member;
@@ -75,6 +76,7 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       const position = text(req.body.position || '', 160, false);
       const password = await hashPassword(req.body.password), id = randomUUID();
       const member = { _id: id, workspaceId: req.team.workspaceId, name, position, loginKey: loginKey(name), password, role, status: 'invited', requireInstalledApp: true, version: 0, authEpoch: 0, createdAt: new Date(), createdBy: req.team.actorId };
+      if (req.body.access != null) member.access = validateAccess(req.body.access);
       member.passwordBox = invites.seal(req.body.password, passwordContext(member));
       const entry = await invites.create(req.team, role);
       await coll('Invites').updateOne({ _id: entry._id }, { $set: { namedLogin: true, entryForMemberId: id } });
@@ -135,13 +137,14 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       const details = {};
       if (Object.hasOwn(req.body, 'name')) details.name = text(req.body.name, 100);
       if (Object.hasOwn(req.body, 'position')) details.position = text(req.body.position, 160, false);
+      if (Object.hasOwn(req.body, 'access') && req.body.access !== null) details.access = validateAccess(req.body.access);
       const member = await transaction(async options => {
         const row = await coll('Members').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId, version: req.body.expectedVersion }, options);
         if (!row) fail('Сотрудник изменился. Обновите список', 409);
         let status = row.status;
         if (req.body.blocked === true) status = 'revoked';
         if (req.body.blocked === false && ['revoked', 'rejected'].includes(status)) status = row.activatedAt || row.phone ? 'active' : 'invited';
-        const changed = await coll('Members').findOneAndUpdate({ _id: row._id, workspaceId: req.team.workspaceId, version: row.version }, { $set: { ...details, ...(details.name && row.loginKey ? { loginKey: loginKey(details.name) } : {}), role, status, reviewedAt: new Date(), reviewedBy: req.team.actorId }, $inc: { version: 1, ...(status !== row.status ? { authEpoch: 1 } : {}) } }, { ...options, returnDocument: 'after' });
+        const changed = await coll('Members').findOneAndUpdate({ _id: row._id, workspaceId: req.team.workspaceId, version: row.version }, { $set: { ...details, ...(details.name && row.loginKey ? { loginKey: loginKey(details.name) } : {}), role, status, reviewedAt: new Date(), reviewedBy: req.team.actorId }, ...(req.body.access === null ? { $unset: { access: '' } } : {}), $inc: { version: 1, ...(status !== row.status ? { authEpoch: 1 } : {}) } }, { ...options, returnDocument: 'after' });
         if (!changed) fail('Сотрудник изменился. Обновите список', 409);
         if (status !== row.status) {
           await coll('Sessions').deleteMany({ memberId: row._id }, options);

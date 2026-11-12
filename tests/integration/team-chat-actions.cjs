@@ -16,6 +16,28 @@ module.exports = async ({
   assert.ok(state.people.some((p) => p.name === "Calendar owner" && p.owner));
   assert.ok(state.people.some((p) => p.name === "Director"));
   assert.ok(state.people.every((p) => !p.phone && !p.password));
+  assert.deepEqual(state.identity.permissions.access, { chat: true, system: false, onec: false, codex: false, calendar: false });
+  const roleAccess = { employee: { chat: true, system: false, onec: true } };
+  assert.equal((await api('/settings', { roleAccess }, 'PATCH', director.auth)).status, 403);
+  assert.equal((await api('/settings', { roleAccess, ownerRole: 'employee' }, 'PATCH')).status, 200);
+  assert.equal((await api('/me', undefined, 'GET')).data.permissions.access.codex, true, 'owner keeps all rights even with the employee display role');
+  assert.equal((await api('/me', undefined, 'GET', employee.auth)).data.permissions.access.onec, true, 'role settings are read live');
+  let staff = await db.collection('teamChatMembers').findOne({ _id: employee.member._id });
+  assert.equal((await api('/access/employees/' + staff._id, { role: staff.role, expectedVersion: staff.version, access: { chat: true, system: true, onec: false } }, 'PATCH')).status, 200);
+  assert.equal((await api('/me', undefined, 'GET', employee.auth)).data.permissions.access.onec, false, 'personal override replaces inherited access');
+  staff = await db.collection('teamChatMembers').findOne({ _id: staff._id });
+  assert.equal((await api('/access/employees/' + staff._id, { role: staff.role, expectedVersion: staff.version, access: null }, 'PATCH')).status, 200);
+  assert.equal((await api('/settings', { roleAccess: {}, ownerRole: 'manager' }, 'PATCH')).status, 200);
+  const staffMessage = randomUUID();
+  assert.equal((await api('/messages', { id: staffMessage, text: 'Employee message' }, 'POST', employee.auth)).status, 201);
+  assert.equal((await api('/messages/' + staffMessage, { text: 'Denied', expectedVersion: 0 }, 'PATCH', director.auth)).status, 403);
+  assert.equal((await api('/messages/' + staffMessage, undefined, 'DELETE', director.auth)).status, 403);
+  assert.equal((await api('/messages/' + staffMessage, { text: 'Owner edit', expectedVersion: 0 }, 'PATCH')).status, 200);
+  assert.equal((await api('/messages/' + staffMessage, { expectedVersion: 0 }, 'DELETE')).status, 409);
+  assert.equal((await api('/messages/' + staffMessage, undefined, 'DELETE')).status, 200, 'owner can delete another author message without a JSON body');
+  assert.equal((await api('/messages/' + staffMessage, undefined, 'DELETE')).status, 200, 'deletion retry is idempotent');
+  assert.equal((await api('/messages/' + staffMessage, undefined, 'GET', employee.auth)).status, 404);
+  assert.ok(!(await api('/state', undefined, 'GET', employee.auth)).data.messages.some(m => m._id === staffMessage), 'deletion persists for the other device');
   const sent = await api("/messages", {
     id: messageId,
     text: "@Employee проверить заявку",

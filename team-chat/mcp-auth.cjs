@@ -5,7 +5,8 @@ const { authorizationHandler } = require('@modelcontextprotocol/sdk/server/auth/
 const { tokenHandler } = require('@modelcontextprotocol/sdk/server/auth/handlers/token.js');
 const { revocationHandler } = require('@modelcontextprotocol/sdk/server/auth/handlers/revoke.js');
 const E = require('@modelcontextprotocol/sdk/server/auth/errors.js');
-const { digest, secret, collection, memberAccess, verifyChatToken, revokeConnection, financialRole } = require('./mcp-access.cjs');
+const { digest, secret, collection, memberAccess, verifyChatToken, revokeConnection } = require('./mcp-access.cjs');
+const { effectiveAccess } = require('./permissions.cjs');
 const { createMcpLogin } = require('./mcp-login.cjs');
 const escape = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const SCOPES = ['index12:read', 'index12:write'];
@@ -26,7 +27,7 @@ function createChatMcpAuth({ db, Workspace, clientsStore, origin }) {
   async function issue(row, scopes = row.scopes) {
     await memberAccess(deps, row);
     const accessToken = 'idxchat_' + secret(), refreshToken = secret(), expiresAt = new Date(Date.now() + 3600000);
-    await c('Tokens').insertOne({ _id: digest(accessToken), actorId: row.actorId, workspaceId: row.workspaceId, ownerId: row.ownerId, authEpoch: row.authEpoch, financeAllowed: row.financeAllowed === true, connectionId: row._id, clientId: row.clientId, scopes, createdAt: new Date(), expiresAt, revokedAt: null });
+    await c('Tokens').insertOne({ _id: digest(accessToken), actorId: row.actorId, workspaceId: row.workspaceId, ownerId: row.ownerId, authEpoch: row.authEpoch, financeAllowed: row.financeAllowed === true, ...(row.access ? { access: row.access } : {}), connectionId: row._id, clientId: row.clientId, scopes, createdAt: new Date(), expiresAt, revokedAt: null });
     await c('Refresh').insertOne({ _id: digest(refreshToken), connectionId: row._id, clientId: row.clientId, scopes, expiresAt: new Date(Date.now() + 90 * 86400000), revokedAt: null });
     return { access_token: accessToken, refresh_token: refreshToken, expires_in: 3600, token_type: 'Bearer', scope: scopes.join(' ') };
   }
@@ -87,9 +88,12 @@ function createChatMcpAuth({ db, Workspace, clientsStore, origin }) {
     const { member, installed } = await login.available(identity);
     if (!installed) return loginForm(res.status(403), row, session, 'Сначала откройте приглашение владельца и добавьте INDEX12 на главный экран.', member.name);
     if (member.role !== identity.acceptedRole) throw new E.InvalidGrantError('Ваша роль изменилась. Подключитесь заново');
+    const settings = await db().collection('teamChatSettings').findOne({ _id: member.workspaceId });
+    const access = effectiveAccess(member, settings || {});
+    const accessText = [['chat','Рабочий чат'],['system','Данные INDEX12 · чтение'],['onec','1С · чтение']].filter(([key]) => access[key]).map(([,label]) => label).join(', ') || 'Нет доступных разделов';
     const consentToken = secret();
-    await c('Pending').updateOne({ _id: row._id }, { $set: { identity, consentToken }, $unset: { candidates: '' } });
-    return html(res, `<p>${escape(member.name)} · ${escape({ employee: 'Сотрудник', manager: 'Управляющий', director: 'Руководитель компании' }[member.role])}</p><p>${escape(identity.workspaceName)}</p><p>${financialRole(member.role) ? 'У вас полный доступ к чтению данных системы: рабочему чату, задачам, финансам и контрагентам. В чате можно отправлять сообщения и выполнять разрешённые действия.' : 'Вам доступны общий чат и ваши задачи.'}</p><p>История ваших вопросов остаётся в вашем ChatGPT и не отображается владельцу в INDEX12. Сообщения и действия, отправленные в рабочий чат, видны участникам.</p><form method="post">${hidden(row, session)}<input type="hidden" name="consent" value="${consentToken}"><label><input type="checkbox" name="readOnly" value="1" style="width:auto;min-height:0"> Только чтение</label><button name="decision" value="accept">Разрешить подключение</button><button name="decision" value="deny">Отмена</button></form>`);
+    await c('Pending').updateOne({ _id: row._id }, { $set: { identity, consentToken, consentAccess: access }, $unset: { candidates: '' } });
+    return html(res, `<p>${escape(member.name)} · ${escape({ employee: 'Сотрудник', manager: 'Управляющий', director: 'Руководитель компании' }[member.role])}</p><p>${escape(identity.workspaceName)}</p><p>${escape(accessText)}</p><p>История ваших вопросов остаётся в вашем ChatGPT и не отображается владельцу в INDEX12. Сообщения и действия, отправленные в рабочий чат, видны участникам.</p><form method="post">${hidden(row, session)}<input type="hidden" name="consent" value="${consentToken}"><label><input type="checkbox" name="readOnly" value="1" style="width:auto;min-height:0"> Только чтение</label><button name="decision" value="accept">Разрешить подключение</button><button name="decision" value="deny">Отмена</button></form>`);
   }
   async function pending(req) {
     const session = req.session?.chatMcpOAuth;
@@ -127,7 +131,10 @@ function createChatMcpAuth({ db, Workspace, clientsStore, origin }) {
     if (!current.installed) throw new E.InvalidGrantError('Сначала добавьте INDEX12 на главный экран');
     if (current.member.role !== row.identity.acceptedRole) throw new E.InvalidGrantError('Ваша роль изменилась. Подключитесь заново, чтобы подтвердить права');
     if (!(await c('Pending').deleteOne({ _id: row._id })).deletedCount) throw new E.InvalidGrantError('Подключение уже обработано');
-    const value = { _id: secret(), ...row.identity, financeAllowed: financialRole(current.member.role), clientId: row.clientId, clientName: row.clientName, scopes: row.scopes.filter(s => s !== 'index12:write' || req.body.readOnly !== '1'), createdAt: new Date(), revokedAt: null };
+    const settings = await db().collection('teamChatSettings').findOne({ _id: current.member.workspaceId });
+    const liveAccess = effectiveAccess(current.member, settings || {});
+    const access = Object.fromEntries(Object.keys(liveAccess).map(key => [key, liveAccess[key] && row.consentAccess?.[key] === true]));
+    const value = { _id: secret(), ...row.identity, access, financeAllowed: access.system || access.onec, clientId: row.clientId, clientName: row.clientName, scopes: row.scopes.filter(s => s !== 'index12:write' || req.body.readOnly !== '1'), createdAt: new Date(), revokedAt: null };
     await c('Connections').insertOne(value);
     const code = secret();
     await c('Codes').insertOne({ _id: digest(code), connectionId: value._id, clientId: row.clientId, redirectUri: row.redirectUri, codeChallenge: row.codeChallenge, expiresAt: new Date(Date.now() + 180000) });

@@ -1,6 +1,7 @@
 'use strict';
 const { randomBytes, createHash } = require('node:crypto');
 const { fail } = require('./domain.cjs');
+const { effectiveAccess, connectorAccess } = require('./permissions.cjs');
 const digest = value => createHash('sha256').update(value).digest('hex');
 const secret = () => randomBytes(32).toString('base64url');
 const financialRole = role => ['manager', 'director'].includes(role);
@@ -11,7 +12,8 @@ async function memberAccess({ db, Workspace }, grant) {
   const member = await db().collection('teamChatMembers').findOne({ _id: grant.actorId, workspaceId: grant.workspaceId, status: 'active' }, { projection: { password: 0, passwordBox: 0 } });
   const workspace = member && await Workspace.findById(member.workspaceId).lean();
   if (!member || !workspace || String(workspace.userId) !== grant.ownerId || (member.authEpoch || 0) !== (grant.authEpoch || 0)) fail('Доступ к коннектору отозван. Подключитесь заново', 401);
-  return { member, workspace };
+  const settings = await db().collection('teamChatSettings').findOne({ _id: grant.workspaceId });
+  return { member, workspace, access: connectorAccess(member, settings || {}, grant) };
 }
 async function verifyChatToken(deps, token) {
   if (!/^idxchat_[A-Za-z0-9_-]{43}$/.test(token || '')) fail('Войдите через MCP-коннектор чата', 401);
@@ -33,7 +35,7 @@ function registerConnectorRoutes(router, { db, wrap, invites, sessions }) {
       invites.memberLoginUrl(req.team), sessions.devices(req.team),
     ]);
     res.set('Cache-Control','private, no-store');
-    res.json({ serverUrl, pluginUrl: publishedPluginUrl(process.env.TEAM_CHAT_PLUGIN_URL), fullData: financialRole(req.team.role), connections, chatUrl, devices });
+    res.json({ serverUrl, pluginUrl: publishedPluginUrl(process.env.TEAM_CHAT_PLUGIN_URL), fullData: (req.team.access || effectiveAccess(req.team)).system, connections, chatUrl, devices });
   }));
   router.delete('/mcp/connections/:id', wrap(async (req, res) => {
     const row = await c('Connections').findOne({ _id: req.params.id, actorId: req.team.actorId, workspaceId: req.team.workspaceId });
