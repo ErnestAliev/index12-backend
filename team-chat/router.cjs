@@ -907,6 +907,8 @@ function createTeamChatRouter({
       )
         fail("Ключ сообщения уже использован", 409);
       let replyTo;
+      const replyExcerpt = Object.hasOwn(req.body, 'replyExcerpt') ? require('./message-fragment.cjs').validateFragment(req.body.replyExcerpt) : null;
+      if (replyExcerpt && !req.body.replyToId) fail('Выберите исходное сообщение');
       if (req.body.replyToId) {
         const sourceId = req.body.replyToId;
         if (
@@ -915,7 +917,10 @@ function createTeamChatRouter({
           sourceId === id
         )
           fail("Выберите исходное сообщение");
-        if (old?.replyTo?.messageId === sourceId) replyTo = old.replyTo;
+        if (old?.replyTo?.messageId === sourceId) {
+          if (JSON.stringify(old.replyTo.fragment || null) !== JSON.stringify(replyExcerpt)) fail('Ключ сообщения уже использован с другим фрагментом', 409);
+          replyTo = old.replyTo;
+        }
         else {
           const source = await coll("Messages").findOne({
             _id: sourceId,
@@ -928,11 +933,13 @@ function createTeamChatRouter({
             source.kind === "task"
           )
             fail("Исходное сообщение удалено или недоступно", 404);
+          const fragment = replyExcerpt ? require('./message-fragment.cjs').fragmentQuote(source, replyExcerpt) : null;
           replyTo = {
             messageId: source._id,
             authorId: source.authorId,
             authorName: source.authorName,
-            text: String(source.text || "").slice(0, 1000),
+            text: fragment ? fragment.text : String(source.text || "").slice(0, 1000),
+            ...(fragment ? { fragment } : {}),
             fileName: source.attachments?.[0]?.name || "",
             fileCount: source.attachments?.length || 0,
             contentVersion: Number(source.contentVersion || 0),
