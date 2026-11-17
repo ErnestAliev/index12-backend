@@ -5,22 +5,38 @@ const {normalizeName}=require('../../utils/mcpImports.js');
 const text=v=>String(v||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();
 // Match business facts, not a model-generated retry key, uploaded file ID,
 // cosmetic party spelling, or optional project. Never silently change amounts.
-function sameInvoice(row,input) {
+function invoiceDifferences(row,input) {
+ const differences=[];
+ const check=(field,a,b)=>{if(a!==b)differences.push(field);};
  const old=row.input;
- if(['companyId','direction','date','number','currency','useVat'].some(k=>(old[k]??null)!==(input[k]??null)))return false;
- if(old.counterparty.taxId!==input.counterparty.taxId||cents(old.amount)!==cents(input.amount)||(old.workflow||'invoice_only')!==(input.workflow||'invoice_only'))return false;
- for(const key of ['iban','bic','kbe'])if(old.counterparty[key]&&input.counterparty[key]&&old.counterparty[key]!==input.counterparty[key])return false;
- if(old.payerIban&&input.payerIban&&old.payerIban!==input.payerIban)return false;
- if((old.contractRef||ZERO)!==(input.contractRef||ZERO))return false;
- if(input.direction==='customer'&&old.sourceTaskId!==input.sourceTaskId)return false;
- if(old.lines.length!==input.lines.length)return false;
- if(input.useVat&&input.vatIncluded!==undefined&&input.vatIncluded!==row.documentData.СуммаВключаетНДС)return false;
- if(input.useVat&&input.vatAmount!==undefined&&cents(input.vatAmount)!==cents(row.vat?.amount??old.vatAmount??0))return false;
- return input.lines.every((line,i)=>{
+ for(const k of ['companyId','direction','date','number','currency','useVat'])check(k,old[k]??null,input[k]??null);
+ check('counterparty.taxId',old.counterparty.taxId,input.counterparty.taxId);check('amount',cents(old.amount),cents(input.amount));
+ check('workflow',old.workflow||'invoice_only',input.workflow||'invoice_only');
+ for(const key of ['iban','bic','kbe'])if(old.counterparty[key]&&input.counterparty[key])check('counterparty.'+key,old.counterparty[key],input.counterparty[key]);
+ if(old.payerIban&&input.payerIban)check('payerIban',old.payerIban,input.payerIban);
+ // An explicitly selected technical contract is the same as the contract
+ // materialized for this plan, not a change to the source invoice.
+ if(input.contractRef&&input.contractRef!==ZERO)check('contractRef',old.contractRef&&old.contractRef!==ZERO?old.contractRef:row.workflow?.contractRef||ZERO,input.contractRef);
+ else if(old.contractRef&&old.contractRef!==ZERO)check('contractRef',old.contractRef,input.contractRef||ZERO);
+ if(input.direction==='customer')check('sourceTaskId',old.sourceTaskId,input.sourceTaskId);
+ check('lines.length',old.lines.length,input.lines.length);
+ if(input.useVat&&input.vatIncluded!==undefined)check('vatIncluded',row.documentData.СуммаВключаетНДС,input.vatIncluded);
+ if(input.useVat&&input.vatAmount!==undefined)check('vatAmount',cents(row.vat?.amount??old.vatAmount??0),cents(input.vatAmount));
+ input.lines.forEach((line,i)=>{
   const saved=old.lines[i],vat=row.vat?.lines?.[i];
-  return text(saved.description)===text(line.description)&&Number(saved.quantity)===Number(line.quantity)&&cents(saved.price)===cents(line.price)&&cents(saved.amount)===cents(line.amount)&&(!line.itemRef||line.itemRef===(saved.itemRef||row.documentData.Услуги[i].Номенклатура_Key))&&(!input.useVat||(line.vatRateRef===undefined||line.vatRateRef===(vat?.rateRef||saved.vatRateRef))&&(line.vatAmount===undefined||cents(line.vatAmount)===cents(vat?.amount??saved.vatAmount??0))&&(line.vatPercent===undefined||Number(line.vatPercent)===Number(vat?.percent??saved.vatPercent??input.vatPercent??old.vatPercent)));
+  if(!saved)return;
+  check(`lines.${i}.description`,text(saved.description),text(line.description));check(`lines.${i}.quantity`,Number(saved.quantity),Number(line.quantity));
+  for(const k of ['price','amount'])check(`lines.${i}.${k}`,cents(saved[k]),cents(line[k]));
+  if(line.itemRef)check(`lines.${i}.itemRef`,saved.itemRef||row.documentData.Услуги[i]?.Номенклатура_Key,line.itemRef);
+  if(input.useVat){
+   if(line.vatRateRef!==undefined)check(`lines.${i}.vatRateRef`,vat?.rateRef||saved.vatRateRef,line.vatRateRef);
+   if(line.vatAmount!==undefined)check(`lines.${i}.vatAmount`,cents(vat?.amount??saved.vatAmount??0),cents(line.vatAmount));
+   if(line.vatPercent!==undefined)check(`lines.${i}.vatPercent`,Number(vat?.percent??saved.vatPercent??input.vatPercent??old.vatPercent),Number(line.vatPercent));
+  }
  });
+ return differences;
 }
+const sameInvoice=(row,input)=>invoiceDifferences(row,input).length===0;
 async function existingExpense({Contractor,Event,req,row,input}) {
  if(input.direction!=='supplier'||input.workflow!=='supplier_payment')return null;
  if(row.linkedOperationId&&input.existingOperationId&&row.linkedOperationId!==input.existingOperationId)fault('OPERATION_LINK_CONFLICT','Счёт уже связан с другим расходом INDEX12',409);
@@ -39,4 +55,4 @@ async function existingExpense({Contractor,Event,req,row,input}) {
  const e=matches[0],party=eligible.find(p=>String(p._id)===String(e.contractorId));
  return {id:String(e._id),companyId:String(e.companyId),accountId:String(e.accountId),contractorId:String(e.contractorId),amount:Math.abs(e.amount),party:{name:party.name,identificationNumber:party.identificationNumber||null},basis:input.existingOperationId?'explicit_id':'unique_company_party_account_amount_day'};
 }
-module.exports={sameInvoice,existingExpense};
+module.exports={sameInvoice,invoiceDifferences,existingExpense};

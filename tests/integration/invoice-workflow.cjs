@@ -24,6 +24,22 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   assert.equal(payment.РасшифровкаПлатежа[0].СчетНаОплату_Key,invoice.Ref_Key);assert.equal(payment.ДокументОснование,invoice.Ref_Key);
   assert.equal(commands.filter(c=>c.id===payment.Ref_Key).length,1);
   const after=posts.length;assert.equal((await call('index12_onec_execute_invoice',{planToken:plan.planToken})).replayed,true);assert.equal(posts.length,after);
+  // An existing source invoice plan accepts an explicit payment date before
+  // payment starts. Neither invoice/expense identity nor completed writes move.
+  const scheduledInput=input('FULL-SCHEDULED');
+  const scheduled=await call('index12_onec_prepare_invoice',scheduledInput);
+  const rescheduled=await call('index12_onec_prepare_invoice',{...scheduledInput,idempotencyKey:'scheduled-retry-key',paymentDate:'2026-11-18',contractRef:'Без договора'});
+  assert.equal(rescheduled.planToken,scheduled.planToken);assert.equal(rescheduled.paymentDate,'2026-11-18');
+  assert.equal(rescheduled.invoice.Date,'2026-11-08T00:00:00');
+  const scheduledDone=await call('index12_onec_execute_invoice',{planToken:scheduled.planToken});
+  const scheduledPayment=records.get(PAYMENT+':'+scheduledDone.steps.payment.id);
+  assert.equal(scheduledPayment.Date.slice(0,10),'2026-11-18');assert.equal(scheduledPayment.ДатаВыписки.slice(0,10),'2026-11-18');
+  assert.equal((await call('index12_onec_prepare_invoice',{...scheduledInput,paymentDate:'2026-11-18'})).planToken,scheduled.planToken);
+  const frozenCount=posts.length;
+  assert.equal((await api('invoices/prepare',{...scheduledInput,paymentDate:'2026-11-19'})).error.code,'PAYMENT_DATE_LOCKED');
+  assert.equal(posts.length,frozenCount);
+  const conflicting=await api('invoices/prepare',{...scheduledInput,workflow:'invoice_only'});
+  assert.equal(conflicting.error.code,'IDEMPOTENCY_CONFLICT');assert.deepEqual(conflicting.error.details.fields,['workflow']);
   const next=await call('index12_onec_prepare_invoice',input('FULL-2'));setMode('timeout:'+PAYMENT);
   const resumed=await call('index12_onec_execute_invoice',{planToken:next.planToken});assert.equal(resumed.completed,true,JSON.stringify(resumed));
   const sent=posts.length;assert.equal((await call('index12_onec_execute_invoice',{planToken:next.planToken})).replayed,true);assert.equal(posts.length,sent);assert.equal(resumed.contractRef,done.contractRef);assert.equal(resumed.steps.item0,undefined,'existing service reused');
@@ -37,8 +53,10 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   Object.assign(records.get('Catalog_Организации:'+refs.org),{Description:'ТОО Fixture',НаименованиеПолное:'ТОО Fixture',ОсновнойБанковскийСчет_Key:refs.ourBank,КБЕ:'17'});
   const ownBank=put('Catalog_Банки',{Description:'Fixture seller bank',БИК:'KCJBKZKX'});records.get('Catalog_БанковскиеСчета:'+refs.ourBank).Банк_Key=ownBank;
   const account=await fixture.models.Account.create({name:'BCCUU',userId:scope.actorId,companyId,isDefaultForExpenses:true});
-  const supplierRequest={...input('PROCESS-1'),pdfId,category:'Обслуживание',subcategory:'Канализация'};delete supplierRequest.workflow;
+  const supplierRequest={...input('PROCESS-1'),paymentDate:'2026-11-18',pdfId,category:'Обслуживание',subcategory:'Канализация'};delete supplierRequest.workflow;
   const processed=await call('index12_process_invoice',supplierRequest);assert.equal(processed.completed,true,JSON.stringify(processed));assert.equal(processed.followupStage,'request_avr');assert.equal(processed.bankPaymentSent,false);assert.equal(processed.account.id,String(account._id));
+  assert.equal(records.get(PAYMENT+':'+processed.paymentRef).Date.slice(0,10),'2026-11-18');
+  assert.equal(records.get(INVOICE+':'+processed.invoiceRef).ДатаВходящегоДокумента.slice(0,10),supplierRequest.date);
   const task=await db.collection('businessTasks').findOne({_id:processed.taskId});assert.equal(task.invoiceFollowup.bankSettlementConfirmed,false);assert.ok(task.startsAt);assert.equal(task.attachments[0].fileId,pdfId);
   const operation=await fixture.models.Event.findById(processed.operationId).lean();assert.equal(operation.type,'expense');
   const party=await fixture.models.Contractor.findById(operation.contractorId).lean();assert.equal(party.onecSync.ref,records.get(INVOICE+':'+processed.invoiceRef).Контрагент_Key);assert.equal(party.bankAccounts[0].iban,input('x').counterparty.iban);

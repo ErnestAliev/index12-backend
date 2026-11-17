@@ -12,7 +12,7 @@ const { scopeQuery } = require('../../mcp/finance.cjs');
 const { fileMeta, fileBuffer } = require('../../codex/files.cjs');
 const { lookupRegistry } = require('../providers.cjs');
 const { normalizeInvoiceVat } = require('./invoice-vat.cjs');
-const {sameInvoice,existingExpense}=require('./invoice-reuse.cjs');
+const {invoiceDifferences,existingExpense}=require('./invoice-reuse.cjs');
 const {requestProgress}=require('../../codex/progress.cjs');
 const DIRECTIONS = {supplier:'Document_СчетНаОплатуПоставщика',customer:'Document_СчетНаОплатуПокупателю'};
 const literal = value => `'${String(value).replace(/'/g,"''")}'`;
@@ -25,11 +25,12 @@ const partyInput = z.object({name:z.string().trim().min(1).max(200),taxId:z.stri
 const prepareSchema = z.object({companyId:z.string().regex(/^[a-f\d]{24}$/i),direction:z.enum(['supplier','customer']),
   workflow:z.enum(['invoice_only','supplier_payment','customer_invoice']).optional().describe('supplier_payment — полная покупка с номенклатурой, «Без договора», оплаченной и проведённой платёжкой; customer_invoice — счёт покупателю с номенклатурой. invoice_only — прежний режим без поручения.'),
   payerIban:z.string().regex(/^KZ[A-Z0-9]{18}$/).optional().describe('Банковский счёт своей компании, соответствующий выбранному счёту INDEX12. Если не задан — основной банковский счёт организации 1С.'),
-  expenseDate:day.optional().describe('Дата расхода INDEX12. Без значения — день подготовки в Asia/Almaty; дата платёжного поручения всегда определяется при его создании.'),
+  expenseDate:day.optional().describe('Дата расхода INDEX12. Без значения — день подготовки в Asia/Almaty. Не меняет дату исходного счёта.'),
+  paymentDate:day.optional().describe('Явно запрошенная дата исходящего платёжного поручения, например завтра. Без значения — день создания Asia/Almaty. date остаётся датой исходного счёта; повтор не меняет уже начатую платёжку.'),
   expenseAccountId:z.string().regex(/^[a-f\d]{24}$/i).optional(),existingOperationId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
   projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
-  counterparty:partyInput,date:day,number:z.string().trim().min(1).max(100).optional(),currency:z.enum(['KZT']).default('KZT'),
-  knp:z.preprocess(value=>value===''?undefined:value,z.string().regex(/^\d{3}$/).optional()),contractRef:z.preprocess(value=>value===''?null:value,z.string().uuid().nullable().optional()),
+  counterparty:partyInput,date:day.describe('Дата исходного счёта из извлечённого текста. Не дата оплаты: для поручения на другую дату используй paymentDate.'),number:z.string().trim().min(1).max(100).optional(),currency:z.enum(['KZT']).default('KZT'),
+  knp:z.preprocess(value=>value===''?undefined:value,z.string().regex(/^\d{3}$/).optional()),contractRef:z.preprocess(value=>typeof value==='string'&&/^(?:без\s+договора)?$/iu.test(value.trim())?null:value,z.string().uuid().nullable().optional()),
   useVat:z.boolean().describe('НДС из исходного счёта: true при наличии НДС, false при «без НДС». Налоговый режим покупателя не определяет НДС поставщика.'),
   vatIncluded:z.boolean().optional().describe('true — НДС уже входит в цены/суммы строк, false — начисляется сверху. Без значения сервер сверит суммы строк с итогом.'),
   vatPercent:z.number().finite().min(0).max(100).optional().describe('Процент из счёта или явного подтверждения пользователя, например 16. Сервер сам найдёт GUID ставки 1С.'),
@@ -122,7 +123,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   const view = row => ({planToken:row._id,state:row.state,completed:row.state==='completed',direction:row.input.direction,
     printReady:!!row.printArtifact,printSource:row.printArtifact?.source||null,
     template:row.template,companyId:row.input.companyId,counterpartyRef:row.partyRef||null,amount:row.input.amount,
-    workflow:row.input.workflow||'invoice_only',expenseDate:row.expenseDate||null,sourceProjectId:row.sourceProjectId||null,contractRef:row.workflow?.contractRef||row.input.contractRef||null,knp:row.input.knp||'859',vat:row.vat||null,steps:row.steps,taskId:row.taskId||null,
+    workflow:row.input.workflow||'invoice_only',expenseDate:row.expenseDate||null,paymentDate:row.paymentCreatedAt?.slice(0,10)||row.paymentDate||null,sourceProjectId:row.sourceProjectId||null,contractRef:row.workflow?.contractRef||row.input.contractRef||null,knp:row.input.knp||'859',vat:row.vat||null,steps:row.steps,taskId:row.taskId||null,
     bankEnabled:false,bankPaymentSent:false,bankSettlementConfirmed:false,documentsPosted:row.steps.posting?.state==='completed',accountingPaid:row.steps.payment?.state==='completed',error:row.error||null});
   router.get('/onec/counterparty-lookup',use(async(req,res)=>{
     const taxId=z.string().regex(/^\d{12}$/).parse(req.query.taxId),legalForm=z.enum(['ip','llp','person']).parse(req.query.legalForm);
@@ -157,7 +158,14 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const old=await plans().findOne({creationKey:key});
     const reuse=async (previous,conflictCode='INVOICE_DATA_CONFLICT')=>{
       if(previous.actorId!==identity(req).actorId)fault('INVOICE_PLAN_OWNED_BY_ANOTHER_ACTOR','Счёт уже обрабатывается другим оператором. Новый документ не создан',409);
-      if(!sameInvoice(previous,input))fault(conflictCode,'Для этого счёта сохранены другие финансовые реквизиты. Новый документ не создан',409,{planToken:previous._id});
+      const fields=invoiceDifferences(previous,input);
+      if(fields.length)fault(conflictCode,`Параметры отличаются от сохранённого счёта: ${fields.join(', ')}. Новый документ не создан`,409,{planToken:previous._id,fields});
+      if(input.paymentDate&&input.paymentDate!==(previous.paymentCreatedAt?.slice(0,10)||previous.paymentDate)) {
+        await guard(req);
+        const changed=await plans().findOneAndUpdate({_id:previous._id,...identity(req),paymentCreatedAt:{$exists:false},'steps.payment':{$exists:false},$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{paymentDate:input.paymentDate}},{returnDocument:'after'});
+        if(!changed)fault('PAYMENT_DATE_LOCKED','Платёжное поручение уже создаётся или создано. Его дату автоматически менять нельзя',409,{planToken:previous._id,paymentDate:previous.paymentCreatedAt?.slice(0,10)||previous.paymentDate||null});
+        Object.assign(previous,changed);
+      }
       const expense=await resolveExpense(req,previous,input);
       await requestProgress(db(),req,'Продолжаю прежний план счёта');
       return res.json({...identity(req),...view(previous),invoice:previous.documentData,existingExpense:expense,replayed:true});
@@ -205,7 +213,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     await plans().createIndex({creationKey:1},{unique:true});
     await plans().createIndex({workspaceId:1,connectionKey:1,invoiceIdentity:1},{unique:true});
     const row={_id:randomUUID(),followupTaskId:input.direction==='supplier'?randomUUID():null,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey:key,requestHash:digest(input),invoiceIdentity,input,
-      organizationRef:org.Ref_Key,companyName:company.name,expenseDate:input.expenseDate||localTimestamp().slice(0,10),sourceProjectId:project?String(project._id):source?.projectId||null,sourceProjectName:project?.name||source?.projectName||'',
+      organizationRef:org.Ref_Key,companyName:company.name,expenseDate:input.expenseDate||localTimestamp().slice(0,10),...(input.paymentDate?{paymentDate:input.paymentDate}:{}),sourceProjectId:project?String(project._id):source?.projectId||null,sourceProjectName:project?.name||source?.projectName||'',
       template:{id:template._id,schemaFingerprint:template.schemaFingerprint,version:template.version,transport:template.transport},taxField:template.taxField,
       partyRef:party?.Ref_Key||null,partyNeedsEnrichment:!!party?.identityIncomplete,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,workflow,vat:{included:normalized.vatIncluded,amount:normalized.vatAmount??0,lines:normalized.lines.map(line=>({rateRef:line.vatRateRef||null,percent:line.vatPercent??null,amount:line.vatAmount}))},state:'prepared',
       steps:{party:{operationId:stableUuid([connectionKey(),identity(req).workspaceId,input.counterparty.taxId,'party'])},bank:{operationId:randomUUID()},partyBank:{operationId:randomUUID()},invoice:{operationId:randomUUID()}},createdAt:new Date()};
@@ -401,7 +409,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
       if(row.workflow?.payment) {
         // Persist the first creation timestamp. A retry tomorrow keeps the same
         // document/date and must reconcile its original mutation key.
-        if(!row.paymentCreatedAt)await save(row,{paymentCreatedAt:localTimestamp()});
+        if(!row.paymentCreatedAt){const now=localTimestamp();await save(row,{paymentCreatedAt:row.paymentDate?row.paymentDate+now.slice(10):now});}
         await workflowCreate('payment','Document_ПлатежноеПоручениеИсходящее',paymentData(row));
         if(row.steps.posting?.state!=='completed') {
           const object=(await client.get({collection:'Document_ПлатежноеПоручениеИсходящее',id:row.steps.payment.id})).object;

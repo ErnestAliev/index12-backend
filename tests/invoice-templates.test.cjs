@@ -6,6 +6,8 @@ const {ZERO}=require('../business/onec/purchase-domain.cjs');
 test('templates leave contract empty, default only absent KNP, and preserve full source lines',async()=>{
  const input=prepareSchema.parse({companyId:'aaaaaaaaaaaaaaaaaaaaaaaa',direction:'supplier',counterparty:{name:'ИП Supplier',taxId:'971116300034'},date:'2026-11-08',number:'2026-11-08-02',useVat:false,amount:100000,lines:[{description:'Гидродинамическая прочистка (30 м)',quantity:1,price:100000,amount:100000}],idempotencyKey:'invoice-template-fixture'});
  const data=documentData(input,'currency');assert.equal(data.ДоговорКонтрагента_Key,ZERO);assert.equal(data.КодНазначенияПлатежа,'859');assert.equal(data.Услуги.length,1);assert.equal(data.НомерВходящегоДокумента,input.number);
+ for(const contractRef of ['',null,'Без договора','  без   договора  '])assert.equal(prepareSchema.parse({...input,contractRef}).contractRef,null);
+ assert.equal(prepareSchema.parse({...input,paymentDate:'2026-11-18'}).date,input.date);
  assert.equal(documentData({...input,knp:'851'},'currency').КодНазначенияПлатежа,'851');
  const {ДоговорКонтрагента_Key,...noContract}=data;
  await validateCustomerInvoice('Document_СчетНаОплатуПокупателю',{...noContract,Организация_Key:'org',Контрагент_Key:'party'},{});
