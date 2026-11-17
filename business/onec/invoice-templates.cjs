@@ -12,6 +12,7 @@ const { scopeQuery } = require('../../mcp/finance.cjs');
 const { fileMeta, fileBuffer } = require('../../codex/files.cjs');
 const { lookupRegistry } = require('../providers.cjs');
 const { normalizeInvoiceVat } = require('./invoice-vat.cjs');
+const {sameInvoice,existingExpense}=require('./invoice-reuse.cjs');
 const {requestProgress}=require('../../codex/progress.cjs');
 const DIRECTIONS = {supplier:'Document_СчетНаОплатуПоставщика',customer:'Document_СчетНаОплатуПокупателю'};
 const literal = value => `'${String(value).replace(/'/g,"''")}'`;
@@ -25,6 +26,7 @@ const prepareSchema = z.object({companyId:z.string().regex(/^[a-f\d]{24}$/i),dir
   workflow:z.enum(['invoice_only','supplier_payment','customer_invoice']).optional().describe('supplier_payment — полная покупка с номенклатурой, «Без договора», оплаченной и проведённой платёжкой; customer_invoice — счёт покупателю с номенклатурой. invoice_only — прежний режим без поручения.'),
   payerIban:z.string().regex(/^KZ[A-Z0-9]{18}$/).optional().describe('Банковский счёт своей компании, соответствующий выбранному счёту INDEX12. Если не задан — основной банковский счёт организации 1С.'),
   expenseDate:day.optional().describe('Дата расхода INDEX12. Без значения — день подготовки в Asia/Almaty; дата платёжного поручения всегда определяется при его создании.'),
+  expenseAccountId:z.string().regex(/^[a-f\d]{24}$/i).optional(),existingOperationId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
   projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
   counterparty:partyInput,date:day,number:z.string().trim().min(1).max(100).optional(),currency:z.enum(['KZT']).default('KZT'),
   knp:z.preprocess(value=>value===''?undefined:value,z.string().regex(/^\d{3}$/).optional()),contractRef:z.preprocess(value=>value===''?null:value,z.string().uuid().nullable().optional()),
@@ -134,6 +136,18 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const row=await plans().findOne({_id:planToken,...identity(req),connectionKey:connectionKey()});
     if(!row)fault('INVOICE_PLAN_NOT_FOUND','План не найден в текущей базе и рабочей области',404);return row;
   }
+  let expenseLinkIndex;
+  async function resolveExpense(req,row,input) {
+    if(!row.linkedOperationId&&row.taskId){const task=await db().collection('businessTasks').findOne({_id:row.taskId,workspaceId:row.workspaceId,'evidence.invoicePlanId':row._id});if(task?.evidence?.operationId)row.linkedOperationId=task.evidence.operationId;}
+    const expense=await existingExpense({Contractor,Event,req,row,input});if(!expense)return null;
+    // Pin the invoice-to-expense relation once. A different invoice cannot
+    // silently reuse this expense merely because vendor/date/amount coincide.
+    if(!expenseLinkIndex)expenseLinkIndex=plans().createIndex({workspaceId:1,connectionKey:1,linkedOperationId:1},{unique:true,partialFilterExpression:{linkedOperationId:{$type:'string'}}}).catch(e=>{expenseLinkIndex=null;throw e;});
+    await expenseLinkIndex;await guard(req);
+    try{await plans().updateOne({_id:row._id,...identity(req)},{$set:{linkedOperationId:expense.id}});row.linkedOperationId=expense.id;}
+    catch(e){if(e.code!==11000)throw e;if(input.existingOperationId||row.linkedOperationId)fault('OPERATION_LINK_CONFLICT','Этот расход уже связан с другим счётом',409);return null;}
+    return expense;
+  }
   router.get('/onec/invoices/templates',use(async(req,res,client)=>{
     const templates=await Promise.all(Object.keys(DIRECTIONS).map(direction=>loadTemplate(db(),client,connectionKey(),direction)));
     res.json({...identity(req),templates:templates.map(row=>({id:row._id,direction:row.direction,collection:row.collection,version:row.version,schemaFingerprint:row.schemaFingerprint,checkedAt:row.checkedAt,transport:row.transport})),supported:{currency:['KZT'],lines:['services']},bankEnabled:false});
@@ -141,14 +155,19 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   router.post('/onec/invoices/prepare',use(async(req,res,client)=>{
     const input=prepareSchema.parse(req.body),key=digest([identity(req),connectionKey(),input.idempotencyKey]);
     const old=await plans().findOne({creationKey:key});
-    if(old){
-      // Older schemas materialized the omitted vatIncluded field as false.
-      const legacyInput={...input,...(input.vatIncluded===undefined&&old.input.vatIncluded===false?{vatIncluded:false}:{})};
-      if(old.requestHash!==digest(input)&&old.requestHash!==digest(legacyInput))fault('IDEMPOTENCY_CONFLICT','Ключ уже использован с другим счётом',409);
-      return res.json({...identity(req),...view(old),replayed:true});
-    }
+    const reuse=async (previous,conflictCode='INVOICE_DATA_CONFLICT')=>{
+      if(previous.actorId!==identity(req).actorId)fault('INVOICE_PLAN_OWNED_BY_ANOTHER_ACTOR','Счёт уже обрабатывается другим оператором. Новый документ не создан',409);
+      if(!sameInvoice(previous,input))fault(conflictCode,'Для этого счёта сохранены другие финансовые реквизиты. Новый документ не создан',409,{planToken:previous._id});
+      const expense=await resolveExpense(req,previous,input);
+      await requestProgress(db(),req,'Продолжаю прежний план счёта');
+      return res.json({...identity(req),...view(previous),invoice:previous.documentData,existingExpense:expense,replayed:true});
+    };
+    if(old)return reuse(old,'IDEMPOTENCY_CONFLICT');
     await requestProgress(db(),req,'Ищу контрагента и реквизиты в 1С');
     const company=await mutations.company(req,input.companyId);
+    const invoiceIdentity=digest([company.onecSync.ref,input.direction,input.counterparty.taxId,input.number||input.idempotencyKey,input.date]);
+    const previous=await plans().findOne({workspaceId:identity(req).workspaceId,connectionKey:connectionKey(),invoiceIdentity});
+    if(previous)return reuse(previous);
     const org=(await client.get({collection:'Catalog_Организации',id:company.onecSync.ref})).object;
     if(org.DeletionMark||company.identificationNumber && String(org.ИдентификационныйНомер||'').trim()!==company.identificationNumber)fault('IDENTITY_MISMATCH','БИН организации не совпадает с карточкой INDEX12',409);
     const template=await loadTemplate(db(),client,connectionKey(),input.direction);
@@ -185,7 +204,6 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(input.pdfId&&!await db().collection('onecPurchaseFiles').findOne({_id:input.pdfId,...identity(req)}))fault('FILE_UNAVAILABLE','Оригинал счёта недоступен',404);
     await plans().createIndex({creationKey:1},{unique:true});
     await plans().createIndex({workspaceId:1,connectionKey:1,invoiceIdentity:1},{unique:true});
-    const invoiceIdentity=digest([org.Ref_Key,input.direction,input.counterparty.taxId,input.number||input.idempotencyKey,input.date]);
     const row={_id:randomUUID(),followupTaskId:input.direction==='supplier'?randomUUID():null,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey:key,requestHash:digest(input),invoiceIdentity,input,
       organizationRef:org.Ref_Key,companyName:company.name,expenseDate:input.expenseDate||localTimestamp().slice(0,10),sourceProjectId:project?String(project._id):source?.projectId||null,sourceProjectName:project?.name||source?.projectName||'',
       template:{id:template._id,schemaFingerprint:template.schemaFingerprint,version:template.version,transport:template.transport},taxField:template.taxField,
@@ -194,8 +212,8 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(party)row.steps.party={...row.steps.party,state:'completed',id:party.Ref_Key};
     await guard(req);
     await requestProgress(db(),req,party?(party.identityIncomplete?'Контрагент найден; дополню пустые реквизиты':'Контрагент найден; реквизиты проверены'):'Контрагент не найден; подготовлено создание');
-    try{await plans().insertOne(row);}catch(e){if(e.code===11000){const duplicate=await plans().findOne({workspaceId:row.workspaceId,connectionKey:row.connectionKey,invoiceIdentity:row.invoiceIdentity});fault('INVOICE_PLAN_EXISTS','Этот счёт уже подготовлен. Используйте прежний план, не создавайте дубль',409,duplicate?.actorId===row.actorId?{planToken:duplicate._id}:undefined);}throw e;}
-    res.json({...identity(req),...view(row),plan:['Сопоставить или создать контрагента без дублей','Сохранить реквизиты банковского счёта в 1С (без подключения к банку)','Создать непроведённый счёт целиком по шаблону'],invoice:data});
+    try{await plans().insertOne(row);}catch(e){if(e.code===11000){const duplicate=await plans().findOne({workspaceId:row.workspaceId,connectionKey:row.connectionKey,invoiceIdentity:row.invoiceIdentity});if(duplicate)return reuse(duplicate);}throw e;}
+    res.json({...identity(req),...view(row),existingExpense:await resolveExpense(req,row,input),plan:['Сопоставить или создать контрагента без дублей','Сохранить реквизиты банковского счёта в 1С (без подключения к банку)','Создать непроведённый счёт целиком по шаблону'],invoice:data});
   }));
   router.get('/onec/invoices/status',use(async(req,res)=>res.json({...identity(req),...view(await getPlan(req))})));
   router.get('/onec/invoices/print-capabilities',use(async(req,res,client)=>{
@@ -294,7 +312,9 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   }
   router.post('/onec/invoices/execute',use(async(req,res,client)=>{
     if(env.ONEC_PURCHASE_WRITES!=='true'||!req.mcpContext?.grant?.scopes?.includes('imports:direct'))fault('DIRECT_AUTHORIZATION_REQUIRED','Нужно прямое разрешение на создание документов',403);
-    const row=await getPlan(req);if(row.state==='completed')return res.json({...identity(req),...view(row),replayed:true});
+    const row=await getPlan(req);
+    if(req.body.operationId){const id=z.string().regex(/^[a-f\d]{24}$/i).parse(req.body.operationId);await resolveExpense(req,row,{...row.input,existingOperationId:id});}
+    if(row.state==='completed')return res.json({...identity(req),...view(row),replayed:true});
     if((row.workflow || row.partyNeedsEnrichment || row.input.counterparty.iban) && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для полной цепочки документов и синхронизации карточки нужно право update',403);
     await guard(req);await mutations.company(req,row.input.companyId,row.organizationRef);
     const lease=randomUUID(),claimed=await plans().findOneAndUpdate({_id:row._id,$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{lease,leaseUntil:new Date(Date.now()+180000),state:'running'}},{returnDocument:'after'});

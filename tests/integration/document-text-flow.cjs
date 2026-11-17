@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const { randomUUID } = require('node:crypto');
 const fixtureText = '| Поле | Значение |\n| --- | --- |\n| Поставщик | ИП Akmola Dez |\n| Сумма | **130000** |';
-function reply(url, options, state) {
+async function reply(url, options, state) {
   if (url.endsWith('/files') && options.method === 'POST') { ++state.uploads; return Response.json({ id: 'file-ocr-fixture' }); }
   if (url.endsWith('/files/file-ocr-fixture') && options.method === 'DELETE') return Response.json({ deleted: true });
   assert.ok(url.endsWith('/responses'));
@@ -16,6 +16,7 @@ function reply(url, options, state) {
   assert.ok(!JSON.stringify(body.input).includes('"type":"input_file"'), 'orchestration never receives the PDF');
   assert.deepEqual(body.tools.find(tool => tool.type === 'code_interpreter').container.file_ids, []);
   ++state.rounds;
+  if (state.pauseAfterExtraction) await state.pauseAfterExtraction;
   if (state.fail) return Response.json({ error: { message: 'fixture failure after extraction' } }, { status: 500 });
   if (state.corrected) {
     assert.ok(JSON.stringify(body.input).includes('135000'), 'corrected fields survive pagination');
@@ -28,15 +29,20 @@ function reply(url, options, state) {
 }
 async function verify({ api, db, scope, waitJob, setState }) {
   const state = { uploads: 0, extractions: 0, rounds: 0, fileId: randomUUID(), fail: true };
+  state.pauseAfterExtraction=new Promise(resolve=>{state.release=resolve;});
   setState(state);
   const chat = (await api('/chats', {})).chat;
   const source = { _id: state.fileId, ...scope, chatId: chat.id, name: 'Счёт.pdf', mimeType: 'application/pdf', size: 13, data: Buffer.from('%PDF-fixture!'), createdAt: new Date() };
   await db.collection('desktopFiles').insertOne(source);
   const submitted = await api(`/chats/${chat.id}/jobs`, { kind: 'send', requestId: randomUUID(), message: 'Прочитай счёт, без записей.', attachments: [{ fileId: state.fileId }] });
+  let interim;for(let n=0;n<100;n++){interim=await api(`/jobs/${submitted.job.id}`);if(interim.job.extractedMessages?.some(m=>m.role==='assistant'))break;await new Promise(r=>setTimeout(r,25));}
+  assert.equal(interim.job.status,'running');assert.ok(interim.job.extractedMessages.some(m=>m.content===fixtureText),'text is visible before the final answer');state.release();state.pauseAfterExtraction=null;
   const failed = await waitJob(submitted.job.id);
   assert.equal(failed.status, 'failed'); assert.equal(state.extractions, 1);
   const extracted = await db.collection('cloudMessages').findOne({ ...scope, chatId: chat.id, documentFileId: state.fileId });
   assert.ok(extracted, 'extracted text survives a later model failure');
+  const streamed=await api(`/jobs/${submitted.job.id}`);assert.ok(streamed.job.extractedMessages.some(m=>m.id===extracted._id&&m.content===fixtureText),'recognized text is delivered independently of the failed final answer');
+  const known=await api(`/jobs/${submitted.job.id}?documentRevision=${streamed.job.documentRevision}`);assert.equal(known.job.extractedMessages,undefined,'polling does not resend the same recognized document');
   const correction = { excerpt: '130000', replacement: '135000', contentVersion: 0, occurrence: 0 };
   const saved = await api(`/chats/${chat.id}/messages/${encodeURIComponent(extracted._id)}/corrections`, correction);
   assert.equal(saved.status, 200); assert.equal(saved.message.contentVersion, 1);

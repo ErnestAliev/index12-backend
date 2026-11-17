@@ -11,12 +11,12 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     chatFileId:z.union([z.string().uuid(),z.string().regex(/^forward:[a-f\d]{64}$/)]).optional(),desktopFileId:z.string().uuid().optional(),
     mediaPermission:z.enum(['explicit_request','user_confirmed']).optional(),requestText:z.string().max(10000).optional(),
   }).superRefine((v,ctx)=>{
-    if(v.direction==='supplier'&&!v.existingOperationId)for(const key of ['category','subcategory'])if(!singleWord(v[key]))ctx.addIssue({code:z.ZodIssueCode.custom,path:[key],message:'Для расхода нужно одно слово'});
+    if(v.direction==='supplier')for(const key of ['category','subcategory'])if(v[key]!==undefined&&!singleWord(v[key]))ctx.addIssue({code:z.ZodIssueCode.custom,path:[key],message:'Для расхода нужно одно слово'});
     if(v.direction!=='supplier'&&v.existingOperationId)ctx.addIssue({code:z.ZodIssueCode.custom,path:['existingOperationId'],message:'Существующий расход относится только к счёту поставщика'});
     if([v.pdfId,v.chatFileId,v.desktopFileId].filter(Boolean).length>1)ctx.addIssue({code:z.ZodIssueCode.custom,path:['pdfId'],message:'Передайте один источник оригинала'});
     if(v.direction==='customer'&&!v.sourceTaskId)ctx.addIssue({code:z.ZodIssueCode.custom,path:['sourceTaskId'],message:'Нужна исходная рабочая задача для возврата счёта в её обсуждение'});
   });
-  register('index12_process_invoice','Выполнить целиком один из двух сценариев по ясному поручению: supplier — расход INDEX12 → счёт поставщика → платёжное поручение текущим днём, Оплачено=true и проведение → синхронизация контрагента → одна задача АВР/ЭСФ; customer — счёт покупателю → PDF (штатная печать, либо шаблон INDEX12 по сохранённому счёту 1С) → сообщение с PDF в обсуждение исходной задачи. Нормализуй исходные данные один раз и передай все строки; сервер сам сопоставляет реальные справочники. К банку не обращается. Для поставщика category/subcategory — по одному слову. Договор отсутствует — запись «Без договора» без вопросов, КНП=859 при отсутствии. Входящий НДС только из счёта, исходящий из настроек продавца/поручения. Только прямой режим. Повторять те же параметры и idempotencyKey: результат сохраняется по этапам. При partial остановиться, сообщить planToken и подтверждённые шаги, неопределённую запись сверять со старым operationId.',schema,async(snapshot,args,extra)=>{
+  register('index12_process_invoice','Выполнить целиком один из двух сценариев по ясному поручению: supplier — расход INDEX12 → счёт поставщика → платёжное поручение текущим днём, Оплачено=true и проведение → синхронизация контрагента → одна задача АВР/ЭСФ; customer — счёт покупателю → PDF (штатная печать, либо шаблон INDEX12 по сохранённому счёту 1С) → сообщение с PDF в обсуждение исходной задачи. Сервер сам находит прежний план этого счёта и существующий расход по компании, контрагенту, счёту, дате и сумме; повторные ручные обходы справочников не нужны. Если расход найден, создаются только недостающие документы 1С. Нормализуй исходные данные один раз и передай все строки; сервер сам сопоставляет реальные справочники. К банку не обращается. Для поставщика category/subcategory — по одному слову. Договор отсутствует — запись «Без договора» без вопросов, КНП=859 при отсутствии. Входящий НДС только из счёта, исходящий из настроек продавца/поручения. Только прямой режим. Повторять те же параметры и idempotencyKey: результат сохраняется по этапам. При partial остановиться, сообщить planToken и подтверждённые шаги, неопределённую запись сверять со старым operationId.',schema,async(snapshot,args,extra)=>{
     const call=async(name,input)=>{
       const result=await invoke(name,input,extra),value=result?.structuredContent;
       if(result?.isError||!value)throw Object.assign(new Error(value?.error?.message||'Не получен результат шага'),{detail:value?.error||{code:'INVOICE_STEP_FAILED',message:'Не получен результат шага'}});
@@ -24,23 +24,26 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     };
     const access=await apiCall('GET','status');
     if(access.confirmationMode!=='direct')throw Object.assign(new Error(),{detail:{code:'DIRECT_AUTHORIZATION_REQUIRED',message:'Полный сценарий требует установленного оператором прямого режима MCP'}});
-    const {accountId,projectId,category,subcategory,chatFileId,desktopFileId,mediaPermission,requestText,existingOperationId,...input}=args;
+    const {accountId,projectId,category='Услуги',subcategory='Обслуживание',chatFileId,desktopFileId,mediaPermission,requestText,existingOperationId,...input}=args;
     if(projectId&&!snapshot.entities.projects.has(projectId))throw Object.assign(new Error(),{detail:{code:'PROJECT_NOT_FOUND',message:'Проект недоступен в рабочей области'}});
     if(projectId)input.projectId=projectId;
     const defaults=args.direction==='supplier'?invoiceDefaults(snapshot,{companyId:args.companyId,accountId}):null;
+    let fingerprint;
+    if(chatFileId||desktopFileId){const file=await call('index12_upload_purchase_pdf',{...(chatFileId?{chatFileId}:{desktopFileId}),...(mediaPermission?{mediaPermission}:{})});input.pdfId=file.pdfId;fingerprint=file.sha256;}
+    if(defaults)input.expenseAccountId=defaults.account.id;
+    if(existingOperationId)input.existingOperationId=existingOperationId;
+    input.workflow=input.direction==='supplier'?'supplier_payment':'customer_invoice';
+    const prepared=await call('index12_onec_prepare_invoice',input),planToken=prepared.planToken;
     let existingOperation,needsPartyEnrichment=false;
-    if(existingOperationId) {
-      existingOperation=(await call('index12_get_operation',{id:existingOperationId})).operation;
-      const party=existingOperation?.contractorId?await call('index12_company_profile',{kind:'contractors',id:existingOperation.contractorId}):null;
+    const resolvedOperationId=existingOperationId||prepared.existingExpense?.id;
+    if(resolvedOperationId) {
+      existingOperation=prepared.existingExpense?{...prepared.existingExpense,type:'expense'}:(await call('index12_get_operation',{id:resolvedOperationId})).operation;
+      const party=prepared.existingExpense?{company:prepared.existingExpense.party}:existingOperation?.contractorId?await call('index12_company_profile',{kind:'contractors',id:existingOperation.contractorId}):null;
       const card=party?.company;
       needsPartyEnrichment=!!card&&!String(card.identificationNumber||'').trim()&&normalizeName(card.name)===normalizeName(args.counterparty.name);
       if(!existingOperation||existingOperation.type!=='expense'||existingOperation.companyId!==args.companyId||existingOperation.accountId!==defaults.account.id||Number(existingOperation.amount).toFixed(2)!==Number(args.amount).toFixed(2)||card?.identificationNumber!==args.counterparty.taxId&&!needsPartyEnrichment)
         throw Object.assign(new Error(),{detail:{code:'OPERATION_MISMATCH',message:'Существующий расход не соответствует компании, счёту, сумме или БИН/ИИН поставщика. Новый расход не создан.'}});
     }
-    let fingerprint;
-    if(chatFileId||desktopFileId){const file=await call('index12_upload_purchase_pdf',{...(chatFileId?{chatFileId}:{desktopFileId}),...(mediaPermission?{mediaPermission}:{})});input.pdfId=file.pdfId;fingerprint=file.sha256;}
-    input.workflow=input.direction==='supplier'?'supplier_payment':'customer_invoice';
-    const prepared=await call('index12_onec_prepare_invoice',input),planToken=prepared.planToken;
     if(args.direction==='customer'&&!prepared.printReady){
       const printing=await apiCall('GET','business/onec/invoices/print-capabilities?'+new URLSearchParams({companyId:args.companyId}));
       if(!printing.available){
@@ -59,11 +62,11 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
       const enriched=await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
       if(!enriched.completed)return {completed:false,state:'partial',planToken,importPlanToken:local.planToken,message:'Дополнение контрагента ещё не подтверждено. Документы 1С не создавались.'};
     }
-    const imported=existingOperation?{completed:true,operation:{id:existingOperationId},entities:{contractor:{id:existingOperation.contractorId}}}:await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
+    const imported=existingOperation?{completed:true,operation:{id:resolvedOperationId},entities:{contractor:{id:existingOperation.contractorId}}}:await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
     if(!imported.completed)return {completed:false,state:'partial',planToken,importPlanToken:local.planToken,message:'Импорт INDEX12 ещё не подтверждён. Документы 1С не создавались.'};
     const operationId=imported.operation?.id||imported.operation?.operation?.id||imported.operation?.operation?._id||imported.operation?._id;
     const contractorId=imported.entities.contractor.id;
-    const result=await call('index12_onec_execute_invoice',{planToken});
+    const result=await call('index12_onec_execute_invoice',{planToken,...(operationId?{operationId}: {})});
     if(!result.completed)return {...result,...(operationId?{operationId}:{}),message:'Цепочка не завершена. Продолжайте прежний план после сверки неопределённого шага.'};
     if(args.direction==='supplier') {
       const followup=await call('index12_invoice_link_expense',{planToken,operationId});

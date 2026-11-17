@@ -49,7 +49,15 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
   });
   const wrap = fn => (req, res, next) => Promise.resolve().then(() => req.codexMcp && req.method !== 'GET' && req.body?.kind !== 'history' ? req.codexMutation(req, res, fn) : fn(req, res)).catch(next);
   const workerFor = async scope => await cloudAllowed(scope) ? await db().collection('cloudWorkers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` }) || cloudService.worker(scope) : collection('Workers').findOne({ _id: `${scope.actorId}:${scope.workspaceId}` });
-  const jobForClient = async job => job && ({ ...publicJob(job), ...(job.active ? { pendingRequests: (await collection('Requests').find({ jobId: job._id, actorId: job.actorId, workspaceId: job.workspaceId, state: 'pending', expiresAt: { $gt: new Date() } }).sort({ expiresAt: 1 }).limit(20).toArray()).map(publicRequest) } : {}) });
+  const jobForClient = async (job, knownDocumentRevision = 0) => {
+    if(!job)return null;
+    const documentRevision=job.documentRevision||0,scope={actorId:job.actorId,workspaceId:job.workspaceId};
+    const [requests,extracted]=await Promise.all([
+      job.active?collection('Requests').find({jobId:job._id,...scope,state:'pending',expiresAt:{$gt:new Date()}}).sort({expiresAt:1}).limit(20).toArray():[],
+      documentRevision>knownDocumentRevision?db().collection('cloudMessages').find({...scope,chatId:job.chatId,$or:[{extractionExecutionId:job._id},{_id:`${job._id}:user`}]},{projection:{role:1,content:1,attachments:1,corrections:1,contentVersion:1,createdAt:1}}).sort({createdAt:1,_id:1}).toArray():[],
+    ]);
+    return {...publicJob(job),documentRevision,...(extracted.length?{extractedMessages:extracted.map(({_id,...message})=>({id:_id,...message}))}:{}),...(job.active?{pendingRequests:requests.map(publicRequest)}:{})};
+  };
   const executionForClient = async (id, scope) => {
     const { run, events } = await new ExecutionStore(db()).report(id, scope);
     if (!run) return null;
@@ -229,7 +237,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
         result: { ...(saved.execution ? { execution: saved.execution } : {}), completed: saved.completed }, error: saved.execution?.error?.message || null } });
     }
     if (!job) return res.status(404).json({ error: 'Запрос не найден.' });
-    res.json({ job: await jobForClient(job) });
+    res.json({ job: await jobForClient(job, Math.max(0,Number(req.query.documentRevision)||0)) });
   }));
   router.use((error, _req, res, _next) => {
     console.error('[Desktop assistant]', error.name);

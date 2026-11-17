@@ -30,12 +30,12 @@ test('existing verified expense is reused without another import; project/catego
   const { tool, args, snapshot, calls, operationId } = fixture();
   const result = await tool.run(snapshot, args, {});
   assert.equal(result.completed, true); assert.equal(result.operationId, operationId);
-  assert.deepEqual(calls, ['index12_get_operation', 'index12_company_profile', 'index12_onec_prepare_invoice', 'index12_onec_execute_invoice', 'index12_invoice_link_expense']);
+  assert.deepEqual(calls, ['index12_onec_prepare_invoice', 'index12_get_operation', 'index12_company_profile', 'index12_onec_execute_invoice', 'index12_invoice_link_expense']);
 });
 test('mismatched existing expense stops before creating any 1C document or new expense', async () => {
   const { tool, args, snapshot, calls } = fixture('100000.00');
   await assert.rejects(tool.run(snapshot, args, {}), error => error.detail.code === 'OPERATION_MISMATCH');
-  assert.deepEqual(calls, ['index12_get_operation', 'index12_company_profile']);
+  assert.deepEqual(calls, ['index12_onec_prepare_invoice','index12_get_operation', 'index12_company_profile']);
 });
 
-test('a verified existing expense with a uniquely matched blank-tax card is enriched, never imported again',async()=>{const {tool,args,snapshot,calls,operationId}=fixture('130000.00',true);const result=await tool.run(snapshot,args,{});assert.equal(result.completed,true);assert.equal(result.operationId,operationId);assert.deepEqual(calls,['index12_get_operation','index12_company_profile','index12_onec_prepare_invoice','index12_prepare_import','index12_execute_import','index12_onec_execute_invoice','index12_invoice_link_expense']);});
+test('a verified existing expense with a uniquely matched blank-tax card is enriched, never imported again',async()=>{const {tool,args,snapshot,calls,operationId}=fixture('130000.00',true);const result=await tool.run(snapshot,args,{});assert.equal(result.completed,true);assert.equal(result.operationId,operationId);assert.deepEqual(calls,['index12_onec_prepare_invoice','index12_get_operation','index12_company_profile','index12_prepare_import','index12_execute_import','index12_onec_execute_invoice','index12_invoice_link_expense']);});

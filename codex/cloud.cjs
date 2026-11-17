@@ -125,7 +125,8 @@ class CloudChat {
     if (response.status !== 'completed' || !text.trim()) throw Error('Не удалось извлечь полный текст документа. Финансовые записи не выполнялись.');
     const db = this.db(), scope = this.scope(job), messageId = `${job._id}:extract:${file.fileId}`;
     await db.collection('cloudMessages').updateOne({ _id: `${job._id}:user` }, { $setOnInsert: { ...scope, chatId: job.chatId, role: 'user', content: job.message, attachments: job.attachments || [], createdAt: job.createdAt } }, { upsert: true });
-    await db.collection('cloudMessages').updateOne({ _id: messageId }, { $setOnInsert: { ...scope, chatId: job.chatId, role: 'assistant', content: text, attachments: [], createdAt: new Date(), documentFileId: file.fileId } }, { upsert: true });
+    await db.collection('cloudMessages').updateOne({ _id: messageId }, { $setOnInsert: { ...scope, chatId: job.chatId, role: 'assistant', content: text, attachments: [], createdAt: new Date(), documentFileId: file.fileId, extractionExecutionId: job._id } }, { upsert: true });
+    await db.collection('desktopJobs').updateOne({_id:job._id,...scope,active:true},{$inc:{documentRevision:1}});
     return { text, messageId };
   }
   async api(route, options, signal) {

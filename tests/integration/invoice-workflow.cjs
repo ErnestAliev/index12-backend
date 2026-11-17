@@ -61,6 +61,7 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   const codeInput={...supplierRequest,number:'PROCESS-CODE',idempotencyKey:'invoice-code-mode-fixture'};
   const codePlan=await call('index12_orchestration_prepare',{idempotencyKey:'full-invoice-code-mode',summary:'Полная покупка одним шагом Code Mode',steps:[{id:'invoice',tool:'index12_process_invoice'}],code:`return await step('invoice',${JSON.stringify(codeInput)});`});
   const codeResult=await call('index12_orchestration_execute',{planId:codePlan.planId});assert.equal(codeResult.state,'completed',JSON.stringify(codeResult));
+  const repeated=await call('index12_process_invoice',{...supplierRequest,idempotencyKey:'same-invoice-new-model-key'});assert.equal(repeated.invoiceRef,processed.invoiceRef);assert.equal(repeated.operationId,processed.operationId);
   const reconcile=require('../../orchestration/reconcile.cjs').reconcileCall;
   const recovered=await reconcile({call:{tool:'index12_process_invoice',args:supplierRequest},db,scope});assert.equal(recovered.result.paymentRef,processed.paymentRef);
   const recoveredOut=await reconcile({call:{tool:'index12_process_invoice',args:processOut},db,scope});assert.equal(recoveredOut.result.messageId,issued.messageId);
@@ -73,7 +74,7 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   const blankLocal=await fixture.models.Contractor.create({name:blankName,userId:scope.actorId});
   const oldExpense=await call('index12_create_operation',{type:'expense',companyId,accountId:String(account._id),contractorId:String(blankLocal._id),amount:'100000',date:'2026-11-17',idempotencyKey:'existing-incomplete-fixture'});
   const oldExpenseId=String(oldExpense.operation.id||oldExpense.operation._id),countBefore=await fixture.models.Event.countDocuments();
-  const blankRequest={...supplierRequest,number:'INCOMPLETE-CODE',idempotencyKey:'incomplete-code-mode-fixture',existingOperationId:oldExpenseId,counterparty:{name:blankName,taxId:blankTax,kbe:'19',iban:'KZ56601A871040552021',bic:'CASPKZKA'}};
+  const blankRequest={...supplierRequest,number:'INCOMPLETE-CODE',idempotencyKey:'incomplete-code-mode-fixture',counterparty:{name:blankName,taxId:blankTax,kbe:'19',iban:'KZ56601A871040552021',bic:'CASPKZKA'}};
   delete blankRequest.category;delete blankRequest.subcategory;
   const blankPlan=await call('index12_orchestration_prepare',{idempotencyKey:'incomplete-code-mode-plan',summary:'Дополнить справочники и завершить оплату без повторного расхода',steps:[{id:'invoice',tool:'index12_process_invoice'}],code:`return await step('invoice',${JSON.stringify(blankRequest)});`});
   setMode('timeout:'+PAYMENT);
@@ -82,6 +83,7 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   const filled=await fixture.models.Contractor.findById(blankLocal._id).lean();assert.equal(filled.identificationNumber,blankTax);assert.equal(filled.onecSync.ref,blankRef);assert.equal(filled.bankAccounts[0].iban,blankRequest.counterparty.iban);
   assert.equal(records.get('Catalog_Контрагенты:'+blankRef).ИдентификационныйКодЛичности,blankTax);assert.equal(records.get('Catalog_Контрагенты:'+blankRef).КБЕ,'19');
   assert.equal(records.get(PAYMENT+':'+blankResult.result.paymentRef).Posted,true);
+  const beforeChanged=posts.length;const changedPlan=await api('invoices/prepare',{...blankRequest,workflow:'supplier_payment',amount:100001,idempotencyKey:'different-financial-data'});assert.equal(changedPlan.error.code,'INVOICE_DATA_CONFLICT');assert.equal(posts.length,beforeChanged);
   const afterBlank=posts.length;assert.equal((await call('index12_process_invoice',blankRequest)).paymentRef,blankResult.result.paymentRef);assert.equal(posts.length,afterBlank);assert.equal(await fixture.models.Event.countDocuments(),countBefore);
   await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:credential.scopes},$unset:{confirmationMode:'',planSigningKey:''}});
   console.log('PASS: full supplier recipe resolves services/contracts, creates dated paid payment order and posts once; uncertain-response reconciliation; customer recipe creates no outgoing payment');
