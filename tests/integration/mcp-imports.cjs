@@ -94,6 +94,12 @@ async function verifyImports({fixture,client:withoutForms,configFile,owner,works
     assert.equal(await db.collection('contractors').countDocuments({userId:String(owner),name:'Без реквизитов'}),1);
     await call('index12_execute_import',{planToken:enrich.planToken});assert.equal((await db.collection('contractors').findOne({_id:incomplete._id})).profileVersion,1,'replay does not update twice');
     await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'Без реквизитов',identificationNumber:'987654321013'}},'ENTITY_CONFLICT');
+    const quoted=await fixture.models.Contractor.create({userId:String(owner),name:'ИП «Akmola Dez»'});
+    const quotedPlan=await call('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'ИП "Akmola Dez"',identificationNumber:'040914551559'}});
+    assert.equal(quotedPlan.items[0].id,String(quoted._id));assert.equal(quotedPlan.items[0].action,'enrich');
+    await call('index12_execute_import',{planToken:quotedPlan.planToken});
+    assert.equal((await fixture.models.Contractor.findById(quoted._id).lean()).identificationNumber,'040914551559');
+    await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'ИП “Akmola Dez”',identificationNumber:'040914551558'}},'ENTITY_CONFLICT');
     const changedCard=await fixture.models.Contractor.create({userId:String(owner),name:'Изменено после подготовки'});
     const changedPlan=await call('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:changedCard.name,identificationNumber:'987654321014'}});
     await db.collection('contractors').updateOne({_id:changedCard._id},{$set:{identificationNumber:'987654321015'}});

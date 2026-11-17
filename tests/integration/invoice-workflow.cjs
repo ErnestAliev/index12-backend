@@ -87,22 +87,33 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   assert.equal(await reconcile({call:{tool:'index12_process_invoice',args:{...supplierRequest,idempotencyKey:'unknown-key'}},db,scope}),null);
   // Regression from the live audit: blank tax identifiers in both systems,
   // existing expense, no project, no contract/KNP and an acknowledgement lost.
-  const blankName='ИП Incomplete fixture',blankTax='111222333444';
+  const blankName='ИП «Incomplete fixture»',blankTax='111222333444';
   const blankRef=put('Catalog_Контрагенты',{Description:blankName,НаименованиеПолное:'',ИдентификационныйКодЛичности:'',DataVersion:Buffer.alloc(8,7).toString('base64')});
   const blankLocal=await fixture.models.Contractor.create({name:blankName,userId:scope.actorId});
-  const oldExpense=await call('index12_create_operation',{type:'expense',companyId,accountId:String(account._id),contractorId:String(blankLocal._id),amount:'100000',date:'2026-11-17',idempotencyKey:'existing-incomplete-fixture'});
-  const oldExpenseId=String(oldExpense.operation.id||oldExpense.operation._id),countBefore=await fixture.models.Event.countDocuments();
-  const blankRequest={...supplierRequest,number:'INCOMPLETE-CODE',idempotencyKey:'incomplete-code-mode-fixture',counterparty:{name:blankName,taxId:blankTax,kbe:'19',iban:'KZ56601A871040552021',bic:'CASPKZKA'}};
+  const manualProject=await fixture.models.Project.create({name:'Ручной проект',userId:scope.actorId});
+  const oldExpense=await call('index12_create_operation',{type:'expense',companyId,accountId:String(account._id),contractorId:String(blankLocal._id),amount:'100000',date:'2026-11-17',projectId:String(manualProject._id),idempotencyKey:'existing-incomplete-fixture'});
+  const oldExpenseId=String(oldExpense.operation.id||oldExpense.operation._id),countBefore=await fixture.models.Event.countDocuments(),partyCountBefore=await fixture.models.Contractor.countDocuments();
+  const blankRequest={...supplierRequest,number:'INCOMPLETE-CODE',idempotencyKey:'incomplete-code-mode-fixture',counterparty:{name:'ИП "Incomplete fixture"',taxId:blankTax,kbe:'19',iban:'KZ56601A871040552021',bic:'CASPKZKA'}};
+  delete blankRequest.projectId;delete blankRequest.sourceTaskId;
   delete blankRequest.category;delete blankRequest.subcategory;
   const blankPlan=await call('index12_orchestration_prepare',{idempotencyKey:'incomplete-code-mode-plan',summary:'Дополнить справочники и завершить оплату без повторного расхода',steps:[{id:'invoice',tool:'index12_process_invoice'}],code:`return await step('invoice',${JSON.stringify(blankRequest)});`});
   setMode('timeout:'+PAYMENT);
   const blankResult=await call('index12_orchestration_execute',{planId:blankPlan.planId});assert.equal(blankResult.state,'completed',JSON.stringify(blankResult));
   assert.equal(blankResult.result.operationId,oldExpenseId);assert.equal(await fixture.models.Event.countDocuments(),countBefore);
+  assert.equal(await fixture.models.Contractor.countDocuments(),partyCountBefore,'quote typography does not create a second contractor');
+  assert.equal(String((await fixture.models.Event.findById(oldExpenseId).lean()).projectId),String(manualProject._id),'manual project is preserved');
   const filled=await fixture.models.Contractor.findById(blankLocal._id).lean();assert.equal(filled.identificationNumber,blankTax);assert.equal(filled.onecSync.ref,blankRef);assert.equal(filled.bankAccounts[0].iban,blankRequest.counterparty.iban);
   assert.equal(records.get('Catalog_Контрагенты:'+blankRef).ИдентификационныйКодЛичности,blankTax);assert.equal(records.get('Catalog_Контрагенты:'+blankRef).КБЕ,'19');
   assert.equal(records.get(PAYMENT+':'+blankResult.result.paymentRef).Posted,true);
   const beforeChanged=posts.length;const changedPlan=await api('invoices/prepare',{...blankRequest,workflow:'supplier_payment',amount:100001,idempotencyKey:'different-financial-data'});assert.equal(changedPlan.error.code,'INVOICE_DATA_CONFLICT');assert.equal(posts.length,beforeChanged);
   const afterBlank=posts.length;assert.equal((await call('index12_process_invoice',blankRequest)).paymentRef,blankResult.result.paymentRef);assert.equal(posts.length,afterBlank);assert.equal(await fixture.models.Event.countDocuments(),countBefore);
+  // Even if duplicate cards already exist, search all equivalent identities;
+  // two matching expenses must never permit silently creating a third one.
+  const duplicateLocal=await fixture.models.Contractor.create({name:'ИП "Incomplete fixture"',identificationNumber:blankTax,userId:scope.actorId});
+  await call('index12_create_operation',{type:'expense',companyId,accountId:String(account._id),contractorId:String(duplicateLocal._id),amount:'100000',date:'2026-11-17',idempotencyKey:'duplicate-identity-fixture'});
+  const beforeAmbiguous=posts.length;
+  const ambiguous=await api('invoices/prepare',{...blankRequest,workflow:'supplier_payment',expenseAccountId:String(account._id),number:'AMBIGUOUS-EXPENSE',idempotencyKey:'ambiguous-existing-expenses'});
+  assert.equal(ambiguous.error.code,'EXISTING_EXPENSE_AMBIGUOUS');assert.equal(posts.length,beforeAmbiguous);
   await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:credential.scopes},$unset:{confirmationMode:'',planSigningKey:''}});
   console.log('PASS: full supplier recipe resolves services/contracts, creates dated paid payment order and posts once; uncertain-response reconciliation; customer recipe creates no outgoing payment');
 };

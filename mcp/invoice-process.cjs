@@ -2,7 +2,7 @@
 const {z}=require('zod');
 const {prepareSchema,stableUuid}=require('../business/onec/invoice-templates.cjs');
 const {invoiceDefaults,singleWord}=require('../utils/invoicePolicy.cjs');
-const {normalizeName}=require('../utils/mcpImports.js');
+const {contractorName,taxId}=require('../utils/contractorIdentity.cjs');
 function registerInvoiceProcess(register,{invoke,apiCall}) {
   const schema=prepareSchema.omit({workflow:true,pdfId:true}).extend({pdfId:z.string().uuid().optional(),
     accountId:z.string().regex(/^[a-f\d]{24}$/i).optional(),projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
@@ -40,8 +40,8 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
       existingOperation=prepared.existingExpense?{...prepared.existingExpense,type:'expense'}:(await call('index12_get_operation',{id:resolvedOperationId})).operation;
       const party=prepared.existingExpense?{company:prepared.existingExpense.party}:existingOperation?.contractorId?await call('index12_company_profile',{kind:'contractors',id:existingOperation.contractorId}):null;
       const card=party?.company;
-      needsPartyEnrichment=!!card&&!String(card.identificationNumber||'').trim()&&normalizeName(card.name)===normalizeName(args.counterparty.name);
-      if(!existingOperation||existingOperation.type!=='expense'||existingOperation.companyId!==args.companyId||existingOperation.accountId!==defaults.account.id||Number(existingOperation.amount).toFixed(2)!==Number(args.amount).toFixed(2)||card?.identificationNumber!==args.counterparty.taxId&&!needsPartyEnrichment)
+      needsPartyEnrichment=!!card&&!taxId(card.identificationNumber)&&contractorName(card.name)===contractorName(args.counterparty.name);
+      if(!existingOperation||existingOperation.type!=='expense'||existingOperation.companyId!==args.companyId||existingOperation.accountId!==defaults.account.id||Number(existingOperation.amount).toFixed(2)!==Number(args.amount).toFixed(2)||taxId(card?.identificationNumber)!==args.counterparty.taxId&&!needsPartyEnrichment)
         throw Object.assign(new Error(),{detail:{code:'OPERATION_MISMATCH',message:'Существующий расход не соответствует компании, счёту, сумме или БИН/ИИН поставщика. Новый расход не создан.'}});
     }
     if(args.direction==='customer'&&!prepared.printReady){

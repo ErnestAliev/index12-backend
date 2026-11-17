@@ -1,7 +1,7 @@
 'use strict';
 const {fault,cents,ZERO}=require('./purchase-domain.cjs');
 const {scopeQuery,eventDay}=require('../../mcp/finance.cjs');
-const {normalizeName}=require('../../utils/mcpImports.js');
+const {contractorName,taxId}=require('../../utils/contractorIdentity.cjs');
 const text=v=>String(v||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLowerCase();
 // Match business facts, not a model-generated retry key, uploaded file ID,
 // cosmetic party spelling, or optional project. Never silently change amounts.
@@ -42,9 +42,12 @@ async function existingExpense({Contractor,Event,req,row,input}) {
  if(row.linkedOperationId&&input.existingOperationId&&row.linkedOperationId!==input.existingOperationId)fault('OPERATION_LINK_CONFLICT','Счёт уже связан с другим расходом INDEX12',409);
  input={...input,existingOperationId:input.existingOperationId||row.linkedOperationId};
  const scope=scopeQuery(req.businessScope,String(req.cachedWorkspace._id));
- const parties=await Contractor.find({$and:[scope,{$or:[{identificationNumber:input.counterparty.taxId},{name:input.counterparty.name},...(row.partyRef?[{'onecSync.ref':row.partyRef}]:[])]}]}).select('_id name identificationNumber').limit(101).lean();
- const eligible=parties.filter(p=>p.identificationNumber===input.counterparty.taxId||!String(p.identificationNumber||'').trim()&&normalizeName(p.name)===normalizeName(input.counterparty.name));
- if(parties.length>100)fault('EXISTING_EXPENSE_AMBIGUOUS','Слишком много карточек для сопоставления расхода',409);
+ // Exact-name filtering used to hide a manually created card with curly quotes
+ // before canonical comparison could see it. Read scoped identities once, using
+ // the same completeness bound as import; never conclude "absent" from a prefix.
+ const parties=await Contractor.find(scope).select('_id name identificationNumber').limit(250001).lean();
+ if(parties.length>250000)fault('EXISTING_EXPENSE_AMBIGUOUS','Проверка справочника контрагентов не завершена',409);
+ const eligible=parties.filter(p=>taxId(p.identificationNumber)===input.counterparty.taxId||!taxId(p.identificationNumber)&&contractorName(p.name)===contractorName(input.counterparty.name));
  if(!eligible.length){if(input.existingOperationId)fault('OPERATION_MISMATCH','Контрагент существующего расхода не соответствует счёту',409);return null;}
  const query={...scope,type:'expense',companyId:input.companyId,contractorId:{$in:eligible.map(p=>p._id)},isDeleted:{$ne:true},isTransfer:{$ne:true},...(input.existingOperationId?{_id:input.existingOperationId}:{amount:{$in:[input.amount,-input.amount]}}),...(input.expenseAccountId?{accountId:input.expenseAccountId}:{})};
  const rows=await Event.find(query).select('_id type amount date dateKey companyId accountId contractorId description').limit(201).lean();
