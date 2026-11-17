@@ -54,7 +54,7 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const documentRevision=job.documentRevision||0,scope={actorId:job.actorId,workspaceId:job.workspaceId};
     const [requests,extracted]=await Promise.all([
       job.active?collection('Requests').find({jobId:job._id,...scope,state:'pending',expiresAt:{$gt:new Date()}}).sort({expiresAt:1}).limit(20).toArray():[],
-      documentRevision>knownDocumentRevision?db().collection('cloudMessages').find({...scope,chatId:job.chatId,$or:[{extractionExecutionId:job._id},{_id:`${job._id}:user`}]},{projection:{role:1,content:1,attachments:1,corrections:1,contentVersion:1,createdAt:1}}).sort({createdAt:1,_id:1}).toArray():[],
+      documentRevision>knownDocumentRevision?db().collection('cloudMessages').find({...scope,chatId:job.chatId,$or:[{extractionExecutionId:job._id},{_id:`${job._id}:user`}]},{projection:{role:1,content:1,attachments:1,corrections:1,contentVersion:1,documentFileId:1,createdAt:1}}).sort({createdAt:1,_id:1}).toArray():[],
     ]);
     return {...publicJob(job),documentRevision,...(extracted.length?{extractedMessages:extracted.map(({_id,...message})=>({id:_id,...message}))}:{}),...(job.active?{pendingRequests:requests.map(publicRequest)}:{})};
   };
@@ -135,7 +135,22 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     if (!result.matchedCount) return res.status(409).json({ error: 'Сообщение изменилось. Обновите историю и выделите фрагмент заново.' });
     const saved = await messages.findOne({ _id: message._id, ...scope, chatId });
     await collection('Chats').updateOne({ _id: chatId, ...scope }, { $set: { updatedAt: new Date() } });
-    res.json({ message: { id: saved._id, role: saved.role, content: saved.content, attachments: saved.attachments, corrections: saved.corrections, contentVersion: saved.contentVersion } });
+    res.json({ message: { id: saved._id, role: saved.role, content: saved.content, attachments: saved.attachments, corrections: saved.corrections, contentVersion: saved.contentVersion, documentFileId: saved.documentFileId || null } });
+  }));
+  router.post('/chats/:id/messages/:messageId/fields', wrap(async (req,res)=>{
+    const scope=req.desktopScope,chatId=req.params.id;
+    if(!await collection('Chats').findOne({_id:chatId,...scope,archived:false}))return res.status(404).json({error:'Чат не найден.'});
+    if(!await cloudAllowed(scope))return res.status(409).json({error:'Редактирование доступно в серверном чате Codex.'});
+    if(await collection('Jobs').findOne({chatId,...scope,active:true}))return res.status(409).json({error:'Дождитесь завершения текущего запроса.'});
+    const messages=db().collection('cloudMessages'),message=await messages.findOne({_id:req.params.messageId,...scope,chatId,role:'assistant'});
+    if(!message)return res.status(404).json({error:'Сообщение не найдено.'});
+    if(!message.documentFileId&&!await db().collection('cloudDocumentTexts').findOne({...scope,chatId,messageId:message._id}))return res.status(409).json({error:'Это сообщение не является извлечённым документом.'});
+    let edit;try{edit=require('./documentFields.cjs').fieldCorrectionInput(message,req.body);}catch(e){return res.status(e.status||400).json({error:e.message});}
+    const version=message.contentVersion||0,updated=await messages.updateOne({_id:message._id,...scope,chatId,...(version?{contentVersion:version}:{$or:[{contentVersion:0},{contentVersion:{$exists:false}}]})},{$push:{corrections:{...edit,actorId:scope.actorId,createdAt:new Date()}},$set:{contentVersion:version+1,correctedAt:new Date()}});
+    if(!updated.matchedCount)return res.status(409).json({error:'Данные изменились. Обновите сообщение перед сохранением.'});
+    const saved=await messages.findOne({_id:message._id,...scope,chatId});
+    await collection('Chats').updateOne({_id:chatId,...scope},{$set:{updatedAt:new Date()}});
+    res.json({message:{id:saved._id,role:saved.role,content:saved.content,attachments:saved.attachments||[],corrections:saved.corrections,contentVersion:saved.contentVersion,documentFileId:saved.documentFileId||'legacy'}});
   }));
   router.post('/chats/:id/files/import', wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });

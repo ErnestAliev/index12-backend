@@ -7,6 +7,7 @@ const invalid = (message, status = 400) => Object.assign(new Error(message), { s
 // Corrections are user data, never a rewritten assistant statement. Keep the
 // original Markdown and an ordered audit trail; render/use the effective text.
 function correctedText(message) {
+  if (message.corrections?.some(edit=>edit.kind==='field'))return require('./documentFields.cjs').effectiveDocumentText(message);
   if (!message.corrections?.length) return message.content || '';
   let text = plainMessageText(message.content || '');
   for (const correction of message.corrections) text = replaceExcerpt(text, correction);
@@ -31,14 +32,14 @@ function correctionInput(message, input) {
   if (typeof excerpt !== 'string' || !normalize(excerpt) || excerpt.length > 6000 || typeof replacement !== 'string' || replacement.length > 6000 || !Number.isSafeInteger(occurrence) || occurrence < 0 || occurrence > 10000 || !Number.isSafeInteger(contentVersion) || contentVersion < 0) throw invalid('Проверьте исправленный фрагмент.');
   if ((message.contentVersion || 0) !== contentVersion) throw invalid('Сообщение изменилось. Выделите фрагмент заново.', 409);
   if ((message.corrections || []).length >= 100) throw invalid('Слишком много исправлений в одном сообщении.');
-  replaceExcerpt(message.corrections?.length ? correctedText(message) : plainMessageText(message.content), { excerpt, replacement, occurrence });
+  replaceExcerpt(message.corrections?.length ? plainMessageText(correctedText(message)) : plainMessageText(message.content), { excerpt, replacement, occurrence });
   return { excerpt, replacement, occurrence, version: contentVersion + 1 };
 }
 function historyInput(message) {
   const files = (message.attachments || []).filter(file => file.fileId).map(file => ({ desktopFileId: file.fileId, name: file.name, mimeType: file.mimeType }));
   const content = correctedText(message);
   const result = [{ role: message.role, content: content + (files.length ? '\nИсходные вложения (только ссылки для сохранения оригинала, не для повторного чтения): ' + JSON.stringify(files) : '') }];
-  if (message.corrections?.length) result.push({ role: 'user', content: 'Я исправил извлечённый текст в предыдущем сообщении. Его показанная версия актуальна; используй мои исправления вместо исходного распознавания. Не перечитывай файл. Исправления: ' + JSON.stringify(message.corrections.map(({ excerpt, replacement, occurrence }) => ({ excerpt, replacement, occurrence }))) });
+  if (message.corrections?.length) result.push({ role: 'user', content: 'Я исправил извлечённый текст в предыдущем сообщении. Его показанная версия актуальна; используй мои исправления вместо исходного распознавания. Не перечитывай файл. Исправления: ' + JSON.stringify(message.corrections.map(({ kind, field, excerpt, replacement, occurrence }) => kind==='field'?{field,replacement}:{excerpt,replacement,occurrence})) });
   return result;
 }
 const readFileId = (name, args) => name === 'index12_chat_read_file' ? args.id : ['index12_read_task_file', 'index12_codex_read_file'].includes(name) ? args.fileId || args.id : null;
@@ -63,8 +64,8 @@ class DocumentTexts {
       const answer = answers.get(row.messageId);
       if (answer || row.extractedText) {
         const corrections = answer?.corrections || [];
-        let text = answer?.documentFileId ? correctedText(answer) : row.extractedText || correctedText(answer);
-        if (row.extractedText && !answer?.documentFileId) for (const correction of corrections) {
+        let text = answer?.documentFileId || corrections.some(edit=>edit.kind==='field') ? correctedText(answer) : row.extractedText || correctedText(answer);
+        if (row.extractedText && !answer?.documentFileId && !corrections.some(edit=>edit.kind==='field')) for (const correction of corrections) {
           try { text = replaceExcerpt(text, correction); } catch { /* A report correction may not be a field of the extracted document. */ }
         }
         this.records.set(row.fileId, { ...row, text, corrections });
