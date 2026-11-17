@@ -25,9 +25,8 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   assert.equal(commands.filter(c=>c.id===payment.Ref_Key).length,1);
   const after=posts.length;assert.equal((await call('index12_onec_execute_invoice',{planToken:plan.planToken})).replayed,true);assert.equal(posts.length,after);
   const next=await call('index12_onec_prepare_invoice',input('FULL-2'));setMode('timeout:'+PAYMENT);
-  const partial=await call('index12_onec_execute_invoice',{planToken:next.planToken});assert.equal(partial.state,'partial');assert.equal(partial.steps.payment.state,'uncertain');assert.equal(partial.steps.posting,undefined);
-  const sent=posts.length;await call('index12_onec_mutation_status',{operationId:partial.steps.payment.operationId});
-  const resumed=await call('index12_onec_execute_invoice',{planToken:next.planToken});assert.equal(resumed.completed,true,JSON.stringify(resumed));assert.equal(posts.length,sent);assert.equal(resumed.contractRef,done.contractRef);assert.equal(resumed.steps.item0,undefined,'existing service reused');
+  const resumed=await call('index12_onec_execute_invoice',{planToken:next.planToken});assert.equal(resumed.completed,true,JSON.stringify(resumed));
+  const sent=posts.length;assert.equal((await call('index12_onec_execute_invoice',{planToken:next.planToken})).replayed,true);assert.equal(posts.length,sent);assert.equal(resumed.contractRef,done.contractRef);assert.equal(resumed.steps.item0,undefined,'existing service reused');
   assert.equal((await api('invoices/prepare',{...input('BAD'),direction:'customer'})).error.code,'INVOICE_DIRECTION_MISMATCH');
   const outgoing=await call('index12_onec_prepare_invoice',{...input('OUT-FULL'),direction:'customer',workflow:'customer_invoice'});
   const out=await call('index12_onec_execute_invoice',{planToken:outgoing.planToken});assert.equal(out.completed,true,JSON.stringify(out));assert.equal(out.steps.payment,undefined);assert.equal(out.documentsPosted,false);
@@ -67,6 +66,23 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   const recoveredOut=await reconcile({call:{tool:'index12_process_invoice',args:processOut},db,scope});assert.equal(recoveredOut.result.messageId,issued.messageId);
   assert.equal(recoveredOut.result.printSource,'INDEX12_FROM_SAVED_ONEC');
   assert.equal(await reconcile({call:{tool:'index12_process_invoice',args:{...supplierRequest,idempotencyKey:'unknown-key'}},db,scope}),null);
+  // Regression from the live audit: blank tax identifiers in both systems,
+  // existing expense, no project, no contract/KNP and an acknowledgement lost.
+  const blankName='ИП Incomplete fixture',blankTax='111222333444';
+  const blankRef=put('Catalog_Контрагенты',{Description:blankName,НаименованиеПолное:'',ИдентификационныйКодЛичности:'',DataVersion:Buffer.alloc(8,7).toString('base64')});
+  const blankLocal=await fixture.models.Contractor.create({name:blankName,userId:scope.actorId});
+  const oldExpense=await call('index12_create_operation',{type:'expense',companyId,accountId:String(account._id),contractorId:String(blankLocal._id),amount:'100000',date:'2026-11-17',idempotencyKey:'existing-incomplete-fixture'});
+  const oldExpenseId=String(oldExpense.operation.id||oldExpense.operation._id),countBefore=await fixture.models.Event.countDocuments();
+  const blankRequest={...supplierRequest,number:'INCOMPLETE-CODE',idempotencyKey:'incomplete-code-mode-fixture',existingOperationId:oldExpenseId,counterparty:{name:blankName,taxId:blankTax,kbe:'19',iban:'KZ56601A871040552021',bic:'CASPKZKA'}};
+  delete blankRequest.category;delete blankRequest.subcategory;
+  const blankPlan=await call('index12_orchestration_prepare',{idempotencyKey:'incomplete-code-mode-plan',summary:'Дополнить справочники и завершить оплату без повторного расхода',steps:[{id:'invoice',tool:'index12_process_invoice'}],code:`return await step('invoice',${JSON.stringify(blankRequest)});`});
+  setMode('timeout:'+PAYMENT);
+  const blankResult=await call('index12_orchestration_execute',{planId:blankPlan.planId});assert.equal(blankResult.state,'completed',JSON.stringify(blankResult));
+  assert.equal(blankResult.result.operationId,oldExpenseId);assert.equal(await fixture.models.Event.countDocuments(),countBefore);
+  const filled=await fixture.models.Contractor.findById(blankLocal._id).lean();assert.equal(filled.identificationNumber,blankTax);assert.equal(filled.onecSync.ref,blankRef);assert.equal(filled.bankAccounts[0].iban,blankRequest.counterparty.iban);
+  assert.equal(records.get('Catalog_Контрагенты:'+blankRef).ИдентификационныйКодЛичности,blankTax);assert.equal(records.get('Catalog_Контрагенты:'+blankRef).КБЕ,'19');
+  assert.equal(records.get(PAYMENT+':'+blankResult.result.paymentRef).Posted,true);
+  const afterBlank=posts.length;assert.equal((await call('index12_process_invoice',blankRequest)).paymentRef,blankResult.result.paymentRef);assert.equal(posts.length,afterBlank);assert.equal(await fixture.models.Event.countDocuments(),countBefore);
   await db.collection('mcpCredentials').updateOne({_id:tokenHash},{$set:{scopes:credential.scopes},$unset:{confirmationMode:'',planSigningKey:''}});
   console.log('PASS: full supplier recipe resolves services/contracts, creates dated paid payment order and posts once; uncertain-response reconciliation; customer recipe creates no outgoing payment');
 };

@@ -40,3 +40,12 @@ test('deletion always requires a fresh object and explicit positive confirmation
  assert.ok(INDEX12_TOOLS.includes('index12_onec_create_object'));
  assert.equal(scopedConfig({confirmationMode:'direct',confirmation:'direct_on_user_request',capabilities:{createOnecObjects:true}})['mcp_servers.index12.tools.index12_onec_create_object.approval_mode'],'auto');
 });
+
+test('empty composite references from 1C are defaults, not malformed GUIDs',async()=>{
+ const schema={name:'Document_Test',keys:['Ref_Key'],properties:[{name:'Сделка',type:'Edm.String'},{name:'Сделка_Type',type:'Edm.String'}]};
+ const client={schema:async()=>schema,get:async()=>assert.fail('empty reference must not be read')};
+ const empty={Сделка:'',Сделка_Type:'StandardODATA.Undefined'};
+ assert.deepEqual(await validateObjectData(client,schema.name,empty,{create:true}),{});
+ assert.deepEqual(await validateObjectData(client,schema.name,empty),empty);
+ await assert.rejects(()=>validateObjectData(client,schema.name,{...empty,Сделка:'not-a-guid'},{create:true}),e=>e.code==='INVALID_ONEC_REFERENCE');
+});

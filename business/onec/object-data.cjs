@@ -33,6 +33,13 @@ async function validateObjectData(client, collection, input, { create = false, d
     if (props.has(`${key}_Type`)) {
       const target = input[`${key}_Type`]?.replace(/^StandardODATA\./,'');
       if (!input[`${key}_Type`]?.startsWith('StandardODATA.')) fault('UNSUPPORTED_ONEC_REFERENCE',`Для ${key} требуется опубликованный ${key}_Type`);
+      // 1C returns an unset composite reference as an empty value + Undefined.
+      // It is not a GUID. Omit its default on create; preserve an explicit
+      // clear on update. Never swallow a nonempty malformed reference.
+      if (target === 'Undefined' && (value === '' || value === null)) {
+        if (!create) { result[key] = value; result[`${key}_Type`] = input[`${key}_Type`]; }
+        continue;
+      }
       await reference(target,value,key); result[key] = value; result[`${key}_Type`] = input[`${key}_Type`]; continue;
     }
     if (type.startsWith('Collection(')) {

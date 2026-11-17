@@ -2,6 +2,7 @@
 const {z}=require('zod');
 const {prepareSchema,stableUuid}=require('../business/onec/invoice-templates.cjs');
 const {invoiceDefaults,singleWord}=require('../utils/invoicePolicy.cjs');
+const {normalizeName}=require('../utils/mcpImports.js');
 function registerInvoiceProcess(register,{invoke,apiCall}) {
   const schema=prepareSchema.omit({workflow:true,pdfId:true}).extend({pdfId:z.string().uuid().optional(),
     accountId:z.string().regex(/^[a-f\d]{24}$/i).optional(),projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
@@ -27,11 +28,13 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     if(projectId&&!snapshot.entities.projects.has(projectId))throw Object.assign(new Error(),{detail:{code:'PROJECT_NOT_FOUND',message:'Проект недоступен в рабочей области'}});
     if(projectId)input.projectId=projectId;
     const defaults=args.direction==='supplier'?invoiceDefaults(snapshot,{companyId:args.companyId,accountId}):null;
-    let existingOperation;
+    let existingOperation,needsPartyEnrichment=false;
     if(existingOperationId) {
       existingOperation=(await call('index12_get_operation',{id:existingOperationId})).operation;
       const party=existingOperation?.contractorId?await call('index12_company_profile',{kind:'contractors',id:existingOperation.contractorId}):null;
-      if(!existingOperation||existingOperation.type!=='expense'||existingOperation.companyId!==args.companyId||existingOperation.accountId!==defaults.account.id||Number(existingOperation.amount).toFixed(2)!==Number(args.amount).toFixed(2)||party?.company?.identificationNumber!==args.counterparty.taxId)
+      const card=party?.company;
+      needsPartyEnrichment=!!card&&!String(card.identificationNumber||'').trim()&&normalizeName(card.name)===normalizeName(args.counterparty.name);
+      if(!existingOperation||existingOperation.type!=='expense'||existingOperation.companyId!==args.companyId||existingOperation.accountId!==defaults.account.id||Number(existingOperation.amount).toFixed(2)!==Number(args.amount).toFixed(2)||card?.identificationNumber!==args.counterparty.taxId&&!needsPartyEnrichment)
         throw Object.assign(new Error(),{detail:{code:'OPERATION_MISMATCH',message:'Существующий расход не соответствует компании, счёту, сумме или БИН/ИИН поставщика. Новый расход не создан.'}});
     }
     let fingerprint;
@@ -48,9 +51,14 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     }
     const operation=args.direction==='supplier'?{type:'expense',amount:String(args.amount),date:prepared.expenseDate,accountId:defaults.account.id,companyId:args.companyId,
       ...((projectId||prepared.sourceProjectId)?{projectId:projectId||prepared.sourceProjectId,projectScope:'selected'}:{}),description:`${args.lines.map(l=>l.description).join('; ')}. Счёт №${args.number} от ${args.date}`.slice(0,10000)}:undefined;
-    const local=existingOperation?null:await call('index12_prepare_import',{idempotencyKey:`invoice:${planToken}`,contractor:{name:args.counterparty.name,identificationNumber:args.counterparty.taxId},
-      ...(operation?{category:{name:category,type:'expense'},subcategory:{name:subcategory},operation,namingPolicy:'single_word'}:{}),
+    const local=existingOperation&&!needsPartyEnrichment?null:await call('index12_prepare_import',{idempotencyKey:`invoice:${planToken}`,contractor:{name:args.counterparty.name,identificationNumber:args.counterparty.taxId},
+      ...(operation&&!existingOperation?{category:{name:category,type:'expense'},subcategory:{name:subcategory},operation,namingPolicy:'single_word'}:{}),
       ...(fingerprint&&operation?{documentFingerprint:fingerprint}:{}),sourceDocument:`Счёт ${args.number||''} от ${args.date}`});
+    if(existingOperation&&needsPartyEnrichment) {
+      if(local.items?.find(item=>item.kind==='contractor')?.id!==existingOperation.contractorId)throw Object.assign(new Error(),{detail:{code:'OPERATION_MISMATCH',message:'Существующий расход связан с другой карточкой контрагента. Новый расход не создан.'}});
+      const enriched=await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
+      if(!enriched.completed)return {completed:false,state:'partial',planToken,importPlanToken:local.planToken,message:'Дополнение контрагента ещё не подтверждено. Документы 1С не создавались.'};
+    }
     const imported=existingOperation?{completed:true,operation:{id:existingOperationId},entities:{contractor:{id:existingOperation.contractorId}}}:await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
     if(!imported.completed)return {completed:false,state:'partial',planToken,importPlanToken:local.planToken,message:'Импорт INDEX12 ещё не подтверждён. Документы 1С не создавались.'};
     const operationId=imported.operation?.id||imported.operation?.operation?.id||imported.operation?.operation?._id||imported.operation?._id;

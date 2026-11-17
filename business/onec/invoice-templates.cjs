@@ -12,6 +12,7 @@ const { scopeQuery } = require('../../mcp/finance.cjs');
 const { fileMeta, fileBuffer } = require('../../codex/files.cjs');
 const { lookupRegistry } = require('../providers.cjs');
 const { normalizeInvoiceVat } = require('./invoice-vat.cjs');
+const {requestProgress}=require('../../codex/progress.cjs');
 const DIRECTIONS = {supplier:'Document_СчетНаОплатуПоставщика',customer:'Document_СчетНаОплатуПокупателю'};
 const literal = value => `'${String(value).replace(/'/g,"''")}'`;
 const day = z.string().refine(value => {try{return !!dateOnly(value);}catch{return false;}},'Дата YYYY-MM-DD');
@@ -82,7 +83,8 @@ async function resolveParty(client,template,party) {
     if(!result.hasMore)break;
     if(skip===100000)fault('PARTY_SCAN_INCOMPLETE','Проверка дублей не завершена; контрагент не создавался',409);
   }
-  if(!found && names.length)fault('COUNTERPARTY_IDENTITY_CONFLICT','Найдена карточка с таким именем и другим/пустым БИН/ИИН. Нужна сверка, дубль не создан',409,{references:names.map(r=>r.Ref_Key)});
+  if(!found && names.length===1 && !String(names[0][template.taxField]||'').trim())return {...names[0],identityIncomplete:true};
+  if(!found && names.length)fault('COUNTERPARTY_IDENTITY_CONFLICT','Найдены неоднозначные карточки с таким именем или другим БИН/ИИН. Дубль не создан',409,{references:names.map(r=>r.Ref_Key)});
   return found;
 }
 function partyData(input,taxField) {
@@ -145,6 +147,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
       if(old.requestHash!==digest(input)&&old.requestHash!==digest(legacyInput))fault('IDEMPOTENCY_CONFLICT','Ключ уже использован с другим счётом',409);
       return res.json({...identity(req),...view(old),replayed:true});
     }
+    await requestProgress(db(),req,'Ищу контрагента и реквизиты в 1С');
     const company=await mutations.company(req,input.companyId);
     const org=(await client.get({collection:'Catalog_Организации',id:company.onecSync.ref})).object;
     if(org.DeletionMark||company.identificationNumber && String(org.ИдентификационныйНомер||'').trim()!==company.identificationNumber)fault('IDENTITY_MISMATCH','БИН организации не совпадает с карточкой INDEX12',409);
@@ -186,10 +189,11 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const row={_id:randomUUID(),followupTaskId:input.direction==='supplier'?randomUUID():null,...identity(req),scope:req.businessScope,connectionKey:connectionKey(),creationKey:key,requestHash:digest(input),invoiceIdentity,input,
       organizationRef:org.Ref_Key,companyName:company.name,expenseDate:input.expenseDate||localTimestamp().slice(0,10),sourceProjectId:project?String(project._id):source?.projectId||null,sourceProjectName:project?.name||source?.projectName||'',
       template:{id:template._id,schemaFingerprint:template.schemaFingerprint,version:template.version,transport:template.transport},taxField:template.taxField,
-      partyRef:party?.Ref_Key||null,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,workflow,vat:{included:normalized.vatIncluded,amount:normalized.vatAmount??0,lines:normalized.lines.map(line=>({rateRef:line.vatRateRef||null,percent:line.vatPercent??null,amount:line.vatAmount}))},state:'prepared',
+      partyRef:party?.Ref_Key||null,partyNeedsEnrichment:!!party?.identityIncomplete,partyData:newPartyData,currencyRef:currencies.rows[0].Ref_Key,bankRef,documentData:data,workflow,vat:{included:normalized.vatIncluded,amount:normalized.vatAmount??0,lines:normalized.lines.map(line=>({rateRef:line.vatRateRef||null,percent:line.vatPercent??null,amount:line.vatAmount}))},state:'prepared',
       steps:{party:{operationId:stableUuid([connectionKey(),identity(req).workspaceId,input.counterparty.taxId,'party'])},bank:{operationId:randomUUID()},partyBank:{operationId:randomUUID()},invoice:{operationId:randomUUID()}},createdAt:new Date()};
     if(party)row.steps.party={...row.steps.party,state:'completed',id:party.Ref_Key};
     await guard(req);
+    await requestProgress(db(),req,party?(party.identityIncomplete?'Контрагент найден; дополню пустые реквизиты':'Контрагент найден; реквизиты проверены'):'Контрагент не найден; подготовлено создание');
     try{await plans().insertOne(row);}catch(e){if(e.code===11000){const duplicate=await plans().findOne({workspaceId:row.workspaceId,connectionKey:row.connectionKey,invoiceIdentity:row.invoiceIdentity});fault('INVOICE_PLAN_EXISTS','Этот счёт уже подготовлен. Используйте прежний план, не создавайте дубль',409,duplicate?.actorId===row.actorId?{planToken:duplicate._id}:undefined);}throw e;}
     res.json({...identity(req),...view(row),plan:['Сопоставить или создать контрагента без дублей','Сохранить реквизиты банковского счёта в 1С (без подключения к банку)','Создать непроведённый счёт целиком по шаблону'],invoice:data});
   }));
@@ -279,15 +283,19 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(row.steps[step].state==='completed')return row.steps[step].id;
     let result;const response={status(){return this;},json(value){result=value;return this;}};
     await mutations.create(Object.assign(Object.create(req),{body:{companyId:row.input.companyId,collection,data,operationId:row.steps[step].operationId}}),response,client);
+    // One read of the assigned GUID can recover a lost acknowledgement. Never
+    // resend a write or rotate its key when the result remains unknown.
+    if(result.uncertain && mutations.status){await requestProgress(db(),req,'Сверяю результат записи в 1С');await mutations.status(Object.assign(Object.create(req),{params:{operationId:row.steps[step].operationId}}),response,client);}
     row.steps[step]={...row.steps[step],state:result.completed?'completed':result.state,id:result.id||result.objectId||null};
     await save(row,{steps:row.steps});
     if(!result.completed)fault('INVOICE_STEP_UNCONFIRMED','Результат шага не подтверждён. Проверьте onec_mutation_status с прежним operationId; новый счёт не создавайте',409,{step,operationId:row.steps[step].operationId});
+    await requestProgress(db(),req,({party:'Контрагент создан',bank:'Банковские реквизиты сохранены',invoice:'Счёт сохранён в 1С',payment:'Платёжное поручение создано',contract:'Запись договора создана'})[step]||(step.startsWith('item')?'Номенклатура создана':'Запись 1С подтверждена'),'completed');
     return result.id;
   }
   router.post('/onec/invoices/execute',use(async(req,res,client)=>{
     if(env.ONEC_PURCHASE_WRITES!=='true'||!req.mcpContext?.grant?.scopes?.includes('imports:direct'))fault('DIRECT_AUTHORIZATION_REQUIRED','Нужно прямое разрешение на создание документов',403);
     const row=await getPlan(req);if(row.state==='completed')return res.json({...identity(req),...view(row),replayed:true});
-    if((row.workflow || row.partyData && row.input.counterparty.iban) && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для полной цепочки документов и синхронизации карточки нужно право update',403);
+    if((row.workflow || row.partyNeedsEnrichment || row.input.counterparty.iban) && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для полной цепочки документов и синхронизации карточки нужно право update',403);
     await guard(req);await mutations.company(req,row.input.companyId,row.organizationRef);
     const lease=randomUUID(),claimed=await plans().findOneAndUpdate({_id:row._id,$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{lease,leaseUntil:new Date(Date.now()+180000),state:'running'}},{returnDocument:'after'});
     if(!claimed)return res.status(202).json({...identity(req),...view(row),inProgress:true});Object.assign(row,claimed);
@@ -303,10 +311,27 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
         if(claim.actorId!==identity(req).actorId)fault('PARTY_CREATION_IN_PROGRESS','Создание этого контрагента уже закреплено за другим оператором. Сначала сверка результата',409);
         if(['sending','uncertain','validating'].includes(row.steps.party.state))await save(row,{partyRef:await create(req,client,row,'party','Catalog_Контрагенты',row.partyData)});
         const existing=await resolveParty(client,template,party);
-        if(existing) await save(row,{partyRef:existing.Ref_Key,steps:{...row.steps,party:{...row.steps.party,state:'completed',id:existing.Ref_Key}}});
+        if(existing) await save(row,{partyRef:existing.Ref_Key,partyNeedsEnrichment:!!existing.identityIncomplete,steps:{...row.steps,party:{...row.steps.party,state:'completed',id:existing.Ref_Key}}});
         else {
           // Same tax identity shares one journal key across invoice plans.
           await save(row,{partyRef:await create(req,client,row,'party','Catalog_Контрагенты',row.partyData)});
+        }
+      }
+      if(row.partyNeedsEnrichment && row.steps.partyIdentity?.state!=='completed') {
+        const card=(await client.get({collection:'Catalog_Контрагенты',id:row.partyRef})).object;
+        const taxId=String(card[row.taxField]||'').trim();
+        if(card.DeletionMark || card.IsFolder || taxId && taxId!==party.taxId || ![card.Description,card.НаименованиеПолное].some(name=>name&&normalizeName(name)===normalizeName(party.name)))fault('COUNTERPARTY_IDENTITY_CHANGED','Карточка контрагента изменена; заполненные чужие реквизиты не перезаписаны',409);
+        if(taxId===party.taxId && !row.steps.partyIdentity?.expectedVersion) {
+          row.steps.partyIdentity={state:'completed',id:row.partyRef};await save(row,{steps:row.steps});
+        } else {
+          if(!row.steps.partyIdentity) {
+            const data={[row.taxField]:party.taxId,...(!String(card.КБЕ||'').trim()&&party.kbe?{КБЕ:party.kbe}:{}),...(!String(card.НаименованиеПолное||'').trim()?{НаименованиеПолное:party.name}:{})};
+            row.steps.partyIdentity={operationId:randomUUID(),expectedVersion:card.DataVersion,data};await save(row,{steps:row.steps});
+          }
+          const step=row.steps.partyIdentity;let result;const response={status(){return this;},json(value){result=value;return this;}};
+          await mutations.update(Object.assign(Object.create(req),{onecInvoiceNeedsUpdate:true,body:{companyId:row.input.companyId,collection:'Catalog_Контрагенты',id:row.partyRef,expectedVersion:step.expectedVersion,operationId:step.operationId,data:step.data}}),response,client);
+          row.steps.partyIdentity={...step,state:result.completed?'completed':result.state,id:row.partyRef};await save(row,{steps:row.steps});
+          if(!result.completed)fault('INVOICE_STEP_UNCONFIRMED','Дополнение реквизитов не подтверждено; сверяйте прежний operationId',409,{step:'partyIdentity',operationId:step.operationId});
         }
       }
       if(party.iban && ['sending','uncertain','validating'].includes(row.steps.bank.state))await create(req,client,row,'bank','Catalog_БанковскиеСчета',{Description:party.iban,НомерСчета:party.iban,Owner:row.partyRef,Owner_Type:'StandardODATA.Catalog_Контрагенты',Банк_Key:row.bankRef,ВалютаДенежныхСредств_Key:row.currencyRef});
@@ -318,12 +343,12 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
           await save(row,{steps:{...row.steps,bank:{...row.steps.bank,state:'completed',id:bank.Ref_Key}}});
         } else await create(req,client,row,'bank','Catalog_БанковскиеСчета',{Description:party.iban,НомерСчета:party.iban,Owner:row.partyRef,Owner_Type:'StandardODATA.Catalog_Контрагенты',Банк_Key:row.bankRef,ВалютаДенежныхСредств_Key:row.currencyRef});
       }
-      if(row.partyData && party.iban && row.steps.partyBank?.state!=='completed') {
+      if(party.iban && row.steps.partyBank?.state!=='completed') {
         const card=(await client.get({collection:'Catalog_Контрагенты',id:row.partyRef})).object;
         const main=card.ОсновнойБанковскийСчет_Key;
-        if(main && main!==ZERO && main!==row.steps.bank.id)fault('PRIMARY_BANK_ACCOUNT_CHANGED','Основной банковский счёт новой карточки уже изменён. Нужна сверка',409);
+        if(row.partyData && main && main!==ZERO && main!==row.steps.bank.id)fault('PRIMARY_BANK_ACCOUNT_CHANGED','Основной банковский счёт новой карточки уже изменён. Нужна сверка',409);
         row.steps.partyBank ||= {operationId:randomUUID()};
-        if(main===row.steps.bank.id && !row.steps.partyBank.expectedVersion) {
+        if(main && main!==ZERO && !row.steps.partyBank.expectedVersion) {
           row.steps.partyBank={...row.steps.partyBank,state:'completed',id:row.partyRef};await save(row,{steps:row.steps});
         } else {
           row.steps.partyBank.expectedVersion ||= card.DataVersion;await save(row,{steps:row.steps});
@@ -366,6 +391,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
           await mutations.posting(Object.assign(Object.create(req),{onecInvoiceNeedsUpdate:true,body:{companyId:row.input.companyId,collection:'Document_ПлатежноеПоручениеИсходящее',id:row.steps.payment.id,expectedVersion:row.steps.posting.expectedVersion,operationId:row.steps.posting.operationId,post:true}}),response,client);
           row.steps.posting={...row.steps.posting,state:result.completed?'completed':result.state,id:row.steps.payment.id};await save(row,{steps:row.steps});
           if(!result.completed)fault('INVOICE_STEP_UNCONFIRMED','Проведение не подтверждено; сверьте onec_mutation_status с прежним ключом',409,{step:'posting',operationId:row.steps.posting.operationId});
+          await requestProgress(db(),req,'Платёжное поручение проведено','completed');
         }
       }
       await save(row,{state:'completed',error:null});
@@ -382,6 +408,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     const contractor=operation && await Contractor.findOne({_id:operation.contractorId,...scopeQuery(req.businessScope,identity(req).workspaceId)}).lean();
     if(!operation||operation.type!=='expense'||String(operation.companyId)!==row.input.companyId||cents(Math.abs(operation.amount))!==cents(row.input.amount)||contractor?.identificationNumber!==row.input.counterparty.taxId)fault('OPERATION_MISMATCH','Расход INDEX12 не соответствует счёту',409);
     if(row.workflow)await syncParty(req,client,row,String(contractor._id));
+    await requestProgress(db(),req,'Синхронизирую реквизиты и создаю напоминание об АВР');
     const tasks=db().collection('businessTasks'),sourceKey=`onec-invoice:${row._id}`;
     const existing=await tasks.findOne({scope:row.scope,sourceKey});if(existing){if(existing.evidence.operationId!==operationId)fault('OPERATION_LINK_CONFLICT','Этот счёт уже связан с другим расходом INDEX12',409);return res.json({...identity(req),task:publicTask(existing),replayed:true});}
     await guard(req);const taskId=row.followupTaskId||randomUUID(),attachments=[];

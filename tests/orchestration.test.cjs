@@ -219,3 +219,5 @@ test("abort and unknown write errors never prove that no change committed", () =
   ])
     assert.equal(uncertain(code), false);
 });
+
+test('invalid 1C references are definitive rejections; network and unknown errors remain uncertain',()=>{for(const code of ['INVALID_ONEC_REFERENCE','INVALID_ONEC_FIELD','ONEC_REFERENCE_UNAVAILABLE'])assert.equal(uncertain(code),false);for(const code of ['HTTP_500','NETWORK_TIMEOUT','RESULT_UNCERTAIN'])assert.equal(uncertain(code),true);});

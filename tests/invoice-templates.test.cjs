@@ -15,7 +15,8 @@ test('counterparty resolver scans all pages with the published tax field, catche
  const queries=[],client={query:async args=>{queries.push(args);return args.skip?{rows:[{Ref_Key:'party',Description:'SUPPLIER',ИдентификационныйКодЛичности:party.taxId}],hasMore:false}:{rows:[],hasMore:true};}};
  assert.equal((await resolveParty(client,template,party)).Ref_Key,'party');assert.equal(queries.length,3);assert.match(queries[0].select,/ИдентификационныйКодЛичности/);assert.doesNotMatch(queries[0].select,/ИдентификационныйНомер/);
  await assert.rejects(()=>resolveParty({query:async()=>({rows:[{Ref_Key:'a',ИдентификационныйКодЛичности:party.taxId},{Ref_Key:'b',ИдентификационныйКодЛичности:party.taxId}],hasMore:false})},template,party),e=>e.code==='DUPLICATE_COUNTERPARTY');
- await assert.rejects(()=>resolveParty({query:async()=>({rows:[{Ref_Key:'a',Description:'ИП SUPPLIER',ИдентификационныйКодЛичности:''}],hasMore:false})},template,party),e=>e.code==='COUNTERPARTY_IDENTITY_CONFLICT');
+ const blank=await resolveParty({query:async()=>({rows:[{Ref_Key:'a',Description:'ИП SUPPLIER',ИдентификационныйКодЛичности:''}],hasMore:false})},template,party);assert.equal(blank.Ref_Key,'a');assert.equal(blank.identityIncomplete,true);
+ for(const rows of [[{Ref_Key:'a',Description:'ИП SUPPLIER',ИдентификационныйКодЛичности:'111111111111'}],[{Ref_Key:'a',Description:'ИП SUPPLIER'},{Ref_Key:'b',Description:'ИП SUPPLIER'}]])await assert.rejects(()=>resolveParty({query:async()=>({rows,hasMore:false})},template,party),e=>e.code==='COUNTERPARTY_IDENTITY_CONFLICT');
 });
 
 test('IP is a physical person with entrepreneur flag; LLP is a legal entity, never inferred from tax digits',()=>{

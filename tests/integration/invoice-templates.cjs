@@ -34,9 +34,8 @@ module.exports=async({call,api,db,scope,companyId,contractorId,refs,records,post
   assert.equal((await api('invoices/followup',{planToken:customer.planToken,operationId:operation.operation.id||operation.operation._id})).error.code,'INVOICE_NOT_READY');
   // A lost POST response must use the same mutation ID and then the same invoice plan.
   const lost=await call('index12_onec_prepare_invoice',input('supplier','T-02'));setMode('timeout:Document_СчетНаОплатуПоставщика');
-  const partial=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(partial.state,'partial');assert.equal(partial.steps.invoice.state,'uncertain');
-  const sent=posts.length;await call('index12_onec_mutation_status',{operationId:partial.steps.invoice.operationId});
-  const resumed=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(resumed.completed,true,JSON.stringify(resumed));assert.equal(posts.length,sent);
+  const recovered=await call('index12_onec_execute_invoice',{planToken:lost.planToken});assert.equal(recovered.completed,true,JSON.stringify(recovered));
+  const sent=posts.length;assert.equal((await call('index12_onec_execute_invoice',{planToken:lost.planToken})).replayed,true);assert.equal(posts.length,sent);
   const vatRef=randomUUID();records.set('Catalog_СтавкиНДС:'+vatRef,{Ref_Key:vatRef,Ставка:'16',Description:'16%',DeletionMark:false,ДляОсвобожденногоОборота:false,МестоРеализацииНеРК:false});
   const vatInput={...input('supplier','VAT-01'),useVat:true,vatAmount:14400,amount:104400,lines:[{description:'Fixture taxable service',quantity:1,price:104400,amount:104400}]};
   const beforeVat=posts.length,vatPlan=await call('index12_onec_prepare_invoice',vatInput);

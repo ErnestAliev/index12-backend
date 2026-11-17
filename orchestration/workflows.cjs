@@ -79,6 +79,12 @@ const REJECTED_WITHOUT_WRITE = new Set([
   "PLAN_EXPIRED",
   "INVALID_PLAN",
   "INVALID_ONEC_MUTATION",
+  "INVALID_ONEC_REFERENCE",
+  "INVALID_ONEC_FIELD",
+  "INVALID_ONEC_ROWS",
+  "UNSUPPORTED_ONEC_REFERENCE",
+  "UNSUPPORTED_ONEC_FIELD",
+  "ONEC_REFERENCE_UNAVAILABLE",
   "ONEC_WRITE_REJECTED",
 ]);
 const uncertain = (code) => !REJECTED_WITHOUT_WRITE.has(code);
@@ -484,7 +490,7 @@ class Workflows {
                 "PLAN_LEASE_LOST",
                 "Право выполнения плана потеряно.",
               );
-            await this.beforeStep(tool);
+            await this.beforeStep(tool,args);
             if (stopped) throw stopped;
             let approval;
             if (tool.write) {

@@ -6,6 +6,7 @@ const { digest } = require("../../codex/executionStore.cjs");
 const { ReadClient } = require("./read-client.cjs");
 const { isReferenceObject, validateObjectData, validateCustomerInvoice } = require('./object-data.cjs');
 const { fault, ZERO } = require("./purchase-domain.cjs");
+const {requestProgress,objectLabel}=require('../../codex/progress.cjs');
 const common = {
   companyId: z.string().regex(/^[a-f\d]{24}$/i),
   collection: z.string().min(1).max(200),
@@ -250,6 +251,7 @@ function registerOnecMutationRoutes(
     const input = schema.parse(req.body),
       scope = identity(req);
     await guard(req);
+    await requestProgress(db(),req,action==='create'?`Создаю ${objectLabel(input.collection)}`:action==='posting'?(input.post?'Провожу документ в 1С':'Отменяю проведение в 1С'):action==='update'?`Обновляю ${objectLabel(input.collection)}`:'Изменяю пометку удаления в 1С');
     const key = digest([scope, connectionKey(), input.operationId]),
       hash = digest([action, input]);
     const previous = await records().findOne({ _id: key });
@@ -530,9 +532,7 @@ function registerOnecMutationRoutes(
       execute(req, res, client, "deletion", deletionSchema),
     ),
   );
-  router.get(
-    "/onec/mutations/:operationId",
-    use(async (req, res, client) => {
+  async function mutationStatus(req, res, client) {
       const operationId = z.string().uuid().parse(req.params.operationId),
         scope = identity(req);
       const row = await records().findOne({
@@ -584,13 +584,13 @@ function registerOnecMutationRoutes(
           ]),
         ),
       });
-    }),
-  );
+  }
+  router.get("/onec/mutations/:operationId",use(mutationStatus));
   // Reuse the same permissions, validation, journal and uncertain-write handling
   // from higher level invoice recipes. Do not implement a second POST transport.
   return { create: (req,res,client) => execute(req,res,client,'create',createSchema),
     update: (req,res,client) => execute(req,res,client,'update',updateSchema),
-    posting: (req,res,client) => execute(req,res,client,'posting',postingSchema), company };
+    posting: (req,res,client) => execute(req,res,client,'posting',postingSchema), status: mutationStatus, company };
 }
 module.exports = {
   registerOnecMutationRoutes,

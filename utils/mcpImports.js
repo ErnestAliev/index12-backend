@@ -70,7 +70,7 @@ function registerMcpImportRoutes(app, deps, context) {
         if (!req.mcpContext.grant.planSigningKey) fail('NOT_CONFIGURED', null, 'Обновите доступ MCP командой mcp:configure: требуется ключ согласования планов.');
     }
     async function scopedRows(req, kind) {
-        const rows = await models[kind].find(scope(req)).select('_id name type parentCategoryId identificationNumber').limit(250001).lean();
+        const rows = await models[kind].find(scope(req)).select('_id name type parentCategoryId identificationNumber profileVersion').limit(250001).lean();
         if (rows.length > 250000) fail('LIMIT_EXCEEDED', kind, 'Справочник слишком большой для надёжного поиска; частичный результат не используется.');
         return rows;
     }
@@ -82,14 +82,15 @@ function registerMcpImportRoutes(app, deps, context) {
         let candidates;
         if (kind === 'contractor' && spec.identificationNumber) {
             candidates = rows.filter(row => String(row.identificationNumber || '').replace(/\s/g, '') === spec.identificationNumber.replace(/\s/g, ''));
-            if (!candidates.length && rows.some(row => normalizeName(row.name) === normalizeName(spec.name) && row.identificationNumber && row.identificationNumber !== spec.identificationNumber)) fail('ENTITY_CONFLICT', 'contractor.identificationNumber', 'Есть контрагент с таким названием и другими реквизитами. Уточните получателя.');
+            if (!candidates.length && rows.some(row => normalizeName(row.name) === normalizeName(spec.name) && String(row.identificationNumber || '').replace(/\s/g, '') && String(row.identificationNumber).replace(/\s/g, '') !== spec.identificationNumber)) fail('ENTITY_CONFLICT', 'contractor.identificationNumber', 'Есть контрагент с таким названием и другими реквизитами. Уточните получателя.');
         }
         if (!candidates?.length) candidates = rows.filter(row => normalizeName(row.name) === normalizeName(spec.name) && (kind !== 'category' || !row.type || row.type === spec.type) && (kind !== 'subcategory' || String(row.parentCategoryId) === String(parentId)));
         if (candidates.length > 1) fail('ENTITY_AMBIGUOUS', kind, `Найдено несколько совпадений для «${spec.name}». Выберите существующую запись по ID.`);
         const found = candidates[0];
-        if (found && kind === 'contractor' && spec.identificationNumber && !found.identificationNumber) fail('ENTITY_CONFLICT', 'contractor.identificationNumber', 'Контрагент с таким названием уже есть, но реквизиты не заполнены. Уточните запись в INDEX12; импорт не изменяет существующие справочники.');
+        const enrich = found && kind === 'contractor' && spec.identificationNumber && !String(found.identificationNumber || '').trim();
+        if (enrich && !req.mcpContext.grant.scopes.includes('update')) fail('FORBIDDEN', 'contractor.identificationNumber', 'Для дополнения существующей карточки нужно право update.', 403);
         const key = identity(req, kind, spec, parentId);
-        return { kind, action: found ? 'reuse' : 'create', id: found ? String(found._id) : key.slice(0,24), name: found?.name || spec.name, requestedName: spec.name, type: spec.type || null, parentCategoryId: parentId || null, identificationNumber: found ? found.identificationNumber || null : spec.identificationNumber || null, identityKey: key };
+        return { kind, action: enrich ? 'enrich' : found ? 'reuse' : 'create', id: found ? String(found._id) : key.slice(0,24), name: found?.name || spec.name, requestedName: spec.name, type: spec.type || null, parentCategoryId: parentId || null, identificationNumber: enrich ? spec.identificationNumber : found ? found.identificationNumber || null : spec.identificationNumber || null, ...(enrich ? { previousIdentificationNumber: found.identificationNumber ?? null, profileVersion: found.profileVersion || 0 } : {}), identityKey: key };
     }
     function sameEntity(actual, expected, parentId = expected.parentCategoryId) {
         return normalizeName(actual.name) === normalizeName(expected.name)
@@ -145,7 +146,7 @@ function registerMcpImportRoutes(app, deps, context) {
             if (operation[field]) relatedNames[field] = (await deps[modelName].findOne({ _id: operation[field], ...scope(req) }).select('name').lean())?.name || null;
         }
         const standaloneParent = input.subcategory?.parentCategoryId && !categoryItem ? await Category.findOne({ _id: input.subcategory.parentCategoryId, ...scope(req) }).select('name').lean() : null;
-        const summary = items.map(item => `${item.action === 'create' ? 'Создам' : 'Использую существующую запись:'} ${labels[item.kind]} «${item.name}»${item.kind === 'category' ? (item.type === 'income' ? ' (доходы)' : ' (расходы)') : ''}${item.identificationNumber ? ` (${item.identificationNumber})` : ''}${item.kind === 'subcategory' ? ` в категории «${categoryItem?.name || relatedNames.categoryId || standaloneParent?.name}»` : ''}.`);
+        const summary = items.map(item => `${item.action === 'create' ? 'Создам' : item.action === 'enrich' ? 'Дополню пустые реквизиты:' : 'Использую существующую запись:'} ${labels[item.kind]} «${item.name}»${item.kind === 'category' ? (item.type === 'income' ? ' (доходы)' : ' (расходы)') : ''}${item.identificationNumber ? ` (${item.identificationNumber})` : ''}${item.kind === 'subcategory' ? ` в категории «${categoryItem?.name || relatedNames.categoryId || standaloneParent?.name}»` : ''}.`);
         if (operation) {
             summary.push(`${operation.type === 'expense' ? 'Расход' : 'Доход'}: ${operation.amount} ₸, дата ${operation.date}, ${operation.projectScope === 'all' ? 'Все проекты' : relatedNames.projectId || 'без проекта'}, счёт «${relatedNames.accountId}».`);
             const labels = { categoryId: 'Категория', subcategoryId: 'Подкатегория', contractorId: 'Контрагент', counterpartyIndividualId: 'Физлицо-контрагент', companyId: 'Компания', individualId: 'Физлицо' };
@@ -192,9 +193,23 @@ function registerMcpImportRoutes(app, deps, context) {
         const model = models[item.kind];
         const spec = { ...input[item.kind], ...(item.kind === 'category' ? { type: item.type } : {}) };
         const actual = await resolveEntity(req, item.kind, spec, parentId);
-        if (item.action === 'reuse' && (actual.id !== item.id || !sameEntity(actual, item))) fail('PLAN_STALE', item.kind, 'Существующая запись изменилась после подготовки плана. Согласуйте новый план.', 409);
+        if (item.action !== 'create' && (actual.id !== item.id || !sameEntity(actual, item))) fail('PLAN_STALE', item.kind, 'Существующая запись изменилась после подготовки плана. Согласуйте новый план.', 409);
         if (actual.action === 'reuse' && !sameEntity(actual, item, parentId)) fail('PLAN_STALE', item.kind, 'Найденная запись отличается от согласованного плана. Подготовьте новый план.', 409);
         if (actual.action === 'reuse') return { ...actual, created: false };
+        if (actual.action === 'enrich') {
+            // Fill only the blank identifier of one exact-name match. The
+            // normal mutation/audit wrapper retains version checks and events.
+            const saved = await invoke(async (_req, res) => {
+                const version = actual.profileVersion;
+                const updated = await Contractor.findOneAndUpdate({ _id: actual.id, ...scope(req), identificationNumber: actual.previousIdentificationNumber,
+                    ...(version ? { profileVersion: version } : { $or: [{ profileVersion: 0 }, { profileVersion: { $exists: false } }] }) },
+                    { $set: { identificationNumber: actual.identificationNumber }, $inc: { profileVersion: 1 } }, { new: true, runValidators: true }).lean();
+                if (!updated) fail('PLAN_STALE', 'contractor', 'Карточка изменилась во время дополнения. Заполненные реквизиты не перезаписаны.', 409);
+                deps.emitEntityEvent(req, updated.userId, 'contractor_updated', updated);
+                res.json(updated);
+            }, req);
+            return { ...actual, created: false, updated: true, profileVersion: saved.profileVersion };
+        }
         let reservation;
         try { await reservations().insertOne({ _id: actual.identityKey, entityId: new mongoose.Types.ObjectId(actual.id), workspaceId: String(req.user.currentWorkspaceId), kind: actual.kind, createdAt: new Date() }); }
         catch (error) { if (error.code !== 11000) throw error; }
@@ -227,7 +242,7 @@ function registerMcpImportRoutes(app, deps, context) {
         }
         // Revalidate all current permissions/references before the first write.
         const refreshed = await plan(req, state.payload.input);
-        for (const old of state.payload.prepared.items.filter(item => item.action === 'reuse')) {
+        for (const old of state.payload.prepared.items.filter(item => item.action !== 'create')) {
             const fresh = refreshed.items.find(item => item.kind === old.kind);
             if (fresh.id !== old.id || !sameEntity(fresh, old)) fail('PLAN_STALE', old.kind, 'Запись изменилась после подготовки плана. Согласуйте новый план.', 409);
         }

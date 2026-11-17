@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test'), assert = require('node:assert/strict');
 const { registerInvoiceProcess } = require('../mcp/invoice-process.cjs');
-function fixture(amount = '130000.00') {
+function fixture(amount = '130000.00', incomplete = false) {
   const companyId = 'a'.repeat(24), accountId = 'b'.repeat(24), contractorId = 'c'.repeat(24), operationId = 'd'.repeat(24), calls = [];
   const snapshot = { metadata: { role: 'admin' }, entities: { companies: new Map([[companyId, { _id: companyId, name: 'UU' }]]), accounts: new Map([[accountId, { _id: accountId, companyId, isDefaultForExpenses: true, name: 'BCC UU' }]]) } };
   let tool;
@@ -11,7 +11,9 @@ function fixture(amount = '130000.00') {
       calls.push(name);
       const values = {
         index12_get_operation: { operation: { id: operationId, type: 'expense', companyId, accountId, contractorId, amount } },
-        index12_company_profile: { company: { identificationNumber: '040914551559' } },
+        index12_company_profile: { company: { name:'ИП Akmola Dez',identificationNumber: incomplete ? null : '040914551559' } },
+        index12_prepare_import:{planToken:'import',items:[{kind:'contractor',id:contractorId,action:'enrich'}]},
+        index12_execute_import:{completed:true,entities:{contractor:{id:contractorId,updated:true}}},
         index12_onec_prepare_invoice: { planToken: 'fixture-plan', expenseDate: '2026-11-17' },
         index12_onec_execute_invoice: { completed: true, steps: { invoice: { id: 'invoice' }, payment: { id: 'payment' } }, documentsPosted: true },
         index12_invoice_link_expense: { task: { _id: 'task', invoiceFollowup: { stage: 'request_avr' } } },
@@ -35,3 +37,5 @@ test('mismatched existing expense stops before creating any 1C document or new e
   await assert.rejects(tool.run(snapshot, args, {}), error => error.detail.code === 'OPERATION_MISMATCH');
   assert.deepEqual(calls, ['index12_get_operation', 'index12_company_profile']);
 });
+
+test('a verified existing expense with a uniquely matched blank-tax card is enriched, never imported again',async()=>{const {tool,args,snapshot,calls,operationId}=fixture('130000.00',true);const result=await tool.run(snapshot,args,{});assert.equal(result.completed,true);assert.equal(result.operationId,operationId);assert.deepEqual(calls,['index12_get_operation','index12_company_profile','index12_onec_prepare_invoice','index12_prepare_import','index12_execute_import','index12_onec_execute_invoice','index12_invoice_link_expense']);});

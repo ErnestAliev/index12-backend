@@ -82,10 +82,23 @@ async function verifyImports({fixture,client:withoutForms,configFile,owner,works
     const parentOperation=await call('index12_prepare_import',{idempotencyKey:'parent-from-subcat-1',subcategory:{name:'Фильтры',parentCategoryId:createdIds.category.id},operation:{...base.operation,amount:'0.10'}});
     const parentResult=await call('index12_execute_import',{planToken:parentOperation.planToken});assert.equal(parentResult.operation.operation.categoryId,createdIds.category.id);
     await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),subcategory:{name:'Нельзя',parentCategoryId:createdIds.category.id},operation:{...base.operation,categoryId:String(category)}},'VALIDATION_ERROR');
-    // Ambiguity is not resolved by guessing; missing tax ID never silently enriched.
+    // A unique incomplete card is enriched by the approved import, not copied.
     await db.collection('contractors').insertMany([{userId:String(owner),name:'Дубль'},{userId:String(owner),name:'дубль'},{userId:String(owner),name:'Без реквизитов'}]);
     await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'ДУБЛЬ'}},'ENTITY_AMBIGUOUS');
-    await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'Без реквизитов',identificationNumber:'987654321012'}},'ENTITY_CONFLICT');
+    const incomplete=await db.collection('contractors').findOne({userId:String(owner),name:'Без реквизитов'});
+    const enrich=await call('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'Без реквизитов',identificationNumber:'987654321012'}});
+    assert.equal(enrich.items[0].action,'enrich');assert.equal(enrich.items[0].id,String(incomplete._id));
+    assert.ok(!((await db.collection('contractors').findOne({_id:incomplete._id})).identificationNumber),'preparation does not update the card');
+    const enriched=await call('index12_execute_import',{planToken:enrich.planToken});assert.equal(enriched.entities.contractor.updated,true);
+    const filled=await db.collection('contractors').findOne({_id:incomplete._id});assert.equal(filled.identificationNumber,'987654321012');assert.equal(filled.profileVersion,1);
+    assert.equal(await db.collection('contractors').countDocuments({userId:String(owner),name:'Без реквизитов'}),1);
+    await call('index12_execute_import',{planToken:enrich.planToken});assert.equal((await db.collection('contractors').findOne({_id:incomplete._id})).profileVersion,1,'replay does not update twice');
+    await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'Без реквизитов',identificationNumber:'987654321013'}},'ENTITY_CONFLICT');
+    const changedCard=await fixture.models.Contractor.create({userId:String(owner),name:'Изменено после подготовки'});
+    const changedPlan=await call('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:changedCard.name,identificationNumber:'987654321014'}});
+    await db.collection('contractors').updateOne({_id:changedCard._id},{$set:{identificationNumber:'987654321015'}});
+    await error('index12_execute_import',{planToken:changedPlan.planToken},'ENTITY_CONFLICT');
+    assert.equal((await db.collection('contractors').findOne({_id:changedCard._id})).identificationNumber,'987654321015');
     // An approved plan cannot silently reuse a renamed existing record.
     const stale=await call('index12_prepare_import',{idempotencyKey:'stale-existing-001',contractor:{name:'Энерго Сервис',identificationNumber:'123456789012'}});
     await db.collection('contractors').updateOne({_id:new mongoose.Types.ObjectId(createdIds.contractor.id)},{$set:{name:'Изменено человеком'}});await error('index12_execute_import',{planToken:stale.planToken},'PLAN_STALE');

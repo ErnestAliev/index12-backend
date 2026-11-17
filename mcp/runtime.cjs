@@ -39,7 +39,7 @@ function register(name,description,shape,run,options={}) {
   const schema=shape instanceof z.ZodType ? shape : z.object(shape).strict();
   const execute=async (input,extra)=>{
     try {
-      await beforeTool?.(name);
+      await beforeTool?.(name,input);
       const args=schema.parse(input);
       const cached = await resolveToolResult?.(name, args);
       if (cached !== undefined) return cached;
