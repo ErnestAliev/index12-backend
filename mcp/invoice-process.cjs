@@ -5,11 +5,13 @@ const {invoiceDefaults,singleWord}=require('../utils/invoicePolicy.cjs');
 function registerInvoiceProcess(register,{invoke,apiCall}) {
   const schema=prepareSchema.omit({workflow:true,pdfId:true}).extend({pdfId:z.string().uuid().optional(),
     accountId:z.string().regex(/^[a-f\d]{24}$/i).optional(),projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
+    existingOperationId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
     category:z.string().max(100).optional(),subcategory:z.string().max(100).optional(),
-    chatFileId:z.string().uuid().optional(),desktopFileId:z.string().uuid().optional(),
+    chatFileId:z.union([z.string().uuid(),z.string().regex(/^forward:[a-f\d]{64}$/)]).optional(),desktopFileId:z.string().uuid().optional(),
     mediaPermission:z.enum(['explicit_request','user_confirmed']).optional(),requestText:z.string().max(10000).optional(),
   }).superRefine((v,ctx)=>{
-    if(v.direction==='supplier')for(const key of ['category','subcategory'])if(!singleWord(v[key]))ctx.addIssue({code:z.ZodIssueCode.custom,path:[key],message:'Для расхода нужно одно слово'});
+    if(v.direction==='supplier'&&!v.existingOperationId)for(const key of ['category','subcategory'])if(!singleWord(v[key]))ctx.addIssue({code:z.ZodIssueCode.custom,path:[key],message:'Для расхода нужно одно слово'});
+    if(v.direction!=='supplier'&&v.existingOperationId)ctx.addIssue({code:z.ZodIssueCode.custom,path:['existingOperationId'],message:'Существующий расход относится только к счёту поставщика'});
     if([v.pdfId,v.chatFileId,v.desktopFileId].filter(Boolean).length>1)ctx.addIssue({code:z.ZodIssueCode.custom,path:['pdfId'],message:'Передайте один источник оригинала'});
     if(v.direction==='customer'&&!v.sourceTaskId)ctx.addIssue({code:z.ZodIssueCode.custom,path:['sourceTaskId'],message:'Нужна исходная рабочая задача для возврата счёта в её обсуждение'});
   });
@@ -21,10 +23,17 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     };
     const access=await apiCall('GET','status');
     if(access.confirmationMode!=='direct')throw Object.assign(new Error(),{detail:{code:'DIRECT_AUTHORIZATION_REQUIRED',message:'Полный сценарий требует установленного оператором прямого режима MCP'}});
-    const {accountId,projectId,category,subcategory,chatFileId,desktopFileId,mediaPermission,requestText,...input}=args;
+    const {accountId,projectId,category,subcategory,chatFileId,desktopFileId,mediaPermission,requestText,existingOperationId,...input}=args;
     if(projectId&&!snapshot.entities.projects.has(projectId))throw Object.assign(new Error(),{detail:{code:'PROJECT_NOT_FOUND',message:'Проект недоступен в рабочей области'}});
     if(projectId)input.projectId=projectId;
     const defaults=args.direction==='supplier'?invoiceDefaults(snapshot,{companyId:args.companyId,accountId}):null;
+    let existingOperation;
+    if(existingOperationId) {
+      existingOperation=(await call('index12_get_operation',{id:existingOperationId})).operation;
+      const party=existingOperation?.contractorId?await call('index12_company_profile',{kind:'contractors',id:existingOperation.contractorId}):null;
+      if(!existingOperation||existingOperation.type!=='expense'||existingOperation.companyId!==args.companyId||existingOperation.accountId!==defaults.account.id||Number(existingOperation.amount).toFixed(2)!==Number(args.amount).toFixed(2)||party?.company?.identificationNumber!==args.counterparty.taxId)
+        throw Object.assign(new Error(),{detail:{code:'OPERATION_MISMATCH',message:'Существующий расход не соответствует компании, счёту, сумме или БИН/ИИН поставщика. Новый расход не создан.'}});
+    }
     let fingerprint;
     if(chatFileId||desktopFileId){const file=await call('index12_upload_purchase_pdf',{...(chatFileId?{chatFileId}:{desktopFileId}),...(mediaPermission?{mediaPermission}:{})});input.pdfId=file.pdfId;fingerprint=file.sha256;}
     input.workflow=input.direction==='supplier'?'supplier_payment':'customer_invoice';
@@ -39,10 +48,10 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     }
     const operation=args.direction==='supplier'?{type:'expense',amount:String(args.amount),date:prepared.expenseDate,accountId:defaults.account.id,companyId:args.companyId,
       ...((projectId||prepared.sourceProjectId)?{projectId:projectId||prepared.sourceProjectId,projectScope:'selected'}:{}),description:`${args.lines.map(l=>l.description).join('; ')}. Счёт №${args.number} от ${args.date}`.slice(0,10000)}:undefined;
-    const local=await call('index12_prepare_import',{idempotencyKey:`invoice:${planToken}`,contractor:{name:args.counterparty.name,identificationNumber:args.counterparty.taxId},
+    const local=existingOperation?null:await call('index12_prepare_import',{idempotencyKey:`invoice:${planToken}`,contractor:{name:args.counterparty.name,identificationNumber:args.counterparty.taxId},
       ...(operation?{category:{name:category,type:'expense'},subcategory:{name:subcategory},operation,namingPolicy:'single_word'}:{}),
       ...(fingerprint&&operation?{documentFingerprint:fingerprint}:{}),sourceDocument:`Счёт ${args.number||''} от ${args.date}`});
-    const imported=await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
+    const imported=existingOperation?{completed:true,operation:{id:existingOperationId},entities:{contractor:{id:existingOperation.contractorId}}}:await call('index12_execute_import',{planToken:local.planToken,...(requestText?{requestText}:{})});
     if(!imported.completed)return {completed:false,state:'partial',planToken,importPlanToken:local.planToken,message:'Импорт INDEX12 ещё не подтверждён. Документы 1С не создавались.'};
     const operationId=imported.operation?.id||imported.operation?.operation?.id||imported.operation?.operation?._id||imported.operation?._id;
     const contractorId=imported.entities.contractor.id;

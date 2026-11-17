@@ -88,8 +88,9 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const pending = await collection('Jobs').findOne({ chatId: chat._id, ...req.desktopScope, active: true });
     const recent = await collection('Jobs').find({ chatId: chat._id, ...req.desktopScope, status: 'completed',
       $or: [{ kind: 'history', cursor: null }, { kind: 'send', 'result.history': { $exists: true } }] }).sort({ createdAt: -1 }).limit(1).toArray();
-    const cachedHistory = recent[0]?.kind === 'send' ? recent[0].result?.history : recent[0]?.result;
-    res.json({ chat: { id: chat._id, title: chat.title, threadId: await cloudAllowed(req.desktopScope) ? null : chat.threadId || null }, pendingJob: await jobForClient(pending), cachedHistory: cachedHistory || null });
+    const cloud = await cloudAllowed(req.desktopScope);
+    const cachedHistory = cloud && cloudService.history ? await cloudService.history(chat._id, req.desktopScope) : recent[0]?.kind === 'send' ? recent[0].result?.history : recent[0]?.result;
+    res.json({ chat: { id: chat._id, title: chat.title, threadId: cloud ? null : chat.threadId || null }, pendingJob: await jobForClient(pending), cachedHistory: cachedHistory || null });
   }));
   router.get('/chats/:id/executions', wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });
@@ -108,6 +109,25 @@ function createDesktopRouter({ db, Workspace, isAuthenticated, frontendUrl = pro
     const executions = [];
     for (const run of runs.slice(0, 20)) executions.push(await executionForClient(run._id, req.desktopScope));
     res.json({ executions, nextCursor: runs.length > 20 ? Buffer.from(JSON.stringify({ createdAt: runs[19].createdAt, id: runs[19]._id })).toString('base64url') : null });
+  }));
+  router.post('/chats/:id/messages/:messageId/corrections', wrap(async (req, res) => {
+    const scope = req.desktopScope, chatId = req.params.id;
+    const chat = await collection('Chats').findOne({ _id: chatId, ...scope, archived: false });
+    if (!chat) return res.status(404).json({ error: 'Чат не найден.' });
+    if (!await cloudAllowed(scope)) return res.status(409).json({ error: 'Исправления доступны в серверном чате Codex.' });
+    if (await collection('Jobs').findOne({ chatId, ...scope, active: true })) return res.status(409).json({ error: 'Дождитесь завершения текущего запроса.' });
+    const messages = db().collection('cloudMessages');
+    const message = await messages.findOne({ _id: req.params.messageId, ...scope, chatId, role: 'assistant' });
+    if (!message) return res.status(404).json({ error: 'Сообщение не найдено.' });
+    let correction;
+    try { correction = require('./documentText.cjs').correctionInput(message, req.body); }
+    catch (error) { return res.status(error.status || 400).json({ error: error.message }); }
+    const version = message.contentVersion || 0;
+    const result = await messages.updateOne({ _id: message._id, ...scope, chatId, ...(version ? { contentVersion: version } : { $or: [{ contentVersion: 0 }, { contentVersion: { $exists: false } }] }) }, { $push: { corrections: { ...correction, actorId: scope.actorId, createdAt: new Date() } }, $set: { contentVersion: version + 1, correctedAt: new Date() } });
+    if (!result.matchedCount) return res.status(409).json({ error: 'Сообщение изменилось. Обновите историю и выделите фрагмент заново.' });
+    const saved = await messages.findOne({ _id: message._id, ...scope, chatId });
+    await collection('Chats').updateOne({ _id: chatId, ...scope }, { $set: { updatedAt: new Date() } });
+    res.json({ message: { id: saved._id, role: saved.role, content: saved.content, attachments: saved.attachments, corrections: saved.corrections, contentVersion: saved.contentVersion } });
   }));
   router.post('/chats/:id/files/import', wrap(async (req, res) => {
     const chat = await collection('Chats').findOne({ _id: req.params.id, ...req.desktopScope, archived: false });

@@ -18,13 +18,14 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     const foreign = await Workspace.create({ name: 'Foreign', userId: String(stranger._id), isDefault: true });
     const db = mongoose.connection.db, scope = { actorId: String(actor._id), workspaceId: String(workspace._id) };
     chatRouter = require('../../team-chat/router.cjs').createTeamChatRouter({ db: () => db, Workspace, User, history: fixture.audit, getWorkspaceStorageUserId: workspace => String(workspace.userId), frontendUrl: new URL(fixture.apiUrl).origin });
-    let calls = 0, failAfterWrite = false, mode = 'calendar', modelState={}, longReadCount=0;
+    let calls = 0, failAfterWrite = false, mode = 'calendar', modelState={}, longReadCount=0, documentState;
     const documentBytes = Buffer.from('%PDF-1.7\ngenerated ESF fixture'); let generatedTaskId;
     const request = async (url, options) => {
       if (!url.startsWith('https://api.openai.com/')) {
         if(mode.startsWith('model:') && url.includes('/api/mcp/business/tasks') && options.method==='POST') { modelState.backendWrites++; if(mode==='model:tool-error')return Response.json({error:{code:'FORBIDDEN',message:'Fixture denial'}},{status:403}); }
         return fetch(url, options);
       }
+      if (mode === 'documents') return require('./document-text-flow.cjs').reply(url, options, documentState);
       if (url === 'https://api.openai.com/v1/containers/cntr_fixture/files/cfile_fixture') return Response.json({ path: '/mnt/data/ЭСФ.pdf' });
       if (url === 'https://api.openai.com/v1/containers/cntr_fixture/files/cfile_fixture/content') return new Response(documentBytes);
       if (url.startsWith('https://api.openai.com/v1/containers/cntr_fixture/files?')) return Response.json({ data: [{ id: 'cfile_fixture', container_id: 'cntr_fixture', path: '/mnt/data/ЭСФ.pdf' }], has_more: false });
@@ -136,6 +137,7 @@ const { createDesktopRouter } = require('../../codex/router.cjs');
     assert.equal(failed.status, 'failed'); assert.equal(failed.result.execution.completed.length, 1); assert.ok(!failed.error.includes('private internal'));
     assert.equal(await db.collection('mcpCredentials').countDocuments({ source: 'cloud_chat', revokedAt: null }), 0);
     await require('./cloud-model-response.cjs').verify({api,db,scope,waitJob,setMode:value=>{mode=value;modelState={calls:0,backendWrites:0,key:randomUUID()};},getState:()=>modelState});
+    await require('./document-text-flow.cjs').verify({ api, db, scope, waitJob, setState: value => { mode = 'documents'; documentState = value; } });
     console.log('PASS: server chat without desktop worker, real MCP task writes and durable receipts, idempotent retries, cross-device history, tenant isolation, interrupted model response preserves writes, ephemeral credentials revoked');
   } finally {
     cloud?.stop(); if (cloud) for (let i = 0; cloud.running && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 20));
