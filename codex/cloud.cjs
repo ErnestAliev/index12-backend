@@ -2,6 +2,7 @@
 const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { AsyncResource } = require('node:async_hooks');
 const { zodToJsonSchema } = require('zod-to-json-schema');
 const { createMcpRuntime, INSTRUCTIONS } = require('../mcp/runtime.cjs');
 const { workspaceAccess } = require('../utils/operationAccess');
@@ -18,7 +19,7 @@ const { DocumentTexts, historyInput, readFileId } = require('./documentText.cjs'
 const hash = value => createHash('sha256').update(value).digest('hex');
 const CONTEXT = fs.readFileSync(path.join(__dirname, 'context.md'), 'utf8');
 class CloudChat {
-  constructor({ db, User, Workspace, env = process.env, request = fetch, pollMs = 2000, modelTimeoutMs = MODEL_TIMEOUT_MS }) { Object.assign(this, { db, User, Workspace, env, request, pollMs, modelTimeoutMs }); this.instanceId = `cloud:${randomUUID()}`; this.running = false; this.stopped = false; }
+  constructor({ db, User, Workspace, env = process.env, request = fetch, pollMs = 2000, modelTimeoutMs = MODEL_TIMEOUT_MS }) { Object.assign(this, { db, User, Workspace, env, request, pollMs, modelTimeoutMs }); this.instanceId = `cloud:${randomUUID()}`; this.running = false; this.stopped = false; this.background = new AsyncResource('INDEX12CloudWorker'); }
   get configured() { return this.env.INDEX12_CLOUD_CHAT_ENABLED === 'true' && !!this.env.OPENAI_API_KEY; }
   async allowed(scope) { if (!this.configured) return false; const ids = (this.env.INDEX12_CLOUD_CHAT_ACTOR_IDS || '').split(',').map(value => value.trim()).filter(Boolean); return ids.length ? ids.includes(scope.actorId) : !!await this.db().collection('mcpCredentials').findOne({ actorId: scope.actorId, source: 'local_operator', revokedAt: null, expiresAt: { $gt: new Date() } }); }
   get origin() { return this.env.MCP_PUBLIC_ORIGIN || this.env.RENDER_EXTERNAL_URL || 'https://index12-backend.onrender.com'; }
@@ -72,7 +73,7 @@ class CloudChat {
     await this.task;
     await this.db().collection('cloudLeases').deleteOne({ _id: 'chat', instanceId: this.instanceId });
   }
-  kick() { if (!this.configured || this.running || this.stopped) return; this.running = true; this.task = this.drain().catch(error => console.error('[Cloud chat]', error.name)).finally(() => { this.running = false; }); }
+  kick() { if (!this.configured || this.running || this.stopped) return; this.running = true; this.task = this.background.runInAsyncScope(() => this.drain()).catch(error => console.error('[Cloud chat]', error.name)).finally(() => { this.running = false; }); }
   async drain() {
     if (!await this.lease()) return;
     await this.recover();
