@@ -71,7 +71,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     "/messages/:id",
     wrap(async (req, res) => {
       const row = await load(req);
-      if (["request", "task",'approval_request'].includes(row.kind))
+      if (["request", "task",'approval_request','finance_operation'].includes(row.kind))
         fail("Откройте карточку для изменения", 409);
       if (!req.team.owner && row.authorId !== req.team.actorId)
         fail("Можно изменить только своё сообщение", 403);
@@ -227,7 +227,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     "/messages/:id/decision",
     wrap(async (req, res) => {
       let row = await load(req);
-      if(row.kind==='approval_request'){
+      if(row.kind==='approval_request'||(row.kind==='finance_operation'&&row.approvalRequest)){
         if(!Number.isInteger(req.body.expectedVersion)||req.body.expectedVersion<0||req.body.expectedVersion>version(row))fail('Сообщение изменилось. Откройте его заново',409);
         const note=text(req.body.note||'',1000,false);
         for(let attempt=0;attempt<4;attempt++){
@@ -239,6 +239,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
           await decorate(req,[updated]);return res.json({message:updated,messageId:updated._id});
         }
       }
+      if (row.kind === 'finance_operation') fail('Для этой операции согласование не требуется', 409);
       expected(req, row);
       if (["request", "task"].includes(row.kind))
         fail("Используйте согласование в карточке заявки", 409);

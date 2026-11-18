@@ -88,7 +88,7 @@ async function startFixture(options = {}) {
     Object.assign(context, context.models);
     const models = context.models;
     await models.Subcategory.init();
-    run('const _getDayOfYear =', 'const findCategoryByName =');
+    run('const _getDayOfYear =', 'const findCategoryByName =', '\nglobalThis.allocateCell = getFirstFreeCellIndex;');
     run('function normalizeOptionalId(', 'function getWorkspaceStorageUserId(');
     run('const mergeLegacyInterCompanyTransfers =', "app.get('/api/events/all-for-export'");
     run("app.get('/api/events/all-for-export'", "app.get('/api/deals/all'");
@@ -121,7 +121,7 @@ async function startFixture(options = {}) {
       const response = await fetch(`${apiUrl}${endpoint}`, { method, headers: { 'Content-Type': 'application/json', ...(owner ? { 'x-test-owner': owner } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
       return { status: response.status, data: await response.json() };
     }
-    return { close, app, apiUrl, models, audit: changeHistory, entityHandlers, userId, request, emitted, identityModels: context.identityModels, dropNextMcpResponse: () => { dropResponse = true; }, setBrowserActor: id => { browserActor = id; }, setBrowserRole: role => { browserRole = role; } };
+    return { close, app, apiUrl, models, allocateCell: context.allocateCell, audit: changeHistory, entityHandlers, userId, request, emitted, identityModels: context.identityModels, dropNextMcpResponse: () => { dropResponse = true; }, setBrowserActor: id => { browserActor = id; }, setBrowserRole: role => { browserRole = role; } };
   } catch (error) { await close(); throw error; }
 }
 

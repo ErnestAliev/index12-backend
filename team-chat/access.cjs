@@ -5,7 +5,7 @@ const { validateOverrides } = require('./permissions.cjs');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const loginKey = value => text(value, 100).normalize('NFKC').replace(/\s+/g, ' ').toLocaleLowerCase('ru');
 const publicMember = ({ password, passwordBox, ...member }) => member;
-function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, notify }) {
+function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, notify, validateAccountIds }) {
   const passwordContext = row => ({ _id: 'employee-password:' + row._id, workspaceId: row.workspaceId });
   async function ensureIndexes() {
     // Keep uniqueness for legacy phones while allowing new employees without a phone.
@@ -77,6 +77,7 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       const password = await hashPassword(req.body.password), id = randomUUID();
       const member = { _id: id, workspaceId: req.team.workspaceId, name, position, loginKey: loginKey(name), password, role, status: 'invited', requireInstalledApp: true, version: 0, authEpoch: 0, createdAt: new Date(), createdBy: req.team.actorId };
       if (req.body.access != null) member.access = validateOverrides(req.body.access);
+      if (Object.hasOwn(req.body, 'accountIds')) member.accountIds = await validateAccountIds(req.team, req.body.accountIds);
       member.passwordBox = invites.seal(req.body.password, passwordContext(member));
       const entry = await invites.create(req.team, role);
       await coll('Invites').updateOne({ _id: entry._id }, { $set: { namedLogin: true, entryForMemberId: id } });
@@ -141,6 +142,7 @@ function createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, not
       const member = await transaction(async options => {
         const row = await coll('Members').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId, version: req.body.expectedVersion }, options);
         if (!row) fail('Сотрудник изменился. Обновите список', 409);
+        if (Object.hasOwn(req.body, 'accountIds')) details.accountIds = await validateAccountIds(req.team, req.body.accountIds, options.session);
         let status = row.status;
         if (req.body.blocked === true) status = 'revoked';
         if (req.body.blocked === false && ['revoked', 'rejected'].includes(status)) status = row.activatedAt || row.phone ? 'active' : 'invited';

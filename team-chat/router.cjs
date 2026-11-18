@@ -27,6 +27,7 @@ function createTeamChatRouter({
   User,
   getWorkspaceStorageUserId,
   history,
+  finance,
   frontendUrl,
   onTasksChanged = () => {},
 }) {
@@ -57,6 +58,7 @@ function createTeamChatRouter({
     role: p.role,
     status: p.status === "active" && p.requireInstalledApp && !p.installationConfirmed ? "installation_required" : p.status,
     owner: p.owner,
+    accountIds: p.owner ? [] : (p.accountIds || []),
     permissions: { manageMembers: p.owner === true, access: p.access || permissions.effectiveAccess(p) },
     ...(p.owner ? { roleAccess: p.roleAccess || permissions.roleAccess() } : {}),
     roles,
@@ -82,7 +84,7 @@ function createTeamChatRouter({
     Workspace,
     frontendUrl,
   });
-  const access = require("./access.cjs").createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, notify });
+  const access = require("./access.cjs").createAccess({ db, coll, invites, sessions, Workspace, frontendUrl, notify, validateAccountIds: (team, ids, session) => require('./finance.cjs').validateAccountIds(db(), team, ids, session) });
   let indexes;
   const ready = () =>
     (indexes ||= Promise.all([
@@ -1100,6 +1102,7 @@ function createTeamChatRouter({
     router,
     { coll, wrap, notify, Workspace },
   );
+  require("./finance.cjs").registerFinanceRoutes(router, { db, coll, wrap, history, User, finance, notify });
   require("./search.cjs").registerSearchRoutes(router, { coll, wrap, tasks, decorate: messageActions.decorate });
   router.use((_req, res) =>
     res.status(404).json({ message: "Маршрут чата не найден" }),
