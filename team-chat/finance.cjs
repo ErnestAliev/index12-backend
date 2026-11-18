@@ -235,8 +235,16 @@ function registerFinanceRoutes(
       const row = data.accounts.find((row) => sid(row) === id);
       if (!row)
         fail("Счёт недоступен. Обновите форму или обратитесь к владельцу", 403);
-      if (!row.companyId && !row.individualId)
-        fail("Владелец счёта не указан. Исправьте его в редакторе счетов");
+      const companyId = sid(row.companyId),
+        individualId = sid(row.individualId);
+      if (
+        !!companyId === !!individualId ||
+        (companyId &&
+          !data.companies.some((owner) => sid(owner) === companyId)) ||
+        (individualId &&
+          !data.individuals.some((owner) => sid(owner) === individualId))
+      )
+        fail("Владелец счёта не настроен. Исправьте его в редакторе счетов");
       return row;
     };
     const ref = (collection, value) => {

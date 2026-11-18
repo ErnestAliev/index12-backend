@@ -130,6 +130,35 @@ const { startFixture } = require("./subcategories.cjs");
     assert.ok(!JSON.stringify(options.data).includes("secret-tax-details"));
     assert.ok(!JSON.stringify(options.data).includes("Secret account"));
     assert.equal((await request("/finance/account-options")).status, 403);
+    const brokenAccount = await Account.create({
+      userId,
+      workspaceId,
+      name: "Broken owner",
+      companyId: foreignCompany._id,
+    });
+    await db
+      .collection("teamChatMembers")
+      .updateOne(
+        { _id: member._id },
+        { $push: { accountIds: String(brokenAccount._id) } },
+      );
+    const broken = await request("/finance/operations", {
+      method: "POST",
+      body: {
+        requestId: randomUUID(),
+        type: "income",
+        amount: 100,
+        date: "2026-11-18",
+        accountId: String(brokenAccount._id),
+      },
+    });
+    assert.equal(broken.status, 400, JSON.stringify(broken.data));
+    await db
+      .collection("teamChatMembers")
+      .updateOne(
+        { _id: member._id },
+        { $pull: { accountIds: String(brokenAccount._id) } },
+      );
     const identity = await request("/me");
     assert.equal(identity.data.permissions.access.system, false);
     assert.equal(identity.data.permissions.access.calendar, false);
