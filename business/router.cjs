@@ -155,7 +155,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
     if (!ref && bin && result.fields.identificationNumber !== bin) fail('БИН/ИИН из 1С не совпадает с карточкой', 502);
     const fields = profileInput(result.fields);
     delete fields.name; // Preserve the display name used by operations and accounts.
-    if (fields.bankAccounts) fields.bankAccounts = [...fields.bankAccounts, ...(entity.bankAccounts || []).filter(row => !fields.bankAccounts.some(source => source.iban === row.iban))];
+    if (fields.bankAccounts) fields.bankAccounts = require('./onec/profile-banks.cjs').mergeBankAccounts(fields.bankAccounts,entity.bankAccounts||[]);
     const company = await model.findOneAndUpdate({ _id: entity._id, userId: entity.userId, identificationNumber: entity.identificationNumber ?? null, ...filter }, { $set: { ...fields, onecSync: { ...result.sync, connectionKey } }, $inc: { profileVersion: 1 } }, { new: true, runValidators: true }).lean();
     if (!company) fail('Карточка изменена во время загрузки. Повторите синхронизацию', 409);
     emitEntityEvent(req, entity.userId, req.params.kind === 'companies' ? 'company_updated' : 'contractor_updated', company);

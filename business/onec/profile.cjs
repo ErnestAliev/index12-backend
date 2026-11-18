@@ -1,6 +1,7 @@
 'use strict';
 const path = require('node:path');
 const { fail, identifier } = require('../providers.cjs');
+const {profileBanks}=require('./profile-banks.cjs');
 let connection;
 async function connect() {
   if (!connection) connection = (async () => {
@@ -53,26 +54,25 @@ async function lookupProfile(bin, kind, invoke = call, ref) {
   const row = (await invoke('onec_get_object', { collection, id: ref })).object;
   if (row.Ref_Key !== ref || row.DeletionMark || row.IsFolder) fail('Запись 1С изменилась, удалена или является группой', 409);
   bin = row[binField] ? identifier(row[binField]) : '';
-  const fields = { legalName: text(row.НаименованиеПолное) || text(row.Description), identificationNumber: bin, kbe: text(row.КБЕ), registrationDate: text(row.ДатаРегистрации)?.match(/^(?!0001)\d{4}-\d{2}-\d{2}/)?.[0], vatNumber: text([row.СерияСвидетельстваПоНДС, row.НомерСвидетельстваПоНДС].filter(Boolean).join(' ')), vatRegistrationDate: text(row.ДатаПостановкиНаУчетПоНДС)?.match(/^(?!0001)\d{4}-\d{2}-\d{2}/)?.[0] };
+  const fields = { legalName: text(row.НаименованиеПолное) || text(row.Description), ...(bin?{identificationNumber:bin}:{}), kbe: text(row.КБЕ), registrationDate: text(row.ДатаРегистрации)?.match(/^(?!0001)\d{4}-\d{2}-\d{2}/)?.[0], vatNumber: text([row.СерияСвидетельстваПоНДС, row.НомерСвидетельстваПоНДС].filter(Boolean).join(' ')), vatRegistrationDate: text(row.ДатаПостановкиНаУчетПоНДС||row.ДатаСвидетельстваПоНДС)?.match(/^(?!0001)\d{4}-\d{2}-\d{2}/)?.[0] };
   const warnings = [];
   const { collections } = await invoke('onec_schema', {});
   // Standard reference catalogs are confirmed against the live metadata inventory.
+  const references=new Map();
   async function getCatalog(name, id) {
     if (!validRef(id)) return null;
     if (!collections.some(s => s.name === name)) { warnings.push(`Не опубликован ${name}`); return null; }
-    return (await invoke('onec_get_object', { collection: name, id })).object;
+    const key=name+':'+id;
+    if(!references.has(key))references.set(key,invoke('onec_get_object',{collection:name,id}).then(result=>{if(result.object?.Ref_Key!==id)fail('1С вернула другую запись справочника',502);return result.object;}));
+    return references.get(key);
   }
   const activity = await getCatalog('Catalog_ВидыДеятельности', row.ОсновнойВидДеятельности_Key);
   if (activity) fields.activity = [text(activity.КодОКЭД), text(activity.ПолноеНаименование) || text(activity.Description)].filter(Boolean).join(' ');
-  const bank = await getCatalog('Catalog_БанковскиеСчета', row.ОсновнойБанковскийСчет_Key);
-  if (bank) {
-    if (bank.Owner !== row.Ref_Key || bank.Owner_Type !== `StandardODATA.${collection}` || bank.DeletionMark) fail('Банковский счёт 1С принадлежит другой организации или удалён', 502);
-    const bankInfo = await getCatalog('Catalog_Банки', bank.Банк_Key);
-    const currency = await getCatalog('Catalog_Валюты', bank.ВалютаДенежныхСредств_Key);
-    fields.bankAccounts = [{ iban: text(bank.НомерСчета) || '', bankName: text(bankInfo?.Description) || '', bic: text(bankInfo?.БИК) || '', currency: text(currency?.Description) || '' }];
-  }
-  for (const [field, source] of [['legalAddress', 'ЮридическийАдрес'], ['director', 'Руководитель'], ['phone', 'Телефон'], ['email', 'ЭлектроннаяПочта'], ['registrationStatus', 'СтатусРегистрации']]) if (text(row[source])) fields[field] = text(row[source]);
-  const missing = ['legalAddress', 'director', 'registrationStatus'].filter(key => !fields[key]);
-  return { fields: Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), sync: { source: '1С', collection, ref: row.Ref_Key, name: text(row.Description) || text(row.НаименованиеПолное) || '', identificationNumber: bin, checkedAt: new Date().toISOString(), missing, warnings } };
+  const banks=await profileBanks({row,collection,collections,invoke,getCatalog,text,validRef,warnings});
+  if(banks.accounts)fields.bankAccounts=banks.accounts;
+  for (const [field, source] of [['legalAddress', 'ЮридическийАдрес'], ['postalAddress','ПочтовыйАдрес'], ['director', 'Руководитель'], ['chiefAccountant','ГлавныйБухгалтер'], ['phone', 'Телефон'], ['email', 'ЭлектроннаяПочта'], ['website','ВебСайт'], ['registrationStatus', 'СтатусРегистрации']]) if (text(row[source])) fields[field] = text(row[source]);
+  const missing = require('../company-profile.cjs').stringFields.filter(key=>!['name','notes'].includes(key)&&!fields[key]);
+  if(!banks.summary.checked||!banks.accounts?.length)missing.push('bankAccounts');
+  return { fields: Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), sync: { source: '1С', collection, ref: row.Ref_Key, name: text(row.Description) || text(row.НаименованиеПолное) || '', identificationNumber: bin, checkedAt: new Date().toISOString(), missing, warnings:[...new Set(warnings)], bankAccounts:banks.summary } };
 }
 module.exports = { lookupProfile, listCandidates };

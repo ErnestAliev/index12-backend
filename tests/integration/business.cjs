@@ -85,10 +85,13 @@ async function run() {
     const savedProfile = await request(`/companies/${company._id}`, 'PATCH', { expectedVersion: refreshed.data.company.profileVersion, changes: { director: 'Ручная правка', externalLinks: [{ title: 'Документы', url: 'https://drive.google.com/drive/folders/test', purpose: 'documents' }] } });
     assert.equal(savedProfile.status, 200); assert.equal(savedProfile.data.company.director, 'Ручная правка');
     assert.equal((await request(`/companies/${company._id}`, 'PATCH', { expectedVersion: savedProfile.data.company.profileVersion, changes: { externalLinks: [{ url: 'javascript:alert(1)' }] } })).status, 400);
-    const contractor = await Contractor.create({ name: 'Поставщик без БИН', userId: fixture.userId });
+    const contractor = await Contractor.create({ name: 'Поставщик без БИН', userId: fixture.userId,bankAccounts:[{iban:'KZTESTACCOUNT',bic:'SAVEDBIC'},{iban:'MANUAL',bankName:'Ручной банк'}] });
     const linkedContractor = await request(`/contractors/${contractor._id}/sync-onec`, 'POST', { ref: '22222222-2222-4222-8222-222222222222', expectedVersion: 0 });
     assert.equal(linkedContractor.status, 200); assert.equal(linkedContractor.data.company.identificationNumber, bin);
     assert.equal(linkedContractor.data.company.name, 'Поставщик без БИН');
+    assert.equal(linkedContractor.data.company.bankAccounts.length,2);assert.equal(linkedContractor.data.company.bankAccounts[1].iban,'MANUAL');
+    const refreshedContractor=await request(`/contractors/${contractor._id}/sync-onec`,'POST',{expectedVersion:linkedContractor.data.company.profileVersion});
+    assert.equal(refreshedContractor.status,200);assert.equal(refreshedContractor.data.company.bankAccounts.length,2,'refresh follows the saved 1C reference without duplicating or deleting accounts');
     assert.equal((await request(`/companies/${otherCompany._id}/connection`, 'PUT', { personalAccountToken: 'personal-account-test-token' })).status, 404);
     assert.equal((await request(`/companies/${company._id}/connection`, 'PUT', { personalAccountToken: 'personal-account-test-token' })).status, 200);
     await until(() => debtCalls === 1);
