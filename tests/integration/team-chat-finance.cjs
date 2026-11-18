@@ -387,6 +387,121 @@ const { startFixture } = require("./subcategories.cjs");
       .find({ actorId: member._id })
       .toArray();
     assert.ok(audit.length >= 6);
+    // Dragging shares the original; neither presentation creates financial data.
+    const foreignOperation = await Event.create({
+      userId,
+      workspaceId: new mongoose.Types.ObjectId(),
+      type: "expense",
+      amount: -500,
+      date: new Date("2026-11-18T12:00:00Z"),
+      dateKey: "2026-322",
+      cellIndex: 20,
+    });
+    const financialCount = await Event.countDocuments({ userId });
+    const buttonShare = { id: randomUUID(), operationId: id, mode: "button" };
+    const tableShare = { ...buttonShare, id: randomUUID(), mode: "table" };
+    const sharedButton = await request("/finance/shares", {
+      staff: false,
+      method: "POST",
+      body: buttonShare,
+    });
+    const sharedTable = await request("/finance/shares", {
+      staff: false,
+      method: "POST",
+      body: tableShare,
+    });
+    assert.equal(sharedButton.status, 201, JSON.stringify(sharedButton.data));
+    assert.equal(sharedTable.status, 201, JSON.stringify(sharedTable.data));
+    assert.equal(await Event.countDocuments({ userId }), financialCount);
+    assert.equal(
+      (
+        await request("/finance/shares", {
+          staff: false,
+          method: "POST",
+          body: buttonShare,
+        })
+      ).data.replayed,
+      true,
+    );
+    assert.equal(
+      (
+        await request("/finance/shares", {
+          staff: false,
+          method: "POST",
+          body: { ...buttonShare, mode: "table" },
+        })
+      ).status,
+      409,
+    );
+    assert.equal(
+      (
+        await request("/finance/shares", {
+          method: "POST",
+          body: { ...buttonShare, id: randomUUID() },
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await request("/finance/shares", {
+          staff: false,
+          method: "POST",
+          body: {
+            ...buttonShare,
+            id: randomUUID(),
+            operationId: String(foreignOperation._id),
+          },
+        })
+      ).status,
+      404,
+    );
+    const opened = await request(
+      "/finance/messages/" + buttonShare.id + "/operation",
+    );
+    assert.equal(opened.status, 200, JSON.stringify(opened.data));
+    assert.equal(opened.data.canEdit, false);
+    assert.equal(opened.data.operation.amount, 123.45);
+    assert.ok(!JSON.stringify(opened.data).includes("balance"));
+    assert.deepEqual(
+      opened.data.options.accounts.map((row) => row.name),
+      ["Cash A"],
+    );
+    assert.equal(
+      (await request("/finance/messages/" + tableShare.id + "/operation"))
+        .status,
+      404,
+    );
+    const edited = await fixture.request(
+      "/events/" + id,
+      "PUT",
+      { amount: 250, date: "2026-11-20T12:00:00Z" },
+      userId,
+    );
+    assert.equal(edited.status, 200, JSON.stringify(edited.data));
+    const reopened = await request(
+      "/finance/messages/" + buttonShare.id + "/operation",
+      { staff: false },
+    );
+    assert.equal(reopened.data.operation._id, id);
+    assert.equal(reopened.data.operation.amount, 250);
+    assert.equal(reopened.data.canEdit, true);
+    assert.ok(
+      sharedTable.data.message.operationShare.rows
+        .find((row) => row.label === "Сумма")
+        .value.includes("123,45"),
+    );
+    await request("/messages/" + buttonShare.id, {
+      staff: false,
+      method: "DELETE",
+      body: { expectedVersion: 0 },
+    });
+    assert.equal(
+      (await request("/finance/messages/" + buttonShare.id + "/operation"))
+        .status,
+      404,
+    );
+    assert.ok(await Event.findById(id));
     const version = (
       await db.collection("teamChatMembers").findOne({ _id: member._id })
     ).version;

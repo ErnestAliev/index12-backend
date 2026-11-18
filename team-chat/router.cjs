@@ -1102,6 +1102,7 @@ function createTeamChatRouter({
     router,
     { coll, wrap, notify, Workspace },
   );
+  require("./operation-shares.cjs").registerOperationShareRoutes(router, { db, coll, wrap, finance, notify });
   require("./finance.cjs").registerFinanceRoutes(router, { db, coll, wrap, history, User, finance, notify });
   require("./search.cjs").registerSearchRoutes(router, { coll, wrap, tasks, decorate: messageActions.decorate });
   router.use((_req, res) =>

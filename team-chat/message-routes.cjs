@@ -71,7 +71,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     "/messages/:id",
     wrap(async (req, res) => {
       const row = await load(req);
-      if (["request", "task",'approval_request','finance_operation'].includes(row.kind))
+      if (["request", "task",'approval_request','finance_operation','operation_share'].includes(row.kind))
         fail("Откройте карточку для изменения", 409);
       if (!req.team.owner && row.authorId !== req.team.actorId)
         fail("Можно изменить только своё сообщение", 403);
