@@ -11,7 +11,7 @@ const { startFixture } = require("./subcategories.cjs");
   try {
     const db = mongoose.connection.db,
       { User, Workspace } = fixture.identityModels;
-    const { Account, Company, Contractor, Project, Category, Event } =
+    const { Account, Company, Individual, Contractor, Project, Category, Subcategory, Event } =
       fixture.models;
     const owner = await User.create({
       name: "Finance owner",
@@ -41,11 +41,12 @@ const { startFixture } = require("./subcategories.cjs");
       companyId: company._id,
       balance: 999999,
     });
+    const individual = await Individual.create({ userId, workspaceId, name: "Шерхан" });
     const b = await Account.create({
       userId,
       workspaceId,
       name: "Cash B",
-      companyId: company._id,
+      individualId: individual._id,
     });
     const forbidden = await Account.create({
       userId,
@@ -79,6 +80,8 @@ const { startFixture } = require("./subcategories.cjs");
       workspaceId,
       name: "Услуги",
     });
+    const subcategory = await Subcategory.create({ userId, workspaceId, name: "Монтаж", nameKey: "монтаж", parentCategoryId: category._id });
+    const value = (message, label) => message.financeOperation.rows.find(row => row.label === label)?.value;
     const member = {
       _id: randomUUID(),
       workspaceId,
@@ -171,13 +174,22 @@ const { startFixture } = require("./subcategories.cjs");
       accountId: String(a._id),
       contractorId: String(contractor._id),
       categoryId: String(category._id),
+      subcategoryId: String(subcategory._id),
       description: "Fixture income",
+      comment: "По договору № 12",
     };
     const created = await request("/finance/operations", {
       method: "POST",
       body: payload,
     });
     assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(value(created.data.message, "Счёт"), "Cash A");
+    assert.equal(value(created.data.message, "Владелец счёта"), "Allowed company");
+    assert.equal(value(created.data.message, "От кого"), "Fixture supplier");
+    assert.equal(value(created.data.message, "Категория"), "Услуги");
+    assert.equal(value(created.data.message, "Подкатегория"), "Монтаж");
+    assert.equal(value(created.data.message, "Описание"), "Fixture income");
+    assert.equal(value(created.data.message, "Комментарий"), "По договору № 12");
     const id = created.data.message.financeOperation.operationId;
     const row = await Event.findById(id).lean();
     assert.equal(row.cellIndex, 0);
@@ -250,6 +262,8 @@ const { startFixture } = require("./subcategories.cjs");
       },
     });
     assert.equal(expense.status, 201, JSON.stringify(expense.data));
+    assert.equal(value(expense.data.message, "Кому"), "Fixture supplier");
+    assert.equal(value(expense.data.message, "Проект"), "Fixture project, Fixture project 2");
     const expenseId = expense.data.message.financeOperation.operationId;
     assert.equal((await Event.findById(expenseId)).amount, -123.45);
     assert.equal(expense.data.message.approvalRequest.state, "pending");
@@ -302,12 +316,27 @@ const { startFixture } = require("./subcategories.cjs");
       body: transfer,
     });
     assert.equal(moved.status, 201, JSON.stringify(moved.data));
+    assert.equal(value(moved.data.message, "Счёт списания"), "Cash A");
+    assert.equal(value(moved.data.message, "Владелец счёта списания"), "Allowed company");
+    assert.equal(value(moved.data.message, "Счёт зачисления"), "Cash B");
+    assert.equal(value(moved.data.message, "Владелец счёта зачисления"), "Шерхан");
+    assert.equal(moved.data.message.financeOperation.isWithdrawal, false);
     const tr = await Event.findById(
       moved.data.message.financeOperation.operationId,
     ).lean();
     assert.equal(tr.type, "transfer");
     assert.equal(tr.amount, 100);
     assert.equal(tr.cellIndex, 2);
+    const withdrawal = await request('/finance/operations', {
+      method: 'POST', body: { ...transfer, requestId: randomUUID(), toAccountId: null, transferPurpose: 'withdrawal', withdrawalRecipient: 'Operator', comment: 'Под отчёт' },
+    });
+    assert.equal(withdrawal.status, 201, JSON.stringify(withdrawal.data));
+    assert.equal(withdrawal.data.message.financeOperation.isWithdrawal, true);
+    assert.equal(value(withdrawal.data.message, 'Счёт зачисления'), 'Operator');
+    assert.equal(value(withdrawal.data.message, 'Комментарий'), 'Под отчёт');
+    const liveWithdrawal = await request('/messages/' + withdrawal.data.message._id);
+    assert.equal(liveWithdrawal.data.message.financeOperation.isWithdrawal, true);
+    assert.equal(value(liveWithdrawal.data.message, 'Счёт зачисления'), 'Operator');
     const concurrent = await Promise.all(
       [0, 1, 2].map(() =>
         request("/finance/operations", {
@@ -498,6 +527,11 @@ const { startFixture } = require("./subcategories.cjs");
     assert.equal(liveCard.data.message.financeOperation.amount, 275);
     assert.equal(liveCard.data.message.financeOperation.description, 'Updated from chat');
     assert.equal(liveCard.data.message.financeOperation.comment, 'Owner correction');
+    assert.equal(value(liveCard.data.message, 'Описание'), 'Updated from chat');
+    assert.equal(value(liveCard.data.message, 'Комментарий'), 'Owner correction');
+    assert.equal(value(liveCard.data.message, 'Дата'), '20.11.2026');
+    assert.equal(value(liveCard.data.message, 'Владелец счёта'), 'Allowed company');
+    assert.equal(value(liveCard.data.message, 'Подкатегория'), 'Монтаж');
     assert.equal(liveCard.data.message.financeOperation.audit.createdByName, 'Operator');
     assert.equal(liveCard.data.message.financeOperation.audit.editedByName, 'Finance owner');
     assert.ok(liveCard.data.message.financeOperation.audit.editedAt);

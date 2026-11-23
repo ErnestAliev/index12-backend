@@ -5,7 +5,8 @@ const { scopeQuery } = require("../mcp/finance.cjs");
 const { fail, text } = require("./domain.cjs");
 const permissions = require("./permissions.cjs");
 const { taskAccess } = require("./mcp-access.cjs");
-const { normalizeTransferData } = require("../utils/transferSemantics");
+const { normalizeTransferData, isSystemWithdrawal } = require("../utils/transferSemantics");
+const { snapshot } = require("./operation-shares.cjs");
 const { equalProjectShares } = require("../utils/projectScope");
 const { withDaySlotLock } = require("../utils/daySlotLock");
 const sid = (value) => (value ? String(value._id || value) : null);
@@ -437,6 +438,8 @@ function registerFinanceRoutes(
       createdAt: new Date(),
       financeOperation: {
         operationId: sid(savedEvents[0]),
+        rows: snapshot(savedEvents[0], data).rows,
+        isWithdrawal: isSystemWithdrawal(savedEvents[0]),
         audit: { createdAt: savedEvents[0].createdAt, createdBy: team.actorId, createdByName: team.name, editedAt: null, editedByName: null },
         type: body.type,
         amount: operation.amount,

@@ -2,6 +2,7 @@
 const { ObjectId } = require("mongoose").mongo;
 const { scopeQuery, eventDay } = require("../mcp/finance.cjs");
 const { snapshot, fields, referenceFields } = require("./operation-shares.cjs");
+const { isSystemWithdrawal } = require("../utils/transferSemantics");
 const sid = value => value ? String(value._id || value) : null;
 const valid = value => typeof value === "string" && /^[a-f\d]{24}$/i.test(value);
 
@@ -53,6 +54,7 @@ async function decorateFinanceMessages({ db, Event, team, messages }) {
       partyName: value(view.type === "income" ? "От кого" : "Кому"),
       projectNames: [value("Проект")].filter(Boolean), categoryName: value("Категория"),
       description: operation.description || "", comment: operation.comment || "", audit,
+      rows: view.rows, isWithdrawal: isSystemWithdrawal(operation),
     };
   }
 }
