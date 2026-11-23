@@ -10,7 +10,7 @@ const revisionFilter = (v) =>
   v === 0
     ? { $or: [{ version: 0 }, { version: { $exists: false } }] }
     : { version: v };
-function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
+function registerMessageRoutes(router, { coll, wrap, notify, Workspace, decorateFinance }) {
   async function load(req) {
     const row = await coll("Messages").findOne({
       _id: req.params.id,
@@ -420,6 +420,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace }) {
     }),
   );
   async function decorate(req, messages) {
+    await decorateFinance?.(req, messages);
     const ids = [
       ...new Set(messages.filter((m) => !m.deletedAt).map((m) => m._id)),
     ];

@@ -185,6 +185,14 @@ const { startFixture } = require("./subcategories.cjs");
     assert.equal(row.dateKey, "2026-322");
     assert.equal(String(row.companyId), String(company._id));
     assert.equal(row.createdBy, member._id);
+    const automatic = await request('/finance/messages/' + created.data.message._id + '/operation', { staff: false });
+    assert.equal(automatic.status, 200, JSON.stringify(automatic.data));
+    assert.equal(automatic.data.operation._id, id);
+    assert.equal(automatic.data.canEdit, true);
+    assert.equal(automatic.data.audit.createdByName, 'Operator');
+    assert.ok(automatic.data.audit.createdAt);
+    assert.equal(automatic.data.audit.editedAt, null);
+    assert.equal((await request('/finance/messages/' + created.data.message._id + '/operation')).data.canEdit, false);
     assert.equal(
       (await request("/finance/operations", { method: "POST", body: payload }))
         .data.replayed,
@@ -479,12 +487,28 @@ const { startFixture } = require("./subcategories.cjs");
       userId,
     );
     assert.equal(edited.status, 200, JSON.stringify(edited.data));
+    // A normal owner edit changes the original operation, its live chat card and audit.
+    const editResponse = await fetch(fixture.apiUrl + '/events/' + id, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Index12-Workspace-ID': workspaceId },
+      body: JSON.stringify({ amount: 275, date: '2026-11-20T12:00:00Z', description: 'Updated from chat', comment: 'Owner correction' }),
+    });
+    assert.equal(editResponse.status, 200, await editResponse.clone().text());
+    await router.operationChanged(workspaceId, id);
+    const liveCard = await request('/messages/' + created.data.message._id);
+    assert.equal(liveCard.data.message.financeOperation.amount, 275);
+    assert.equal(liveCard.data.message.financeOperation.description, 'Updated from chat');
+    assert.equal(liveCard.data.message.financeOperation.comment, 'Owner correction');
+    assert.equal(liveCard.data.message.financeOperation.audit.createdByName, 'Operator');
+    assert.equal(liveCard.data.message.financeOperation.audit.editedByName, 'Finance owner');
+    assert.ok(liveCard.data.message.financeOperation.audit.editedAt);
+    assert.equal(liveCard.data.message.createdAt, created.data.message.createdAt);
+    assert.equal((await Event.findById(id)).amount, 275);
     const reopened = await request(
       "/finance/messages/" + buttonShare.id + "/operation",
       { staff: false },
     );
     assert.equal(reopened.data.operation._id, id);
-    assert.equal(reopened.data.operation.amount, 250);
+    assert.equal(reopened.data.operation.amount, 275);
     assert.equal(reopened.data.canEdit, true);
     assert.ok(
       sharedTable.data.message.operationShare.rows

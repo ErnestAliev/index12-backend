@@ -147,6 +147,9 @@ const emitToAll = (req, userId, event, data) => {
 const emitToWorkspace = (req, workspaceId, event, data, extraMeta = {}) => {
     if (changeHistory.current?.()?.undo && /^operation_(added|updated|deleted)$/.test(event)) extraMeta = { ...extraMeta, historyReceipt: true };
     if (changeHistory.defer(() => emitToWorkspace(req, workspaceId, event, data, extraMeta))) return;
+    if (workspaceId && /^operation_(updated|deleted)$/.test(event)) {
+        void teamChatRouter.operationChanged(workspaceId, data?._id || data).catch(error => console.error('[Team chat] Operation refresh failed:', error.message));
+    }
     if (!req.io || !workspaceId) return;
 
     const socketId = req.headers['x-socket-id'];

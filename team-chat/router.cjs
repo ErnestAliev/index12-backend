@@ -34,6 +34,9 @@ function createTeamChatRouter({
   const router = express.Router(),
     bus = new EventEmitter();
   bus.setMaxListeners(1000);
+  router.operationChanged = async (workspaceId, operationId) => {
+    if (await require("./finance-messages.cjs").touchFinanceMessages(db, workspaceId, operationId)) bus.emit(String(workspaceId));
+  };
   const coll = (name) => {
     const raw = db().collection('teamChat' + name);
     return new Proxy(raw, { get(target, key) {
@@ -110,6 +113,7 @@ function createTeamChatRouter({
       coll("Sessions").createIndex({ memberId: 1, authEpoch: 1, expiresAt: 1 }),
       access.ensureIndexes(),
       coll("Messages").createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
+      coll("Messages").createIndex({ workspaceId: 1, "financeOperation.operationId": 1 }),
       coll("Messages").createIndex({ workspaceId: 1, "replyTo.messageId": 1 }),
       coll("MessageReactions").createIndex({ workspaceId: 1, messageId: 1 }),
       coll("MessageReads").createIndex({
@@ -1100,7 +1104,7 @@ function createTeamChatRouter({
   );
   const messageActions = require("./message-routes.cjs").registerMessageRoutes(
     router,
-    { coll, wrap, notify, Workspace },
+    { coll, wrap, notify, Workspace, decorateFinance: (req, messages) => require("./finance-messages.cjs").decorateFinanceMessages({ db, Event: finance?.Event, team: req.team, messages }) },
   );
   require("./operation-shares.cjs").registerOperationShareRoutes(router, { db, coll, wrap, finance, notify });
   require("./finance.cjs").registerFinanceRoutes(router, { db, coll, wrap, history, User, finance, notify });

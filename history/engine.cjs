@@ -18,6 +18,7 @@ function createHistoryEngine({ mongoose }) {
       indexes = Promise.all([
         entries().createIndex({ workspaceId: 1, createdAt: -1, _id: -1 }),
         entries().createIndex({ actorId: 1, kind: 1, createdAt: -1, _id: -1 }),
+        entries().createIndex({ workspaceId: 1, operationId: 1, action: 1, createdAt: -1, _id: -1 }),
       ]).catch((e) => {
         indexes = null;
         throw e;

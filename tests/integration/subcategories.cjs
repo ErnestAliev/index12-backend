@@ -55,7 +55,7 @@ async function startFixture(options = {}) {
     });
     const userId = 'subcategory-test-owner';
     let browserActor = userId, browserRole = 'admin';
-    app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, workspaceRole: browserRole, role: browserRole }; req.workspaceRole = browserRole; next(); });
+    app.use((req, _res, next) => { req.user = { id: req.headers['x-test-owner'] || browserActor, currentWorkspaceId: req.headers['x-index12-workspace-id'], workspaceRole: browserRole, role: browserRole }; req.workspaceRole = browserRole; next(); });
     const emitted = [];
     const handlers = {};
     const entityHandlers = {};

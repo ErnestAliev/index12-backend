@@ -265,22 +265,24 @@ function registerOperationShareRoutes(
       const message = await coll("Messages").findOne({
         _id: req.params.id,
         workspaceId: req.team.workspaceId,
-        kind: "operation_share",
+        kind: { $in: ["operation_share", "finance_operation"] },
         deletedAt: { $exists: false },
       });
-      if (!message || message.operationShare?.mode !== "button")
+      if (!message || (message.kind === "operation_share" && message.operationShare?.mode !== "button"))
         fail("Кнопка операции недоступна", 404);
       if (message.taskId) await task(req.team, message.taskId);
       const result = await loadOperation(
         req.team,
-        message.operationShare.operationId,
+        message.financeOperation?.operationId || message.operationShare.operationId,
       );
+      if (message.kind === "finance_operation") await require("./finance-messages.cjs").decorateFinanceMessages({ db, Event, team: req.team, messages: [message] });
       res.json({
         ...result,
+        audit: message.financeOperation?.audit || null,
         snapshot: snapshot(result.operation, result.options),
         canEdit: req.team.owner === true,
       });
     }),
   );
 }
-module.exports = { registerOperationShareRoutes, snapshot };
+module.exports = { registerOperationShareRoutes, snapshot, fields, referenceFields };

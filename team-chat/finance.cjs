@@ -437,6 +437,7 @@ function registerFinanceRoutes(
       createdAt: new Date(),
       financeOperation: {
         operationId: sid(savedEvents[0]),
+        audit: { createdAt: savedEvents[0].createdAt, createdBy: team.actorId, createdByName: team.name, editedAt: null, editedByName: null },
         type: body.type,
         amount: operation.amount,
         date: dateValue,

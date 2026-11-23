@@ -163,11 +163,13 @@ test('legacy transfer deletion removes both halves in one scoped database call',
 test('workspace broadcasts preserve anti-echo metadata alongside deleted IDs', () => {
   let broadcast;
   let excluded;
+  let refreshed;
   const room = {
     except(id) { excluded = id; return this; },
     emit(...args) { broadcast = args; },
   };
   const context = {
+    teamChatRouter: { operationChanged: async (...args) => { refreshed = args; } },
     changeHistory: { defer: () => false },
     console: { log: () => {}, warn: () => {} },
     buildSocketMeta: req => ({ sourceSocketId: req.headers['x-socket-id'], sourceClientInstanceId: req.headers['x-client-instance-id'] }),
@@ -179,6 +181,7 @@ test('workspace broadcasts preserve anti-echo metadata alongside deleted IDs', (
     io: { to: () => room }, headers: { 'x-socket-id': 'sender', 'x-client-instance-id': 'client' },
   }, 'workspace', 'operation_deleted', 'operation', { deletedOperationIds: ['operation', 'child'] });
   assert.equal(excluded, 'sender');
+  assert.deepEqual(Array.from(refreshed), ['workspace', 'operation']);
   assert.equal(broadcast[2].sourceSocketId, 'sender');
   assert.equal(broadcast[2].sourceClientInstanceId, 'client');
   assert.deepEqual(broadcast[2].deletedOperationIds, ['operation', 'child']);
