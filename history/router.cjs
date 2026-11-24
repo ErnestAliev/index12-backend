@@ -132,6 +132,10 @@ function createHistoryRouter({
       const query = { $and: [{ $or: clauses }] },
         kind = req.query.kind;
       if (["operation", "setting"].includes(kind)) query.$and.push({ kind });
+      if (req.query.operationId) {
+        if (!/^[a-f\d]{24}$/i.test(String(req.query.operationId))) fail("Неверная операция.", 400);
+        query.$and.push({ kind: 'operation', operationId: String(req.query.operationId) });
+      }
       if (
         ["income", "expense", "transfer", "withdrawal"].includes(
           req.query.operationType,
@@ -152,6 +156,7 @@ function createHistoryRouter({
       if (Object.keys(time).length) query.$and.push({ createdAt: time });
       const order = req.query.order === "asc" ? 1 : -1,
         limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 50));
+      let operationCursor;
       if (req.query.cursor) {
         let c;
         try {
@@ -165,23 +170,32 @@ function createHistoryRouter({
         if (!validId(c.id) || !Number.isFinite(at.getTime()))
           fail("Неверная страница журнала.", 400);
         const op = order === 1 ? "$gt" : "$lt";
-        query.$and.push({
+        const cursorQuery = {
           $or: [
             { createdAt: { [op]: at } },
             { createdAt: at, _id: { [op]: c.id } },
           ],
-        });
+        };
+        if (req.query.operationId) operationCursor = cursorQuery;
+        else query.$and.push(cursorQuery);
       }
-      const docs = await col()
+      const docs = req.query.operationId ? await require('./operation-page.cjs').operationPage(col(), query, operationCursor, limit, order) : await col()
         .find(query)
         .sort({ createdAt: order, _id: order })
         .limit(limit + 1)
         .toArray();
       const page = docs.slice(0, limit),
         items = [];
+      const unnamed = [...new Set(page.filter(row => !row.actorName).map(row => String(row.actorId || '')))];
+      const userIds = unnamed.map(id => id.replace(/^owner:/, '')).filter(id => /^[a-f\d]{24}$/i.test(id));
+      const [users, members] = unnamed.length ? await Promise.all([
+        userIds.length ? db().collection('users').find({ _id: { $in: userIds.map(id => new mongoose.Types.ObjectId(id)) } }, { projection: { name: 1 } }).toArray() : [],
+        db().collection('teamChatMembers').find({ workspaceId: String(req.user.currentWorkspaceId || ''), _id: { $in: unnamed } }, { projection: { name: 1 } }).toArray(),
+      ]) : [[], []];
       for (const row of page) {
         if (!canAccess(row, req)) continue;
         const out = safe(row);
+        if (!out.actorName) out.actorName = [...users, ...members].find(person => String(person._id) === String(row.actorId || '').replace(/^owner:/, ''))?.name || null;
         out.canUndo = !row.undoneAt && canAccess(row, req, true);
         out.pending = !!(
           row.pending && new Date(row.pending.expiresAt) > new Date()
@@ -225,7 +239,7 @@ function createHistoryRouter({
                         ]
                       : []),
                     ...(field === "projectId"
-                      ? (row.snapshot?.splitMeta || []).map((s) => s.projectId)
+                      ? [row.snapshot, row.change?.before, row.change?.after].flatMap(value => (value?.splitMeta || []).map((s) => s.projectId))
                       : []),
                   ]
                     .filter(Boolean)

@@ -92,6 +92,7 @@ const GROUPS = [
     ],
   ],
   ["description", ["description"]],
+  ["comment", ["comment"]],
   ["recipient", ["destination", "withdrawalRecipient"]],
   ["reason", ["transferReason"]],
   ["status", ["isClosed"]],
@@ -101,7 +102,7 @@ const GROUPS = [
 ];
 const EDIT_KEYS = GROUPS.flatMap(([, keys]) => keys);
 const logical = (value, key) =>
-  value == null ? (key === "description" ? "" : null) : value;
+  value == null ? (["description", "comment"].includes(key) ? "" : null) : value;
 function operationChanges(before, after) {
   const purchase = before.purchaseGroupId || after.purchaseGroupId;
   const groups = purchase ? GROUPS.filter(([field]) => !['account','route','contractor'].includes(field)).concat([

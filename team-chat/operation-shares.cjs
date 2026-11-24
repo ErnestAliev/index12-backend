@@ -10,7 +10,7 @@ const uuid = (value) =>
   typeof value === "string" &&
   /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value);
 const fields =
-  "_id type amount date dateKey dayOfYear cellIndex syncVersion accountId companyId individualId contractorId counterpartyCompanyId counterpartyIndividualId projectId projectScope categoryId categoryIds subcategoryId description comment createdBy isClosed isWriteOff isWorkAct isRetailWriteOff isCreditIncome isPrepayment isRefund isTransfer isWithdrawal fromAccountId toAccountId fromCompanyId fromIndividualId toCompanyId toIndividualId transferPurpose transferReason withdrawalRecipient destination transferGroupId isSplitParent isSplitChild splitMeta parentOpId excludeFromTotals offsetIncomeId purchaseGroupId purchasePeerId".split(
+  "_id type amount date dateKey dayOfYear cellIndex syncVersion accountId companyId individualId contractorId counterpartyCompanyId counterpartyIndividualId projectId projectScope categoryId categoryIds subcategoryId description comment createdBy createdAt isClosed isWriteOff isWorkAct isRetailWriteOff isCreditIncome isPrepayment isRefund isTransfer isWithdrawal fromAccountId toAccountId fromCompanyId fromIndividualId toCompanyId toIndividualId transferPurpose transferReason withdrawalRecipient destination transferGroupId isSplitParent isSplitChild splitMeta parentOpId excludeFromTotals offsetIncomeId purchaseGroupId purchasePeerId".split(
     " ",
   );
 const title = (op) =>
@@ -256,6 +256,19 @@ function registerOperationShareRoutes(
         ...(taskId ? { taskId } : {}),
       });
       res.status(201).json({ message });
+    }),
+  );
+  router.get(
+    '/finance/messages/:id/history',
+    wrap(async (req, res) => {
+      chat(req.team);
+      const message = await coll('Messages').findOne({ _id: req.params.id, workspaceId: req.team.workspaceId, kind: { $in: ['finance_operation', 'operation_share'] }, deletedAt: { $exists: false } });
+      if (!message) fail('Сообщение недоступно', 404);
+      if (message.taskId) await task(req.team, message.taskId);
+      const operationId = message.financeOperation?.operationId || message.operationShare?.operationId;
+      if (!valid(operationId)) fail('Операция недоступна', 404);
+      const operation = await Event.findOne({ ...scopeQuery(req.team.scope, req.team.workspaceId), _id: operationId }).select('createdAt createdBy').lean();
+      res.json(await require('./operation-history.cjs').operationHistory({ db, team: req.team, operationId, operation, message, cursor: req.query.cursor }));
     }),
   );
   router.get(
