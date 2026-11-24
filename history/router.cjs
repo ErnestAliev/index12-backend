@@ -263,8 +263,19 @@ function createHistoryRouter({
         items.push(out);
       }
       const last = page.at(-1);
+      let approvalEvents = [];
+      if (req.query.operationId && req.historyAccess) {
+        const source = await Event.findOne({ _id: req.query.operationId, workspaceId: req.user.currentWorkspaceId }).select('accountId fromAccountId toAccountId').lean()
+          || page.find(row => row.kind === 'operation' && canAccess(row, req))?.snapshot;
+        const accountIds = source ? ['accountId', 'fromAccountId', 'toAccountId'].map(key => String(source[key]?._id || source[key] || '')).filter(Boolean) : [];
+        if (source && canAccess({ kind: 'operation', workspaceId: String(req.user.currentWorkspaceId), accountIds }, req)) {
+          const messages = await db().collection('teamChatMessages').find({ workspaceId: String(req.user.currentWorkspaceId), kind: 'finance_operation', 'financeOperation.operationId': String(req.query.operationId) }, { projection: { authorName: 1, approvalRequest: 1, approval: 1 } }).toArray();
+          approvalEvents = messages.flatMap(require('./approval-events.cjs').approvalEvents);
+        }
+      }
       res.json({
         items,
+        ...(req.query.operationId ? { approvalEvents } : {}),
         nextCursor:
           docs.length > limit && last
             ? Buffer.from(

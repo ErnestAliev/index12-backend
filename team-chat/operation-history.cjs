@@ -47,6 +47,7 @@ async function operationHistory({ db, team, operationId, operation, message, cur
   const last = rows.at(-1);
   return {
     items,
+    approvalEvents: require('../history/approval-events.cjs').approvalEvents(message),
     creation: createdAt ? { id: 'creation:' + operationId, kind: 'operation', action: 'created', createdAt, actorName: actorName(creator) || (financeMessage && creator === message.authorId ? message.authorName : null) } : null,
     nextCursor: docs.length > 50 ? Buffer.from(JSON.stringify({ at: last.createdAt, id: last._id })).toString('base64url') : null,
   };

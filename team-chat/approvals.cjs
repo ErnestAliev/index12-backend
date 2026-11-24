@@ -12,9 +12,9 @@ async function approvalRequest({coll,User,team,ids,task}){
     members.push({_id:ownerId,name:settings?.ownerName||owner?.name||'Владелец'});
   }
   if(members.length!==ids.length)fail('Согласователь недоступен. Выберите действующего участника чата',404);
-  return {state:'pending',taskVersion:task.version||0,requestedAt:new Date(),recipients:ids.map(id=>({actorId:id,name:members.find(m=>m._id===id).name,state:'pending'}))};
+  return {state:'pending',taskVersion:task.version||0,requestedAt:new Date(),requestedBy:team.actorId,requestedByName:team.name,recipients:ids.map(id=>({actorId:id,name:members.find(m=>m._id===id).name,state:'pending'}))};
 }
-function decideApproval(request,actorId,action,note='',now=new Date()){
+function decideApproval(request,actorId,action,note='',now=new Date(),actorName=null){
   if(!['approve','reject'].includes(action))fail('Выберите решение');
   const own=request?.recipients?.find(p=>p.actorId===actorId);
   if(!own)fail('Решение доступно только выбранным согласователям',403);
@@ -23,7 +23,7 @@ function decideApproval(request,actorId,action,note='',now=new Date()){
     if(own.state===state&&String(own.note||'')===note)return {request,replayed:true};
     fail('Ваше решение уже сохранено',409);
   }
-  const recipients=request.recipients.map(p=>p.actorId===actorId?{...p,state,note,decidedAt:now}:p);
+  const recipients=request.recipients.map(p=>p.actorId===actorId?{...p,state,note,decidedAt:now,decidedByName:actorName||p.name}:p);
   return {request:{...request,recipients,state:recipients.some(p=>p.state==='rejected')?'rejected':recipients.every(p=>p.state==='approved')?'approved':'pending'},replayed:false};
 }
 function approvalNotifications(row,description){

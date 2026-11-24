@@ -231,7 +231,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace, decorate
         if(!Number.isInteger(req.body.expectedVersion)||req.body.expectedVersion<0||req.body.expectedVersion>version(row))fail('Сообщение изменилось. Откройте его заново',409);
         const note=text(req.body.note||'',1000,false);
         for(let attempt=0;attempt<4;attempt++){
-          const decision=require('./approvals.cjs').decideApproval(row.approvalRequest,req.team.actorId,req.body.action,note);
+          const decision=require('./approvals.cjs').decideApproval(row.approvalRequest,req.team.actorId,req.body.action,note,new Date(),req.team.name);
           if(decision.replayed){await decorate(req,[row]);return res.json({message:row,messageId:row._id,replayed:true});}
           let updated;
           try{updated=await update(req,row,{$set:{approvalRequest:decision.request}});}catch(error){if(error.status===409&&attempt<3){row=await load(req);continue;}throw error;}
