@@ -189,6 +189,7 @@ function createTeamChatRouter({
         roleName: roles[role],
         joinable: invite.joinable,
         namedLogin: invite.namedLogin === true,
+        publicEntry: invite.publicEntry === true,
       });
     }),
   );

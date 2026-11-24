@@ -68,6 +68,13 @@ function createInvites({ coll, Workspace, frontendUrl, env = process.env }) {
   async function lookup(token, { allowClosed = false } = {}) {
     if (typeof token !== "string" || !/^[\w-]{20,100}$/.test(token))
       fail("Приглашение недействительно", 404);
+    // Stable task links identify a workspace, but never grant membership.
+    // They support existing credentials only, including after an invite rotates.
+    if (/^[a-f\d]{24}$/i.test(token)) {
+      if (!allowClosed) fail("Войдите с существующей учётной записью", 403);
+      if (!(await Workspace.exists({ _id: token }))) fail("Чат недоступен", 404);
+      return { workspaceId: token, namedLogin: true, joinable: false, publicEntry: true };
+    }
     const tokenHash = hash(token);
     const row = await coll("Invites").findOne({
       $or: [
