@@ -22,11 +22,15 @@ class NativePrintClient {
     return {response,bytes:Buffer.concat(chunks)};
   }
   async capabilities(){
-    if(!this.configured())return {available:false,code:'NATIVE_PRINT_NOT_CONFIGURED',message:'В коннекторе не подключён сервис штатной печати 1С. Счёт не создавался.'};
+    if(!this.configured())return {available:false,code:'NATIVE_PRINT_NOT_CONFIGURED',setupRequired:'publish_onec_print_service',message:'В 1С:Fresh не подключён сервис выдачи штатного PDF. Нужна однократная публикация сервиса на стороне обслуживающей организации 1С.'};
     const {bytes}=await this.request('capabilities');let data;
     try{data=JSON.parse(bytes.toString('utf8'));}catch{fault('NATIVE_PRINT_PROTOCOL_ERROR','Некорректный ответ сервиса печати 1С',424);}
-    const form=data.forms?.find(f=>f.collection===COLLECTION&&typeof f.id==='string'&&f.id.length<=100&&typeof f.version==='string'&&f.version.length<=200);
-    if(data.protocol!=='index12-print-v1'||!form)fault('NATIVE_PRINT_UNSUPPORTED','Сервис 1С не публикует печать счёта покупателю',424);
+    const forms=Array.isArray(data.forms)?data.forms.filter(f=>f?.collection===COLLECTION&&typeof f.id==='string'&&f.id.trim()&&f.id.length<=100&&typeof f.version==='string'&&/^[\x20-\x7e]{1,200}$/.test(f.version)):[];
+    if(data.protocol!=='index12-print-v1'||!forms.length)fault('NATIVE_PRINT_UNSUPPORTED','Сервис 1С не публикует печать счёта покупателю',424);
+    const selected=this.env.ONEC_PRINT_FORM_ID;
+    const matches=selected?forms.filter(f=>f.id===selected):forms.length===1?forms:forms.filter(f=>f.default===true);
+    if(matches.length!==1)fault('NATIVE_PRINT_FORM_REQUIRED','В сервисе 1С несколько форм. Укажите штатную форму счёта в ONEC_PRINT_FORM_ID или назначьте её формой по умолчанию в сервисе',503);
+    const form=matches[0];
     return {available:true,source:'ONEC_NATIVE',form:{collection:form.collection,id:form.id,version:form.version}};
   }
   async print({invoiceRef,organizationRef,dataVersion,form}){

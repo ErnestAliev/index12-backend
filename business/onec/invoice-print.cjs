@@ -1,15 +1,9 @@
 'use strict';
-const {fault}=require('./purchase-domain.cjs');
-const {TEMPLATE,loadSeller}=require('./invoice-pdf.cjs');
-async function printCapabilities({env=process.env,printer,client,company}){
-  const mode=env.ONEC_INVOICE_PRINT_MODE||'auto';
-  if(!['auto','native','index12'].includes(mode))fault('INVOICE_PRINT_MODE_INVALID','Некорректная настройка способа печати счёта',503);
-  if(mode!=='index12'){
-    const native=await printer.capabilities();
-    if(native.available)return {...native,mode,source:'ONEC_NATIVE'};
-    if(mode==='native')return {...native,mode};
-  }
-  if(company)await loadSeller(client,company);
-  return {available:true,mode,source:'INDEX12_FROM_SAVED_ONEC',form:TEMPLATE,companyValidated:!!company};
+// Customer invoices are delivered only as PDFs produced by the connected 1C.
+// Legacy auto/index12 mode settings cannot silently enable a local substitute.
+async function printCapabilities({printer}) {
+  const native=await printer.capabilities();
+  if(!native.available)return {...native,available:false,code:native.code||'NATIVE_PRINT_NOT_CONFIGURED',message:native.message||'Не подключён сервис выдачи штатного PDF из 1С',mode:'native',source:null,automaticFallback:false};
+  return {...native,mode:'native',source:native.available?'ONEC_NATIVE':null,automaticFallback:false};
 }
 module.exports={printCapabilities};

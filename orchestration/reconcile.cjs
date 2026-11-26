@@ -38,10 +38,13 @@ async function reconcileCall({ call, db, scope, invoke }) {
       if(!task)return null;
       return {result:{completed:true,planToken:row._id,direction:'supplier',amount:row.input.amount,operationId:task.evidence.operationId,invoiceRef:row.steps.invoice.id,paymentRef:row.steps.payment.id,documentsPosted:true,accountingPaid:true,bankPaymentSent:false,bankSettlementConfirmed:false,taskId:task._id,followupStage:task.invoiceFollowup.stage},evidence:{source:'onecInvoicePlans+businessTasks',planToken:row._id}};
     }
-    const message=await db.collection('teamChatMessages').findOne({_id:stableUuid([row._id,'invoice-message']),workspaceId:scope.workspaceId,taskId:row.input.sourceTaskId,deletedAt:{$exists:false}});
-    const fileId=stableUuid([row._id,'invoice-pdf']);
+    const native=row.nativePrintArtifact||(row.printArtifact?.source==='ONEC_NATIVE'?row.printArtifact:null);
+    if(!native||native.source!=='ONEC_NATIVE')return null;
+    const edition=row.printArtifact&&row.printArtifact.source!=='ONEC_NATIVE'?['native']:[];
+    const message=await db.collection('teamChatMessages').findOne({_id:stableUuid([row._id,'invoice-message',...edition]),workspaceId:scope.workspaceId,taskId:row.input.sourceTaskId,deletedAt:{$exists:false}});
+    const fileId=stableUuid([row._id,'invoice-pdf',...edition]);
     if(!message?.attachments?.some(f=>f.fileId===fileId))return null;
-    return {result:{completed:true,planToken:row._id,direction:'customer',invoiceRef:row.steps.invoice.id,amount:row.input.amount,fileId,messageId:message._id,delivered:true,printSource:row.printArtifact?.source||'ONEC_NATIVE',bankPaymentSent:false},evidence:{source:'onecInvoicePlans+teamChatMessages',planToken:row._id}};
+    return {result:{completed:true,planToken:row._id,direction:'customer',invoiceRef:row.steps.invoice.id,amount:row.input.amount,fileId,messageId:message._id,delivered:true,printSource:'ONEC_NATIVE',bankPaymentSent:false},evidence:{source:'onecInvoicePlans+teamChatMessages',planToken:row._id}};
   }
   const requestHash = actionRequest(call.tool, call.args);
   if (requestHash) {
