@@ -235,7 +235,7 @@ function registerMessageRoutes(router, { coll, wrap, notify, Workspace, decorate
           if(decision.replayed){await decorate(req,[row]);return res.json({message:row,messageId:row._id,replayed:true});}
           let updated;
           try{updated=await update(req,row,{$set:{approvalRequest:decision.request}});}catch(error){if(error.status===409&&attempt<3){row=await load(req);continue;}throw error;}
-          notify(req,{key:`approval-decision:${row._id}:${req.team.actorId}`,title:req.team.name+' · '+(req.body.action==='approve'?'Согласовано':'Отклонено'),body:row.text,taskId:row.taskId,messageId:row._id,onlyActor:row.authorId});
+          await notify(req,{key:`approval-decision:${row._id}:${req.team.actorId}`,title:req.team.name+' · '+(req.body.action==='approve'?'Согласовано':'Отклонено'),body:row.text,taskId:row.taskId,messageId:row._id,onlyActor:row.authorId});
           await decorate(req,[updated]);return res.json({message:updated,messageId:updated._id});
         }
       }

@@ -78,6 +78,7 @@ function createChatPush({
           _id: job.subscriptionId,
         });
         try {
+          let outcome = 'skipped', skipReason = 'subscription_missing', acceptedStatus;
           if (
             target &&
             target.actorId === job.actorId &&
@@ -85,7 +86,7 @@ function createChatPush({
           ) {
             const deadlineTask = job.deadline ? await coll('Tasks').findOne({ _id: job.deadline.taskId, workspaceId: job.workspaceId, status: { $ne: 'done' }, deletedAt: { $exists: false }, deadlineAt: { $lte: new Date() }, deadlineActorId: job.actorId, deadlineRevision: job.deadline.revision }) : null;
             if ((!job.deadline || deadlineTask) && (!job.payload.releaseVersion || target.clientVersion !== job.payload.releaseVersion) && await permitted(target, job.allowPending)) {
-              await send(
+              const response = await send(
                 target.subscription,
                 JSON.stringify({
                   ...job.payload,
@@ -98,24 +99,36 @@ function createChatPush({
                   timeout: 10000,
                 },
               );
-            } else if (!(await permitted(target, true)))
-              await coll("PushSubscriptions").deleteOne({ _id: target._id });
+              outcome = 'accepted';
+              skipReason = null;
+              acceptedStatus = response?.statusCode || null;
+              await coll('PushSubscriptions').updateOne(
+                { _id: target._id, actorId: target.actorId, workspaceId: target.workspaceId },
+                { $set: { lastAcceptedAt: new Date() }, $unset: { lastErrorCode: '', lastErrorAt: '' } },
+              );
+            } else {
+              skipReason = 'event_obsolete_or_access_closed';
+              if (!(await permitted(target, true)))
+                await coll("PushSubscriptions").deleteOne({ _id: target._id, actorId: target.actorId, workspaceId: target.workspaceId });
+            }
           }
           await coll("PushJobs").updateOne(
             { _id: job._id, lease },
             {
-              $set: { done: true, sentAt: new Date() },
+              $set: { done: true, outcome, ...(outcome==='accepted'?{sentAt:new Date(),acceptedStatus}:{skipReason}) },
               $unset: { leaseUntil: "" },
             },
           );
         } catch (e) {
+          const errorCode=Number.isInteger(e.statusCode)?e.statusCode:(e.code==='ETIMEDOUT'?'timeout':'transport_error');
+          await coll('PushSubscriptions').updateOne({_id:job.subscriptionId,actorId:job.actorId,workspaceId:job.workspaceId},{$set:{lastErrorCode:errorCode,lastErrorAt:new Date()}});
           if ([404, 410].includes(e.statusCode)) {
             await coll("PushSubscriptions").deleteOne({
-              _id: job.subscriptionId,
+              _id: job.subscriptionId, actorId: job.actorId, workspaceId: job.workspaceId,
             });
             await coll("PushJobs").updateOne(
               { _id: job._id, lease },
-              { $set: { done: true }, $unset: { leaseUntil: "" } },
+              { $set: { done: true, outcome:"expired_subscription", lastErrorCode:errorCode }, $unset: { leaseUntil: "" } },
             );
           } else
             await coll("PushJobs").updateOne(
@@ -123,6 +136,7 @@ function createChatPush({
               {
                 $inc: { attempts: 1 },
                 $set: {
+                  outcome:"retrying",lastErrorCode:errorCode,lastErrorAt:new Date(),
                   nextAt: new Date(
                     Date.now() +
                       Math.min(
@@ -177,6 +191,9 @@ function createChatPush({
     title,
     body,
     onlyActor,
+    onlyActors,
+    mentionActorIds,
+    mentionTitle,
     allowPending = false,
     testId,
     taskId,
@@ -187,7 +204,7 @@ function createChatPush({
     if (!configured) return 0;
     await ready();
     const targets = await coll("PushSubscriptions")
-      .find({ workspaceId, actorId: onlyActor || { $ne: actorId },...(releaseVersion?{clientVersion:{$ne:releaseVersion}}:{}) })
+      .find({ workspaceId, actorId: onlyActor || (Array.isArray(onlyActors)?{$in:[...new Set(onlyActors)].filter(id=>id!==actorId)}:{ $ne: actorId }),...(releaseVersion?{clientVersion:{$ne:releaseVersion}}:{}) })
       .toArray();
     for (const target of targets) {
       const id = hash(target._id + ":" + key);
@@ -199,7 +216,7 @@ function createChatPush({
             workspaceId,
             actorId: target.actorId,
             payload: {
-              title: String(title || "Chat").slice(0, 100),
+              title: String(mentionActorIds?.includes(target.actorId)?mentionTitle||"Вас упомянули":title || "Chat").slice(0, 100),
               body: String(body || "Новое событие в чате").slice(0, 180),
               tag: "team-" + hash(key).slice(0, 24),
               testId,
@@ -233,7 +250,7 @@ function createChatPush({
           actorId: req.team.actorId,
           workspaceId: req.team.workspaceId,
         });
-        res.json({ enabled: configured && !!row });
+        res.json({ enabled: configured && !!row, configured, ...(row?{lastAcceptedAt:row.lastAcceptedAt||null,lastErrorCode:row.lastErrorCode||null,lastErrorAt:row.lastErrorAt||null}:{}) });
       }),
     );
     router.get("/push/key", (_req, res) =>
@@ -244,6 +261,7 @@ function createChatPush({
       wrap(async (req, res) => {
         if (!configured)
           fail("Уведомления чата пока не настроены на сервере", 503);
+        if(req.body.actorId!==undefined&&req.body.actorId!==req.team.actorId||req.body.workspaceId!==undefined&&req.body.workspaceId!==req.team.workspaceId)fail('Учётная запись чата изменилась. Откройте чат заново',409);
         const token = req.body.token;
         let url;
         if (token === undefined && req.team.owner) {

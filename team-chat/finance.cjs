@@ -496,9 +496,9 @@ function registerFinanceRoutes(
         console.error("[Chat finance] Publish failed:", error.name),
       );
     });
-    notify(req, {
+    await notify(req, {
       key: "chat-finance:" + message._id,
-      title: team.name + " · " + title,
+      title: team.name + " · " + (body.type==='expense'?'Расход на согласование':title),
       body: message.text,
       messageId: message._id,
       ...(task ? { taskId: task._id } : {}),

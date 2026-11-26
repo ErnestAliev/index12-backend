@@ -27,6 +27,6 @@ function decideApproval(request,actorId,action,note='',now=new Date(),actorName=
   return {request:{...request,recipients,state:recipients.some(p=>p.state==='rejected')?'rejected':recipients.every(p=>p.state==='approved')?'approved':'pending'},replayed:false};
 }
 function approvalNotifications(row,description){
-  return row.approvalRequest.recipients.map(person=>({key:'approval-request:'+row._id,title:row.authorName+' · Согласование',body:description,taskId:row.taskId,messageId:row._id,onlyActor:person.actorId}));
+  return row.approvalRequest.recipients.filter(person=>!person.state||person.state==='pending').map(person=>({key:'approval-request:'+row._id,title:row.authorName+' · Согласование',body:description||row.text||'Требуется согласование',taskId:row.taskId,messageId:row._id,onlyActor:person.actorId}));
 }
 module.exports={recipientIds,approvalRequest,decideApproval,approvalNotifications};

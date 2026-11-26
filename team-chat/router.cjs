@@ -141,7 +141,7 @@ function createTeamChatRouter({
     const send = () => {
       bus.emit(req.team.workspaceId);
       if (event)
-        void push
+        return push
           .enqueue({
             workspaceId: req.team.workspaceId,
             actorId: req.team.actorId,
@@ -151,7 +151,7 @@ function createTeamChatRouter({
             console.error("[Team chat] Could not queue notification"),
           );
     };
-    if (!history?.defer(send)) send();
+    if (!history?.defer(send)) return send();
   }
   router.use(
     wrap(async (req, res, next) => {
@@ -1065,11 +1065,13 @@ function createTeamChatRouter({
       );
       if(approvalIds){
         notify(req);
-        for(const event of require('./approvals.cjs').approvalNotifications(row,task.description))notify(req,event);
-      }else notify(req, {
+        for(const event of require('./approvals.cjs').approvalNotifications(row,task.description))await notify(req,event);
+      }else await notify(req, {
         key: "message:" + row._id,
         title: req.team.workspace.name + " · " + req.team.name,
         body: row.text || "Файл в чате",
+        mentionActorIds: row.mentions?.map(person=>person.actorId),
+        mentionTitle: req.team.name+" · Вас упомянули",
         taskId: row.taskId,
         messageId: row._id,
       });

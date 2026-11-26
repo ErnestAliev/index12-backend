@@ -367,9 +367,11 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
         },
         { upsert: true },
       );
-      notify(req, {
+      await notify(req, {
         key: "task:" + id,
-        title: req.team.name,
+        mentionActorIds: row.assigneeIds,
+        mentionTitle: req.team.name+" · Вам назначена задача",
+        title: req.team.name+" · Новая задача",
         body: row.description,
         taskId: id,
       });
@@ -423,7 +425,14 @@ function registerTaskRoutes(router, { coll, wrap, notify, User, db, onTasksChang
       );
       if (!result.modifiedCount)
         fail("Задача изменилась. Откройте её заново", 409);
-      notify(req);
+      const added=input.assigneeIds.filter(id=>!old.assigneeIds.includes(id));
+      if(added.length)await notify(req,{
+        key:`task-assigned:${old._id}:${old.version+1}`,
+        onlyActors:added,
+        title:req.team.name+' · Вам назначена задача',
+        body:input.description,
+        taskId:old._id,
+      });else notify(req);
       onTasksChanged(req);
       const task = (await summaries(req, [old._id]))[0];
       res.json({ task, calendarTask: calendarTask(task) });
