@@ -4,10 +4,10 @@ const {loadSeller,renderInvoicePdf,TEMPLATE}=require('../business/onec/invoice-p
 const {printCapabilities}=require('../business/onec/invoice-print.cjs');
 const seller={name:'Товарищество с ограниченной ответственностью "UU"',taxId:'250340021816',address:'Алматы, пример адреса',iban:'KZ358562203144890864',bic:'KCJBKZKX',bankName:'АО "Банк ЦентрКредит"',kbe:'17'};
 const example={template:TEMPLATE,number:'ПРИМЕР-001',date:'2026-11-11',currency:'KZT',amount:104400,useVat:true,vatIncluded:true,vatAmount:14400,knp:'859',seller,buyer:{name:'ТОО "Покупатель - пример"',taxId:'123456789012',address:'Алматы'},lines:[{description:'Дератизация помещений и территорий. Ә Ғ Қ Ң Ө Ұ Ү Һ І',quantity:1,unit:'усл.',price:104400,amount:104400,vatAmount:14400,vatPercent:16,vatLabel:'16%'}]};
-test('customer invoice delivery requires native printing even with legacy fallback settings',async()=>{
+test('auto printing uses the built-in generator until native printing is connected',async()=>{
   const printer={capabilities:async()=>({available:false,code:'NATIVE_PRINT_NOT_CONFIGURED'})};
-  const result=await printCapabilities({env:{},printer});assert.equal(result.available,false);assert.equal(result.source,null);assert.equal(result.automaticFallback,false);
-  assert.equal((await printCapabilities({env:{ONEC_INVOICE_PRINT_MODE:'index12'},printer})).available,false);
+  const result=await printCapabilities({env:{},printer});assert.equal(result.available,true);assert.equal(result.source,'INDEX12_FROM_SAVED_ONEC');assert.equal(result.automaticFallback,true);
+  assert.equal((await printCapabilities({env:{ONEC_INVOICE_PRINT_MODE:'native'},printer})).available,false);
   assert.equal((await printCapabilities({env:{},printer:{capabilities:async()=>({available:true,form:{id:'native',version:'1'}})}})).source,'ONEC_NATIVE');
 });
 test('seller details never use a foreign bank or invent missing payment requisites',async()=>{

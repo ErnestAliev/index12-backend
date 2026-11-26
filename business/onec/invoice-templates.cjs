@@ -122,7 +122,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(e.public||/^(HTTP_|NETWORK_|INVALID_|NOT_PUBLISHED|RESPONSE_)/.test(e.code||''))return res.status(e.status||424).json({error:{code:e.code,message:e.message,...(e.details?{details:e.details}:{})}});next(e);}};
   const nativeArtifact = row => row?.nativePrintArtifact || (row?.printArtifact?.source==='ONEC_NATIVE'?row.printArtifact:null);
   const view = row => ({planToken:row._id,state:row.state,completed:row.state==='completed',direction:row.input.direction,
-    printReady:!!nativeArtifact(row),printSource:nativeArtifact(row)?.source||null,
+    printReady:!!(nativeArtifact(row)||row.printArtifact),printSource:(nativeArtifact(row)||row.printArtifact)?.source||null,
     template:row.template,companyId:row.input.companyId,counterpartyRef:row.partyRef||null,amount:row.input.amount,
     workflow:row.input.workflow||'invoice_only',expenseDate:row.expenseDate||null,paymentDate:row.paymentCreatedAt?.slice(0,10)||row.paymentDate||null,sourceProjectId:row.sourceProjectId||null,contractRef:row.workflow?.contractRef||row.input.contractRef||null,knp:row.input.knp||'859',vat:row.vat||null,steps:row.steps,taskId:row.taskId||null,
     bankEnabled:false,bankPaymentSent:false,bankSettlementConfirmed:false,documentsPosted:row.steps.posting?.state==='completed',accountingPaid:row.steps.payment?.state==='completed',error:row.error||null});
@@ -248,42 +248,49 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   router.get('/onec/invoices/pdf',use(async(req,res,client)=>{
     const row=await getPlan(req);
     if(row.state!=='completed'||row.input.direction!=='customer')fault('CUSTOMER_INVOICE_NOT_READY','Для печати нужен сохранённый счёт покупателю',409);
-    await mutations.company(req,row.input.companyId,row.organizationRef);
+    const company=await mutations.company(req,row.input.companyId,row.organizationRef);
     const [invoice]=await Promise.all([
       client.get({collection:DIRECTIONS.customer,id:row.steps.invoice.id}).then(r=>r.object),
     ]);
     if(invoice.DeletionMark||invoice.Организация_Key!==row.organizationRef||invoice.Контрагент_Key!==row.partyRef||invoice.ВалютаДокумента_Key!==row.currencyRef||cents(invoice.СуммаДокумента)!==cents(row.input.amount))fault('INVOICE_CHANGED','Сохранённый счёт изменён, требуется сверка перед отправкой',409);
     const cache=db().collection('onecInvoicePrintFiles');
     async function pinned(artifact){
-      if(!artifact||artifact.source!=='ONEC_NATIVE')fault('NATIVE_PRINT_REQUIRED','Для отправки нужен оригинальный PDF из 1С',409);
+      if(!artifact||!['ONEC_NATIVE','INDEX12_FROM_SAVED_ONEC'].includes(artifact.source))fault('PRINT_ARTIFACT_UNAVAILABLE','Сохранённый PDF недоступен',409);
       if(artifact.dataVersion!==invoice.DataVersion)fault('INVOICE_CHANGED','Счёт изменён после формирования файла. Нужна сверка, прежний файл не отправлен повторно',409);
-      const saved=await cache.findOne({_id:artifact.key,workspaceId:row.workspaceId,organizationRef:row.organizationRef,invoiceRef:invoice.Ref_Key,source:'ONEC_NATIVE',dataVersion:invoice.DataVersion});
+      const saved=await cache.findOne({_id:artifact.key,workspaceId:row.workspaceId,organizationRef:row.organizationRef,invoiceRef:invoice.Ref_Key,source:artifact.source,dataVersion:invoice.DataVersion});
       if(!saved)fault('PRINT_ARTIFACT_UNAVAILABLE','Сохранённый PDF 1С недоступен. Счёт повторно не создавайте',409);
       return saved;
     }
-    const currentPin=nativeArtifact(row);
+    const nativeOnly=req.query.nativeOnly==='true'||env.ONEC_INVOICE_PRINT_MODE==='native';
+    const currentPin=nativeArtifact(row)||(!nativeOnly?row.printArtifact:null);
     let artifact=currentPin?await pinned(currentPin):null;
     if(!artifact){
-      const printer=printClientFactory(),capabilities=await require('./invoice-print.cjs').printCapabilities({env,printer,client});
+      const printer=printClientFactory(),capabilities=await require('./invoice-print.cjs').printCapabilities({env:nativeOnly?{...env,ONEC_INVOICE_PRINT_MODE:'native'}:env,printer,client});
       if(!capabilities.available)fault(capabilities.code||'NATIVE_PRINT_NOT_CONFIGURED','Счёт уже сохранён в 1С. '+capabilities.message+' Повторно создавать счёт нельзя.',503);
-      const cacheKey=digest([row.connectionKey,row.workspaceId,row.organizationRef,invoice.Ref_Key,invoice.DataVersion,'ONEC_NATIVE',capabilities.form,null]);
-      artifact=await cache.findOne({_id:cacheKey,source:'ONEC_NATIVE'});
+      let data=null;
+      if(capabilities.source==='INDEX12_FROM_SAVED_ONEC') {
+        const contractor=row.contractorId?await Contractor.findOne({_id:row.contractorId,...scopeQuery(req.businessScope,row.workspaceId)}).lean():null;
+        data=await require('./invoice-pdf.cjs').loadInvoicePrintData(client,{invoice,company,contractor,taxField:row.taxField,expectedTaxId:row.input.counterparty.taxId,executorName:env.ONEC_USERNAME});
+      }
+      const cacheKey=digest([row.connectionKey,row.workspaceId,row.organizationRef,invoice.Ref_Key,invoice.DataVersion,capabilities.source,capabilities.form,data?digest(data):null]);
+      artifact=await cache.findOne({_id:cacheKey,source:capabilities.source});
       if(!artifact){
-        const bytes=await printer.print({invoiceRef:invoice.Ref_Key,organizationRef:row.organizationRef,dataVersion:invoice.DataVersion,form:capabilities.form});
+        const bytes=data?await require('./invoice-pdf.cjs').renderInvoicePdf(data,{createdAt:row.createdAt}):await printer.print({invoiceRef:invoice.Ref_Key,organizationRef:row.organizationRef,dataVersion:invoice.DataVersion,form:capabilities.form});
         const latest=(await client.get({collection:DIRECTIONS.customer,id:invoice.Ref_Key})).object;
         if(latest.Ref_Key!==invoice.Ref_Key||latest.DataVersion!==invoice.DataVersion)fault('INVOICE_CHANGED','Счёт изменился во время выгрузки PDF. Файл не отправлен; повторно создавать счёт нельзя',409);
-        artifact={_id:cacheKey,workspaceId:row.workspaceId,organizationRef:row.organizationRef,invoiceRef:invoice.Ref_Key,dataVersion:invoice.DataVersion,source:'ONEC_NATIVE',form:capabilities.form,number:invoice.Number,amount:invoice.СуммаДокумента,data:bytes,createdAt:new Date()};
+        artifact={_id:cacheKey,workspaceId:row.workspaceId,organizationRef:row.organizationRef,invoiceRef:invoice.Ref_Key,dataVersion:invoice.DataVersion,source:capabilities.source,form:capabilities.form,number:invoice.Number,amount:invoice.СуммаДокумента,data:bytes,createdAt:new Date()};
         await cache.updateOne({_id:cacheKey},{$setOnInsert:artifact},{upsert:true});
       }
       const pin={key:cacheKey,dataVersion:invoice.DataVersion,source:artifact.source,form:artifact.form};
-      const claimed=await plans().updateOne({_id:row._id,$or:[{nativePrintArtifact:{$exists:false}},{nativePrintArtifact:null}]},{$set:{nativePrintArtifact:pin}});
-      if(!claimed.modifiedCount)artifact=await pinned(nativeArtifact(await plans().findOne({_id:row._id})));
+      const field=artifact.source==='ONEC_NATIVE'?'nativePrintArtifact':'printArtifact';
+      const claimed=await plans().updateOne({_id:row._id,$or:[{[field]:{$exists:false}},{[field]:null}]},{$set:{[field]:pin}});
+      if(!claimed.modifiedCount)artifact=await pinned((await plans().findOne({_id:row._id}))[field]);
     }
     // Preserve the earlier local PDF as history. Its uploaded UUID stays immutable.
     // The original 1C PDF has a separate, stable delivery ID when replacing it.
-    const replacedLocal=!!row.printArtifact&&row.printArtifact.source!=='ONEC_NATIVE';
+    const replacedLocal=artifact.source==='ONEC_NATIVE'&&!!row.printArtifact&&row.printArtifact.source!=='ONEC_NATIVE';
     res.set('Cache-Control','private, no-store');res.json({...identity(req),planToken:row._id,invoiceRef:invoice.Ref_Key,number:artifact.number,amount:artifact.amount,
-      printSource:'ONEC_NATIVE',...(replacedLocal?{deliveryRevision:'native'}:{}),file:{name:`Счет на оплату № ${String(artifact.number).replace(/[^\p{L}\p{N}._-]/gu,'_')} от ${invoice.Date.slice(0,10).split('-').reverse().join('.')}.pdf`,mimeType:'application/pdf',dataBase64:fileBuffer(artifact).toString('base64')}});
+      printSource:artifact.source,...(replacedLocal?{deliveryRevision:'native'}:{}),file:{name:`Счет на оплату № ${String(artifact.number).replace(/[^\p{L}\p{N}._-]/gu,'_')} от ${invoice.Date.slice(0,10).split('-').reverse().join('.')}.pdf`,mimeType:'application/pdf',dataBase64:fileBuffer(artifact).toString('base64')}});
   }));
 
   async function save(row,values) {Object.assign(row,values);await plans().updateOne({_id:row._id},{$set:values});}
@@ -341,9 +348,9 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     if(req.body.operationId){const id=z.string().regex(/^[a-f\d]{24}$/i).parse(req.body.operationId);await resolveExpense(req,row,{...row.input,existingOperationId:id});}
     if(row.state==='completed')return res.json({...identity(req),...view(row),replayed:true});
     if((row.workflow || row.partyNeedsEnrichment || row.input.counterparty.iban) && !req.mcpContext.grant.scopes.includes('update'))fault('UPDATE_AUTHORIZATION_REQUIRED','Для полной цепочки документов и синхронизации карточки нужно право update',403);
-    await guard(req);await mutations.company(req,row.input.companyId,row.organizationRef);
+    await guard(req);const company=await mutations.company(req,row.input.companyId,row.organizationRef);
     if(row.input.direction==='customer') {
-      const printing=await require('./invoice-print.cjs').printCapabilities({printer:printClientFactory()});
+      const printing=await require('./invoice-print.cjs').printCapabilities({env,printer:printClientFactory(),client,company});
       if(!printing.available)fault(printing.code||'NATIVE_PRINT_NOT_CONFIGURED',printing.message,503);
     }
     const lease=randomUUID(),claimed=await plans().findOneAndUpdate({_id:row._id,$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{lease,leaseUntil:new Date(Date.now()+180000),state:'running'}},{returnDocument:'after'});

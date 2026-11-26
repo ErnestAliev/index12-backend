@@ -66,15 +66,14 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   setPrinting(false);const beforeBlocked=posts.length;
   process.env.ONEC_INVOICE_PRINT_MODE='native';
   const blocked=await call('index12_process_invoice',processOut);assert.equal(blocked.state,'blocked');assert.equal(posts.length,beforeBlocked,'missing native printing blocks before writes');delete process.env.ONEC_INVOICE_PRINT_MODE;
-  setPrinting(true);
-  const issued=await call('index12_process_invoice',processOut);assert.equal(issued.completed,true,JSON.stringify(issued));assert.equal(issued.delivered,true);assert.equal(issued.printSource,'ONEC_NATIVE');
+  const issued=await call('index12_process_invoice',processOut);assert.equal(issued.completed,true,JSON.stringify(issued));assert.equal(issued.delivered,true);assert.equal(issued.printSource,'INDEX12_FROM_SAVED_ONEC');
   const file=await db.collection('teamChatFiles').findOne({_id:issued.fileId}),message=await db.collection('teamChatMessages').findOne({_id:issued.messageId});
   assert.equal(file.mimeType,'application/pdf');assert.equal(message.taskId,sourceTaskId);assert.equal(message.attachments[0].fileId,issued.fileId);
   const bytes=Buffer.from(file.data.buffer);assert.equal(bytes.subarray(0,4).toString(),'%PDF');await require('node:fs/promises').writeFile('/private/tmp/index12-local-invoice.pdf',bytes);
   const messageCount=await db.collection('teamChatMessages').countDocuments();setPrinting(true);
-  assert.equal((await call('index12_process_invoice',processOut)).messageId,issued.messageId);assert.equal(await db.collection('teamChatMessages').countDocuments(),messageCount);assert.equal(await fixture.models.Event.countDocuments(),eventCount,'issuing creates no expense/income');assert.equal(printCalls(),1,'the original native PDF is cached on repeat');
+  assert.equal((await call('index12_process_invoice',processOut)).messageId,issued.messageId);assert.equal(await db.collection('teamChatMessages').countDocuments(),messageCount);assert.equal(await fixture.models.Event.countDocuments(),eventCount,'issuing creates no expense/income');assert.equal(printCalls(),0,'enabling native printing does not overwrite an already delivered local file');
   const issuedNative=await call('index12_process_invoice',{...processOut,number:'PROCESS-NATIVE',idempotencyKey:'process-native-printfixture'});assert.equal(issuedNative.printSource,'ONEC_NATIVE');
-  assert.equal((await call('index12_process_invoice',{...processOut,number:'PROCESS-NATIVE',idempotencyKey:'process-native-printfixture'})).messageId,issuedNative.messageId);assert.equal(printCalls(),2,'each native PDF is generated once and cached on repeat');
+  assert.equal((await call('index12_process_invoice',{...processOut,number:'PROCESS-NATIVE',idempotencyKey:'process-native-printfixture'})).messageId,issuedNative.messageId);assert.equal(printCalls(),1,'each native PDF is generated once and cached on repeat');
   const savedInvoice=records.get('Document_СчетНаОплатуПокупателю:'+issued.invoiceRef),previousVersion=savedInvoice.DataVersion;
   savedInvoice.DataVersion='changed-version';const changed=await api('invoices/pdf?planToken='+issued.planToken,undefined,'GET');assert.equal(changed.error.code,'INVOICE_CHANGED');savedInvoice.DataVersion=previousVersion;
   const codeInput={...supplierRequest,number:'PROCESS-CODE',idempotencyKey:'invoice-code-mode-fixture'};
@@ -84,7 +83,7 @@ module.exports=async({call,api,db,companyId,refs,records,posts,commands,setMode,
   const reconcile=require('../../orchestration/reconcile.cjs').reconcileCall;
   const recovered=await reconcile({call:{tool:'index12_process_invoice',args:supplierRequest},db,scope});assert.equal(recovered.result.paymentRef,processed.paymentRef);
   const recoveredOut=await reconcile({call:{tool:'index12_process_invoice',args:processOut},db,scope});assert.equal(recoveredOut.result.messageId,issued.messageId);
-  assert.equal(recoveredOut.result.printSource,'ONEC_NATIVE');
+  assert.equal(recoveredOut.result.printSource,'INDEX12_FROM_SAVED_ONEC');
   assert.equal(await reconcile({call:{tool:'index12_process_invoice',args:{...supplierRequest,idempotencyKey:'unknown-key'}},db,scope}),null);
   // Regression from the live audit: blank tax identifiers in both systems,
   // existing expense, no project, no contract/KNP and an acknowledgement lost.
