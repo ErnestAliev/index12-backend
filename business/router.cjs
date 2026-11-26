@@ -152,7 +152,7 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
     const result = await onecLookup(bin, req.params.kind, undefined, ref);
     const expectedCollection = req.params.kind === 'companies' ? 'Catalog_Организации' : 'Catalog_Контрагенты';
     if (result.sync.ref !== ref || result.sync.collection !== expectedCollection) fail('MCP 1С вернул другую запись', 502);
-    if (!ref && bin && result.fields.identificationNumber !== bin) fail('БИН/ИИН из 1С не совпадает с карточкой', 502);
+    if (bin && result.fields.identificationNumber && result.fields.identificationNumber !== bin) fail('БИН/ИИН из 1С не совпадает с карточкой', 502);
     const fields = profileInput(result.fields);
     delete fields.name; // Preserve the display name used by operations and accounts.
     if (fields.bankAccounts) fields.bankAccounts = require('./onec/profile-banks.cjs').mergeBankAccounts(fields.bankAccounts,entity.bankAccounts||[]);
@@ -200,10 +200,12 @@ function createBusinessRouter({ db, Company, Contractor, Individual, Event, task
   require('./onec/purchases.cjs').registerPurchaseRoutes(router, { db, Company, Contractor, Event, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, download:purchaseDownload, onTasksChanged });
   const mutations = require('./onec/mutations.cjs').registerOnecMutationRoutes(router, { db, Company, env, guard:purchaseGuard, clientFactory:purchaseClientFactory });
   require('./onec/invoice-templates.cjs').registerInvoiceTemplateRoutes(router, { db, Company, Contractor, Event, mutations, env, guard:purchaseGuard, clientFactory:purchaseClientFactory, onTasksChanged, printClientFactory, onContractorChanged:(req,entity)=>emitEntityEvent(req,entity.userId,'contractor_updated',entity) });
+  require('./onec/profile-push.cjs').registerProfilePushRoutes(router, { db, Company, mutations, env, guard: purchaseGuard, clientFactory: purchaseClientFactory, emitEntityEvent });
   registerTaskRoutes(router, { db, coll, wrap, Company, Contractor, Individual, taskMutation, taskSession, onTasksChanged });
   registerReminderRoutes(router, { coll, wrap, env });
   router.use((error, _req, res, _next) => {
     if (error.code === 11000 && error.keyPattern?.['onecSync.ref']) return res.status(409).json({ message: 'Эта запись 1С уже связана с другой карточкой' });
+    if (/^(HTTP_|NETWORK_|INVALID_|NOT_PUBLISHED|RESPONSE_)/.test(error.code || '')) return res.status(424).json({ message: error.message });
     if (!error.status) reportError(error);
     res.status(error.status || 500).json({ message: error.status ? error.message : 'Ошибка обработки данных компании' });
   });

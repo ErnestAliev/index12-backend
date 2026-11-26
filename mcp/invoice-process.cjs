@@ -11,6 +11,7 @@ function registerInvoiceProcess(register,{invoke,apiCall}) {
     chatFileId:z.union([z.string().uuid(),z.string().regex(/^forward:[a-f\d]{64}$/)]).optional(),desktopFileId:z.string().uuid().optional(),
     mediaPermission:z.enum(['explicit_request','user_confirmed']).optional(),requestText:z.string().max(10000).optional(),
   }).superRefine((v,ctx)=>{
+    if(v.direction==='supplier'&&v.useVat===undefined)ctx.addIssue({code:z.ZodIssueCode.custom,path:['useVat'],message:'Перенесите НДС из счёта поставщика'});
     if(v.direction==='supplier')for(const key of ['category','subcategory'])if(v[key]!==undefined&&!singleWord(v[key]))ctx.addIssue({code:z.ZodIssueCode.custom,path:[key],message:'Для расхода нужно одно слово'});
     if(v.direction!=='supplier'&&v.existingOperationId)ctx.addIssue({code:z.ZodIssueCode.custom,path:['existingOperationId'],message:'Существующий расход относится только к счёту поставщика'});
     if([v.pdfId,v.chatFileId,v.desktopFileId].filter(Boolean).length>1)ctx.addIssue({code:z.ZodIssueCode.custom,path:['pdfId'],message:'Передайте один источник оригинала'});

@@ -31,7 +31,7 @@ const prepareSchema = z.object({companyId:z.string().regex(/^[a-f\d]{24}$/i),dir
   projectId:z.string().regex(/^[a-f\d]{24}$/i).optional(),
   counterparty:partyInput,date:day.describe('Дата исходного счёта из извлечённого текста. Не дата оплаты: для поручения на другую дату используй paymentDate.'),number:z.string().trim().min(1).max(100).optional(),currency:z.enum(['KZT']).default('KZT'),
   knp:z.preprocess(value=>value===''?undefined:value,z.string().regex(/^\d{3}$/).optional()),contractRef:z.preprocess(value=>typeof value==='string'&&/^(?:без\s+договора)?$/iu.test(value.trim())?null:value,z.string().uuid().nullable().optional()),
-  useVat:z.boolean().describe('НДС из исходного счёта: true при наличии НДС, false при «без НДС». Налоговый режим покупателя не определяет НДС поставщика.'),
+  useVat:z.boolean().optional().describe('Для supplier обязательно из исходного счёта. Для customer без значения используется явная настройка vatPayer продавца в карточке компании INDEX12. taxPercent не является НДС.'),
   vatIncluded:z.boolean().optional().describe('true — НДС уже входит в цены/суммы строк, false — начисляется сверху. Без значения сервер сверит суммы строк с итогом.'),
   vatPercent:z.number().finite().min(0).max(100).optional().describe('Процент из счёта или явного подтверждения пользователя, например 16. Сервер сам найдёт GUID ставки 1С.'),
   vatAmount:money.optional().describe('Общая сумма НДС из счёта, например 14400 при итоге 104400. При одной строке сервер сопоставит её ставку и сумму НДС автоматически.'),
@@ -156,6 +156,22 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
   router.post('/onec/invoices/prepare',use(async(req,res,client)=>{
     const input=prepareSchema.parse(req.body),key=digest([identity(req),connectionKey(),input.idempotencyKey]);
     const old=await plans().findOne({creationKey:key});
+    const company=await mutations.company(req,input.companyId);
+    if(input.direction==='customer') {
+      // A replay uses the original tax settings, even if the card has changed.
+      const seller=old ? {useVat:old.input.useVat,vatPercent:old.input.vatPercent,vatIncluded:old.documentData.СуммаВключаетНДС,vatAmount:old.vat?.amount} : {useVat:company.vatPayer,vatPercent:company.vatPercent,vatIncluded:company.vatIncluded};
+      if(input.useVat===undefined) {
+        if(typeof seller.useVat!=='boolean')fault('SELLER_VAT_REQUIRED','В карточке продавца не указан признак плательщика НДС. Заполните его или укажите НДС в поручении',409);
+        input.useVat=seller.useVat;
+      }
+      if(input.useVat) {
+        input.vatIncluded ??= seller.vatIncluded ?? true;
+        if(input.vatPercent===undefined && input.vatAmount===undefined && !input.lines.some(line=>line.vatPercent!==undefined||line.vatAmount!==undefined||line.vatRateRef)) {
+          if(old && seller.vatPercent===undefined && seller.vatAmount!==undefined)input.vatAmount=seller.vatAmount;
+          else input.vatPercent=seller.vatPercent ?? 16;
+        }
+      }
+    } else if(typeof input.useVat!=='boolean')fault('SUPPLIER_VAT_REQUIRED','Перенесите НДС из исходного счёта поставщика');
     const reuse=async (previous,conflictCode='INVOICE_DATA_CONFLICT')=>{
       if(previous.actorId!==identity(req).actorId)fault('INVOICE_PLAN_OWNED_BY_ANOTHER_ACTOR','Счёт уже обрабатывается другим оператором. Новый документ не создан',409);
       const fields=invoiceDifferences(previous,input);
@@ -172,7 +188,6 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
     };
     if(old)return reuse(old,'IDEMPOTENCY_CONFLICT');
     await requestProgress(db(),req,'Ищу контрагента и реквизиты в 1С');
-    const company=await mutations.company(req,input.companyId);
     const invoiceIdentity=digest([company.onecSync.ref,input.direction,input.counterparty.taxId,input.number||input.idempotencyKey,input.date]);
     const previous=await plans().findOne({workspaceId:identity(req).workspaceId,connectionKey:connectionKey(),invoiceIdentity});
     if(previous)return reuse(previous);

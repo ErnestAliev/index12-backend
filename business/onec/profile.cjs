@@ -71,6 +71,7 @@ async function lookupProfile(bin, kind, invoke = call, ref) {
   const banks=await profileBanks({row,collection,collections,invoke,getCatalog,text,validRef,warnings});
   if(banks.accounts)fields.bankAccounts=banks.accounts;
   for (const [field, source] of [['legalAddress', 'ЮридическийАдрес'], ['postalAddress','ПочтовыйАдрес'], ['director', 'Руководитель'], ['chiefAccountant','ГлавныйБухгалтер'], ['phone', 'Телефон'], ['email', 'ЭлектроннаяПочта'], ['website','ВебСайт'], ['registrationStatus', 'СтатусРегистрации']]) if (text(row[source])) fields[field] = text(row[source]);
+  await require('./profile-fields.cjs').enrichProfile({row,schema,fields,getCatalog,warnings,invoke,collections});
   const missing = require('../company-profile.cjs').stringFields.filter(key=>!['name','notes'].includes(key)&&!fields[key]);
   if(!banks.summary.checked||!banks.accounts?.length)missing.push('bankAccounts');
   return { fields: Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)), sync: { source: '1С', collection, ref: row.Ref_Key, name: text(row.Description) || text(row.НаименованиеПолное) || '', identificationNumber: bin, checkedAt: new Date().toISOString(), missing, warnings:[...new Set(warnings)], bankAccounts:banks.summary } };

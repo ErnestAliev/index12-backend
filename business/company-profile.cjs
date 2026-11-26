@@ -20,6 +20,18 @@ function profileInput(body) {
   if (result.identificationNumber) identifier(result.identificationNumber);
   for (const date of ['registrationDate', 'vatRegistrationDate']) if (result[date] && (!/^\d{4}-\d{2}-\d{2}$/.test(result[date]) || !Number.isFinite(Date.parse(result[date])) || new Date(result[date]).toISOString().slice(0, 10) !== result[date])) fail('Укажите действительную дату');
   if (result.website) result.website = externalUrl(result.website);
+  if (Object.hasOwn(body, 'legalForm')) {
+    if (body.legalForm != null && !['too','ip','ao','tdo','pt','kt','pk','gu','gp','oo','of','pc','institution','fund','religious','association','nao','ooo','individual','other'].includes(body.legalForm)) fail('Выберите форму лица');
+    result.legalForm = body.legalForm || null;
+  }
+  for (const field of ['vatPayer', 'vatIncluded']) if (Object.hasOwn(body, field)) {
+    if (body[field] !== null && typeof body[field] !== 'boolean') fail('Укажите настройку НДС');
+    result[field] = body[field];
+  }
+  if (Object.hasOwn(body, 'vatPercent')) {
+    if (typeof body.vatPercent !== 'number' || !Number.isFinite(body.vatPercent) || body.vatPercent < 0 || body.vatPercent > 100) fail('Ставка НДС должна быть от 0 до 100');
+    result.vatPercent = body.vatPercent;
+  }
   if (Object.hasOwn(body, 'bankAccounts')) {
     if (!Array.isArray(body.bankAccounts) || body.bankAccounts.length > 30) fail('Допустимо до 30 банковских счетов');
     result.bankAccounts = body.bankAccounts.map(row => Object.fromEntries(['iban', 'bankName', 'bic', 'currency'].map(key => [key, cleanString(row?.[key], 300)])));
@@ -35,6 +47,10 @@ function profileSchema(mongoose) {
     bankAccounts: { type: [new mongoose.Schema({ iban: String, bankName: String, bic: String, currency: String }, { _id: false })], default: [] },
     externalLinks: { type: [new mongoose.Schema({ title: String, url: String, purpose: String }, { _id: false })], default: [] },
     profileVersion: { type: Number, default: 0 },
+    legalForm: { type: String, default: null },
+    vatPayer: { type: Boolean, default: null },
+    vatPercent: { type: Number, default: 16, min: 0, max: 100 },
+    vatIncluded: { type: Boolean, default: true },
     onecSync: mongoose.Schema.Types.Mixed
   };
 }

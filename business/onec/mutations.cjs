@@ -248,6 +248,7 @@ function registerOnecMutationRoutes(
         "Запись документов 1С не включена на сервере",
         403,
       );
+    await ready();
     const input = schema.parse(req.body),
       scope = identity(req);
     await guard(req);
@@ -382,8 +383,9 @@ function registerOnecMutationRoutes(
       if (
         org.DeletionMark ||
         (linked.identificationNumber &&
-          String(org.ИдентификационныйНомер || "").trim() !==
-            linked.identificationNumber)
+          String(org.ИдентификационныйНомер || "").trim() !== linked.identificationNumber &&
+          !(action === 'update' && input.collection === 'Catalog_Организации' && input.id === linked.onecSync.ref &&
+            !String(org.ИдентификационныйНомер || '').trim() && input.data.ИдентификационныйНомер === linked.identificationNumber))
       )
         fault(
           "ONEC_IDENTITY_MISMATCH",

@@ -3238,7 +3238,7 @@ const generateCRUD = (model, path, emitEventName = null) => {
         const sourceName = String(name || '').trim();
         if (IP_PATTERN.test(sourceName)) return 'ip';
         if (TOO_PATTERN.test(sourceName)) return 'too';
-        return 'other';
+        return require('./business/onec/profile-fields.cjs').detectLegalForm(sourceName) || 'other';
     };
     const getDefaultCompanyTaxPercent = (name, regime) => {
         const normalizedRegime = normalizeCompanyTaxRegime(regime);
