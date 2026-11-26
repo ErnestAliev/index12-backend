@@ -266,7 +266,7 @@ function registerInvoiceTemplateRoutes(router,{db,Company,Contractor,Event,mutat
       let data=null;
       if(capabilities.source==='INDEX12_FROM_SAVED_ONEC'){
         const contractor=row.contractorId?await Contractor.findOne({_id:row.contractorId,...scopeQuery(req.businessScope,row.workspaceId)}).lean():null;
-        data=await require('./invoice-pdf.cjs').loadInvoicePrintData(client,{invoice,company,contractor,taxField:row.taxField,expectedTaxId:row.input.counterparty.taxId});
+        data=await require('./invoice-pdf.cjs').loadInvoicePrintData(client,{invoice,company,contractor,taxField:row.taxField,expectedTaxId:row.input.counterparty.taxId,executorName:env.ONEC_USERNAME});
       }
       const cacheKey=digest([row.connectionKey,row.workspaceId,row.organizationRef,invoice.Ref_Key,invoice.DataVersion,capabilities.source,capabilities.form,data?digest(data):null]);
       artifact=await cache.findOne({_id:cacheKey});
