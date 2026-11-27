@@ -42,4 +42,5 @@ Thumbs.db
 
 # Plugin release artifacts and private reviewer credentials
 /output/plugins/
+/output/subcategory-merges/
 /.plugin-review.local.json
