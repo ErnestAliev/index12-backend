@@ -176,12 +176,6 @@ function registerMcpOperationRoutes(app, deps) {
             const value = Object.hasOwn(data, field) ? data[field] : previous[field];
             if (value && !await deps[model].exists({ _id: value, ...req.mcpContext.scope })) fail('ENTITY_NOT_FOUND', field, 'Связанная сущность не найдена в текущей рабочей области.');
         }
-        const subcategoryId = Object.hasOwn(data, 'subcategoryId') ? data.subcategoryId : previous.subcategoryId;
-        if (subcategoryId) {
-            const subcategory = await deps.Subcategory.findOne({ _id: subcategoryId, ...req.mcpContext.scope });
-            const categoryId = Object.hasOwn(data, 'categoryId') ? data.categoryId : previous.categoryId;
-            if (String(subcategory.parentCategoryId) !== String(categoryId)) fail('VALIDATION_ERROR', 'subcategoryId', 'Подкатегория должна принадлежать выбранной категории. Укажите другую подкатегорию или явно очистите поле (null).');
-        }
         const accountId = data.accountId || previous.accountId;
         if (!transfer && !accountId) fail('VALIDATION_ERROR', 'accountId', 'Укажите счёт операции.');
         await ensureManagerCanAccessOperationAccounts(req, data, existing);

@@ -134,10 +134,10 @@ async function verifyDatabase(fixture) {
   const account = await Account.create({ userId, name: 'Тестовый счет', initialBalance: 100000, companyId: company._id });
   const toAccount = await Account.create({ userId, name: 'Второй счет', initialBalance: 0, companyId: company._id });
   const contractor = await Contractor.create({ userId, name: 'Поставщик' });
-  const sub = await request('/subcategories', 'POST', { name: 'Свет', parentCategoryId: utilities._id });
+  const sub = await request('/subcategories', 'POST', { name: 'Свет' });
   assert.equal(sub.status, 201);
   assert.ok(await Subcategory.findById(sub.data._id));
-  const duplicate = await request('/subcategories', 'POST', { name: ' СВЕТ ', parentCategoryId: utilities._id });
+  const duplicate = await request('/subcategories', 'POST', { name: ' СВЕТ ', parentCategoryId: repair._id });
   assert.equal(duplicate.data._id, sub.data._id);
   const inaccessible = await request('/subcategories', 'POST', { name: 'Чужая', parentCategoryId: utilities._id }, 'another-workspace');
   assert.equal(inaccessible.status, 400);
@@ -163,11 +163,12 @@ async function verifyDatabase(fixture) {
   await request(`/events/${legacyId}`, 'PUT', { amount: -120 });
   assert.equal(String((await Event.findById(legacyId)).subcategoryId), sub.data._id);
   const invalid = await request(`/events/${legacyId}`, 'PUT', { categoryId: repair._id, subcategoryId: sub.data._id });
-  assert.equal(invalid.status, 400);
+  assert.equal(invalid.status, 200);
+  assert.equal(String((await Event.findById(legacyId)).subcategoryId), sub.data._id);
   const foreign = await request(`/events/${legacyId}`, 'PUT', { subcategoryId: sub.data._id }, 'another-workspace');
   assert.equal(foreign.status, 404);
   const changed = await request(`/events/${legacyId}`, 'PUT', { categoryId: repair._id });
-  assert.equal(changed.data.subcategoryId, null);
+  assert.equal(changed.data.subcategoryId._id, sub.data._id);
   const parent = await Event.create({ ...common, userId, dateKey: dayKey(date), type: 'expense', amount: -50, isSplitParent: true, excludeFromTotals: true });
   const child = await Event.create({ ...common, userId, type: 'expense', amount: -50, parentOpId: parent._id, isSplitChild: true });
   await request(`/events/${parent._id}`, 'PUT', { subcategoryId: sub.data._id });
@@ -179,7 +180,7 @@ async function verifyDatabase(fixture) {
   const snapshot = await request('/snapshot');
   assert.equal(snapshot.status, 200, JSON.stringify(snapshot));
   assert.equal(snapshot.data.subcategoryTotals[sub.data._id].income, 500);
-  assert.equal(snapshot.data.subcategoryTotals[sub.data._id].expense, 50);
+  assert.equal(snapshot.data.subcategoryTotals[sub.data._id].expense, 170);
   assert.equal(snapshot.data.subcategoryTotals[transferSub.data._id].transfers, 300);
   assert.equal(snapshot.data.subcategoryTotals[transferSub.data._id].total, 0);
   const exported = await request('/events/all-for-export');
@@ -194,7 +195,7 @@ async function verifyDatabase(fixture) {
   await request(`/subcategories/${water._id}`, 'DELETE');
   assert.equal(await Event.countDocuments({ userId }), count);
   assert.equal(await Event.countDocuments({ userId, subcategoryId: water._id }), 0);
-  console.log('PASS MongoDB: schema, persistence, old edit/reload, category validation, workspace isolation, split payments, transfers, snapshot totals, export/import, rename and safe deletion');
+  console.log('PASS MongoDB: schema, persistence, old edit/reload, independent categories, workspace isolation, split payments, transfers, snapshot totals, export/import, rename and safe deletion');
   return { categories: { utilities, repair, transferCategory }, legacyId, createdId: created.data._id, account, toAccount, company, contractor, subcategory: sub.data, transferSubcategory: transferSub.data, dateKey: dayKey(date) };
 }
 

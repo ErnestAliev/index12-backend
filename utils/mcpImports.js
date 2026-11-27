@@ -76,7 +76,7 @@ function registerMcpImportRoutes(app, deps, context) {
         return rows;
     }
     function identity(req, kind, spec, parentId) {
-        return digest(canonical({ workspaceId: String(req.user.currentWorkspaceId), kind, name: kind === 'contractor' ? spec.identificationNumber ? null : contractorName(spec.name) : normalizeName(spec.name), identificationNumber: spec.identificationNumber || null, type: spec.type || null, parentCategoryId: parentId || null }));
+        return digest(canonical({ workspaceId: String(req.user.currentWorkspaceId), kind, name: kind === 'contractor' ? spec.identificationNumber ? null : contractorName(spec.name) : normalizeName(spec.name), identificationNumber: spec.identificationNumber || null, type: spec.type || null, parentCategoryId: kind === 'subcategory' ? null : parentId || null }));
     }
     async function resolveEntity(req, kind, spec, parentId) {
         const rows = await scopedRows(req, kind);
@@ -86,19 +86,19 @@ function registerMcpImportRoutes(app, deps, context) {
             candidates = rows.filter(row => String(row.identificationNumber || '').replace(/\s/g, '') === spec.identificationNumber.replace(/\s/g, ''));
             if (!candidates.length && rows.some(row => normalize(row.name) === normalize(spec.name) && String(row.identificationNumber || '').replace(/\s/g, '') && String(row.identificationNumber).replace(/\s/g, '') !== spec.identificationNumber)) fail('ENTITY_CONFLICT', 'contractor.identificationNumber', 'Есть контрагент с таким названием и другими реквизитами. Уточните получателя.');
         }
-        if (!candidates?.length) candidates = rows.filter(row => normalize(row.name) === normalize(spec.name) && (kind !== 'category' || !row.type || row.type === spec.type) && (kind !== 'subcategory' || String(row.parentCategoryId) === String(parentId)));
+        if (!candidates?.length) candidates = rows.filter(row => normalize(row.name) === normalize(spec.name) && (kind !== 'category' || !row.type || row.type === spec.type));
+        if (kind === 'subcategory' && candidates.length > 1) candidates = [candidates.sort((a, b) => String(a._id).localeCompare(String(b._id)))[0]];
         if (candidates.length > 1) fail('ENTITY_AMBIGUOUS', kind, `Найдено несколько совпадений для «${spec.name}». Выберите существующую запись по ID.`);
         const found = candidates[0];
         const enrich = found && kind === 'contractor' && spec.identificationNumber && !String(found.identificationNumber || '').trim();
         if (enrich && !req.mcpContext.grant.scopes.includes('update')) fail('FORBIDDEN', 'contractor.identificationNumber', 'Для дополнения существующей карточки нужно право update.', 403);
         const key = identity(req, kind, spec, parentId);
-        return { kind, action: enrich ? 'enrich' : found ? 'reuse' : 'create', id: found ? String(found._id) : key.slice(0,24), name: found?.name || spec.name, requestedName: spec.name, type: spec.type || null, parentCategoryId: parentId || null, identificationNumber: enrich ? spec.identificationNumber : found ? found.identificationNumber || null : spec.identificationNumber || null, ...(enrich ? { previousIdentificationNumber: found.identificationNumber ?? null, profileVersion: found.profileVersion || 0 } : {}), identityKey: key };
+        return { kind, action: enrich ? 'enrich' : found ? 'reuse' : 'create', id: found ? String(found._id) : key.slice(0,24), name: found?.name || spec.name, requestedName: spec.name, type: spec.type || null, parentCategoryId: kind === 'subcategory' ? null : parentId || null, identificationNumber: enrich ? spec.identificationNumber : found ? found.identificationNumber || null : spec.identificationNumber || null, ...(enrich ? { previousIdentificationNumber: found.identificationNumber ?? null, profileVersion: found.profileVersion || 0 } : {}), identityKey: key };
     }
     function sameEntity(actual, expected, parentId = expected.parentCategoryId) {
         const normalize = expected.kind === 'contractor' ? contractorName : normalizeName;
         return normalize(actual.name) === normalize(expected.name)
             && (expected.kind !== 'category' || !actual.type || actual.type === expected.type)
-            && (expected.kind !== 'subcategory' || String(actual.parentCategoryId) === String(parentId))
             && (expected.kind !== 'contractor' || String(actual.identificationNumber || '').replace(/\s/g, '') === String(expected.identificationNumber || '').replace(/\s/g, ''));
     }
     async function plan(req, input) {
@@ -112,12 +112,9 @@ function registerMcpImportRoutes(app, deps, context) {
         }
         const categoryItem = items.find(item => item.kind === 'category');
         if (input.subcategory) {
-            const parentId = categoryItem?.id || input.subcategory.parentCategoryId || input.operation?.categoryId;
-            if (!parentId) fail('VALIDATION_ERROR', 'subcategory.parentCategoryId', 'Укажите категорию для подкатегории.');
-            if (categoryItem && input.subcategory.parentCategoryId && input.subcategory.parentCategoryId !== categoryItem.id) fail('VALIDATION_ERROR', 'subcategory.parentCategoryId', 'Подкатегория должна относиться к согласуемой категории.');
-            if (!categoryItem && input.operation?.categoryId && input.operation.categoryId !== parentId) fail('VALIDATION_ERROR', 'subcategory.parentCategoryId', 'Подкатегория должна относиться к категории операции.');
-            if (!categoryItem && !await Category.exists({ _id: parentId, ...scope(req) })) fail('ENTITY_NOT_FOUND', 'subcategory.parentCategoryId', 'Категория не найдена в текущей рабочей области.');
-            items.push(await resolveEntity(req, 'subcategory', input.subcategory, parentId));
+            // Legacy parent IDs remain accepted, but never constrain the shared list.
+            if (input.subcategory.parentCategoryId && !await Category.exists({ _id: input.subcategory.parentCategoryId, ...scope(req) })) fail('ENTITY_NOT_FOUND', 'subcategory.parentCategoryId', 'Категория не найдена в текущей рабочей области.');
+            items.push(await resolveEntity(req, 'subcategory', input.subcategory));
         }
         if (input.contractor) items.push(await resolveEntity(req, 'contractor', input.contractor));
         let operation = input.operation ? { ...input.operation } : null;
@@ -129,13 +126,8 @@ function registerMcpImportRoutes(app, deps, context) {
                 }
                 if ((!input.category && !operation.categoryId) || (!input.subcategory && !operation.subcategoryId)) fail('VALIDATION_ERROR', 'category', 'Для счёта обязательны одна категория и одна подкатегория.');
             }
-            if (input.subcategory && !categoryItem && !operation.categoryId) operation.categoryId = input.subcategory.parentCategoryId;
             for (const [kind, field] of [['category','categoryId'],['subcategory','subcategoryId'],['contractor','contractorId']]) if (input[kind] && operation[field]) fail('VALIDATION_ERROR', `operation.${field}`, 'Укажите либо существующий ID, либо согласуемый справочник, а не оба варианта.');
             if (input.contractor && operation.counterpartyIndividualId) fail('VALIDATION_ERROR', 'operation.counterpartyIndividualId', 'Нельзя одновременно выбрать физлицо-контрагента и создать контрагента.');
-            if (categoryItem && operation.subcategoryId) {
-                const sub = await Subcategory.findOne({ _id: operation.subcategoryId, ...scope(req) }).lean();
-                if (!sub || String(sub.parentCategoryId) !== categoryItem.id) fail('VALIDATION_ERROR','operation.subcategoryId','Подкатегория должна принадлежать согласуемой категории.');
-            }
             const validation = { ...operation };
             // Validate all existing references before any approved entity writes.
             if (categoryItem?.action === 'reuse') validation.categoryId = categoryItem.id;
@@ -148,8 +140,7 @@ function registerMcpImportRoutes(app, deps, context) {
         if (operation) for (const [field, modelName] of [['accountId','Account'],['projectId','Project'],['categoryId','Category'],['subcategoryId','Subcategory'],['contractorId','Contractor'],['companyId','Company'],['individualId','Individual'],['counterpartyIndividualId','Individual']]) {
             if (operation[field]) relatedNames[field] = (await deps[modelName].findOne({ _id: operation[field], ...scope(req) }).select('name').lean())?.name || null;
         }
-        const standaloneParent = input.subcategory?.parentCategoryId && !categoryItem ? await Category.findOne({ _id: input.subcategory.parentCategoryId, ...scope(req) }).select('name').lean() : null;
-        const summary = items.map(item => `${item.action === 'create' ? 'Создам' : item.action === 'enrich' ? 'Дополню пустые реквизиты:' : 'Использую существующую запись:'} ${labels[item.kind]} «${item.name}»${item.kind === 'category' ? (item.type === 'income' ? ' (доходы)' : ' (расходы)') : ''}${item.identificationNumber ? ` (${item.identificationNumber})` : ''}${item.kind === 'subcategory' ? ` в категории «${categoryItem?.name || relatedNames.categoryId || standaloneParent?.name}»` : ''}.`);
+        const summary = items.map(item => `${item.action === 'create' ? 'Создам' : item.action === 'enrich' ? 'Дополню пустые реквизиты:' : 'Использую существующую запись:'} ${labels[item.kind]} «${item.name}»${item.kind === 'category' ? (item.type === 'income' ? ' (доходы)' : ' (расходы)') : ''}${item.identificationNumber ? ` (${item.identificationNumber})` : ''}.`);
         if (operation) {
             summary.push(`${operation.type === 'expense' ? 'Расход' : 'Доход'}: ${operation.amount} ₸, дата ${operation.date}, ${operation.projectScope === 'all' ? 'Все проекты' : relatedNames.projectId || 'без проекта'}, счёт «${relatedNames.accountId}».`);
             const labels = { categoryId: 'Категория', subcategoryId: 'Подкатегория', contractorId: 'Контрагент', counterpartyIndividualId: 'Физлицо-контрагент', companyId: 'Компания', individualId: 'Физлицо' };
@@ -222,7 +213,7 @@ function registerMcpImportRoutes(app, deps, context) {
             if (!sameEntity(existing, actual, parentId)) fail('PLAN_STALE', item.kind, 'Справочник изменился. Согласуйте новый план.', 409);
             return { ...actual, id: String(existing._id), name: existing.name, created: false };
         }
-        const data = { name: actual.name, ...(actual.type ? { type: actual.type } : {}), ...(actual.identificationNumber ? { identificationNumber: actual.identificationNumber } : {}), ...(parentId ? { parentCategoryId: parentId } : {}) };
+        const data = { name: actual.name, ...(actual.type ? { type: actual.type } : {}), ...(actual.identificationNumber ? { identificationNumber: actual.identificationNumber } : {}), ...(actual.kind !== 'subcategory' && parentId ? { parentCategoryId: parentId } : {}) };
         req.body = data; req.mcpContext.entityId = reservation.entityId;
         let saved;
         try { saved = await invoke(entityHandlers[paths[item.kind]], req); }

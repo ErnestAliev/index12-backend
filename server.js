@@ -3151,10 +3151,10 @@ app.post('/api/import/operations', isAuthenticated, captureMcpHandler('import', 
 
             const categoryId = await findOrCreateEntity(Category, opData.category, caches.categories, userId);
             let subcategoryId = null;
-            if (categoryId && opData.subcategory) {
+            if (opData.subcategory) {
                 const name = String(opData.subcategory).trim();
                 const nameKey = name.toLocaleLowerCase('ru-RU');
-                const sub = await Subcategory.findOneAndUpdate({ userId, parentCategoryId: categoryId, nameKey }, { $setOnInsert: { name, nameKey, userId, parentCategoryId: categoryId, workspaceId: req.user.currentWorkspaceId || null } }, { upsert: true, new: true, runValidators: true });
+                const sub = await require('./utils/subcategories').upsertSharedSubcategory(Subcategory, { userId }, { name, nameKey, userId, workspaceId: req.user.currentWorkspaceId || null });
                 subcategoryId = sub._id;
             }
             const projectScope = opData.projectScope === 'all' || opData.project === 'Все проекты' ? 'all' : 'selected';
@@ -3428,13 +3428,6 @@ const generateDeleteWithCascade = (model, path, foreignKeyField, emitEventName =
             const deletedEntity = await model.findOneAndDelete({ _id: id, userId });
             if (!deletedEntity) { return res.status(404).json({ message: 'Entity not found' }); }
 
-            if (model === Category) {
-                const children = await Subcategory.find({ userId, parentCategoryId: id }).select('_id').lean();
-                const childIds = children.map(item => item._id);
-                await Event.updateMany({ userId, subcategoryId: { $in: childIds } }, { $set: { subcategoryId: null }, $inc: { syncVersion: 1 } });
-                await Subcategory.deleteMany({ userId, parentCategoryId: id });
-                for (const childId of childIds) emitEntityEvent(req, userId, 'subcategory_deleted', String(childId));
-            }
             let deletedOpsCount = 0;
             let opsDeleted = false;
             const affectedDates = [];

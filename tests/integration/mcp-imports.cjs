@@ -64,7 +64,7 @@ async function verifyImports({fixture,client:withoutForms,configFile,owner,works
     answer={action:'accept',content:{approve:true}};
     const completed=await call('index12_execute_import',{planToken:prepared.planToken});assert.equal(completed.completed,true);assert.equal(completed.operation.version,0);assert.equal(completed.operation.operation.amount,'1000000.10');
     assert.equal(completed.operation.related.contractorId.name,'Энерго Сервис');assert.equal(completed.operation.related.subcategoryId.name,'Кондиционеры');assert.equal(questions.at(-1).message,prepared.summary);
-    const createdIds=completed.entities;assert.equal(createdIds.subcategory.parentCategoryId,createdIds.category.id);
+    const createdIds=completed.entities;assert.equal(createdIds.subcategory.parentCategoryId,null);
     for(const [kind,collection] of [['category','categories'],['subcategory','subcategories'],['contractor','contractors']]){const raw=await db.collection(collection).findOne({_id:new mongoose.Types.ObjectId(createdIds[kind].id)});assert.equal(raw.createdVia,'mcp');assert.equal(raw.mcpImportId,completed.importId);assert.equal(raw.createdBy,String(owner));assert.ok(fixture.emitted.some(args=>args[2]===`${kind}_added` && String(args[3]._id)===createdIds[kind].id));}
     const rawEvent=await db.collection('events').findOne({_id:new mongoose.Types.ObjectId(completed.operation.id)});assert.equal(rawEvent.amount,-1000000.10);assert.equal(rawEvent.changeHistory[0].importId,completed.importId);assert.equal(rawEvent.changeHistory[0].documentFingerprint,base.documentFingerprint);
     const after=await counts();for(const c of ['categories','subcategories','contractors','events'])assert.equal(after[c],beforeAccept[c]+1)
@@ -78,10 +78,10 @@ async function verifyImports({fixture,client:withoutForms,configFile,owner,works
     // Case/spacing differences reuse existing records; standalone subcategory identifies parent by name.
     const reuse=await call('index12_prepare_import',{idempotencyKey:'reuse-catalogs-001',contractor:{name:'  энерго   сервис ',identificationNumber:'123456789012'},category:{name:'ОБСЛУЖИВАНИЕ',type:'expense'},subcategory:{name:'кондиционеры'}});assert.ok(reuse.items.every(i=>i.action==='reuse'));
     await call('index12_execute_import',{planToken:reuse.planToken});assert.equal((await counts()).contractors,after.contractors);
-    const alone=await call('index12_prepare_import',{idempotencyKey:'standalone-subcat-1',subcategory:{name:'Вентиляция',parentCategoryId:createdIds.category.id}});assert.ok(alone.summary.includes('Обслуживание'));await call('index12_execute_import',{planToken:alone.planToken});
+    const alone=await call('index12_prepare_import',{idempotencyKey:'standalone-subcat-1',subcategory:{name:'Вентиляция'}});assert.ok(alone.summary.includes('Вентиляция'));await call('index12_execute_import',{planToken:alone.planToken});
     const parentOperation=await call('index12_prepare_import',{idempotencyKey:'parent-from-subcat-1',subcategory:{name:'Фильтры',parentCategoryId:createdIds.category.id},operation:{...base.operation,amount:'0.10'}});
-    const parentResult=await call('index12_execute_import',{planToken:parentOperation.planToken});assert.equal(parentResult.operation.operation.categoryId,createdIds.category.id);
-    await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),subcategory:{name:'Нельзя',parentCategoryId:createdIds.category.id},operation:{...base.operation,categoryId:String(category)}},'VALIDATION_ERROR');
+    const parentResult=await call('index12_execute_import',{planToken:parentOperation.planToken});assert.ok(!parentResult.operation.operation.categoryId);
+    const independent=await call('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),subcategory:{name:'Общая',parentCategoryId:createdIds.category.id},operation:{...base.operation,categoryId:String(category)}});assert.ok(independent.planToken);
     // A unique incomplete card is enriched by the approved import, not copied.
     await db.collection('contractors').insertMany([{userId:String(owner),name:'Дубль'},{userId:String(owner),name:'дубль'},{userId:String(owner),name:'Без реквизитов'}]);
     await error('index12_prepare_import',{idempotencyKey:crypto.randomUUID(),contractor:{name:'ДУБЛЬ'}},'ENTITY_AMBIGUOUS');

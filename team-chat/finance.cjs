@@ -268,16 +268,6 @@ function registerFinanceRoutes(
     if (categoryId && categoryIds.length && !categoryIds.includes(categoryId))
       fail("Проверьте категорию");
     const subcategoryId = ref("subcategories", body.subcategoryId);
-    if (
-      subcategoryId &&
-      !categoryIds.includes(
-        sid(
-          data.subcategories.find((row) => sid(row) === subcategoryId)
-            .parentCategoryId,
-        ),
-      )
-    )
-      fail("Подкатегория относится к другой категории");
     if (body.projectScope && !["all", "selected"].includes(body.projectScope))
       fail("Проверьте проекты");
     if (
