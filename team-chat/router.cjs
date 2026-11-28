@@ -819,6 +819,7 @@ function createTeamChatRouter({
     }),
   );
   require('./file-library.cjs').registerFileLibrary(router, { db, wrap, notify });
+  require('./file-content.cjs').registerFileContent(router, { db, wrap, notify, history, onTasksChanged });
   router.post('/files/import', wrap(async (req, res) => {
     const result = await importFile(req.body, {
       db: db(), collection: coll('Files'), scope: { workspaceId: req.team.workspaceId, actorId: req.team.actorId }, team: req.team,
@@ -876,17 +877,21 @@ function createTeamChatRouter({
         $or: [{ linked: true }, { actorId: req.team.actorId }],
       });
       if (!row) fail("Файл недоступен", 404);
+      if (req.query.contentVersion !== undefined && (!/^\d+$/.test(req.query.contentVersion) || Number(req.query.contentVersion) !== (row.contentVersion || 0))) fail('PDF был изменён. Откройте файл заново', 409);
       res.set({
         "Content-Type": "application/octet-stream",
         "X-Content-Type-Options": "nosniff",
         "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(row.name)}`,
+        "Cache-Control": "private, no-store",
+        "X-File-Content-Version": String(row.contentVersion || 0),
       });
       res.send(fileBuffer(row));
     }),
   );
   router.get('/files/:id/content', wrap(async (req, res) => {
-    const row = await accessibleChatFile(db(), req.team, req.params.id);
-    if (req.query.metadataOnly === 'true') return res.json({ file: fileMeta(row) });
+    const row = await accessibleChatFile(db(), req.team, req.params.id, { metadataOnly: req.query.metadataOnly === 'true' });
+    res.set('Cache-Control', 'private, no-store');
+    if (req.query.metadataOnly === 'true') return res.json({ file: { ...fileMeta(row), canEditContent: require('./file-content.cjs').canEditContent(req.team, row) } });
     res.json({ file: { ...fileMeta(row), dataBase64: fileBuffer(row).toString('base64') } });
   }));
   router.post(
@@ -1032,7 +1037,7 @@ function createTeamChatRouter({
           (old.replyTo?.messageId || null) !== (replyTo?.messageId || null) ||
           JSON.stringify(old.mentions || []) !==
             JSON.stringify(row.mentions || []) ||
-          JSON.stringify(old.attachments) !== JSON.stringify(attachments)
+          JSON.stringify((old.attachments || []).map(file => file.fileId)) !== JSON.stringify(attachments.map(file => file.fileId))
         )
           fail("Ключ сообщения уже использован", 409);
         await messageActions.decorate(req, [old]);

@@ -14,7 +14,8 @@ const imageMime = data => data.subarray(0, 8).equals(Buffer.from([137,80,78,71,1
   : data[0] === 255 && data[1] === 216 && data[2] === 255 ? 'image/jpeg'
   : data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp'
   : /^GIF8[79]a$/.test(data.toString('ascii', 0, 6)) ? 'image/gif' : null;
-const fileMeta = row => ({ fileId: row._id, name: row.name, mimeType: row.mimeType, size: row.size });
+const fileMeta = row => ({ fileId: row._id, name: row.name, mimeType: row.mimeType, size: row.size, ...(row.contentVersion !== undefined ? { contentVersion: row.contentVersion } : {}),
+  ...(row.updatedAt ? { updatedAt: row.updatedAt, updatedByName: row.updatedByName || '' } : {}) });
 const fileBuffer = row => Buffer.isBuffer(row.data) ? row.data : Buffer.from(row.data.buffer || row.data);
 const scopeHash = scope => createHash('sha256').update(JSON.stringify([scope.actorId, scope.workspaceId])).digest('hex');
 const MARKER = '[INDEX12_FILES_V1]';

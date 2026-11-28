@@ -66,10 +66,10 @@ function importedBytes(data, name, requestedType) {
     sha256: createHash("sha256").update(data).digest("hex"),
   };
 }
-async function accessibleChatFile(db, team, id) {
+async function accessibleChatFile(db, team, id, { metadataOnly = false } = {}) {
   const row = await db
     .collection("teamChatFiles")
-    .findOne({ _id: id, workspaceId: team.workspaceId });
+    .findOne({ _id: id, workspaceId: team.workspaceId }, metadataOnly ? { projection: { data: 0 } } : {});
   if (!row) throw error("Файл недоступен", 404);
   if (row.actorId === team.actorId) return row;
   const { taskAccess } = require("../team-chat/mcp-access.cjs");
